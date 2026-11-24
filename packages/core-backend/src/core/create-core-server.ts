@@ -39,6 +39,7 @@ import {
 } from '../modules/tool-manuals/index.js';
 import { registerVersionControlTools } from '../modules/version-control/agent-tools/version-control.tools.js';
 import { changeRequestScope, registerChangeRequestReadTools } from '../modules/version-control/agent-tools/change-request-read.tools.js';
+import { registerChangeRequestApplyTools } from '../modules/version-control/agent-tools/change-request-apply.tools.js';
 import { createOnboardingRoutes } from '../modules/onboarding/onboarding.routes.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { registerAgentGuideTool } from '../modules/agent-guide/index.js';
@@ -56,6 +57,7 @@ import {
   registerPluginsTools,
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
+import { actingUser } from '../modules/tool-auth/index.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -399,7 +401,7 @@ export async function createCoreServer(
     core.internalTokenService,
     core.mcpOAuthProvider,
     core.mcpResourceMetadataUrl,
-    core.agentScopeService,
+    core.botService,
   ));
 
   // Remote sync — `POST /api/sync`, called by a git host's webhook or a
@@ -440,7 +442,11 @@ export async function createCoreServer(
     toolManualService: core.toolManualService,
     accessControl: core.accessControl,
     connectionProbe: core.connectionProbeService,
-    agents: core.agentScopeService,
+    bots: core.botService,
+    userOf: async (userId: string) => {
+      const user = await core.authService.getUserById(userId);
+      return user ? { id: user.id, email: user.email } : null;
+    },
     stateSecret: core.config.jwtSecret,
     publicBackendUrl: core.config.publicBackendUrl,
     publicFrontendUrl: core.config.publicFrontendUrl,
@@ -501,6 +507,8 @@ export async function createCoreServer(
   // because they are the only ones that gate their whole payload on the
   // caller's read access, so they take the access service and nothing else.
   registerChangeRequestReadTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
+  // Approving and applying a change request: offered only to a connection made as a bot.
+  registerChangeRequestApplyTools(core.toolRegistry, toolsRouter, ta, th, core.accessControl, core.kb);
   const workspaceTools = registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kb, agentAccessGate, core.routineWritePolicy, core.sessionSink, allowedToolsChecker, core.changeGate, core.agentUploadStore, core.agentGuideStart, core.agentDownloadStore, core.starterPackService, core.disk, core.patternMatcher);
   // `open_page` — the knowledge-base page shown inside a chat. Registered
   // here, on the same router as the file tools, because it answers with
@@ -572,7 +580,6 @@ export async function createCoreServer(
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
     readOnlyHints,
-    core.agentScopeService,
   ));
   toolsRouter.use(createToolHintsAgentRoutes(readOnlyHints, core.manualAuthMiddleware));
   // The aggregated manual list (KB + the caller's accessible `.tool`s) + inline
@@ -589,7 +596,6 @@ export async function createCoreServer(
       disk: core.disk,
       pluginIndex: core.pluginIndexService,
     },
-    core.agentScopeService,
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
@@ -611,7 +617,6 @@ export async function createCoreServer(
     skills: core.skillService,
     manualAuth: core.manualAuthMiddleware,
     resolveUserEmail: async (userId) => (await core.authService.getUserById(userId))?.email,
-    agentScope: core.agentScopeService,
     // The views move the revision too: a release that changes a view and no
     // manual would otherwise leave a running local server on the old one.
     mcpApps: core.mcpAppService,
@@ -626,7 +631,6 @@ export async function createCoreServer(
     core.secretsVaultService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
-    core.agentScopeService,
   ));
   app.use('/api', toolsRouter);
 
@@ -666,11 +670,16 @@ export async function createCoreServer(
         core.internalTokenService.looksLikeInternalToken(token) ||
         core.externalApiKeyService.looksLikeExternalApiKey(token),
     }),
-    createPluginCreationRoutes(
-      core.pluginProvisionService,
-      async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
-      core.agentScopeService,
-    ),
+    createPluginCreationRoutes(core.pluginProvisionService, async (req) => {
+      // A connection key acts as its account, a bot's with its maker beside
+      // it, as every tool call does, and is refused with the same sentence;
+      // a session is its own user.
+      if (req.toolAuth) {
+        const acting = await actingUser((id) => core.authService.getUserById(id), req.toolAuth);
+        return 'user' in acting ? acting.user : acting;
+      }
+      return req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null;
+    }),
   );
 
   // Protected routes
@@ -939,7 +948,7 @@ export async function createCoreServer(
       clientNameFor: (st) => core.githubFacade.clientNameFor(st),
       completeConsent: (userId, st) => core.githubFacade.completeConsent(userId, st),
     },
-    agents: core.agentScopeService,
+    bots: core.botService,
   }));
 
   // What an Owner pastes into Claude's admin settings to register this

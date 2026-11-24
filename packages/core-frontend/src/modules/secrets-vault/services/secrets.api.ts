@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import { secretsPath, type ActingFor } from './acting-for';
 
 export type SecretKind = 'static' | 'oauth';
 
@@ -37,8 +38,9 @@ async function unwrap(res: Response, fallback: string): Promise<never> {
   throw new Error(message);
 }
 
-export async function listSecrets(): Promise<SecretSummary[]> {
-  const res = await authFetch('/api/secrets');
+/** `bot`: whose secrets (see `acting-for.ts`); null, the default, is the person's. */
+export async function listSecrets(bot: ActingFor = null): Promise<SecretSummary[]> {
+  const res = await authFetch(secretsPath('/api/secrets', bot));
   if (!res.ok) await unwrap(res, "Couldn't load your secrets.");
   return ((await res.json()) as { secrets: SecretSummary[] }).secrets;
 }
@@ -47,8 +49,8 @@ export async function putStaticSecret(input: {
   key: string;
   value: string;
   label?: string | null;
-}): Promise<SecretSummary> {
-  const res = await authFetch('/api/secrets/static', {
+}, bot: ActingFor = null): Promise<SecretSummary> {
+  const res = await authFetch(secretsPath('/api/secrets/static', bot), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -61,8 +63,8 @@ export async function createOAuthSecret(input: {
   key: string;
   label?: string | null;
   provider: OAuthProviderConfig;
-}): Promise<SecretSummary> {
-  const res = await authFetch('/api/secrets/oauth', {
+}, bot: ActingFor = null): Promise<SecretSummary> {
+  const res = await authFetch(secretsPath('/api/secrets/oauth', bot), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -71,14 +73,14 @@ export async function createOAuthSecret(input: {
   return ((await res.json()) as { secret: SecretSummary }).secret;
 }
 
-export async function deleteSecret(id: string): Promise<void> {
-  const res = await authFetch(`/api/secrets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export async function deleteSecret(id: string, bot: ActingFor = null): Promise<void> {
+  const res = await authFetch(secretsPath(`/api/secrets/${encodeURIComponent(id)}`, bot), { method: 'DELETE' });
   if (!res.ok && res.status !== 204) await unwrap(res, "Couldn't remove this secret.");
 }
 
 /** Fetch the provider consent URL for an oauth secret; the caller navigates to it. */
-export async function startOAuth(id: string): Promise<string> {
-  const res = await authFetch(`/api/secrets/${encodeURIComponent(id)}/oauth/start`);
+export async function startOAuth(id: string, bot: ActingFor = null): Promise<string> {
+  const res = await authFetch(secretsPath(`/api/secrets/${encodeURIComponent(id)}/oauth/start`, bot));
   if (!res.ok) await unwrap(res, "Couldn't start authorization.");
   return ((await res.json()) as { url: string }).url;
 }

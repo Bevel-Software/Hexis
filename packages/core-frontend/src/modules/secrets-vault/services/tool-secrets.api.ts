@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import { secretsPath, type ActingFor } from './acting-for';
 import type { ManagedSignIn } from './connect.api';
 
 /**
@@ -99,10 +100,13 @@ async function unwrap(res: Response, fallback: string): Promise<never> {
   throw new Error(message);
 }
 
-/** All accessible tools with their variables + config status; `path` narrows to one tool. */
-export async function listToolSecrets(path?: string): Promise<ToolSecrets[]> {
+/**
+ * All accessible tools with their variables + config status; `path` narrows to one tool.
+ * `bot`: whose configuration (see `acting-for.ts`); null, the default, is the person's.
+ */
+export async function listToolSecrets(path?: string, bot: ActingFor = null): Promise<ToolSecrets[]> {
   const q = path ? `?path=${encodeURIComponent(path)}` : '';
-  const res = await authFetch(`/api/secrets/tools${q}`);
+  const res = await authFetch(secretsPath(`/api/secrets/tools${q}`, bot));
   if (!res.ok) await unwrap(res, "Couldn't load tool secrets.");
   return ((await res.json()) as { tools: ToolSecrets[] }).tools;
 }
@@ -110,8 +114,15 @@ export async function listToolSecrets(path?: string): Promise<ToolSecrets[]> {
 const varPath = (slug: string, varName: string, tier: ToolVarScope) =>
   `/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/${tier}`;
 
-async function putVar(slug: string, varName: string, tier: ToolVarScope, value: string, label?: string | null): Promise<void> {
-  const res = await authFetch(varPath(slug, varName, tier), {
+async function putVar(
+  slug: string,
+  varName: string,
+  tier: ToolVarScope,
+  value: string,
+  label: string | null | undefined,
+  bot: ActingFor,
+): Promise<void> {
+  const res = await authFetch(secretsPath(varPath(slug, varName, tier), bot), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ value, label: label ?? null }),
@@ -119,8 +130,8 @@ async function putVar(slug: string, varName: string, tier: ToolVarScope, value: 
   if (!res.ok) await unwrap(res, "Couldn't save this secret.");
 }
 
-async function deleteVar(slug: string, varName: string, tier: ToolVarScope): Promise<void> {
-  const res = await authFetch(varPath(slug, varName, tier), { method: 'DELETE' });
+async function deleteVar(slug: string, varName: string, tier: ToolVarScope, bot: ActingFor): Promise<void> {
+  const res = await authFetch(secretsPath(varPath(slug, varName, tier), bot), { method: 'DELETE' });
   if (!res.ok && res.status !== 204) await unwrap(res, "Couldn't remove this secret.");
 }
 
@@ -138,9 +149,10 @@ export async function setOAuthClientSecret(
   clientSecret: string,
   /** For a managed sign-in only: the deployment's OWN app, replacing the managed one ("use our own app"). */
   clientId?: string,
+  bot: ActingFor = null,
 ): Promise<void> {
   const res = await authFetch(
-    `/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/admin`,
+    secretsPath(`/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/admin`, bot),
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -159,15 +171,16 @@ export async function setOAuthClientSecret(
  * `status: 'failed'` rather than throwing; only a transport or access failure
  * rejects.
  */
-export async function checkToolConnection(slug: string): Promise<ProbeVerdict> {
-  const res = await authFetch(`/api/secrets/tools/${encodeURIComponent(slug)}/check`, { method: 'POST' });
+export async function checkToolConnection(slug: string, bot: ActingFor = null): Promise<ProbeVerdict> {
+  const res = await authFetch(secretsPath(`/api/secrets/tools/${encodeURIComponent(slug)}/check`, bot), { method: 'POST' });
   if (!res.ok) await unwrap(res, "Couldn't test this connection.");
   return ((await res.json()) as { verdict: ProbeVerdict }).verdict;
 }
 
-export const setAdminVar = (slug: string, varName: string, value: string, label?: string | null) =>
-  putVar(slug, varName, 'admin', value, label);
-export const setUserVar = (slug: string, varName: string, value: string, label?: string | null) =>
-  putVar(slug, varName, 'user', value, label);
-export const deleteAdminVar = (slug: string, varName: string) => deleteVar(slug, varName, 'admin');
-export const deleteUserVar = (slug: string, varName: string) => deleteVar(slug, varName, 'user');
+/** Each takes `bot` last: whose secret (see `acting-for.ts`); null, the default, is the person's. */
+export const setAdminVar = (slug: string, varName: string, value: string, label?: string | null, bot: ActingFor = null) =>
+  putVar(slug, varName, 'admin', value, label, bot);
+export const setUserVar = (slug: string, varName: string, value: string, label?: string | null, bot: ActingFor = null) =>
+  putVar(slug, varName, 'user', value, label, bot);
+export const deleteAdminVar = (slug: string, varName: string, bot: ActingFor = null) => deleteVar(slug, varName, 'admin', bot);
+export const deleteUserVar = (slug: string, varName: string, bot: ActingFor = null) => deleteVar(slug, varName, 'user', bot);

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { PageShell } from '../../../shared/components/PageShell';
 import { pathForTool, readOAuthFragment, ToolLogo } from '../../library';
@@ -12,6 +12,7 @@ import {
 } from '../services/secrets.api';
 import { listToolSecrets, type ToolSecrets } from '../services/tool-secrets.api';
 import { ToolSecretsPanel } from './ToolSecretsPanel';
+import { ActingForBot, botFromLocation, useActingForBot } from '../services/acting-for';
 
 /**
  * The Secrets page, routed standalone at `/secrets` (below the persistent
@@ -61,15 +62,37 @@ export function SecretsPage() {
    * away the only copy of the answer the save was waiting for. Same fix
    * `useToolPage` made for the tool page, for the same reason.
    */
+  // Opened for a bot by a link naming it (`?bot=<id>`): every request this
+  // page and what it renders makes reads and writes that bot's secrets — the
+  // page passes the bot to its own calls and provides it to its panels
+  // (`ActingForBot`). Nothing outside the page sees it, so nothing is "as
+  // the bot" once the page is left. Read from the router's location, so the
+  // page follows its URL: a link to another bot's page, or back to the
+  // person's own, reads and writes for whom the URL now names.
+  const location = useLocation();
+  const bot = useMemo(() => botFromLocation(location.search), [location.search]);
+  /**
+   * Whom the lists ON SCREEN were loaded for — set with the lists, in the
+   * same load. Every action a row offers (Sign in, Remove, a panel's save)
+   * acts for THIS identity, never for the one the URL names now: between a
+   * change of `?bot=` and the new lists' arrival — or after that load
+   * failed — the rows still on screen are the previous identity's, and a
+   * click on one must not act in, or delete from, the newly named one's
+   * vault. Undefined until the first lists have arrived.
+   */
+  const [listedFor, setListedFor] = useState<string | null | undefined>(undefined);
+  const shownFor = listedFor === undefined ? bot : listedFor;
+
   const refresh = useCallback(async (quiet = false) => {
     const mine = ++loadSeq.current;
     if (!quiet) setLoading(true);
     setRefreshing(true);
     try {
-      const [t, s] = await Promise.all([listToolSecrets(), listSecrets()]);
+      const [t, s] = await Promise.all([listToolSecrets(undefined, bot), listSecrets(bot)]);
       if (loadSeq.current !== mine) return;
       setTools(t);
       setSecrets(s);
+      setListedFor(bot);
       setError(null);
     } catch (err) {
       // Inside the guard too: an older load failing after a newer one
@@ -83,7 +106,7 @@ export function SecretsPage() {
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [bot]);
 
   useEffect(() => {
     void refresh();
@@ -91,7 +114,8 @@ export function SecretsPage() {
 
   // Strip the consumed fragment so a refresh doesn't re-announce the outcome.
   useEffect(() => {
-    if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname);
+    // The query stays: it names the bot the page was opened for.
+    if (oauthOutcome) window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }, [oauthOutcome]);
 
   // A live API error wins over the (historical) callback outcome; otherwise
@@ -103,7 +127,7 @@ export function SecretsPage() {
 
   const onDelete = async (id: string) => {
     try {
-      await deleteSecret(id);
+      await deleteSecret(id, shownFor);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -112,7 +136,7 @@ export function SecretsPage() {
 
   const onAuthorize = async (id: string) => {
     try {
-      const url = await startOAuth(id);
+      const url = await startOAuth(id, shownFor);
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -120,6 +144,7 @@ export function SecretsPage() {
   };
 
   return (
+    <ActingForBot.Provider value={shownFor}>
     <PageShell
       title="Secrets"
       // The header's Refresh is QUIET, like the refetch a save triggers: a loud
@@ -149,6 +174,11 @@ export function SecretsPage() {
         </Banner>
       )}
 
+      {shownFor && (
+        <p className="mb-2 text-ui font-medium text-ink" data-testid="secrets-of-bot">
+          Secrets of {shownFor}
+        </p>
+      )}
       <p className="mb-5 text-ui text-ink-muted">
         Secrets back the{' '}
         <code className="rounded-sm bg-sunken px-1 py-0.5 font-mono text-meta text-ink">
@@ -252,6 +282,7 @@ export function SecretsPage() {
         </div>
       </details>
     </PageShell>
+    </ActingForBot.Provider>
   );
 }
 
@@ -266,6 +297,7 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
   // implement it ignores the extra parameters — off is the rare exception.
   const [pkce, setPkce] = useState(true);
   const [busy, setBusy] = useState(false);
+  const bot = useActingForBot();
 
   const submit = async () => {
     setBusy(true);
@@ -280,7 +312,7 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
           scopes: scopes.split(/[\s,]+/).filter(Boolean),
           pkce,
         },
-      });
+      }, bot);
       onSaved();
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));

@@ -11,6 +11,7 @@ import { catFileBatchBytes } from './cat-file-batch.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../version-control/index.js';
 import { readRevSha } from '../kb-fs/index.js';
+import type { IBotAddresses } from '../bots/index.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import type {
   IAccessControl,
@@ -153,7 +154,19 @@ export interface AccessModel {
    * admits everywhere and the read gate admits nowhere.
    */
   deploymentOwners: ReadonlySet<string>;
+  /**
+   * Which addresses are bots'. A bot is judged by its own grants and its
+   * groups' only: it is not part of `everyone`, holds no role and is no
+   * admin (see `modules/bots`).
+   */
+  bots: IBotAddresses;
 }
+
+/** The address book of a deployment without bots: nobody is one. */
+const NO_BOTS: IBotAddresses = {
+  isBot: () => false,
+  domain: () => '',
+};
 
 function isBuiltInRole(canonicalRole: string): boolean {
   return canonicalRole === EVERYONE_CANONICAL;
@@ -497,6 +510,7 @@ function resolveAtPath(
  * matching the plain `byEmail.get` the tier-2 check used to read.
  */
 function principalKeysOf(model: AccessModel, email: string): Set<string> | undefined {
+  if (model.bots.isBot(email)) return botKeysOf(model, email);
   const own = model.roles.byEmail.get(email);
   const pub = model.roles.publicKeys;
   const asOwner = model.deploymentOwners.has(email) && !own?.has(ADMIN_ROLE_KEY);
@@ -506,6 +520,32 @@ function principalKeysOf(model: AccessModel, email: string): Set<string> | undef
     ...(pub ?? []),
     ...(asOwner ? principalKeysOfToken(model, ADMIN_ROLE_KEY) : []),
   ]);
+}
+
+/**
+ * A bot's principal keys: the groups its address is a member of, and
+ * the plugin principals expanded from those groups. Never a role's key, a
+ * role that folds one of its groups in included; never a public key, which
+ * is what `everyone` holds; never the owner's Admin keys. Undefined when it
+ * is in no group.
+ */
+function botKeysOf(model: AccessModel, email: string): Set<string> | undefined {
+  const groups = new Set<string>();
+  for (const key of model.roles.byEmail.get(email) ?? []) {
+    if (model.roles.byCanonical.get(key)?.kind === 'group') groups.add(key);
+  }
+  if (groups.size === 0) return undefined;
+  const keys = new Set(groups);
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
+    for (const source of principal.sourceKeys) {
+      if (groups.has(source)) {
+        keys.add(key);
+        break;
+      }
+    }
+  }
+  return keys;
 }
 
 /** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
@@ -616,6 +656,8 @@ function isAdminFloorScope(scope: AccessScope, relativePath: string): boolean {
 }
 
 function isAdminEmail(model: AccessModel, email: string): boolean {
+  // A bot is never an admin, whatever roles.yaml or the environment says.
+  if (model.bots.isBot(email)) return false;
   if (model.deploymentOwners.has(email)) return true;
   const roles = model.roles.byEmail.get(email);
   // Check the explicit `role/admin` alias: it is the role's whatever the
@@ -704,6 +746,7 @@ function decidePermissionResolved(
   fileOwn?: OwnEntries | null,
 ): PermissionDecision {
   const email = canonicalEmail(userEmail);
+  const bot = model.bots.isBot(email);
 
   if (verb === 'write') {
     if (relativePath === 'roles.yaml') {
@@ -745,8 +788,9 @@ function decidePermissionResolved(
     }
 
     // Tier 3 — the built-in `everyone` role (derived: a public plugin
-    // principal granted here counts, see `AccessScope.everyone`).
-    if (scope.everyone) {
+    // principal granted here counts, see `AccessScope.everyone`). A bot is
+    // not part of everyone: it holds exactly its own grants and its groups'.
+    if (scope.everyone && !bot) {
       return { allowed: scope.everyone === 'grant', scope, via: 'everyone', key: EVERYONE_CANONICAL };
     }
 
@@ -1596,6 +1640,14 @@ export class AccessControlService implements IAccessControl {
       undefined,
       limits.now,
     ),
+    /**
+     * Which addresses are bots' (`modules/bots`), read on every decision.
+     * Defaulted for the same reason as `deploymentOwners`: the fixtures that
+     * construct this service directly run without bots. Without it every bot
+     * reads as a person, so the composition root must pass the real book;
+     * `core/__tests__/bot-check-wired.test.ts` checks that it does.
+     */
+    private readonly bots: IBotAddresses = NO_BOTS,
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -2504,6 +2556,10 @@ export class AccessControlService implements IAccessControl {
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
   }
 
+  isBot(email: string): boolean {
+    return this.bots.isBot(canonicalEmail(email));
+  }
+
   async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
     const model = await this.loadModel(workspaceId);
     return isAdminEmail(model, canonicalEmail(userEmail));
@@ -2734,6 +2790,7 @@ export class AccessControlService implements IAccessControl {
       accessFilesByDir: accessFiles,
       groupsHealth: activeGroups.health,
       deploymentOwners: this.deploymentOwners,
+      bots: this.bots,
     };
     // An invalidation landed mid-load: this model describes a tree that is
     // already gone, so it is returned to this caller but never stored.
@@ -3385,6 +3442,7 @@ export class AccessControlService implements IAccessControl {
         // a roles.yaml repair locally and then be refused when it tries to
         // land — the lockout moved one step later, not removed.
         deploymentOwners: this.deploymentOwners,
+        bots: this.bots,
       },
       resolvedRef: commit,
       // The listing already named every path; held so an own-entries read

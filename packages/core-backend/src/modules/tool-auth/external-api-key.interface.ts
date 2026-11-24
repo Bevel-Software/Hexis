@@ -44,10 +44,16 @@ export interface ExternalApiKeySummary {
    */
   deletedAt: number | null;
   /**
-   * The agent configuration the key connects as (a repo-relative knowledge-base
-   * path), or null for Everything — chosen when the key was minted.
+   * A legacy "as an agent" path the key was minted with before bots; null on
+   * every key minted since (see `botUserId`).
    */
   agentPath: string | null;
+  /**
+   * The bot the key connects as (its users row), chosen when the key was
+   * minted. Null means Myself only when `agentPath` is null too: a legacy key
+   * keeps its `agentPath` with this null, and is not Myself.
+   */
+  botUserId: string | null;
 }
 
 /** Who revoked a key: its owner, or an admin acting across the deployment. */
@@ -103,10 +109,10 @@ export interface KeyKindSpec {
 export interface MintOptions {
   kind?: string;
   /**
-   * The agent configuration the key connects as, already checked to be one the
-   * owner may choose (`IAgentScopeResolver.choosable`). Absent: Everything.
+   * The bot the key connects as (its users row), already checked to be one
+   * the owner may act as (`IBots.actAs`). Absent: Myself.
    */
-  agentPath?: string;
+  botUserId?: string;
 }
 
 /**
@@ -148,7 +154,7 @@ export interface IExternalApiKeyService {
    */
   verifyAndLoadToken(
     plaintext: string,
-  ): Promise<{ tokenId: string; user: AuthUser; agentPath?: string | null } | null>;
+  ): Promise<{ tokenId: string; user: AuthUser; botUserId: string | null; agentPath: string | null } | null>;
 
   /**
    * For a key {@link verifyAndLoadToken} refused: whether it is a live key

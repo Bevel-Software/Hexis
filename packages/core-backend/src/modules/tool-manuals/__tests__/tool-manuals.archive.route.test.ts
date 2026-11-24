@@ -4,15 +4,15 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { createToolManualsAgentRoutes } from '../tool-manuals.routes.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { IToolManualService } from '../tool-manuals.contract.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { ConnectionScope, type IAgentScopeResolver } from '../../agent-scope/index.js';
+import { ConnectionScope } from '../../agent-scope/index.js';
 
 /**
  * `GET /agent/plugins/:folder/archive` — error taxonomy of the plugin-folder
@@ -30,10 +30,9 @@ let wsDir: string;
 
 async function baseUrl(
   pluginIndex?: { catalog(): Promise<{ name: string; folders: string[] }[]> },
-  /** The connection's `.agent` choice; absent is Everything. */
+  /** What the connection loads, as the verifier resolved it; absent is Myself. */
   connection?: {
-    agentPath: string;
-    agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
+    scope: ConnectionScope;
     /** Whether the person may read the plugin's files; default yes. */
     readable?: boolean;
   },
@@ -41,7 +40,7 @@ async function baseUrl(
 ): Promise<string> {
   const app = express();
   const manualAuth: express.RequestHandler = (req, _res, next) => {
-    req.toolAuth = { userId: 'u-1', ...(connection ? { agentPath: connection.agentPath } : {}) } as never;
+    req.toolAuth = { userId: 'u-1', ...(connection ? { connection: connection.scope } : {}) } as never;
     next();
   };
   const workspaceService = {
@@ -59,7 +58,7 @@ async function baseUrl(
       toolManualService,
       manualAuth,
       async () => 'ali@example.com',
-      { workspaceService, accessControl, kb: testKbContext({ kbDirName: KB }), disk: new NodeFs(), pluginIndex: pluginIndex as never },
+      { workspaceService, accessControl, kb: testKbContext({ kbDirName: KB }), disk: realDisk(), pluginIndex: pluginIndex as never },
       connection?.agentScope,
     ),
   );
@@ -85,44 +84,32 @@ afterEach(async () => {
 
 const OPS = { path: 'Agents/ops.agent', name: 'Ops' };
 /** A resolver that narrows every connection to `connectors`. */
-function loading(connectors: string[]): Pick<IAgentScopeResolver, 'resolve'> {
-  return { resolve: async () => ConnectionScope.narrowed(OPS, { skills: [], connectors, platformTools: null }, 'fp') };
-}
+/** A connection whose bot cannot be used: it loads nothing. */
+const UNAVAILABLE = ConnectionScope.unavailable(OPS, 'It loads nothing.', 'fp');
 
 describe('GET /agent/plugins/:folder/archive', () => {
-  it("a connection made as an .agent file archives only a plugin defining a connector the file loads", async () => {
+  it('a connection made as a bot archives what the bot may read; one that loads nothing is refused, before anything is read', async () => {
     const pluginDir = path.join(wsDir, KB, 'Plugins', 'GTM');
     await fs.mkdir(pluginDir, { recursive: true });
     await fs.writeFile(path.join(pluginDir, 'mcp.json'), '{"mcpServers":{}}', 'utf-8');
-    const archive = async (connectors: string[] | null) => {
-      const base = await baseUrl(undefined, {
-        agentPath: OPS.path,
-        ...(connectors ? { agentScope: loading(connectors) } : {}),
-      });
+    const archive = async (scope: ConnectionScope) => {
+      const base = await baseUrl(undefined, { scope });
       const res = await fetch(`${base}/api/agent/plugins/GTM/archive`);
       await new Promise<void>((r) => httpServer!.close(() => r()));
       httpServer = undefined;
       return res;
     };
-    // The plugin's own definition file, the plugin folder, a folder above it.
-    expect((await archive(['Plugins/GTM/mcp.json'])).status).toBe(200);
-    expect((await archive(['Plugins/GTM'])).status).toBe(200);
-    expect((await archive(['Plugins'])).status).toBe(200);
-    // A connector elsewhere: refused by name, before anything is read.
-    const refused = await archive(['Plugins/Other']);
+    expect((await archive(ConnectionScope.asBot(OPS, null, 'fp'))).status).toBe(200);
+    const refused = await archive(UNAVAILABLE);
     expect(refused.status).toBe(403);
-    const body = (await refused.json()) as { error: string; code: string };
-    expect(body.code).toBe('not_available_to_connection');
-    expect(body.error).toContain('The plugin "GTM" is not available to this connection.');
-    // A narrowed connection with no resolver wired loads nothing.
-    expect((await archive(null)).status).toBe(403);
+    expect(((await refused.json()) as { code: string }).code).toBe('not_available_to_connection');
   });
 
   it('an out-of-scope plugin folder the person cannot read answers the 404 an absent one does', async () => {
     const pluginDir = path.join(wsDir, KB, 'Plugins', 'Private');
     await fs.mkdir(pluginDir, { recursive: true });
     await fs.writeFile(path.join(pluginDir, 'mcp.json'), '{"mcpServers":{}}', 'utf-8');
-    const base = await baseUrl(undefined, { agentPath: OPS.path, agentScope: loading(['Plugins/Other']), readable: false });
+    const base = await baseUrl(undefined, { scope: UNAVAILABLE, readable: false });
     const existing = await fetch(`${base}/api/agent/plugins/Private/archive`);
     const absent = await fetch(`${base}/api/agent/plugins/Nowhere/archive`);
     expect(existing.status).toBe(404);
@@ -179,19 +166,20 @@ describe('GET /agent/plugins/:folder/archive', () => {
 });
 
 describe('GET /tools/:slug/manual', () => {
-  it("narrows an inline manual read to the connectors the connection's .agent file loads", async () => {
+  it('reads an inline manual for whom the connection acts as, and narrows nothing but a connection that loads nothing', async () => {
     const resolveInlineManual = vi.fn(async () => ({ utcp_version: '1.1.0', manual_version: '1.0.0', tools: [] }));
     const service = { resolveInlineManual } as unknown as IToolManualService;
-    // Everything asks exactly what it asked before: no narrowing at all.
     let base = await baseUrl(undefined, undefined, service);
     expect((await fetch(`${base}/api/tools/weather/manual`)).status).toBe(200);
     expect(resolveInlineManual).toHaveBeenLastCalledWith('ali@example.com', 'weather', undefined);
     await new Promise<void>((r) => httpServer!.close(() => r()));
 
-    base = await baseUrl(undefined, { agentPath: OPS.path, agentScope: loading(['Plugins/GTM']) }, service);
+    base = await baseUrl(undefined, { scope: UNAVAILABLE }, service);
+    // The stub answers a manual whatever it is asked, so the status says the
+    // route asked; the filter it was handed is what narrows a real service.
     expect((await fetch(`${base}/api/tools/weather/manual`)).status).toBe(200);
-    const within = (resolveInlineManual.mock.calls.at(-1) as unknown[])[2] as { within: (p: string) => boolean };
-    expect(within.within('Plugins/GTM/weather.tool')).toBe(true);
-    expect(within.within('Plugins/Other/weather.tool')).toBe(false);
+    expect(resolveInlineManual).toHaveBeenLastCalledWith('ali@example.com', 'weather', { within: expect.any(Function) });
+    const last = resolveInlineManual.mock.calls.at(-1) as unknown as [string, string, { within: (p: string) => boolean }];
+    expect(last[2].within('Plugins/GTM/weather.tool')).toBe(false);
   });
 });

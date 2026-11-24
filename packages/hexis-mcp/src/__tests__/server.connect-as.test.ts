@@ -20,7 +20,7 @@ import type { HexisMcpConfig } from '../config.js';
  */
 
 const REMOTE_TOOL = 'ping_probe';
-const NARROW = { agent: { path: 'Agents/narrow.agent', name: 'narrow' } };
+const NARROW = { agent: { path: 'narrow@agent.hexis', name: 'narrow' } };
 const GONE_SENTENCE =
   'This connection was made as the agent `Agents/gone.agent`, which no longer exists or which you can no ' +
   'longer read, so it loads no tools and no skills. Reconnect and choose another agent, or Everything.';
@@ -141,21 +141,21 @@ describe('a connection made as Everything', () => {
   });
 });
 
-describe('a connection made as an agent configuration', () => {
-  it('is told so at the handshake, and a tool off its surface is refused by name and agent', { timeout: 60_000 }, async () => {
+describe('a connection made as a bot', () => {
+  it('is told so at the handshake, and a tool the bot is not offered is refused by name and bot', { timeout: 60_000 }, async () => {
     connection = NARROW;
     const { client, shutdown } = await start();
     try {
       expect(client.getInstructions()).toBe(
         'Read the guide first.\n\n' +
-          'This connection is connected as the agent "narrow" (`Agents/narrow.agent`): it loads only the ' +
-          'platform tools, connectors, skills and plugins that file lists, and of those only what you may read.',
+          'This connection acts as the bot "narrow" (narrow@agent.hexis), not as the person who made it: ' +
+          "every read, write, skill and tool is judged for the bot's own access, with the bot's secrets and tool sign-ins.",
       );
       expect((await client.listTools()).tools.map((t) => t.name)).toContain(REMOTE_TOOL);
       const refused = await client.callTool({ name: 'nope', arguments: {} });
       expect(refused.isError).toBe(true);
       expect(text(refused)).toContain(
-        'The tool "nope" is not available to this connection: it is connected as the agent "narrow" (`Agents/narrow.agent`), which does not load it.',
+        'The tool "nope" is not available to this connection: it acts as the bot "narrow" (narrow@agent.hexis), which is not offered it.',
       );
     } finally {
       await shutdown();

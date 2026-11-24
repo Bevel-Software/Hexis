@@ -34,11 +34,11 @@ vi.mock('../services/groups.api', async (importOriginal) => {
 });
 // The add-member input suggests people from the access suggest endpoint —
 // stubbed here so these tests stay about the groups roster.
-vi.mock('../../access/api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../access/api')>();
+vi.mock('../../access', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../access')>();
   return { ...actual, suggestPrincipals: vi.fn() };
 });
-import { suggestPrincipals } from '../../access/api';
+import { suggestPrincipals } from '../../access';
 
 const MANUAL_ROSTER: GroupsRoster = {
   mode: 'manual',
@@ -143,6 +143,17 @@ describe('DirectoryGroupsPage', () => {
     expect(screen.getByRole('textbox', { name: 'New group name' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete Product' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'Add member to Product' })).toBeInTheDocument();
+  });
+
+  it('marks a bot among the members "Bot", and a person not', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      ...MANUAL_ROSTER,
+      groups: [{ ...MANUAL_ROSTER.groups[0]!, members: ['pat@example.com', 'release-helper@agent.hexis'], bots: ['release-helper@agent.hexis'] }],
+    });
+    renderPage();
+    const bot = (await screen.findByText('release-helper@agent.hexis')).parentElement!;
+    expect(bot).toHaveTextContent('Bot');
+    expect(screen.getByText('pat@example.com').parentElement!).not.toHaveTextContent('Bot');
   });
 
   it('manual mode: creating a group calls the api and applies the returned roster', async () => {

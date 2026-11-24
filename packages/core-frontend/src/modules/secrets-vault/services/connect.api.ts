@@ -1,5 +1,6 @@
 import { authFetch } from '../../../lib/api';
-import type { AgentChoice } from '../../agents';
+import type { BotChoice } from '../../agents';
+import { secretsPath, type ActingFor } from './acting-for';
 
 /**
  * The aggregated "connect your tools" surface: everything standing between the
@@ -139,13 +140,11 @@ async function fail(res: Response, fallback: string): Promise<never> {
 }
 
 /**
- * The caller's outstanding per-user credentials across every accessible tool —
- * or, with `agentPath` (the consent step's "Connect as" choice), across the
- * connectors a connection made as that agent configuration loads. Null is
- * Everything.
+ * The caller's outstanding per-user credentials across every accessible tool:
+ * the person's (`bot` null, the default), or a bot's (see `acting-for.ts`).
  */
-export async function getConnectPending(agentPath: string | null = null): Promise<ConnectPending> {
-  const res = await authFetch(agentPath ? `/api/connect/pending?agent=${encodeURIComponent(agentPath)}` : '/api/connect/pending');
+export async function getConnectPending(bot: ActingFor = null): Promise<ConnectPending> {
+  const res = await authFetch(secretsPath('/api/connect/pending', bot));
   if (!res.ok) await fail(res, "Couldn't load your tools.");
   return (await res.json()) as ConnectPending;
 }
@@ -167,6 +166,8 @@ export async function startToolOAuth(
   slug: string,
   varName: string,
   opts?: { returnTo?: string },
+  /** Whose sign-in (see `acting-for.ts`); null, the default, is the person's. */
+  bot: ActingFor = null,
 ): Promise<string> {
   const init: RequestInit = { method: 'POST' };
   if (opts?.returnTo) {
@@ -174,7 +175,7 @@ export async function startToolOAuth(
     init.body = JSON.stringify({ returnTo: opts.returnTo });
   }
   const res = await authFetch(
-    `/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/start`,
+    secretsPath(`/api/secrets/tools/${encodeURIComponent(slug)}/vars/${encodeURIComponent(varName)}/oauth/start`, bot),
     init,
   );
   if (!res.ok) await fail(res, "Couldn't start sign-in.");
@@ -189,13 +190,13 @@ export interface McpOAuthRequest {
   scope: string | null;
   resource: string | null;
   /**
-   * The agent configurations the person may connect this client as, offered below
-   * Everything. Empty when there are none (or for a request that cannot take
-   * a choice).
+   * The bots the person may connect this client as, offered below Myself,
+   * the ones that cannot be used included. Empty when there are none (or for
+   * a request that cannot take a choice).
    */
-  agents?: AgentChoice[];
-  /** Set when the agents could not be listed: `agents` is then empty for that reason, not because there are none. */
-  agentsUnavailable?: boolean;
+  bots?: BotChoice[];
+  /** Set when the bots could not be listed: `bots` is then empty for that reason, not because there are none. */
+  botsUnavailable?: boolean;
 }
 
 /** Describe the pending MCP authorization carried in the signed `state`. */
@@ -208,13 +209,13 @@ export async function getMcpOAuthRequest(state: string): Promise<McpOAuthRequest
 /**
  * Finish the MCP authorization: mint the one-time code for the signed-in user
  * and return the agent's redirect URL the browser should navigate to.
- * `agentPath` is the "Connect as" choice; null (the default) is Everything.
+ * `bot` is the "Connect as" choice, a bot's id; null (the default) is Myself.
  */
-export async function completeMcpOAuth(state: string, agentPath: string | null = null): Promise<string> {
+export async function completeMcpOAuth(state: string, bot: string | null = null): Promise<string> {
   const res = await authFetch('/api/mcp/oauth/complete', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(agentPath ? { state, agentPath } : { state }),
+    body: JSON.stringify(bot ? { state, bot } : { state }),
   });
   if (!res.ok) await fail(res, "Couldn't finish connecting.");
   return ((await res.json()) as { redirectTo: string }).redirectTo;

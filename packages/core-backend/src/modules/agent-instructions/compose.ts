@@ -80,15 +80,15 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * The first line of the handshake text, ahead of everything else. Clients cut
  * the instructions they show the model, so the line that must survive the cut
  * comes first: it sends the agent to the guide, the one text that says in full
- * what this deployment is and, for a connection made as an agent, what that
+ * what this deployment is and, for a connection made as a bot, what that
  * connection loads.
  *
  * The same line on every handshake, unconditionally — also on a connection
- * whose `.agent` leaves `get_agent_guide` out of its platform tools. That
+ * whose bot the distribution offers without `get_agent_guide`. That
  * connection is already told the same thing by the sentence its platform
  * tools' descriptions open with (`GUIDE_FIRST_SENTENCE` in tool-registry), so
- * the line adds no case; which tools a narrowed connection loads is the
- * agent configuration's rule, not this text's, and is left as it is.
+ * the line adds no case; which tools a bot's connection loads is the
+ * distribution's rule, not this text's, and is left as it is.
  */
 export const GUIDE_FIRST_LINE =
   'Before anything else, call `get_agent_guide` and read the guide: it says what this deployment is and what this connection loads.';

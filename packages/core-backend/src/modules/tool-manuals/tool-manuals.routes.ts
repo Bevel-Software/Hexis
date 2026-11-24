@@ -19,7 +19,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { NOT_AVAILABLE_TO_CONNECTION, connectionOf } from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -65,11 +65,6 @@ export function createToolManualsAgentRoutes(
      */
     pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
   },
-  /**
-   * Resolves the scope of a connection made as an agent configuration, so
-   * `all-tools` lists only the connectors it loads (`modules/agent-scope`).
-   */
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -89,11 +84,12 @@ export function createToolManualsAgentRoutes(
       // Default remote-safe: exclude local-only manuals unless the caller (a locally
       // installed MCP server) explicitly opts in with `?remote=false`.
       const remoteOnly = req.query.remote !== 'false';
-      // A connection made as an agent configuration lists only the connectors that
-      // file loads, and says which agent it is — the MCP proxy words its
-      // refusals and its handshake from that. Everything lists as it always
-      // did, with no `connection` at all.
-      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      // The caller is whom the connection acts as (a bot's row for a bot's
+      // connection), so the list is already theirs; the answer says which bot
+      // it is — the MCP proxy words its refusals and its handshake from that —
+      // and a connection that loads nothing lists nothing. Myself lists as it
+      // always did, with no `connection` at all.
+      const scope = connectionOf(req.toolAuth);
       const within = scope.connectorFilter();
       const userManuals = email
         ? await toolManualService.toManualCallTemplates(email, within ? { remoteOnly, within } : { remoteOnly })
@@ -192,12 +188,11 @@ export function createToolManualsAgentRoutes(
       if (![...verdicts.values()].some((v) => v === true)) {
         return void res.status(404).json({ error: 'Not found' });
       }
-      // A connection made as an agent configuration materializes only a plugin
-      // that defines a connector the file loads — the archive is how the
-      // local MCP server runs one, and nothing else asks for it. Checked
-      // before any file is opened.
-      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
-      if (!scope.loadsConnectorIn(pluginRel)) {
+      // A connection that loads nothing materializes no plugin — the archive
+      // is how the local MCP server runs one, and nothing else asks for it.
+      // Checked before any file is opened.
+      const scope = connectionOf(req.toolAuth);
+      if (!scope.loadsAnything()) {
         const why = scope.describe();
         return void res.status(403).json({
           error: `The plugin "${folder}" is not available to this connection.${why ? ` ${why}` : ''}`,
@@ -304,7 +299,7 @@ export function createToolManualsAgentRoutes(
       const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
       // A connection made as an agent configuration reads only the manuals of the
       // connectors it loads; another is as absent as one the person cannot read.
-      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
+      const scope = connectionOf(req.toolAuth);
       const within = scope.connectorFilter();
       const manual = await toolManualService.resolveInlineManual(email, String(slug), within ? { within } : undefined);
       if (!manual) return void res.status(404).json({ error: 'Not found' });

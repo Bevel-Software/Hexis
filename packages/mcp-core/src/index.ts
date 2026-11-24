@@ -178,9 +178,11 @@ export { printable } from './printable.js';
 // the local server cannot describe or refuse the same connection differently.
 export {
   CONNECTION_META_KEY,
+  BOT_ONLY_TOOLS,
   NOT_AVAILABLE_TO_CONNECTION,
   connectionRefusal,
   connectionWireOf,
+  unlistedToolAnswer,
   describeConnection,
   type ConnectionScopeWire,
   type ScopeAgent,

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PendingCommitsService } from '../pending-commits.service.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 
 /**
  * `enqueueIfAbsent` backs the pull-conflict recovery dispatch: it must
@@ -70,6 +70,13 @@ describe('PendingCommitsService.enqueueIfAbsent', () => {
       authorEmail: 'alice@example.com',
       authorName: 'Alice',
     });
+  });
+
+  it("records the person behind a bot beside the bot, as every queued save does", async () => {
+    const { db, inserted } = makeFakeDb(0);
+    const svc = new PendingCommitsService(db);
+    await svc.enqueueIfAbsent({ ...INPUT, authorEmail: 'ops@agent.hexis', authorName: 'Ops', madeBy: { name: 'Dana', email: 'Dana@Acme.com' } });
+    expect(inserted[0]).toMatchObject({ authorEmail: 'ops@agent.hexis', madeByEmail: 'dana@acme.com', madeByEmailBidx: 'dana@acme.com', madeByName: 'Dana' });
   });
 
   it('is a no-op when ANY row exists for the tuple (pending, running, or needs_attention)', async () => {

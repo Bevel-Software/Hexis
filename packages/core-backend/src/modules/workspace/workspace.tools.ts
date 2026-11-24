@@ -2043,7 +2043,7 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work: a new id mid-run starts a second conversation. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where there is an `ask` tool, hand it the SAME id: reads and questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two ids, which is harmless: keep the one you already used. Returns `{ sessionId, defaultBranch, connectedAs }`: `connectedAs` is the agent this connection was made as (`{ path, name }`), null for Everything. Plus `firstRun` while the knowledge base is empty: a note to act on.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work: a new id mid-run starts a second conversation. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where there is an `ask` tool, hand it the SAME id: reads and questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two ids, which is harmless: keep the one you already used. Returns `{ sessionId, defaultBranch, connectedAs }`: `connectedAs` is the bot this connection acts as (`{ path, name }`), null for Myself. Plus `firstRun` while the knowledge base is empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
@@ -2056,10 +2056,12 @@ export function registerWorkspaceTools(
         connectedAs: {
           type: ['object', 'null'],
           description:
-            'The agent configuration this connection was made as: its `path` and `name`. Null when the connection was made as Everything.',
+            'The bot this connection was made as, `{ path, name }`. Null when it was made as Myself.',
           properties: {
-            path: str('Repository-relative path of the agent configuration.'),
-            name: str('Its name, or the path when the file cannot be read.'),
+            path: str(
+              "The bot's address (`<id>@agent.hexis`). For a bot that cannot be used, the id or legacy path it was made with.",
+            ),
+            name: str("The bot's name; `unknown` when no bot answers to the connection any more."),
           },
           required: ['path', 'name'],
         },

@@ -1,4 +1,5 @@
 import { authFetch } from '../../../lib/api';
+import type { ConnectedAs } from '../../agents';
 
 export interface ExternalApiKeySummary {
   id: string;
@@ -16,8 +17,8 @@ export interface ExternalApiKeySummary {
   revokedBy: 'owner' | 'admin' | null;
   /** Never set on a key the owner can see: a deleted key leaves their listings. */
   deletedAt?: number | null;
-  /** The agent configuration the key connects as (a knowledge-base path), or null for Everything. */
-  agentPath?: string | null;
+  /** Whom the key connects as, judged now: you, a bot, or a bot it stopped acting as and why. */
+  connectedAs?: ConnectedAs;
   /** Model-proxy usage for this key today + the daily cap (in tokens). */
   llmUsage?: { usedTodayTokens: number; dailyTokenCap: number };
 }
@@ -46,12 +47,12 @@ export async function listExternalApiKeys(): Promise<ExternalApiKeySummary[]> {
   return res.json() as Promise<ExternalApiKeySummary[]>;
 }
 
-/** Mint a key. `agentPath` is its "Connect as" choice; null (the default) is Everything. */
-export async function createExternalApiKey(label: string, agentPath: string | null = null): Promise<MintedExternalApiKey> {
+/** Mint a key. `bot` is its "Connect as" choice, a bot's id; null (the default) is Myself. */
+export async function createExternalApiKey(label: string, bot: string | null = null): Promise<MintedExternalApiKey> {
   const res = await authFetch('/api/mcp/external-api-keys', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(agentPath ? { label, agentPath } : { label }),
+    body: JSON.stringify(bot ? { label, bot } : { label }),
   });
   if (!res.ok) await unwrap(res, "Couldn't create external API key.");
   return res.json() as Promise<MintedExternalApiKey>;

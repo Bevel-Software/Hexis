@@ -48,13 +48,15 @@ export interface InternalTokenClaim {
    */
   connectionId?: string;
   /**
-   * The agent configuration the external caller's connection was made as (a
-   * repo-relative knowledge-base path), copied at mint from the verified
-   * grant or connection — the hosted proxy's loopback token and the local
-   * server's exchanged grant both carry it, so every agent surface narrows
-   * their calls to that agent's scope (`modules/agent-scope`). Absent is
-   * Everything. Carried, never decided, like `connectionId`.
+   * The bot (its users row) the external caller's connection was made as,
+   * copied at mint from the verified grant or key — the hosted proxy's
+   * loopback token carries it, so the verifier resolves the call to the bot
+   * (`modules/bots`), checking again that `userId` may still act as it.
+   * Absent is Myself. Carried, never decided, like `connectionId`. A token
+   * that names a connection reads the connection's CURRENT choice instead.
    */
+  botUserId?: string;
+  /** A legacy "as an agent" path the connection recorded before bots; resolved like `botUserId`. */
   agentPath?: string;
 }
 
@@ -157,6 +159,7 @@ export class InternalTokenService {
       ...(typeof payload.focusedBranch === 'string' ? { focusedBranch: payload.focusedBranch } : {}),
       ...(payload.externalProxy === true ? { externalProxy: true } : {}),
       ...(typeof payload.connectionId === 'string' ? { connectionId: payload.connectionId } : {}),
+      ...(typeof payload.botUserId === 'string' && payload.botUserId ? { botUserId: payload.botUserId } : {}),
       ...(typeof payload.agentPath === 'string' && payload.agentPath ? { agentPath: payload.agentPath } : {}),
     };
   }

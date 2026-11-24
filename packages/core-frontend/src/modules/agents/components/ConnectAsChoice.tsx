@@ -1,47 +1,62 @@
-import { useId } from 'react';
+import { useContext, useId } from 'react';
+import { AuthContext } from '../../auth';
 import { cn } from '../../../lib/utils';
-import type { AgentChoice } from '../services/agent-choices.api';
+import type { BotChoice } from '../services/agent-choices.api';
 import type { UnavailableChoice } from '../connect-as';
 
 export interface ConnectAsChoiceProps {
-  /** The agents the person may connect as; Everything is always offered first. */
-  agents: readonly AgentChoice[];
-  /** The chosen agent's path, or null for Everything. */
+  /** The bots the person may act as, the ones that cannot be used included; Myself is always offered first. */
+  bots: readonly BotChoice[];
+  /** The address shown under Myself; the signed-in person's when not given. */
+  myselfEmail?: string;
+  /** The chosen bot's id, or null for Myself. */
   value: string | null;
-  onChange: (agentPath: string | null) => void;
+  onChange: (botId: string | null) => void;
   disabled?: boolean;
   /** One line under the heading, saying what the choice is for here. */
   hint?: string;
   /**
-   * Set when the agents could not be loaded: the list is not "you have
-   * none", so the choice says it failed and asks the person to confirm
-   * Everything before the connection is made (see {@link canConnectAs}).
+   * Set when the bots could not be loaded: the list is not "you have none",
+   * so the choice says it failed and asks the person to confirm Myself
+   * before the connection is made (see {@link canConnectAs}).
    */
   unavailable?: UnavailableChoice;
 }
 
 /**
- * "Connect as": Everything (selected by default) or one agent configuration, by
- * name with its description. Used where a connection is made — the OAuth
- * consent step and the connection-key form — so both offer the same choice
- * the same way.
+ * "Connect as": Myself (selected by default), then each bot the person may
+ * act as, by name with its description. A bot that cannot be used stays in
+ * the list, disabled, with its reason on its own line. Used where a
+ * connection is made — the OAuth consent step and the connection-key form —
+ * so both offer the same choice the same way.
  *
- * With no agent on offer there is no choice to make, and nothing is shown:
- * the connection is Everything's, as every connection was before agents
- * existed, and a page with one radio button would only ask what it cannot
- * be asked. The one exception is a listing that FAILED — then the person is
- * told, and confirms Everything, since the agents may well exist.
+ * With no bot on offer there is no choice to make, and nothing is shown: the
+ * connection is the person's, as every connection was before bots existed.
+ * The one exception is a listing that FAILED — then the person is told, and
+ * confirms Myself, since bots may well exist.
  */
-export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unavailable }: ConnectAsChoiceProps) {
+export function ConnectAsChoice({ bots, myselfEmail, value, onChange, disabled, hint, unavailable }: ConnectAsChoiceProps) {
   const name = useId();
-  if (agents.length === 0 && !unavailable) return null;
-  const options: { path: string | null; title: string; detail: string }[] = [
+  const signedIn = useContext(AuthContext)?.user?.email;
+  const email = myselfEmail ?? signedIn;
+  if (bots.length === 0 && !unavailable) return null;
+  const options: { id: string | null; title: string; detail: string; disabled: boolean }[] = [
     {
-      path: null,
-      title: 'Everything',
-      detail: 'Every tool, skill and plugin you may read.',
+      id: null,
+      title: 'Myself',
+      detail: email ? `${email} · everything you may read and write` : 'everything you may read and write',
+      disabled: false,
     },
-    ...agents.map((a) => ({ path: a.path, title: a.name, detail: a.description || a.path })),
+    ...bots.map((b) => ({
+      id: b.id,
+      title: b.name,
+      detail: b.unavailable
+        ? `Cannot be used: ${b.unavailable}`
+        : b.description
+          ? `Bot · ${b.description}`
+          : `Bot · ${b.address}`,
+      disabled: b.unavailable !== null,
+    })),
   ];
   return (
     <fieldset className="space-y-1.5" disabled={disabled}>
@@ -49,18 +64,23 @@ export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unava
       {hint && <p className="text-meta text-ink-muted leading-snug">{hint}</p>}
       <div className="divide-y divide-line border border-line rounded-md">
         {options.map((o) => {
-          const checked = value === o.path;
+          const checked = value === o.id;
           return (
             <label
-              key={o.path ?? ''}
-              className={cn('flex items-start gap-2 px-3 py-2 cursor-pointer', checked && 'bg-sunken')}
+              key={o.id ?? ''}
+              className={cn(
+                'flex items-start gap-2 px-3 py-2',
+                o.disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer',
+                checked && 'bg-sunken',
+              )}
             >
               <input
                 type="radio"
                 name={name}
                 className="mt-0.5"
                 checked={checked}
-                onChange={() => onChange(o.path)}
+                disabled={o.disabled}
+                onChange={() => onChange(o.id)}
               />
               <span className="min-w-0">
                 <span className="block text-sm font-medium text-ink truncate">{o.title}</span>
@@ -72,14 +92,14 @@ export function ConnectAsChoice({ agents, value, onChange, disabled, hint, unava
       </div>
       {unavailable && (
         <div role="alert" className="text-xs text-danger bg-danger-soft border border-danger rounded-md px-2 py-1.5 space-y-1">
-          <p>Your agents couldn't be loaded, so only Everything can be chosen right now.</p>
+          <p>Your bots couldn't be loaded, so only Myself can be chosen right now.</p>
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"
               checked={unavailable.confirmed}
               onChange={(e) => unavailable.onConfirm(e.target.checked)}
             />
-            Connect as Everything anyway
+            Connect as Myself anyway
           </label>
         </div>
       )}

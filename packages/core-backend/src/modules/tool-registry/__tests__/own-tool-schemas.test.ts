@@ -3,15 +3,16 @@ import express from 'express';
 import { describe, expect, it } from 'vitest';
 import { inputSchemaDefect } from '@bevel-software/platform-mcp-core';
 import { ToolRegistry } from '../tool-registry.js';
-import { registerVersionControlTools } from '../../version-control/agent-tools/version-control.tools.js';
-import { registerChangeRequestReadTools } from '../../version-control/agent-tools/change-request-read.tools.js';
-import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { registerSkillsTools } from '../../skills/skills.tools.js';
-import { registerPluginsTools } from '../../plugins/plugins.tools.js';
-import { registerToolManualsTools } from '../../tool-manuals/tool-manuals.tools.js';
-import { registerEmbedTools } from '../../embed/embed.tools.js';
-import { registerAgentGuideTool } from '../../agent-guide/agent-guide.tools.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
+import { registerVersionControlTools } from '../../../__tests__/tool-wiring.js';
+import { registerChangeRequestReadTools } from '../../../__tests__/tool-wiring.js';
+import { registerChangeRequestApplyTools } from '../../../__tests__/tool-wiring.js';
+import { registerWorkspaceTools } from '../../../__tests__/tool-wiring.js';
+import { registerSkillsTools } from '../../skills/index.js';
+import { registerPluginsTools } from '../../plugins/index.js';
+import { registerToolManualsTools } from '../../tool-manuals/index.js';
+import { registerEmbedTools } from '../../../__tests__/tool-wiring.js';
+import { registerAgentGuideTool } from '../../agent-guide/index.js';
+import { ToolDescriptionNotes } from '../../workspace/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -65,6 +66,11 @@ const MODULES: ReadonlyArray<{ name: string; register: (registry: ToolRegistry) 
     name: 'registerChangeRequestReadTools',
     register: (registry) =>
       registerChangeRequestReadTools(registry, express.Router(), pass, handler, nothing, testKbContext()),
+  },
+  {
+    name: 'registerChangeRequestApplyTools',
+    register: (registry) =>
+      registerChangeRequestApplyTools(registry, express.Router(), pass, handler, nothing, testKbContext()),
   },
   {
     name: 'registerWorkspaceTools',

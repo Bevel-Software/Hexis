@@ -1,39 +1,46 @@
 import { authFetch } from '../../../lib/api';
 
 /**
- * Connecting as an agent: an MCP connection or a connection key is made as
- * Everything (all the person may read) or as one agent configuration of the
- * knowledge base, whose lists narrow what the connection loads. What a
- * configuration is — the file kind, what it says — is the distribution's;
- * this mirrors the backend's `modules/agent-scope` contract, which only
- * names the configuration by its path.
+ * Connecting as a bot: an MCP connection or a connection key is made as
+ * Myself (the person) or as a bot — an identity of its own, with its own
+ * access, secrets and tool sign-ins — that the person may act as. Which bots
+ * exist and what defines them is the distribution's; this mirrors the
+ * backend's `modules/bots` contract.
  */
 
-/** One agent configuration the signed-in person may connect as. */
-export interface AgentChoice {
-  /** Repo-relative path of the configuration — what the connection records. */
-  path: string;
+/** One bot the signed-in person may act as. */
+export interface BotChoice {
+  /** The bot's id: what a connection asks to be made as. */
+  id: string;
   /** Its name, as the choice shows it. */
   name: string;
   /** Its description, one line; empty when it has none. */
   description: string;
+  /** Its address, `<id>@agent.hexis`. */
+  address: string;
+  /** Why it cannot be chosen, in a few words; null when it can. A disabled choice is still listed. */
+  unavailable: string | null;
 }
 
-/** The agents a connection key may be minted as (the OAuth consent step gets the same list with its request). */
-export async function listAgentChoices(): Promise<AgentChoice[]> {
-  const res = await authFetch('/api/mcp/agent-choices');
-  if (!res.ok) throw new Error("Couldn't load the agents you can connect as.");
-  const body = (await res.json()) as { agents?: AgentChoice[] };
-  return Array.isArray(body.agents) ? body.agents : [];
+/** The bots a connection key may be minted as (the OAuth consent step gets the same list with its request). */
+export async function listBotChoices(): Promise<BotChoice[]> {
+  const res = await authFetch('/api/mcp/bot-choices');
+  if (!res.ok) throw new Error("Couldn't load the bots you can connect as.");
+  const body = (await res.json()) as { bots?: BotChoice[] };
+  return Array.isArray(body.bots) ? body.bots : [];
 }
+
+/** Whom a connection the person made is connected as, as the server judged it for the listing. */
+export type ConnectedAs = { kind: 'myself' } | { kind: 'bot'; name: string; stopped: string | null };
 
 /**
- * How a connection's choice reads beside it: "Everything" for none, else the
- * configuration's file name without its extension (the stored record is the
- * path; the name its definition carries is the distribution's to show).
+ * How a connection reads in a list of connections: "Connected as you", or
+ * as the bot by name — with, when it stopped, why ("stopped: you may no
+ * longer edit this bot").
  */
-export function connectedAsLabel(agentPath: string | null | undefined): string {
-  if (!agentPath) return 'Everything';
-  const base = agentPath.slice(agentPath.lastIndexOf('/') + 1);
-  return base.replace(/\.[a-z0-9]+$/i, '') || agentPath;
+export function connectedAsLabel(connectedAs: ConnectedAs | null | undefined): string {
+  if (!connectedAs || connectedAs.kind === 'myself') return 'Connected as you';
+  return connectedAs.stopped
+    ? `Connected as ${connectedAs.name} · stopped: ${connectedAs.stopped}`
+    : `Connected as ${connectedAs.name}`;
 }

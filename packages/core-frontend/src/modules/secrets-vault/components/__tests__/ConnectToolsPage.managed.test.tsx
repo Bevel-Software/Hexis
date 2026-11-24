@@ -147,7 +147,7 @@ describe('ConnectToolsPage: skipping a managed connector, as any sign-in row can
     connectMock.getConnectPending.mockResolvedValue(listing(managedRow({ authorized: true })));
     renderPage();
     fireEvent.click((await card('microsoft365')).getByRole('checkbox', { name: /Skip this tool/ }));
-    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('microsoft365', 'ACCESS_TOKEN'));
+    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('microsoft365', 'ACCESS_TOKEN', null));
     expect(varsMock.deleteAdminVar).not.toHaveBeenCalled();
     expect(await (await card('microsoft365')).findByText('Skipped')).toBeInTheDocument();
     fireEvent.click((await card('microsoft365')).getByRole('button', { name: 'Include' }));
@@ -173,7 +173,7 @@ describe('ConnectToolsPage: disconnecting a managed sign-in', () => {
       .mockReturnValue(new Promise<ConnectPending>((resolve) => (answer = resolve)));
     renderPage();
     fireEvent.click((await card('microsoft365')).getByRole('button', { name: 'Disconnect' }));
-    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('microsoft365', 'ACCESS_TOKEN'));
+    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledWith('microsoft365', 'ACCESS_TOKEN', null));
     expect(varsMock.deleteAdminVar).not.toHaveBeenCalled();
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenCalledTimes(2));
@@ -191,7 +191,7 @@ describe('ConnectToolsPage: disconnecting a managed sign-in', () => {
       .mockResolvedValue(listing({ ...workspaceRow(), authorized: false, managed: { ...workspaceRow().managed!, account: null } }));
     renderPage();
     fireEvent.click((await card('hubspot')).getByRole('button', { name: 'Disconnect' }));
-    await waitFor(() => expect(varsMock.deleteAdminVar).toHaveBeenCalledWith('hubspot', 'ACCESS_TOKEN'));
+    await waitFor(() => expect(varsMock.deleteAdminVar).toHaveBeenCalledWith('hubspot', 'ACCESS_TOKEN', null));
     expect(varsMock.deleteUserVar).not.toHaveBeenCalled();
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenCalledTimes(2));

@@ -40,6 +40,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('pending-commits');
 import type { Database } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
+import { madeByColumns } from './made-by.js';
 import { pendingCommits } from '../database/index.js';
 import { canonicalWorkspaceId } from '../../shared/workspace-id.js';
 
@@ -92,6 +93,9 @@ export interface PendingCommit {
   path: string;
   authorEmail: string;
   authorName: string;
+  /** For a bot's change: the person behind the bot, named beside it on the commit. */
+  madeByEmail: string | null;
+  madeByName: string | null;
   queuedAt: Date;
   status: 'pending' | 'running' | 'needs_attention';
   attempts: number;
@@ -106,6 +110,8 @@ export interface EnqueueInput {
   path: string;
   authorEmail: string;
   authorName: string;
+  /** For a bot's change: the person who made the connection it acts through. */
+  madeBy?: { name: string; email: string };
 }
 
 export interface WorkspaceDescriptor {
@@ -123,6 +129,8 @@ function rowToPending(row: Row): PendingCommit {
     path: row.path,
     authorEmail: row.authorEmail,
     authorName: row.authorName,
+    madeByEmail: row.madeByEmail ?? null,
+    madeByName: row.madeByName ?? null,
     queuedAt: row.queuedAt,
     status: row.status as PendingCommit['status'],
     attempts: row.attempts,
@@ -155,6 +163,17 @@ export class PendingCommitsService {
    * on disk, not "the version that triggered this row"). A row that's
    * `running` or `needs_attention` is left alone — both states represent
    * in-flight or terminal work the caller shouldn't disturb.
+   *
+   * A bot's save is queued like anyone's, beside the person behind it
+   * (`madeBy`), and never refused for that person: its bytes are already on
+   * disk, possibly on top of another save still queued for the same path,
+   * so a refusal would leave them nobody's to commit and nothing safe to
+   * put back. It does not join the record writers' lock (`holdMaker`) for
+   * the same reason. Account erasure rewrites the person out of the row in
+   * its transaction and once more after it commits; a row the worker
+   * claimed before that, or one written after the second pass, commits
+   * with the name it was queued with, as every commit made before the
+   * erasure keeps its names: git history is never rewritten.
    */
   async enqueue(input: EnqueueInput): Promise<void> {
     const email = canonicalEmail(input.authorEmail);
@@ -178,6 +197,7 @@ export class PendingCommitsService {
         authorEmail: email,
         authorEmailBidx: email,
         authorName: input.authorName,
+        ...madeByColumns(input.madeBy),
         // Reset transient counters — this is effectively a fresh enqueue.
         attempts: 0,
         lastError: null,
@@ -200,6 +220,7 @@ export class PendingCommitsService {
       authorEmail: email,
       authorEmailBidx: email,
       authorName: input.authorName,
+      ...madeByColumns(input.madeBy),
     });
   }
 
@@ -240,6 +261,7 @@ export class PendingCommitsService {
       authorEmail: email,
       authorEmailBidx: email,
       authorName: input.authorName,
+      ...madeByColumns(input.madeBy),
     });
     return true;
   }

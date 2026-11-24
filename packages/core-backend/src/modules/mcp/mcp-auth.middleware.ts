@@ -8,6 +8,9 @@ import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError 
 import type { IExternalApiKeyService, InternalTokenService } from '../tool-auth/index.js';
 import { rejectConnectionKey } from '../tool-auth/index.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
+import type { ConnectionChoice } from '../bots/index.js';
+import { resolveConnectionIdentity } from '../agent-scope/index.js';
+import type { ConnectionIdentities } from '../tool-auth/index.js';
 import '../tool-auth/index.js'; // Express Request augmentation (req.externalApiKeyId)
 import '../audit/index.js'; // Express Request augmentation (req.agentConnectionId)
 
@@ -25,12 +28,19 @@ declare global {
        */
       mcpCallerKind?: McpCallerKind;
       /**
-       * The agent configuration the MCP caller's credential connects as — a key's
-       * `api_tokens.agent_path`, an agent connection's
-       * `agent_connections.agent_path`, or the one an exchanged grant
-       * carries. Unset is Everything.
+       * Whom the MCP caller's credential connects as — a key's choice, an
+       * agent connection's, or the one an exchanged grant carries: a bot's
+       * row, or a legacy agent path. Unset is Myself. Carried, never decided
+       * here: the loopback verifier resolves it on every call (`modules/bots`).
        */
-      mcpAgentPath?: string;
+      mcpConnectionChoice?: ConnectionChoice;
+      /**
+       * The person the credential belongs to, when the connection acts as a
+       * bot (`userId`/`userEmail` are then the bot's): what the loopback
+       * credential is minted for, so the loopback verifier checks again that
+       * this person may act as the bot.
+       */
+      mcpCredentialUserId?: string;
     }
   }
 }
@@ -75,11 +85,43 @@ export function createMcpAuthMiddleware(
   oauthProvider: BevelOAuthProvider,
   resourceMetadataUrl: string,
   internalTokens: InternalTokenService,
+  /**
+   * How a connection made as a bot is resolved: the request then carries the
+   * bot's identity (the hosted proxy dials connectors with the bot's secrets,
+   * never the person's). Absent, such a connection keeps the person's
+   * identity, and the loopback surface it reaches loads nothing.
+   */
+  identities?: ConnectionIdentities,
 ) {
   const wwwAuthenticate = `Bearer realm="bevel-mcp", resource_metadata="${resourceMetadataUrl}"`;
   const unauthorized = (res: Response, error: string) => {
     res.setHeader('WWW-Authenticate', wwwAuthenticate);
     res.status(401).json({ error });
+  };
+
+  /**
+   * Hand the request on as whom its connection acts as: the person, or the
+   * bot the connection was made as (resolved on THIS request, so a bot the
+   * person may no longer act as stops here too). The person is kept for the
+   * loopback credential. A failure to resolve is the backend's, a 500.
+   */
+  const proceed = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const choice = req.mcpConnectionChoice;
+    if (!choice || !identities) return next();
+    let resolved;
+    try {
+      resolved = await resolveConnectionIdentity(identities.bots, { id: req.userId!, email: req.userEmail! }, choice);
+    } catch (err) {
+      log.error('resolving the bot a connection acts as failed:', { err });
+      res.status(500).json({ error: 'Authentication backend unavailable' });
+      return;
+    }
+    if (resolved.madeBy) {
+      req.mcpCredentialUserId = resolved.madeBy.id;
+      req.userId = resolved.actor.id;
+      req.userEmail = resolved.actor.email;
+    }
+    next();
   };
 
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -117,10 +159,10 @@ export function createMcpAuthMiddleware(
         req.userId = resolved.user.id;
         req.userEmail = resolved.user.email;
         req.externalApiKeyId = resolved.tokenId;
-        if (resolved.agentPath) req.mcpAgentPath = resolved.agentPath;
+        if (resolved.botUserId || resolved.agentPath) {
+          req.mcpConnectionChoice = { botUserId: resolved.botUserId, agentPath: resolved.agentPath };
+        }
         req.mcpCallerKind = 'key';
-        next();
-        return;
       } catch (err) {
         // A DB error during verification is a 500, not a 401 — the caller's
         // credentials may be valid; we just can't check them right now.
@@ -128,6 +170,10 @@ export function createMcpAuthMiddleware(
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }
+      // Outside the try, as for the OAuth branch: a throw downstream is not
+      // a verification failure.
+      await proceed(req, res, next);
+      return;
     }
 
     // MCP OAuth access token — issued by our own authorization server. An
@@ -145,9 +191,9 @@ export function createMcpAuthMiddleware(
         if (typeof info.extra?.connectionId === 'string') {
           req.agentConnectionId = info.extra.connectionId;
         }
-        if (typeof info.extra?.agentPath === 'string' && info.extra.agentPath) {
-          req.mcpAgentPath = info.extra.agentPath;
-        }
+        const botUserId = typeof info.extra?.botUserId === 'string' && info.extra.botUserId ? info.extra.botUserId : null;
+        const agentPath = typeof info.extra?.agentPath === 'string' && info.extra.agentPath ? info.extra.agentPath : null;
+        if (botUserId || agentPath) req.mcpConnectionChoice = { botUserId, agentPath };
         if (!req.userId) {
           unauthorized(res, 'Invalid access token');
           return;
@@ -165,7 +211,7 @@ export function createMcpAuthMiddleware(
       // misclassified as a token-verification failure (and doesn't try to write
       // a second response).
       req.mcpCallerKind = 'oauth';
-      next();
+      await proceed(req, res, next);
       return;
     }
 
@@ -232,7 +278,7 @@ export function createMcpAuthMiddleware(
       // re-consent changes the row, not the token, so the row's choice is
       // the one served, never the one the token was minted with.
       if (claim.connectionId) {
-        let live: { agentPath: string | null } | null;
+        let live: ConnectionChoice | null;
         try {
           live = await oauthProvider.liveConnectionChoice(claim.connectionId);
         } catch (err) {
@@ -246,12 +292,12 @@ export function createMcpAuthMiddleware(
         }
         oauthProvider.noteConnectionUse(claim.connectionId);
         req.agentConnectionId = claim.connectionId;
-        if (live.agentPath) req.mcpAgentPath = live.agentPath;
-      } else if (claim.agentPath) {
-        req.mcpAgentPath = claim.agentPath;
+        if (live.botUserId || live.agentPath) req.mcpConnectionChoice = live;
+      } else if (claim.botUserId || claim.agentPath) {
+        req.mcpConnectionChoice = { botUserId: claim.botUserId ?? null, agentPath: claim.agentPath ?? null };
       }
       req.mcpCallerKind = 'internal';
-      next();
+      await proceed(req, res, next);
       return;
     }
 

@@ -4,15 +4,15 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { IAccessControl } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import { createAccessRoutes } from '../access.routes.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * A grant to an email with NO ACCOUNT says so, and stays allowed.
@@ -44,6 +44,8 @@ async function makeHarness(opts: {
   denied?: { name: string; email: string }[];
   /** Override the users database — to stand in a lookup that is DOWN. */
   db?: Database;
+  /** Addresses that are bots'. */
+  bots?: string[];
 }): Promise<{ server: Server; baseUrl: string; files: Map<string, string> }> {
   const files = new Map<string, string>();
   const granted = opts.granted ?? [];
@@ -63,6 +65,7 @@ async function makeHarness(opts: {
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleDownloaders: vi.fn(async () => ({ roles: [], users: [] })),
     locallyDeniedPrincipals: vi.fn(async () => ({ principals: [], users: opts.denied ?? [] })),
+    isBot: (email: string) => (opts.bots ?? []).includes(email.toLowerCase()),
   } as unknown as IAccessControl;
 
   const workspaceService = {
@@ -113,7 +116,7 @@ async function makeHarness(opts: {
       { emit: vi.fn() } as unknown as VersionControlEventBus,
       opts.db ?? usersDbDouble(opts.accounts ?? []),
       testKbContext({ kbDirName: KB }),
-      new NodeFs(),
+      realDisk(),
     ),
   );
 
@@ -294,6 +297,30 @@ describe('a grant to an email with no account', () => {
       readers: { users: { email: string; hasAccount: boolean }[] };
     };
     expect(body.readers.users[0].hasAccount).toBe(true);
+  });
+
+  it('suggest leaves a bot out of the people: it is not a person, and is granted by typing its address', async () => {
+    const BOT = { name: 'release-helper', email: 'release-helper@agent.hexis' };
+    h = await makeHarness({ kbPeople: [KNOWN, BOT], accounts: [KNOWN.email, BOT.email], bots: [BOT.email] });
+    const body = (await (
+      await fetch(`${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=${encodeURIComponent('re')}`)
+    ).json()) as { people: { email: string }[] };
+    expect(body.people.map((p) => p.email)).toContain(KNOWN.email);
+    expect(body.people.map((p) => p.email)).not.toContain(BOT.email);
+  });
+
+  it("suggest does not rule on accounts for a bot's address typed in full, so its chip is not labelled as a missing account", async () => {
+    const BOT = { name: 'release-helper', email: 'release-helper@agent.hexis' };
+    h = await makeHarness({ kbPeople: [KNOWN, BOT], accounts: [KNOWN.email, BOT.email], bots: [BOT.email] });
+    const ask = async (q: string) =>
+      (await (
+        await fetch(`${h.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=${encodeURIComponent(q)}`)
+      ).json()) as { people: { email: string }[]; accountsKnown: boolean };
+    const typed = await ask(BOT.email);
+    expect(typed.people.map((p) => p.email)).not.toContain(BOT.email);
+    expect(typed.accountsKnown).toBe(false);
+    // A person's address still rules on accounts as before.
+    expect((await ask(KNOWN.email)).accountsKnown).toBe(true);
   });
 
   it('suggest puts the exact address asked for first, so the cap can never hide it', async () => {

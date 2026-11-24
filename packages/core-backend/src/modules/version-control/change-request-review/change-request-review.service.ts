@@ -25,6 +25,7 @@ import {
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
+import { holdMaker, madeByColumns, writeNamingActor } from '../made-by.js';
 import type {
   IChangeRequestReviewService,
   MergeGateInput,
@@ -116,8 +117,8 @@ class ApprovalAuthError extends VersionControlDomainError {
  * made then are that new person's.
  */
 class ApprovalAccountGoneError extends VersionControlDomainError {
-  constructor() {
-    super('This account no longer exists — sign in again to approve.', 401, {
+  constructor(message = 'This account no longer exists — sign in again to approve.') {
+    super(message, 401, {
       kind: 'approval-account-erased',
     });
     this.name = 'ApprovalAccountGoneError';
@@ -364,9 +365,10 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
           (r) => {
             const approverEmail = r.approverEmail.toLowerCase();
             if (r.headSha !== headSha) return false;
-            return everyoneCanApprove
-              ? !excludedEmails.has(approverEmail)
-              : eligible.emails.has(approverEmail);
+            if (eligible.emails.has(approverEmail)) return true;
+            // A bot is not part of everyone: only its own grants and its
+            // groups' (which put it in `emails`) make its approval count.
+            return everyoneCanApprove && !excludedEmails.has(approverEmail) && !this.accessControl.isBot(approverEmail);
           },
         );
 
@@ -415,7 +417,6 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     );
     if (canApprove === null) throw new ApprovalAuthError('no-eligible-approvers');
     if (!canApprove) throw new ApprovalAuthError('not-eligible');
-    const callerEmail = canonicalEmail(user.email);
 
     // Unique index on (prNumber, path, approverEmail, headSha) makes this
     // idempotent — `onConflictDoNothing` turns a double-click into a no-op.
@@ -446,14 +447,22 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         .where(eq(users.id, user.id))
         .limit(1);
       if (!account) throw new ApprovalAccountGoneError();
+      // A bot's approval names the person behind it too, and their erasure
+      // rewrites that name under this same lock: asked here as well
+      // (`holdMaker`, as every record that names them asks), so an erasure
+      // that committed first is not undone by this insert.
+      await holdMaker(tx, user.madeBy);
+      const approver = canonicalEmail(user.email);
       await tx
         .insert(prFileApprovals)
         .values({
           prNumber,
           path,
-          approverEmail: callerEmail,
-          approverEmailBidx: callerEmail,
+          approverEmail: approver,
+          approverEmailBidx: approver,
           approverName: user.name,
+          // A bot approving: the person behind the bot is in the approval too.
+          ...madeByColumns(user.madeBy),
           headSha,
         })
         .onConflictDoNothing();
@@ -485,6 +494,11 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       .update(prFileApprovals)
       .set({ approverEmail: erased.email, approverEmailBidx: erased.email, approverName: erased.name })
       .where(eq(prFileApprovals.approverEmailBidx, email));
+    // The person behind a bot's approvals, erased the same way.
+    await tx
+      .update(prFileApprovals)
+      .set({ madeByEmail: erased.email, madeByEmailBidx: erased.email, madeByName: erased.name })
+      .where(eq(prFileApprovals.madeByEmailBidx, email));
   }
 
   /**
@@ -510,7 +524,21 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     prTitle: string,
     baseBranch: string,
     workspaceId: string,
-    opts: { bypass?: boolean } = {},
+    opts: {
+      bypass?: boolean;
+      /**
+       * A further check of the merge, run where the git layer runs its own:
+       * inside the merge's reservation, against the target and source commits
+       * this attempt actually merges (see `GitService.mergeChangeRequest`), in
+       * the clone the merge runs in (`workspaceId`), which holds both commits.
+       * Throwing a domain error refuses the merge, and the refusal reaches
+       * the caller as it was thrown; any other error is a failed merge.
+       * Not called when this attempt merges nothing because an earlier one
+       * already merged and failed to record it (`finalizeAlreadyApplied`):
+       * that merge passed the check when it ran.
+       */
+      authorize?: (target: { sha: string; sourceSha: string; changedPaths: string[]; workspaceId: string }) => Promise<void>;
+    } = {},
   ): Promise<MergePrResult> {
     assertValidPrNumber(prNumber);
     if (!headSha) throw new VersionControlValidationError('head sha is required');
@@ -574,19 +602,23 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       ]);
     }
 
-    const triggeredByEmail = canonicalEmail(user.email);
-    const [logRow] = await this.db
-      .insert(prMergeLog)
-      .values({
-        prNumber,
-        triggeredByEmail,
-        triggeredByEmailBidx: triggeredByEmail,
-        triggeredByName: user.name,
-        headShaAtMerge: headSha,
-        mergeMethod: MERGE_METHOD,
-        succeeded: false,
-      })
-      .returning({ id: prMergeLog.id });
+    // Who started it (`writeNamingActor`: a bot at the address its row has now).
+    const [logRow] = await writeNamingActor(this.db, user, async (q, triggeredByEmail) =>
+      q
+        .insert(prMergeLog)
+        .values({
+          prNumber,
+          triggeredByEmail,
+          triggeredByEmailBidx: triggeredByEmail,
+          triggeredByName: user.name,
+          // A bot merging: the person behind the bot is in the merge's history too.
+          ...madeByColumns(user.madeBy),
+          headShaAtMerge: headSha,
+          mergeMethod: MERGE_METHOD,
+          succeeded: false,
+        })
+        .returning({ id: prMergeLog.id })
+    );
 
     // Attribution lives on the merge commit itself (authored as the human
     // triggerer). When bypass is used, the bypassed warnings are appended so the
@@ -606,6 +638,9 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     // caller-resolvable precondition (ChangeRequestConflictsError, 409).
     const baseWorkspace = await this.workspaceService.getOrCreateForBranch(cr.targetBranch);
     let mergeResult: Awaited<ReturnType<GitService['mergeChangeRequest']>>;
+    // A refusal from the check below is the caller's answer, not a failed
+    // merge: kept apart so it is not rewrapped as one.
+    let refusal: unknown = null;
     try {
       mergeResult = await this.git.mergeChangeRequest(
         baseWorkspace.id,
@@ -616,9 +651,39 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         // Named so a merge that finds nothing to merge can tell an empty request
         // apart from one a previous attempt already merged and failed to record
         // (see `ownMergeCommitOn`).
-        { appliedChangeNumber: prNumber, appliedChangeTitle: cr.title },
+        {
+          appliedChangeNumber: prNumber,
+          appliedChangeTitle: cr.title,
+          // The gate above judged the approvals at `headSha`. The merge lands
+          // whatever the source holds when it runs, so a push in between
+          // would land a head nobody approved: asked again here, at the
+          // commit this attempt merges, inside the merge's reservation.
+          authorize: async (target) => {
+            try {
+              if (target.sourceSha !== headSha) {
+                throw new MergeBlockedError([
+                  'The draft changed after its approvals were read. Read the change request again; approvals of an earlier version do not apply.',
+                ]);
+              }
+              await opts.authorize?.({ ...target, workspaceId: baseWorkspace.id });
+            } catch (err) {
+              // Only a refusal is the caller's answer. A git or infrastructure
+              // failure inside the check takes the redacted path below, like
+              // any other failure of the merge.
+              if (err instanceof VersionControlDomainError) refusal = err;
+              throw err;
+            }
+          },
+        },
       );
     } catch (err) {
+      if (err === refusal) {
+        await this.db
+          .update(prMergeLog)
+          .set({ succeeded: false, completedAt: new Date(), error: err instanceof Error ? err.message : String(err) })
+          .where(eq(prMergeLog.id, logRow.id));
+        throw err;
+      }
       const redacted = redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token());
       await this.db
         .update(prMergeLog)
@@ -764,23 +829,27 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     // merge path logs its own: a log write that fails must not leave a request
     // recorded as merged with no attempt behind it, and failing here fails
     // before anything is committed, so the retry is clean (cubic P2 on #347).
-    const triggeredByEmail = canonicalEmail(user.email);
-    const [logRow] = await this.db
-      .insert(prMergeLog)
-      .values({
-        prNumber,
-        triggeredByEmail,
-        triggeredByEmailBidx: triggeredByEmail,
-        triggeredByName: user.name,
-        headShaAtMerge: headSha,
-        mergeMethod: MERGE_METHOD,
-        succeeded: false,
-        // Not an error — the one thing a reader of this row has to know is that
-        // no merge was performed under it, because it had already been
-        // performed. Written at the start so it survives a crash in between.
-        error: `Finalizing an earlier attempt's merge commit ${own}; nothing is merged by this one.`,
-      })
-      .returning({ id: prMergeLog.id });
+    // Who started it (`writeNamingActor`: a bot at the address its row has now).
+    const [logRow] = await writeNamingActor(this.db, user, async (q, triggeredByEmail) =>
+      q
+        .insert(prMergeLog)
+        .values({
+          prNumber,
+          triggeredByEmail,
+          triggeredByEmailBidx: triggeredByEmail,
+          triggeredByName: user.name,
+          // A bot merging: the person behind the bot is in the merge's history too.
+          ...madeByColumns(user.madeBy),
+          headShaAtMerge: headSha,
+          mergeMethod: MERGE_METHOD,
+          succeeded: false,
+          // Not an error — the one thing a reader of this row has to know is that
+          // no merge was performed under it, because it had already been
+          // performed. Written at the start so it survives a crash in between.
+          error: `Finalizing an earlier attempt's merge commit ${own}; nothing is merged by this one.`,
+        })
+        .returning({ id: prMergeLog.id })
+    );
 
     // Same CAS as the merge path: a concurrent finalization wins and we say so
     // rather than overwriting its terminal state.
@@ -1025,8 +1094,6 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     assertValidPath(path);
     if (!headSha) throw new VersionControlValidationError('head sha is required');
 
-    const callerEmail = canonicalEmail(user.email);
-
     // Only revoke the caller's OWN approval — never someone else's. Filter on
     // (PR, path, approverEmail) without pinning the SHA so a user revoking
     // after a force-push can drop their stale row in one click.
@@ -1036,6 +1103,7 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     // the new one, and a delete that interleaved with that copy would be
     // undone by it — the revoked approval would come back at the new head.
     await this.withApprovalLock(prNumber, async (tx) => {
+      const callerEmail = canonicalEmail(user.email);
       await tx
         .delete(prFileApprovals)
         .where(

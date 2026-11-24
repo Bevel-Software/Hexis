@@ -92,6 +92,11 @@ export interface RoleRosterEntry {
   /** Individual member EMAILS (group assignments are split into `groups`). */
   members: string[];
   /**
+   * The {@link members} that are bots (`modules/bots`). A bot holds no role,
+   * so such a line grants it nothing; the page marks it "Bot", never a person.
+   */
+  bots: string[];
+  /**
    * Emails that hold this role NO MATTER WHAT `roles.yaml` says — today the
    * deployment admins (`ADMIN_EMAIL`) on the Admin role, empty on every other
    * role. They are not editable from this surface: the resolver admits them
@@ -349,6 +354,7 @@ export class RolesAdminService {
         canonical,
         displayName,
         members: entries.filter((m) => !isGroupRefMember(m)),
+        bots: entries.filter((m) => !isGroupRefMember(m) && (this.accessControl.isBot?.(m) ?? false)),
         // Only Admin has fixed members: `deploymentOwners` is an Admin rescue
         // in the resolver, never a general grant, so no other role gains one.
         fixedMembers: isAdmin ? [...this.fixedAdminEmails] : [],
@@ -516,6 +522,13 @@ export class RolesAdminService {
     opts?: { aroundWrite?: (write: () => Promise<void>) => Promise<void> },
   ): Promise<RoleRosterEntry[]> {
     this.assertNotFixedAdmin(canonical, email);
+    // A bot holds no role, Admin least of all: it is granted by its address
+    // and through the groups it is in (`modules/bots`).
+    if (this.accessControl.isBot?.(email) ?? false) {
+      throw new RolesAdminError('A bot cannot hold a role. Grant it access by its address, or add it to a group.', 422, {
+        kind: 'bot-cannot-hold-role',
+      });
+    }
     await this.runEdit(actor, (text) => editAddMember(this.withDeclaredRole(text, canonical), canonical, email), opts?.aroundWrite);
     return this.getRoster(actor.email);
   }

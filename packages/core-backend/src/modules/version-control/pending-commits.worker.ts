@@ -368,6 +368,8 @@ export class PendingCommitsWorker {
       id: `pending-commit-author:${authorIdOf(row.authorEmail)}`,
       email: row.authorEmail,
       name: row.authorName,
+      // A bot's change keeps the person behind the bot: the commit names both.
+      ...(row.madeByEmail ? { madeBy: { email: row.madeByEmail, name: row.madeByName ?? row.madeByEmail } } : {}),
     };
     try {
       await this.deps.versionControl.runPendingCommit(row.workspaceId, row.branch, row.path, user, {

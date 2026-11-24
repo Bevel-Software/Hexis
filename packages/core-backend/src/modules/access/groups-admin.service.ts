@@ -76,6 +76,8 @@ export interface GroupRosterEntry {
   canonical: string;
   displayName: string;
   members: string[];
+  /** The members that are bots (`modules/bots`): listed beside the people, and marked "Bot". */
+  bots: string[];
   /**
    * Every access rule referencing this group — same scan the rename uses —
    * in a file the roster's viewer can read (see `getRoster`).
@@ -216,6 +218,7 @@ export class GroupsAdminService {
         // IdP members render sorted (machine-generated file, no author order
         // to honour); manual members keep file order (the editor's view).
         members: mode === 'idp' ? [...def.emails].sort() : [...def.emails],
+        bots: [...def.emails].filter((e) => this.accessControl.isBot?.(e) ?? false),
         // A group's references are its `group/<name>` hits, plus its BARE
         // hits while no role shares the name — a bare name is the role when
         // one exists (the roles roster is the mirror image: it counts the

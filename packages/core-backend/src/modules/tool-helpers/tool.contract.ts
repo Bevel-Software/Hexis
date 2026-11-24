@@ -61,11 +61,11 @@ export interface ToolContext {
   branch?: string;
   /**
    * What the caller's connection may load (`modules/agent-scope`): resolved
-   * once per call from the agent configuration its credential connects as. The
-   * tool handler refuses a platform tool outside it before the tool runs; the
-   * tools that list skills and connectors narrow by it. Absent is Everything
-   * — and a context built without it for a credential that names an agent is
-   * refused every tool by the handler, never served Everything.
+   * once per call by the credential verifier from whom it was made as. The
+   * tool handler refuses a platform tool outside it before the tool runs; a
+   * connection that loads nothing is handed nothing by the tools that list.
+   * Absent is Myself (the handler reads the verifier's answer when a context
+   * was built without it).
    */
   connectionScope?: ConnectionScope;
   abortSignal: AbortSignal;

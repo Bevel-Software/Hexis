@@ -2541,8 +2541,8 @@ describe('start_session', () => {
     sessionExtractor = undefined;
   });
 
-  describe('connectedAs: what the connection was made as', () => {
-    const SHIP_IT = { path: 'Agents/ship-it-reviewer.agent', name: 'Ship It reviewer' };
+  describe('connectedAs: the bot the connection acts as', () => {
+    const SHIP_IT = { path: 'ship-it@agent.hexis', name: 'Ship It reviewer' };
     const startAs = async (connectionScope?: ConnectionScope) => {
       const base = await startSessionApp('external', undefined, undefined, undefined, allowAll, connectionScope);
       const res = await postRaw(`${base}/api/agent/tools/start_session`);
@@ -2550,24 +2550,24 @@ describe('start_session', () => {
       return (await res.json()) as { sessionId: string; connectedAs: unknown };
     };
 
-    it('is null for a connection made as Everything', async () => {
+    it('is null for a connection made as Myself', async () => {
       expect(await startAs()).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
-      expect(await startAs(ConnectionScope.everything())).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
+      expect(await startAs(ConnectionScope.myself())).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
 
-    it('is the path and name of the agent configuration a narrowed connection was made as', async () => {
-      const scope = ConnectionScope.narrowed(SHIP_IT, { skills: [], connectors: [], platformTools: null }, 'fp');
+    it('is the address and name of the bot a connection was made as', async () => {
+      const scope = ConnectionScope.asBot(SHIP_IT, null, 'fp');
       expect(await startAs(scope)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: SHIP_IT });
     });
 
-    it('is never answered to a connection whose configuration cannot be used: it is served nothing, start_session included', async () => {
-      // Connect-As-An-Agent's rule, not reopened for this field: the refusal
+    it('is never answered to a connection whose bot cannot be used: it is served nothing, start_session included', async () => {
+      // Bots-Are-Identities' rule, not reopened for this field: the refusal
       // carries why, and no session (so no `connectedAs`) is minted.
-      const unusable = ConnectionScope.unavailable(SHIP_IT, 'It cannot be read.', 'fp');
+      const unusable = ConnectionScope.unavailable(SHIP_IT, 'Its definition is gone.', 'fp');
       const base = await startSessionApp('external', undefined, undefined, undefined, allowAll, unusable);
       const res = await postRaw(`${base}/api/agent/tools/start_session`);
       expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: 'It cannot be read.', code: NOT_AVAILABLE_TO_CONNECTION });
+      expect(await res.json()).toEqual({ error: 'Its definition is gone.', code: NOT_AVAILABLE_TO_CONNECTION });
       expect(created).toHaveLength(0);
     });
 

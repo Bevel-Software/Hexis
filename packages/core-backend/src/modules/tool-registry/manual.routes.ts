@@ -2,8 +2,8 @@ import express, { type Request, type RequestHandler } from 'express';
 import { UtcpManualSerializer } from '@utcp/sdk';
 import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
 import { requireInternalSource } from '../tool-auth/index.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
+import { ConnectionScope } from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -63,12 +63,6 @@ export function createManualRoutes(
    * Absent, the manual carries the tools' own tags only.
    */
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
-  /**
-   * Resolves the scope of a connection made as an agent configuration: the external
-   * manual then lists only the platform tools it loads, and the providers word
-   * their descriptions for it (`modules/agent-scope`).
-   */
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
 ): express.Router {
   const router = express.Router();
 
@@ -84,10 +78,9 @@ export function createManualRoutes(
     } catch {
       userEmail = undefined;
     }
-    // Everything adds nothing to the context, so its providers are asked
-    // exactly what they were asked before connections could be narrowed.
-    const agentPath = req.toolAuth?.agentPath;
-    const connectionScope = agentPath ? await resolveConnectionScope(agentScope, userEmail, agentPath) : undefined;
+    // Myself adds nothing to the context, so its providers are asked exactly
+    // what they were asked before connections could be made as bots.
+    const connectionScope = req.toolAuth?.connection;
     return {
       userId,
       ...(userEmail !== undefined ? { userEmail } : {}),
@@ -98,14 +91,20 @@ export function createManualRoutes(
   router.get('/agent/utcp', manualAuth, async (req, res) => {
     const ctx = await context(req);
     const tools = await registry.listExternal(ctx);
-    // A connection made as an agent configuration is offered only the platform
-    // tools that file loads; a call to another is refused at its route.
-    const scope = ctx.connectionScope;
-    const offered = scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools;
+    // A connection made as a bot is offered only the platform tools the
+    // distribution offers the bot, and Myself none of the bot-only ones; a
+    // call to another is refused at its route. No scope on the context is
+    // Myself.
+    const scope = ctx.connectionScope ?? ConnectionScope.myself();
+    const offered = tools.filter((t) => scope.allowsPlatformTool(t.name));
     res.json(toManual(readOnlyHints ? readOnlyHints.apply(offered) : offered));
   });
   router.get('/agent/internal/utcp', manualAuth, requireInternalSource, async (req, res) => {
-    const internal = await registry.listInternal(await context(req));
+    const ctx = await context(req);
+    // The same offer as the external manual: the in-app agent acts as a
+    // person (Myself), and a bot's internal token as that bot.
+    const scope = ctx.connectionScope ?? ConnectionScope.myself();
+    const internal = (await registry.listInternal(ctx)).filter((t) => scope.allowsPlatformTool(t.name));
     const tools = req.toolAuth?.scope === 'read' ? internal.filter((t) => !declaresWrite(t)) : internal;
     res.json(toManual(tools));
   });

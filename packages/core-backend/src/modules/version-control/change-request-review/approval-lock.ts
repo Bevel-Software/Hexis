@@ -102,6 +102,23 @@ export async function takeApprovalLock(tx: ApprovalTx, prNumber: number): Promis
 }
 
 /**
+ * Join the per-request writers, for the rest of `tx`, without claiming any
+ * one request: shared on the every-request key only. For a write that names
+ * a BOT's connection maker outside `pr_file_approvals` (a change request it
+ * opens, a merge it starts; see `holdMaker` in
+ * `made-by.ts`): account erasure rewrites the maker out of those rows after
+ * taking the every-request key exclusively (`takeEveryApprovalLock`), so a
+ * writer holding it shared either commits before that rewrite starts — and
+ * the rewrite takes its row with the rest — or waits until the erasure has
+ * committed and then finds the maker gone. Bounded like the per-request
+ * writers, and for the same reason.
+ */
+export async function takeRecordWriterLock(tx: ApprovalTx): Promise<void> {
+  await tx.execute(sql.raw(`set local lock_timeout = ${APPROVAL_LOCK_TIMEOUT_MS}`));
+  await tx.execute(sql`select pg_advisory_xact_lock_shared(${APPROVAL_LOCK_CLASS}, ${EVERY_REQUEST})`);
+}
+
+/**
  * Claim the approvals of EVERY change request for the rest of `tx` — account
  * erasure, whose rewrite is keyed by a person rather than by a request.
  *

@@ -32,6 +32,8 @@ export class RequestAudit {
     private readonly principal: RecordedPrincipal,
     private readonly ctx: {
       kbManualName: string;
+      /** The bot the request acts as, when its connection was made as one: recorded beside the person. */
+      botUserId?: string | null;
       /** Read at classification time — the surface (and its catalog names) is built lazily. */
       catalogNames: () => ReadonlyMap<string, string>;
       /** The caller's skill catalog, for telling a skill read from a file read. */
@@ -44,6 +46,7 @@ export class RequestAudit {
     try {
       this.recorder.record({
         userId: this.userId,
+        ...(this.ctx.botUserId ? { botUserId: this.ctx.botUserId } : {}),
         principal: this.principal,
         kind: call.kind,
         manual: call.manual,

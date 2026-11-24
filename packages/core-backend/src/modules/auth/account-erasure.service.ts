@@ -5,6 +5,11 @@ const log = logger('account-erasure');
 import { and, eq, notExists } from 'drizzle-orm';
 import { isEncryptedBlob } from '../../shared/column-crypto.js';
 import type { Database } from '../database/index.js';
+import { AccountChangeRefusedError } from './account-admission.js';
+
+/** What erasing a bot's row answers: a bot is retired by its distribution, never erased. */
+export const BOT_ERASURE_REFUSAL =
+  'This is a bot, not a person: it is retired when its definition is removed, and its row is kept for the history that names it.';
 import type { IChangeRequestReviewService } from '../version-control/index.js';
 import {
   changeRequests,
@@ -105,7 +110,8 @@ export interface IAccountErasureService {
    * Erase `userId`. Returns false when no such user exists. `erasureId` fixes
    * the anonymised identity (`deleted-<erasureId>@erased.invalid`) so a caller
    * can name the erased account elsewhere — e.g. a commit message — without
-   * the email; random when omitted.
+   * the email; random when omitted. Throws `AccountChangeRefusedError` for a
+   * bot's row, before anything is touched: a bot is retired, never erased.
    */
   eraseUser(userId: string, opts?: { erasureId?: string }): Promise<boolean>;
 }
@@ -154,6 +160,10 @@ export class AccountErasureService implements IAccountErasureService {
   async eraseUser(userId: string, opts: { erasureId?: string } = {}): Promise<boolean> {
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) return false;
+    // A bot's row is retired, never deleted (`modules/bots`): it is not a
+    // person's account, and the audit events and history that name it stay
+    // readable. Refused before anything is touched.
+    if (user.botId != null) throw new AccountChangeRefusedError(BOT_ERASURE_REFUSAL);
 
     // Fail CLOSED on an undecryptable email. The encrypted column's read
     // fallback returns the raw ciphertext when the configured key cannot open
@@ -264,6 +274,15 @@ export class AccountErasureService implements IAccountErasureService {
         .update(pendingCommits)
         .set({ authorEmail: target.erasedEmail, authorEmailBidx: erasedBidx, authorName: target.erasedName })
         .where(eq(pendingCommits.authorEmailBidx, emailBidx));
+      // The person behind a bot's actions (`modules/bots`): named beside the
+      // bot on its queued saves, the requests it opened and the merges it
+      // made, and erased there as everywhere else.
+      for (const table of [pendingCommits, changeRequests, prMergeLog] as const) {
+        await tx
+          .update(table)
+          .set({ madeByEmail: target.erasedEmail, madeByEmailBidx: erasedBidx, madeByName: target.erasedName })
+          .where(eq(table.madeByEmailBidx, emailBidx));
+      }
 
       // Module-owned rows, before the users delete so FKs onto users are
       // still satisfiable — and so a participant that MISSES rows makes the
@@ -329,6 +348,27 @@ export class AccountErasureService implements IAccountErasureService {
           notExists(this.db.select({ id: users.id }).from(users).where(eq(users.emailBidx, emailBidx))),
         ),
       );
+
+    // And the person behind a bot, on the four records that name them beside
+    // it. The writers of a request, an approval and a merge join the lock
+    // above and ask for the person's account before they write (`holdMaker`
+    // in version control), so one in flight either landed before the
+    // rewrite or is refused; for those this is the belt, as for the
+    // approvals above. A queued save does neither: its bytes are already on
+    // disk, so it is never refused (`PendingCommitsService.enqueue`), and
+    // this pass is what takes a row queued while the erasure ran. Same
+    // statement, same guard, same reason.
+    for (const table of [changeRequests, prFileApprovals, pendingCommits, prMergeLog] as const) {
+      await this.db
+        .update(table)
+        .set({ madeByEmail: target.erasedEmail, madeByEmailBidx: erasedBidx, madeByName: target.erasedName })
+        .where(
+          and(
+            eq(table.madeByEmailBidx, emailBidx),
+            notExists(this.db.select({ id: users.id }).from(users).where(eq(users.emailBidx, emailBidx))),
+          ),
+        );
+    }
 
     // And the refusal note, for the apply this person was inside when the
     // commit landed: recording it takes no lock and names no user row, so it

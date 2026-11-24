@@ -27,7 +27,7 @@ export {
   type ToolSurfaceCtx,
 } from './core/create-core-server.js';
 export type { AppRole } from './modules/access/index.js';
-export { noopRecoveryAgent, type AgentScopeCollaborators, type CorePorts } from './core/core-ports.js';
+export { noopRecoveryAgent, type BotDirectoryCollaborators, type CorePorts } from './core/core-ports.js';
 // Logging: the contract, the slot a shell installs its sink into, and the
 // tagged-logger lookup every module logs through. See shared/logging.ts.
 export { setLogger, logger, createConsoleLogger } from './shared/logging.js';

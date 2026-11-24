@@ -14,7 +14,7 @@ import { domainErrorBody } from '../../shared/http-errors.js';
 import type { ResolveToolContext } from './tool-context.js';
 import { argumentsRefusal } from './route-argument-check.js';
 import { routeToolName, routeToolSchemasForRequest } from './route-tool-schemas.js';
-import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../agent-scope/index.js';
+import { NOT_AVAILABLE_TO_CONNECTION, connectionOf } from '../agent-scope/index.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 
@@ -50,9 +50,8 @@ export interface ToolHandlerOptions {
    * connectors it must materialize. A connection's `platformTools` decides
    * which tools its agent is OFFERED — the MCP listing and `tools/call`
    * refuse the rest by name — not what its surface holds, so such a route is
-   * not refused for want of a `platformTools` entry. Its answer is still
-   * narrowed to the connection's skills or connectors by the handler, and a
-   * connection that loads nothing is refused it like any other route.
+   * not refused for want of a `platformTools` entry. A connection that loads
+   * nothing is refused it like any other route.
    */
   discovery?: boolean;
 }
@@ -272,15 +271,15 @@ export function createToolHandlerFactory(
         const ctx = await resolve(auth, abort.signal, sessionId);
         // The connection's scope, before the tool runs, for every caller of a
         // hosted platform tool — MCP, a chain, the local server, a script with
-        // a key. A connection made as an agent configuration that does not
-        // list this tool is refused it by name: the ONE policy,
+        // a key. A connection made as a bot that is not offered this tool is
+        // refused it by name (one that loads nothing was refused already, by
+        // the context resolver, with the sentence that says why): the ONE policy,
         // `ConnectionScope.platformToolRefusal`, which the platform-tool routes
         // this handler does not host (the plugin-creation routes) ask as well.
         const toolName = routeToolSchemasForRequest(req.originalUrl)?.name ?? routeToolName(req.originalUrl);
-        const scope =
-          ctx.connectionScope ?? (auth.agentPath ? ConnectionScope.gone(auth.agentPath) : ConnectionScope.everything());
+        const scope = ctx.connectionScope ?? connectionOf(auth);
         // The handler narrows by the scope decided here, so a context built
-        // without one cannot read as Everything inside the tool either.
+        // without one reads as the verifier decided inside the tool too.
         ctx.connectionScope = scope;
         const refusal = scope.platformToolRefusal(toolName, { discovery: opts.discovery === true });
         if (refusal) {

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { pathForTool, readOAuthFragment } from '../../library';
@@ -13,6 +13,7 @@ import { useAppRegistry } from '../../../core/registry';
 import { SlotBoundary } from '../../../shared/components/SlotBoundary';
 import { useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
+import { ActingForBot, botFromLocation, useActingForBot } from '../services/acting-for';
 import {
   getConnectPending,
   startToolOAuth,
@@ -149,13 +150,30 @@ export function ConnectToolsPage() {
    */
   const loadSeq = useRef(0);
 
-  // The agent the list is for: the "Connect as" choice, in agent-connect mode
-  // only. A connection made as an agent loads only the connectors its file
-  // lists, so the page asks for the sign-ins and keys of those and no other —
-  // asking for hubspot's sign-in on the way to an agent that never loads
-  // hubspot sends the person off to sign in for nothing. Everything (null)
-  // lists what it always listed.
-  const chosenAgent = agentState != null ? connectAs.value : null;
+  // Whose tools, keys and sign-ins the page shows: the bot chosen to connect
+  // as, in agent-connect mode; else the bot the page was opened for by its
+  // link (`?bot=<id>`); else the person's own. A connection made as a bot
+  // uses the bot's sign-ins, so those are the ones it needs. The page passes
+  // it to its own calls and provides it to the rows it renders
+  // (`ActingForBot`); nothing outside the page sees it, so no other page —
+  // nor the Library's lists, refetched while this one is open — acts for the
+  // bot.
+  //
+  // Read from the router's location, so the page follows its URL: a link to
+  // another bot's page, or back to the person's own, is acted on as such.
+  const location = useLocation();
+  const linkedBot = useMemo(() => botFromLocation(location.search), [location.search]);
+  const chosenAgent = agentState != null ? connectAs.value : linkedBot;
+  /**
+   * Whom the list ON SCREEN was loaded for — set with the list, in the same
+   * load. Every action a row offers acts for THIS identity, never for the one
+   * just chosen: between a change of choice and the new list's arrival, the
+   * rows still on screen are the previous identity's, and a click on one of
+   * them must not save into, or delete from, the newly chosen one's vault.
+   * Undefined until the first list has arrived (nothing is on screen then).
+   */
+  const [listedFor, setListedFor] = useState<string | null | undefined>(undefined);
+  const shownFor = listedFor === undefined ? chosenAgent : listedFor;
 
   /**
    * @param quiet keep the list on screen while it refetches.
@@ -176,6 +194,7 @@ export function ConnectToolsPage() {
       setTools(pending.tools);
       setOauth(pending.oauth);
       setToolOAuth(pending.toolOAuth);
+      setListedFor(chosenAgent);
       setError(null);
     } catch (err) {
       // Inside the guard too: an older load failing after a newer one
@@ -187,6 +206,7 @@ export function ConnectToolsPage() {
         setRefreshing(false);
       }
     }
+    // Remade when the choice changes: the list is whom the page acts for.
   }, [chosenAgent]);
 
   // The first load, loud; and again, quietly, whenever the choice changes —
@@ -226,7 +246,7 @@ export function ConnectToolsPage() {
       .then((r) => {
         if (cancelled) return;
         setAgentName(r.clientName);
-        settleConnectAs({ agents: r.agents ?? [], failed: r.agentsUnavailable === true }, agentState);
+        settleConnectAs({ bots: r.bots ?? [], failed: r.botsUnavailable === true }, agentState);
       })
       .catch(() => {
         if (cancelled) return;
@@ -254,7 +274,7 @@ export function ConnectToolsPage() {
 
   const onAuthorize = async (id: string) => {
     try {
-      const url = await startOAuth(id);
+      const url = await startOAuth(id, shownFor);
       // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
@@ -264,7 +284,11 @@ export function ConnectToolsPage() {
 
   const onAuthorizeTool = async (slug: string, varName: string) => {
     try {
-      const url = await startToolOAuth(slug, varName);
+      // A page opened for a bot by its link comes back to that bot's page,
+      // not the person's. In agent-connect mode the page restores its own
+      // state on return, as before.
+      const returnTo = agentState == null && shownFor ? `${location.pathname}?bot=${encodeURIComponent(shownFor)}` : undefined;
+      const url = await startToolOAuth(slug, varName, returnTo ? { returnTo } : undefined, shownFor);
       // eslint-disable-next-line react-hooks/immutability -- leaving for the provider is the point
       window.location.href = url;
     } catch (err) {
@@ -282,8 +306,8 @@ export function ConnectToolsPage() {
     const id = signInId(o);
     setWiping((s) => new Set(s).add(id));
     try {
-      if (o.managed?.tokenScope === 'shared') await deleteAdminVar(o.slug, o.varName);
-      else await deleteUserVar(o.slug, o.varName);
+      if (o.managed?.tokenScope === 'shared') await deleteAdminVar(o.slug, o.varName, shownFor);
+      else await deleteUserVar(o.slug, o.varName, shownFor);
       announceToolCredentialsChanged();
       await refresh(true);
     } catch (err) {
@@ -392,6 +416,7 @@ export function ConnectToolsPage() {
   // scroller. The header sticks to the top of that pane, so the title and
   // Refresh stay in reach down a long list instead of scrolling away with it.
   return (
+    <ActingForBot.Provider value={shownFor}>
     <div className="flex flex-col bg-canvas text-ink">
       <header className="sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-line bg-canvas px-8 py-4">
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
@@ -439,13 +464,12 @@ export function ConnectToolsPage() {
               </div>
               <div className="mt-4">
                 <ConnectAsChoice
-                  agents={connectAs.agents}
+                  bots={connectAs.bots}
                   value={connectAs.value}
                   disabled={finishing}
-                  hint="What this connection loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
-                  onChange={(path) => {
-                    connectAs.setValue(path);
-                    if (path) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, path);
+                  onChange={(botId) => {
+                    connectAs.setValue(botId);
+                    if (botId) sessionStorage.setItem(MCP_OAUTH_AGENT_KEY, botId);
                     else sessionStorage.removeItem(MCP_OAUTH_AGENT_KEY);
                   }}
                   unavailable={connectAs.unavailable}
@@ -475,8 +499,8 @@ export function ConnectToolsPage() {
               so before they wonder why a row has no field. */}
           {!nothingToDo && (
             <p className="mb-5 text-ui text-ink-muted">
-              {chosenAgent
-                ? 'These are the tools the chosen agent loads that need a sign-in or a key before they will work in your agent. '
+              {shownFor
+                ? `These are the tools the bot ${shownFor} may reach that need a sign-in or a key before they will work for it. `
                 : 'These tools need a sign-in or a key before they will work in your agent. '}
               Authorize each connection and enter any keys below, then head back to your agent and
               run the tool again. Anything greyed out is not yours to do — it is waiting on the
@@ -493,14 +517,16 @@ export function ConnectToolsPage() {
               // every shared tool works without a personal credential, so the
               // user's only job is to finish.
               <Banner role="status" tone="ok">
-                {chosenAgent
-                  ? 'You’re all set: none of the tools the chosen agent loads need a personal sign-in or key. Click '
+                {shownFor
+                  ? `You’re all set: none of the tools the bot ${shownFor} may reach need a sign-in or key. Click `
                   : 'You’re all set: none of your tools need a personal sign-in or key. Click '}
                 “Finish &amp; return to your agent” above to complete the connection.
               </Banner>
             ) : (
               <p className="py-16 text-center text-ui text-ink-faint">
-                You have no tools that need a personal sign-in or key.
+                {shownFor
+                  ? `The bot ${shownFor} has no tools that need a sign-in or key.`
+                  : 'You have no tools that need a personal sign-in or key.'}
               </p>
             )
           ) : (
@@ -533,7 +559,7 @@ export function ConnectToolsPage() {
                           ? undefined
                           : () =>
                               void onToggle(signInId(o), o.authorized, async (removed) => {
-                                await deleteUserVar(o.slug, o.varName);
+                                await deleteUserVar(o.slug, o.varName, shownFor);
                                 removed();
                               })
                       }
@@ -542,7 +568,7 @@ export function ConnectToolsPage() {
                       onOwnApp={
                         canBringOwnApp(o)
                           ? async (clientId, clientSecret) => {
-                              await setOAuthClientSecret(o.slug, o.varName, clientSecret, clientId);
+                              await setOAuthClientSecret(o.slug, o.varName, clientSecret, clientId, shownFor);
                               announceToolCredentialsChanged();
                               await refresh(true);
                             }
@@ -609,7 +635,7 @@ export function ConnectToolsPage() {
                         }
                         onToggle={() =>
                           void onToggle(id, o.authorized, async (removed) => {
-                            await deleteUserVar(o.slug, o.varName);
+                            await deleteUserVar(o.slug, o.varName, shownFor);
                             removed();
                           })
                         }
@@ -705,7 +731,7 @@ export function ConnectToolsPage() {
                               : () =>
                                   void onToggle(id, configured, async (removed) => {
                                     for (const v of actionable.filter((x) => x.configured)) {
-                                      await deleteUserVar(tool.slug, v.name);
+                                      await deleteUserVar(tool.slug, v.name, shownFor);
                                       removed();
                                     }
                                   })
@@ -754,6 +780,7 @@ export function ConnectToolsPage() {
         </div>
       </div>
     </div>
+    </ActingForBot.Provider>
   );
 }
 
@@ -906,6 +933,7 @@ function ToolKeyList({
   onError: (m: string) => void;
 }) {
   const probe = useSavedKeyProbe(tool.slug);
+  const bot = useActingForBot();
   return (
     <ul className="mt-3 flex flex-col gap-2">
       {tool.variables.map((v) => (
@@ -916,7 +944,9 @@ function ToolKeyList({
           configured={v.configured}
           ownerOnly={v.ownerOnly}
           save={(value) =>
-            v.scope === 'admin' ? setAdminVar(tool.slug, v.name, value) : setUserVar(tool.slug, v.name, value)
+            v.scope === 'admin'
+              ? setAdminVar(tool.slug, v.name, value, null, bot)
+              : setUserVar(tool.slug, v.name, value, null, bot)
           }
           probe={probe}
           onSaved={onSaved}
@@ -944,6 +974,7 @@ function SignInOwnerSecret({
   onError: (m: string) => void;
 }) {
   const probe = useSavedKeyProbe(o.slug);
+  const bot = useActingForBot();
   return (
     <Surface tone="surface" radius="lg" elevation="none" padded className="border border-line">
       <ConnectRowHead
@@ -961,7 +992,7 @@ function SignInOwnerSecret({
           label={`${o.varName} (client secret)`}
           configured={false}
           ownerOnly={false}
-          save={(value) => setOAuthClientSecret(o.slug, o.varName, value)}
+          save={(value) => setOAuthClientSecret(o.slug, o.varName, value, undefined, bot)}
           probe={probe}
           onSaved={onSaved}
           onError={onError}

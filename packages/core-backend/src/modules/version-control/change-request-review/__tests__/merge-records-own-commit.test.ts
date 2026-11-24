@@ -3,12 +3,13 @@ import { describe, it, expect, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { ChangeRequestReviewService } from '../change-request-review.service.js';
-import { changeRequests, prMergeLog } from '../../../database/schema.js';
-import type { Database } from '../../../database/connection.js';
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import { changeRequests, prMergeLog } from '../../../database/index.js';
+import type { Database } from '../../../database/index.js';
+import type { WorkspaceService } from '../../../workspace/index.js';
 import type { GitService } from '../../git/git.service.js';
 import type { AppliedMergeResult, AuthUser, FileApprovalState } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../../access/access-control.interface.js';
+import type { IAccessControl } from '../../../access/index.js';
+import { VersionControlDomainError } from '../../../../shared/domain-errors.js';
 
 /**
  * What `mergePr` records as a change request's `merged_sha`, which is the only
@@ -403,5 +404,78 @@ describe('mergePr — a request whose merge commit was pushed but never recorded
     expect(String(logUpdate?.values.error)).toBe(
       'Change request was no longer open (merged); this attempt did not finalize it.',
     );
+  });
+});
+
+/**
+ * The gate judges the approvals at the head the caller read; the merge lands
+ * whatever the source holds when it runs. `mergePr` asks again inside the
+ * merge, at the source commit that attempt merges, so a push in between is
+ * refused instead of landing a head nobody approved.
+ */
+describe('mergePr — the head the approvals were read at', () => {
+  type Hook = (t: { sha: string; sourceSha: string; changedPaths: string[] }) => Promise<void>;
+  function makeMergingAt(sourceSha: string, extra?: (t: { workspaceId: string }) => Promise<void>) {
+    const captured: Captured[] = [];
+    const landed = { count: 0 };
+    const mergeChangeRequest = vi.fn(async (...args: unknown[]) => {
+      const opts = args[5] as { authorize?: Hook };
+      await opts.authorize?.({ sha: 'target-tip', sourceSha, changedPaths: [APPROVED.path] });
+      landed.count += 1;
+      return { kind: 'merged', sha: 'merge-1', mergeCommit: 'merge-1' } as AppliedMergeResult;
+    });
+    const svc = new ChangeRequestReviewService(
+      makeDb(captured),
+      {} as unknown as IAccessControl,
+      { getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })) } as unknown as WorkspaceService,
+      { mergeChangeRequest } as unknown as GitService,
+    );
+    const merge = () =>
+      svc.mergePr(CR_ROW.number, USER, HEAD_SHA, [APPROVED], 'open', CR_ROW.title, BASE, 'ws-1', {
+        ...(extra ? { authorize: extra } : {}),
+      });
+    return { merge, landed, captured };
+  }
+
+  it('refuses, as a gate refusal, when the source moved past the approved head, and lands nothing', async () => {
+    const { merge, landed, captured } = makeMergingAt('a-later-push');
+    await expect(merge()).rejects.toMatchObject({
+      status: 422,
+      payload: { mergeBlockedReasons: [expect.stringMatching(/changed after its approvals were read/)] },
+    });
+    expect(landed.count).toBe(0);
+    const log = captured.find((c) => c.kind === 'update' && c.table === prMergeLog);
+    expect(log?.values).toMatchObject({ succeeded: false });
+  });
+
+  it("merges at the approved head, and runs the caller's own check in the merge's clone", async () => {
+    const seen: string[] = [];
+    const { merge, landed } = makeMergingAt(HEAD_SHA, async (t) => {
+      seen.push(t.workspaceId);
+    });
+    await merge();
+    expect(landed.count).toBe(1);
+    expect(seen).toEqual(['ws-base']);
+  });
+
+  it("passes the caller's refusal through as it was thrown, not as a failed merge", async () => {
+    const refusal = new VersionControlDomainError('outside its write access', 403, { kind: 'bot-merge-outside-grant' });
+    const { merge, landed } = makeMergingAt(HEAD_SHA, async () => {
+      throw refusal;
+    });
+    await expect(merge()).rejects.toBe(refusal);
+    expect(landed.count).toBe(0);
+  });
+
+  it("takes a failure inside the caller's check as a failed merge: wrapped, with the token redacted", async () => {
+    const { merge, landed, captured } = makeMergingAt(HEAD_SHA, async () => {
+      throw new Error('git cat-file failed: https://x-access-token:ghs_secret@github.com/acme/kb');
+    });
+    const failed = merge();
+    await expect(failed).rejects.toMatchObject({ status: 502 });
+    await expect(failed).rejects.not.toThrow(/ghs_secret/);
+    expect(landed.count).toBe(0);
+    const log = captured.find((c) => c.kind === 'update' && c.table === prMergeLog);
+    expect(String(log?.values.error)).not.toContain('ghs_secret');
   });
 });

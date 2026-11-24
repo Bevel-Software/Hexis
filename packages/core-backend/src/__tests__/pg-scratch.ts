@@ -49,15 +49,17 @@ export async function scratchDatabaseUrl(prefix: string): Promise<string> {
 /**
  * A scratch database at the current core schema — created, connected to with
  * the PII key given (a fresh random one when none is), and every core
- * migration run — as a module's test wants it. `close` ends the connection;
+ * migration run — as a module's test wants it. `url` reaches the same
+ * database, for a test that opens a connection of its own. `close` ends the connection;
  * {@link dropScratchDatabases} drops the database afterwards as for any other.
  */
 export async function openMigratedScratchDb(
   prefix: string,
   opts: { piiKey?: string } = {},
-): Promise<{ db: Database; close: () => Promise<void> }> {
+): Promise<{ db: Database; url: string; close: () => Promise<void> }> {
   const piiKey = opts.piiKey ?? randomBytes(32).toString('base64');
-  const db = createDb(await scratchDatabaseUrl(prefix), { piiKey });
+  const url = await scratchDatabaseUrl(prefix);
+  const db = createDb(url, { piiKey });
   try {
     await runCoreMigrations(db, coreMigrationsDir());
   } catch (err) {
@@ -66,7 +68,7 @@ export async function openMigratedScratchDb(
     await closeDb(db);
     throw err;
   }
-  return { db, close: () => closeDb(db) };
+  return { db, url, close: () => closeDb(db) };
 }
 
 /** Drop every scratch database this file made; for `afterAll`, with {@link PG_TEST_TIMEOUT}. */

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type MockInstance } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock, type MockInstance } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, Change } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
@@ -40,6 +40,14 @@ const USER: AuthUser = {
   id: 'user-1',
   email: 'alice@example.com',
   name: 'Alice',
+};
+
+/** A bot acting through a connection Dana made. */
+const BOT_USER: AuthUser = {
+  id: USER.id,
+  email: 'coder@agent.hexis',
+  name: 'Coder',
+  madeBy: { name: 'Dana', email: 'dana@example.com' },
 };
 
 const CHANGE: Change = {
@@ -299,6 +307,42 @@ describe('VersionControlService.releaseLock — new (enqueue, no synchronous com
     expect(err).toBeInstanceOf(VersionControlValidationError);
     expect((err as VersionControlValidationError).payload?.kind).toBe('coordination-hold');
     expect(pending.enqueue).not.toHaveBeenCalled();
+    expect(locks.release).not.toHaveBeenCalled();
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  // A bot's save is queued like anyone's, beside the person behind it, and
+  // released the crash-safe way: nothing here puts its bytes back, since
+  // they may sit on top of another save of the path still queued.
+  it("a bot's save is queued beside the person behind it, then the lock is dropped", async () => {
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id);
+    const pending = makePending();
+    const svc = makeFacade(git, locks, pending, events);
+
+    await svc.releaseLock('ws-1', 'feat/x', 'foo.md', BOT_USER);
+    // The bot is the queued author; the person behind it rides only in `madeBy`.
+    expect(pending.enqueue).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      branch: 'feat/x',
+      path: 'foo.md',
+      authorEmail: BOT_USER.email,
+      authorName: BOT_USER.name,
+      madeBy: BOT_USER.madeBy,
+    });
+    expect(git.discardPath).not.toHaveBeenCalled();
+    expect(locks.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("a queue that fails leaves the bytes and the lock for recovery, a bot's save as anyone's", async () => {
+    const git = makeGit();
+    const locks = makeFileLocks(USER.id);
+    const pending = makePending();
+    (pending.enqueue as Mock).mockRejectedValue(new Error('db connection lost'));
+    const svc = makeFacade(git, locks, pending, events);
+
+    await expect(svc.releaseLock('ws-1', 'feat/x', 'foo.md', BOT_USER)).rejects.toThrow(/db connection lost/);
+    expect(git.discardPath).not.toHaveBeenCalled();
     expect(locks.release).not.toHaveBeenCalled();
     expect(emitSpy).not.toHaveBeenCalled();
   });

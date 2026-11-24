@@ -91,6 +91,7 @@ import {
 } from './change-request-hooks.js';
 import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
+import { madeByColumns, writeNamingActor } from './made-by.js';
 import {
   BranchAuthorshipError,
   BranchDeleteBlockedError,
@@ -107,7 +108,7 @@ import {
   VersionControlValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, ROLES_YAML_BASENAME, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -349,6 +350,14 @@ export class VersionControlService implements IVersionControlService {
      * approver counts as unresolved.
      */
     private readonly accounts?: ApproverAccounts,
+    /**
+     * Whether an address is a bot's (`modules/bots`): a bot merges a change
+     * request only where it may write every file it changes. Defaulted for the harnesses that construct
+     * this service without bots. Without it every bot reads as a person, so
+     * the composition root must pass the access module's answer;
+     * `core/__tests__/bot-check-wired.test.ts` checks that it does.
+     */
+    private readonly isBot: (email: string) => boolean = () => false,
   ) {
     // The type already requires it; this holds for a caller the compiler did
     // not see (plain JavaScript, a positional slip in a harness).
@@ -1215,6 +1224,7 @@ export class VersionControlService implements IVersionControlService {
         path: [...err.conflictedPaths].sort()[0],
         authorEmail: user?.email ?? RECOVERY_BOT_EMAIL,
         authorName: user?.name ?? RECOVERY_BOT_NAME,
+        madeBy: user?.madeBy,
       });
       if (queued) {
         log.warn(
@@ -1728,12 +1738,18 @@ export class VersionControlService implements IVersionControlService {
     // rather than dropping the lock without queueing the commit (which
     // would re-introduce the orphan-files class of bug this refactor
     // exists to fix). Worst case: brief over-lock that resolves on TTL.
+    //
+    // A bot's save takes the same path: the queue never refuses a save for
+    // the person behind the bot (see `PendingCommitsService.enqueue`), so
+    // no refusal here leaves its bytes nobody's to commit, and nothing is
+    // put back that another queued save of the path still needs.
     await this.pendingCommits.enqueue({
       workspaceId,
       branch,
       path: targetPath,
       authorEmail: user.email,
       authorName: user.name,
+      ...(user.madeBy ? { madeBy: user.madeBy } : {}),
     });
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
     lockLog.info(
@@ -2283,12 +2299,86 @@ export class VersionControlService implements IVersionControlService {
     return { number: row.number, state: row.state as ChangeRequestState };
   }
 
-  getChangeRequestDetail(
+  /**
+   * A change request as `viewerEmail` sees it. For a BOT viewer of an open
+   * request, the bot's own refusal of an apply — a file outside its write
+   * access — is among its `mergeBlockedReasons`, judged by the check its
+   * merge runs (`assertBotMayWriteMerged`) at the head and target the detail
+   * was read at, over the paths the merge writes (`writtenPathsBetweenCommits`,
+   * less roles.yaml, whose change the merge restores away first, as for
+   * every account: `preserveBaseRolesYaml`). So
+   * whatever a reader derives from the blockers ("may I apply this?") says
+   * what the merge would answer for the bot; the merge itself still asks
+   * again, inside its reservation. A verdict is kept briefly per pair of
+   * commits and bot (see {@link botApplyVerdicts}).
+   */
+  async getChangeRequestDetail(
     number: number,
     opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<ChangeRequestDetail | null> {
-    return this.prs.getPrDetail(number, opts);
+    const detail = await this.prs.getPrDetail(number, opts);
+    if (!detail || detail.state !== 'open' || !opts?.viewerEmail || !opts.workspaceId || !this.isBot(opts.viewerEmail)) {
+      return detail;
+    }
+    const refusal = await this.botApplyRefusal(opts.viewerEmail, {
+      sha: detail.baseSha,
+      sourceSha: detail.headSha,
+      workspaceId: opts.workspaceId,
+    });
+    return refusal === null
+      ? detail
+      : { ...detail, mergeableInBevel: false, mergeBlockedReasons: [...detail.mergeBlockedReasons, refusal] };
   }
+
+  /**
+   * The sentence a bot's apply would be refused with at `target`, or null when
+   * its check passes. A check that cannot be answered (a read of either
+   * commit fails) is a refusal too, worded as such: "may apply" is never
+   * claimed unchecked.
+   */
+  private async botApplyRefusal(
+    email: string,
+    at: { sha: string; sourceSha: string; workspaceId: string },
+  ): Promise<string | null> {
+    const key = [at.workspaceId, at.sha, at.sourceSha, email.toLowerCase()].join('\0');
+    const kept = this.botApplyVerdicts.get(key);
+    if (kept && Date.now() - kept.at < VersionControlService.BOT_APPLY_VERDICT_TTL_MS) return kept.refusal;
+    let refusal: string | null;
+    try {
+      const written = await this.git.writtenPathsBetweenCommits(at.workspaceId, at.sha, at.sourceSha);
+      const target = { ...at, changedPaths: written.filter((p) => p !== ROLES_YAML_BASENAME) };
+      await this.assertBotMayWriteMerged(email, target);
+      refusal = null;
+    } catch (err) {
+      if (!(err instanceof VersionControlDomainError)) {
+        // Not kept: the next read asks again.
+        mergeLog.warn('could not judge whether a bot may apply a change request:', { err: sanitizeError(err) });
+        return 'Whether this bot may apply the request could not be checked right now.';
+      }
+      refusal = err.message;
+    }
+    this.botApplyVerdicts.delete(key);
+    if (this.botApplyVerdicts.size >= VersionControlService.BOT_APPLY_VERDICTS_MAX) {
+      const oldest = this.botApplyVerdicts.keys().next().value;
+      if (oldest !== undefined) this.botApplyVerdicts.delete(oldest);
+    }
+    this.botApplyVerdicts.set(key, { at: Date.now(), refusal });
+    return refusal;
+  }
+
+  /**
+   * A bot's apply verdict per (workspace, target commit, source commit, bot):
+   * the two commits fix what is changed and the access files it is judged
+   * by, so a detail read again — every poll of the page, every agent call —
+   * reads no file a second time. Kept for a short while only, because not
+   * everything the answer depends on lives in the commits (which addresses
+   * are bots', which says whose grant a line is, is the bots' rows); the merge never reads
+   * this and judges for itself. A verdict that could not be reached is not
+   * kept. Bounded, oldest first.
+   */
+  private readonly botApplyVerdicts = new Map<string, { at: number; refusal: string | null }>();
+  private static readonly BOT_APPLY_VERDICT_TTL_MS = 30_000;
+  private static readonly BOT_APPLY_VERDICTS_MAX = 500;
 
   /**
    * Open a new change request. A change request is a plain `change_requests`
@@ -2429,20 +2519,25 @@ export class VersionControlService implements IVersionControlService {
 
     let prNumber: number;
     try {
-      const [row] = await this.db
-        .insert(changeRequests)
-        .values({
-          sourceBranch: input.sourceBranch,
-          targetBranch: input.targetBranch,
-          title: input.title.trim(),
-          body: input.description?.trim() ?? '',
-          authorEmail: canonicalEmail(user.email),
-          authorEmailBidx: user.email,
-          authorName: user.name,
-          accessRequestLevel: input.accessRequest?.level ?? null,
-          accessRequestNote: note ? note : null,
-        })
-        .returning({ number: changeRequests.number });
+      // The author (`writeNamingActor`), with the person behind a bot.
+      const [row] = await writeNamingActor(this.db, user, async (q, author) =>
+        q
+          .insert(changeRequests)
+          .values({
+            sourceBranch: input.sourceBranch,
+            targetBranch: input.targetBranch,
+            title: input.title.trim(),
+            body: input.description?.trim() ?? '',
+            authorEmail: author,
+            authorEmailBidx: author,
+            authorName: user.name,
+            // A bot opening it: the person behind the bot is in its history too.
+            ...madeByColumns(user.madeBy),
+            accessRequestLevel: input.accessRequest?.level ?? null,
+            accessRequestNote: note ? note : null,
+          })
+          .returning({ number: changeRequests.number })
+      );
       prNumber = row.number;
     } catch (err) {
       // The partial unique index (source, target WHERE state='open') is the
@@ -4291,6 +4386,12 @@ export class VersionControlService implements IVersionControlService {
     // App roles surface (itself admin-gated). The rest of the CR merges
     // normally. Best-effort by design is NOT acceptable here — a failure to
     // neutralise must abort the merge, never fall through.
+    //
+    // A bot is held to this as every account is, and to one thing more,
+    // asked inside the merge: every file the merge changes must be one it
+    // may write (`assertBotMayWriteMerged`), since no approval of others
+    // stands in for its own grants.
+    const bot = this.isBot(user.email);
     const preserved = await this.preserveBaseRolesYaml(number, user, baseBranch);
 
     // When preservation pushed a restore commit, the source-branch head advanced,
@@ -4328,7 +4429,10 @@ export class VersionControlService implements IVersionControlService {
         title,
         baseBranch,
         workspaceId,
-        opts,
+        {
+          ...opts,
+          authorize: bot ? (target) => this.assertBotMayWriteMerged(user.email, target) : undefined,
+        },
       );
     } catch (err) {
       // The local merge hit conflicts — hand the caller (agent/UI) the actual
@@ -4476,7 +4580,7 @@ export class VersionControlService implements IVersionControlService {
     // at once rather than after the source's commits have landed. Not the
     // answer that counts — that one is asked again under the locks below.
     const openBefore = await this.openRequestBlockingMerge(sourceBranch, targetBranch);
-    if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, openBefore);
+    if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, openBefore, this.isBot(user.email));
 
     // Writes are committed asynchronously: a write tool answers once the bytes
     // are on disk and the pending-commits worker commits and pushes them a few
@@ -4515,7 +4619,7 @@ export class VersionControlService implements IVersionControlService {
       // blocked: the target merged into the source is how a draft under review
       // stays current, and that must keep working while the request is open.
       const open = await this.openRequestBlockingMerge(sourceBranch, targetBranch);
-      if (open !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open);
+      if (open !== null) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open, this.isBot(user.email));
 
       // The merge runs in the target's own workspace, like a change request's.
       const targetWorkspaceId = (await this.workspaceService.getOrCreateForBranch(targetBranch)).id;
@@ -4550,7 +4654,8 @@ export class VersionControlService implements IVersionControlService {
           // is what the hook refuses on) and both sides of a rename, since the
           // old name is a file this merge deletes.
           authorize: this.kb.isProtectedBranch(targetBranch)
-            ? async ({ sha, changedPaths }) => {
+            ? async (target) => {
+                const { sha, changedPaths } = target;
                 if (changedPaths.length === 0) return;
                 // roles.yaml never changes through a merge. A change request's
                 // merge restores the target's copy on the source first
@@ -4648,27 +4753,32 @@ export class VersionControlService implements IVersionControlService {
   ): Promise<boolean> {
     if (this.applyAttempts.get(number) !== attempt) return false;
     const at = failure.at ?? new Date();
-    const updated = await this.db
-      .update(changeRequests)
-      .set({
-        applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
-        applyFailureConflicts: failure.kind === 'conflicts',
-        applyFailureKind: failure.kind,
-        applyFailedAt: at,
-        applyFailedByName: user.name,
-        applyFailedByEmailBidx: user.email,
-      })
-      // The write itself refuses to go backwards: the attempt map above is an
-      // early exit within this process, but an older UPDATE still in flight (or
-      // one from another replica) must never replace a newer refusal.
-      .where(
-        and(
-          eq(changeRequests.number, number),
-          eq(changeRequests.state, 'open'),
-          or(isNull(changeRequests.applyFailedAt), lt(changeRequests.applyFailedAt, at)),
-        ),
-      )
-      .returning({ number: changeRequests.number });
+    // Who could not apply it (`writeNamingActor`: a bot at the address its row has now;
+    // the bot alone is named, so an erased maker does not refuse the note).
+    const updated = await writeNamingActor(this.db, user, async (q, by) =>
+      q
+        .update(changeRequests)
+        .set({
+          applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
+          applyFailureConflicts: failure.kind === 'conflicts',
+          applyFailureKind: failure.kind,
+          applyFailedAt: at,
+          applyFailedByName: user.name,
+          applyFailedByEmailBidx: by,
+        })
+        // The write itself refuses to go backwards: the attempt map above is an
+        // early exit within this process, but an older UPDATE still in flight (or
+        // one from another replica) must never replace a newer refusal.
+        .where(
+          and(
+            eq(changeRequests.number, number),
+            eq(changeRequests.state, 'open'),
+            or(isNull(changeRequests.applyFailedAt), lt(changeRequests.applyFailedAt, at)),
+          ),
+        )
+        .returning({ number: changeRequests.number }),
+      { namesMaker: false },
+    );
     if (updated.length === 0) return false;
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-apply-failed', number });
@@ -4795,6 +4905,32 @@ export class VersionControlService implements IVersionControlService {
         err,
       });
     }
+  }
+
+  /**
+   * A bot merges a change request only where it is granted: it must be able
+   * to write every file the merge changes, judged at the target commit the
+   * merge is built on — the rule a merge into a protected branch applies to
+   * every caller (`mergeBranch`). A person's Apply is authorized by the
+   * approval gate alone; a bot is held to its own grants as well, so a bot
+   * that may only read cannot land a request because others approved it.
+   */
+  private async assertBotMayWriteMerged(
+    email: string,
+    target: { sha: string; changedPaths: string[]; workspaceId: string },
+  ): Promise<void> {
+    const { sha, changedPaths, workspaceId } = target;
+    if (changedPaths.length === 0) return;
+    const allowed = await this.accessControl.canWriteBatchAtRef(workspaceId, sha, email, changedPaths);
+    const denied = allowed ? changedPaths.filter((p) => !allowed.get(p)) : changedPaths;
+    if (denied.length === 0) return;
+    throw new VersionControlDomainError(
+      `A bot merges a change request only where it may write every file it changes: ` +
+        `${denied.length} changed file(s) are outside its write access (${denied.join(', ')}). ` +
+        `Ask the user to apply it in the app.`,
+      403,
+      { kind: 'bot-merge-outside-grant', deniedPaths: denied },
+    );
   }
 
   /**
@@ -5031,7 +5167,7 @@ export class VersionControlService implements IVersionControlService {
     // how a draft under review stays current, and is never blocked.)
     if (from !== branch) {
       const openBefore = await this.openRequestBlockingMerge(from, branch);
-      if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore);
+      if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore, this.isBot(user.email));
     }
     // The merge takes what the REMOTE holds of `from`, and the push publishes
     // the branch: writes still being committed on either would be missed by
@@ -5062,7 +5198,7 @@ export class VersionControlService implements IVersionControlService {
     return this.runOnBranchPair(from, branch, async () => {
       if (from !== branch) {
         const open = await this.openRequestBlockingMerge(from, branch);
-        if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open);
+        if (open !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, open, this.isBot(user.email));
       }
       if (!(await this.git.remoteBranchExists(workspaceId, from))) {
         throw new VersionControlValidationError(`No branch named "${from}" on the shared repository.`);

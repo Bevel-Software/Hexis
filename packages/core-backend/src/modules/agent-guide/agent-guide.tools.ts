@@ -124,10 +124,9 @@ export function registerAgentGuideTool(
       // A distribution that dropped the start section gets the whole guide by
       // default, as before there was one: never an answer with nothing in it.
       const start = list.find((s) => s.id === START_HERE_SECTION_ID);
-      // A connection made as an agent configuration is told so at the top of
-      // the guide's first answer and of the whole guide: the catalog it
-      // describes is narrowed to that agent. Everything is told nothing new,
-      // so its guide is the same text.
+      // A connection made as a bot is told so at the top of the guide's first
+      // answer and of the whole guide: everything it describes is judged for
+      // the bot. Myself is told nothing new, so its guide is the same text.
       const connection = ctx.connectionScope?.describe() ?? null;
       const told = (guide: string) => ({
         guide: connection ? `> ${connection}\n\n${guide}` : guide,

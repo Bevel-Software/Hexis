@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import type { CoreConfig } from '../../../core-config.js';
 import { AuthService } from '../auth.service.js';
 import {
@@ -13,7 +13,8 @@ import {
   type IAccountAdmission,
 } from '../account-admission.js';
 import { hashPassword } from '../password-hash.js';
-import { RECOVERY_BOT_EMAIL } from '../../version-control/recovery-bot.js';
+import { RECOVERY_BOT_EMAIL } from '../../version-control/index.js';
+import { noBotAddresses } from '../../../__tests__/real-auth.js';
 
 /**
  * Drizzle chain stub, as in `auth.service.test.ts`: each db.select() /
@@ -108,7 +109,7 @@ describe('signing in with a switched-off account', () => {
   it('refuses a password sign-in once the password is proven, and says why', async () => {
     const passwordHash = await hashPassword('a-long-enough-password');
     const { db } = makeFakeDb([[{ ...OFF, passwordHash }]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     await expect(svc.loginWithPassword('alice@example.com', 'a-long-enough-password')).rejects.toBeInstanceOf(
       AccountDeactivatedError,
     );
@@ -117,19 +118,19 @@ describe('signing in with a switched-off account', () => {
   it('gives a wrong password the same answer as for any account, so it reveals nothing', async () => {
     const passwordHash = await hashPassword('a-long-enough-password');
     const { db } = makeFakeDb([[{ ...OFF, passwordHash }]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     await expect(svc.loginWithPassword('alice@example.com', 'the-wrong-password')).rejects.toThrow('Invalid credentials');
   });
 
   it('refuses a single sign-on sign-in, without issuing a session', async () => {
     const { db } = makeFakeDb([[OFF]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     await expect(svc.loginWithSso('alice@example.com', 'Alice')).rejects.toBeInstanceOf(AccountDeactivatedError);
   });
 
   it('refuses an embed identity', async () => {
     const { db } = makeFakeDb([[OFF]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     await expect(svc.getOrCreateByEmail('alice@example.com')).rejects.toBeInstanceOf(AccountDeactivatedError);
   });
 });
@@ -137,7 +138,7 @@ describe('signing in with a switched-off account', () => {
 describe('the accounts a change request\'s approvers resolve to', () => {
   it('are read in one indexed query through the email blind index, live accounts only, keyed by canonical address', async () => {
     const { db, captured } = makeFakeDb([[{ id: 'user-1', email: 'Alice@Example.com', name: 'Alice' }]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     const found = await svc.findActiveAccountsByEmail(['ALICE@example.com', 'alice@example.com', 'bob@example.com']);
     // One read, by the blind index, with the addresses canonicalised and
     // deduplicated, and a switched-off account excluded in the query itself.
@@ -154,7 +155,7 @@ describe('the accounts a change request\'s approvers resolve to', () => {
 
   it('asks nothing for no addresses', async () => {
     const { db } = makeFakeDb([]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     expect(await svc.findActiveAccountsByEmail([])).toEqual(new Map());
     expect((db as unknown as { select: ReturnType<typeof vi.fn> }).select).not.toHaveBeenCalled();
   });
@@ -163,7 +164,7 @@ describe('the accounts a change request\'s approvers resolve to', () => {
 describe('a session that outlives a deactivation', () => {
   it('stops being accepted once the account is switched off', async () => {
     const { db } = makeFakeDb([[ROW], [{ deactivatedAt: new Date() }]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     const { token } = await svc.loginWithSso('alice@example.com', 'Alice');
     // The signature alone is still good…
     expect(svc.verifyToken(token).userId).toBe(ROW.id);
@@ -173,7 +174,7 @@ describe('a session that outlives a deactivation', () => {
 
   it('is told apart from a refusal when the account cannot be looked up', async () => {
     const { db } = makeFakeDb([[ROW]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     const { token } = await svc.loginWithSso('alice@example.com', 'Alice');
     vi.mocked(db.select).mockImplementationOnce(() => {
       throw new Error('db down');
@@ -183,7 +184,7 @@ describe('a session that outlives a deactivation', () => {
 
   it('is accepted while the account is on', async () => {
     const { db } = makeFakeDb([[ROW], [{ deactivatedAt: null }]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     const { token } = await svc.loginWithSso('alice@example.com', 'Alice');
     await expect(svc.resolveSession(token)).resolves.toEqual({ userId: ROW.id, email: ROW.email });
   });
@@ -192,7 +193,7 @@ describe('a session that outlives a deactivation', () => {
 describe('AuthService.isActive', () => {
   it('reads once and keeps the answer briefly', async () => {
     const { db } = makeFakeDb([[{ deactivatedAt: null }]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     expect(await svc.isActive('user-1')).toBe(true);
     expect(await svc.isActive('user-1')).toBe(true);
     expect(vi.mocked(db.select)).toHaveBeenCalledTimes(1);
@@ -201,17 +202,17 @@ describe('AuthService.isActive', () => {
   it('treats the deployment admin as on whatever its row says, so its rescue session works', async () => {
     const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
     const { db } = makeFakeDb([[{ email: 'root@example.com', deactivatedAt: new Date() }]]);
-    expect(await new AuthService(db, config).isActive('root-id')).toBe(true);
+    expect(await new AuthService(db, config, undefined, noBotAddresses).isActive('root-id')).toBe(true);
   });
 
   it('treats an account that no longer exists as off', async () => {
     const { db } = makeFakeDb([[]]);
-    expect(await new AuthService(db, makeConfig()).isActive('gone')).toBe(false);
+    expect(await new AuthService(db, makeConfig(), undefined, noBotAddresses).isActive('gone')).toBe(false);
   });
 
   it('forgets the cached answer when this process switches the account off', async () => {
     const { db } = makeFakeDb([[{ deactivatedAt: null }], [ROW], [], [{ deactivatedAt: new Date() }]]);
-    const svc = new AuthService(db, makeConfig());
+    const svc = new AuthService(db, makeConfig(), undefined, noBotAddresses);
     expect(await svc.isActive(ROW.id)).toBe(true);
     expect(await svc.deactivate(ROW.id)).toBe(true);
     expect(await svc.isActive(ROW.id)).toBe(false);
@@ -232,20 +233,20 @@ describe('an owner switched off by an earlier version', () => {
 
     it(`signs in with single sign-on, and the switch-off is cleared on the row, ${label}`, async () => {
       const { db, captured } = makeFakeDb([[OWNER_OFF], []]);
-      const { user } = await new AuthService(db, config).loginWithSso('root@example.com', 'Root');
+      const { user } = await new AuthService(db, config, undefined, noBotAddresses).loginWithSso('root@example.com', 'Root');
       expect(user.id).toBe('owner-1');
       expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
     });
 
     it(`is let in as an embed identity, ${label}`, async () => {
       const { db, captured } = makeFakeDb([[OWNER_OFF], []]);
-      await expect(new AuthService(db, config).getOrCreateByEmail('root@example.com')).resolves.toMatchObject({ id: 'owner-1' });
+      await expect(new AuthService(db, config, undefined, noBotAddresses).getOrCreateByEmail('root@example.com')).resolves.toMatchObject({ id: 'owner-1' });
       expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
     });
 
     it(`keeps a session they already hold, ${label}`, async () => {
       const { db, captured } = makeFakeDb([[{ id: 'owner-1', email: 'root@example.com', deactivatedAt: new Date() }], []]);
-      expect(await new AuthService(db, config).isActive('owner-1')).toBe(true);
+      expect(await new AuthService(db, config, undefined, noBotAddresses).isActive('owner-1')).toBe(true);
       expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
     });
   }
@@ -253,7 +254,7 @@ describe('an owner switched off by an earlier version', () => {
   it('signs in with a password they hold on the row, without ADMIN_PASSWORD', async () => {
     const passwordHash = await hashPassword('a-long-enough-password');
     const { db, captured } = makeFakeDb([[{ ...OWNER_OFF, passwordHash }], []]);
-    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }));
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }), undefined, noBotAddresses);
     const { user } = await svc.loginWithPassword('root@example.com', 'a-long-enough-password');
     expect(user.id).toBe('owner-1');
     expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
@@ -262,7 +263,7 @@ describe('an owner switched off by an earlier version', () => {
   it('signs in with ADMIN_PASSWORD, and the switch-off is cleared on the row', async () => {
     // The lookup, the upsert, then the clearing update.
     const { db, captured } = makeFakeDb([[OWNER_OFF], [OWNER_OFF], []]);
-    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' }));
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' }), undefined, noBotAddresses);
     const { user } = await svc.loginWithPassword('root@example.com', 'sup3r-secret');
     expect(user.id).toBe('owner-1');
     expect(captured.set).toEqual([expect.objectContaining({ deactivatedAt: null })]);
@@ -270,7 +271,7 @@ describe('an owner switched off by an earlier version', () => {
 
   it('leaves a switched-off account that is not an owner switched off', async () => {
     const { db, captured } = makeFakeDb([[OFF]]);
-    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }));
+    const svc = new AuthService(db, makeConfig({ adminEmail: 'root@example.com' }), undefined, noBotAddresses);
     await expect(svc.loginWithSso('alice@example.com', 'Alice')).rejects.toBeInstanceOf(AccountDeactivatedError);
     expect(captured.set).toEqual([]);
   });
@@ -279,13 +280,13 @@ describe('an owner switched off by an earlier version', () => {
 describe('AuthService.deactivate', () => {
   it('records when the account was switched off', async () => {
     const { db, captured } = makeFakeDb([[ROW], []]);
-    expect(await new AuthService(db, makeConfig()).deactivate(ROW.id)).toBe(true);
+    expect(await new AuthService(db, makeConfig(), undefined, noBotAddresses).deactivate(ROW.id)).toBe(true);
     expect(captured.set[0].deactivatedAt).toBeInstanceOf(Date);
   });
 
   it('switches off under the address switch lock, taken before the update', async () => {
     const { db, captured } = makeFakeDb([[{ ...ROW, email: 'Alice@Example.com' }], []]);
-    await new AuthService(db, makeConfig()).deactivate(ROW.id);
+    await new AuthService(db, makeConfig(), undefined, noBotAddresses).deactivate(ROW.id);
     expect(captured.order).toEqual([
       'begin',
       // The wait for the lock is bounded, inside the transaction.
@@ -298,7 +299,7 @@ describe('AuthService.deactivate', () => {
 
   it('answers false for an account that does not exist', async () => {
     const { db } = makeFakeDb([[]]);
-    expect(await new AuthService(db, makeConfig()).deactivate('nobody')).toBe(false);
+    expect(await new AuthService(db, makeConfig(), undefined, noBotAddresses).deactivate('nobody')).toBe(false);
   });
 
   // With a server-held owner password (self-hosted) and without one (the
@@ -311,7 +312,7 @@ describe('AuthService.deactivate', () => {
     it(`refuses the owner, ${label}, and says why`, async () => {
       const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
       const { db, captured } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
-      const refusal = new AuthService(db, config).deactivate(ROW.id);
+      const refusal = new AuthService(db, config, undefined, noBotAddresses).deactivate(ROW.id);
       await expect(refusal).rejects.toBeInstanceOf(AccountChangeRefusedError);
       await expect(refusal).rejects.toThrow("The owner can't be switched off.");
       expect(captured.order).toEqual([]);
@@ -320,7 +321,7 @@ describe('AuthService.deactivate', () => {
     it(`still switches off an account that is not the owner, ${label}`, async () => {
       const config = makeConfig({ adminEmail: 'root@example.com', adminPassword });
       const { db, captured } = makeFakeDb([[ROW], []]);
-      expect(await new AuthService(db, config).deactivate(ROW.id)).toBe(true);
+      expect(await new AuthService(db, config, undefined, noBotAddresses).deactivate(ROW.id)).toBe(true);
       expect(captured.set[0].deactivatedAt).toBeInstanceOf(Date);
     });
   }
@@ -328,13 +329,13 @@ describe('AuthService.deactivate', () => {
   it('refuses the owner even with password sign-in switched off', async () => {
     const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret', loginPasswordEnabled: false });
     const { db, captured } = makeFakeDb([[{ ...ROW, email: 'root@example.com' }]]);
-    await expect(new AuthService(db, config).deactivate(ROW.id)).rejects.toThrow("The owner can't be switched off.");
+    await expect(new AuthService(db, config, undefined, noBotAddresses).deactivate(ROW.id)).rejects.toThrow("The owner can't be switched off.");
     expect(captured.order).toEqual([]);
   });
 
   it('refuses the accounts the platform runs its own work as', async () => {
     const { db, captured } = makeFakeDb([[{ ...ROW, email: RECOVERY_BOT_EMAIL }]]);
-    await expect(new AuthService(db, makeConfig()).deactivate(ROW.id)).rejects.toThrow('platform itself');
+    await expect(new AuthService(db, makeConfig(), undefined, noBotAddresses).deactivate(ROW.id)).rejects.toThrow('platform itself');
     expect(captured.order).toEqual([]);
   });
 });
@@ -343,7 +344,7 @@ describe('AuthService.reactivate', () => {
   it('asks the admission port, as for a new account, and switches it on when admitted', async () => {
     const { port, asked } = recordingPort({ ok: true });
     const { db, captured } = makeFakeDb([[OFF], []]);
-    expect(await new AuthService(db, makeConfig(), port).reactivate(ROW.id)).toBe(true);
+    expect(await new AuthService(db, makeConfig(), port, noBotAddresses).reactivate(ROW.id)).toBe(true);
     expect(asked).toEqual([['alice@example.com', 'reactivate']]);
     expect(captured.set[0].deactivatedAt).toBeNull();
   });
@@ -351,7 +352,7 @@ describe('AuthService.reactivate', () => {
   it("refuses with the port's words when there is no room, and changes nothing", async () => {
     const { port } = recordingPort({ ok: false, message: 'All 3 seats are taken' });
     const { db } = makeFakeDb([[OFF]]);
-    const svc = new AuthService(db, makeConfig(), port);
+    const svc = new AuthService(db, makeConfig(), port, noBotAddresses);
     await expect(svc.reactivate(ROW.id)).rejects.toThrow('All 3 seats are taken');
     expect(vi.mocked(db.update)).not.toHaveBeenCalled();
   });
@@ -359,7 +360,7 @@ describe('AuthService.reactivate', () => {
   it('does not ask about an account that is already on', async () => {
     const { port, asked } = recordingPort({ ok: false, message: 'full' });
     const { db } = makeFakeDb([[ROW]]);
-    expect(await new AuthService(db, makeConfig(), port).reactivate(ROW.id)).toBe(true);
+    expect(await new AuthService(db, makeConfig(), port, noBotAddresses).reactivate(ROW.id)).toBe(true);
     expect(asked).toEqual([]);
   });
 });
@@ -370,7 +371,7 @@ describe('a first sign-in the port would rather keep waiting', () => {
   it('puts the person on file switched off, and still refuses the sign-in', async () => {
     const { port } = recordingPort(waiting);
     const { db, captured } = makeFakeDb([[], []]);
-    const svc = new AuthService(db, makeConfig(), port);
+    const svc = new AuthService(db, makeConfig(), port, noBotAddresses);
     const err = await svc.loginWithSso('new@example.com', 'New').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AccountAdmissionRefusedError);
     expect((err as AccountAdmissionRefusedError).waitingForAdmin).toBe(true);
@@ -391,7 +392,7 @@ describe('a first sign-in the port would rather keep waiting', () => {
   it('is a plain refusal when an admin creates the account', async () => {
     const { port } = recordingPort(waiting);
     const { db, captured } = makeFakeDb([[]]);
-    const err = await new AuthService(db, makeConfig(), port)
+    const err = await new AuthService(db, makeConfig(), port, noBotAddresses)
       .createAccount('new@example.com', 'New')
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AccountAdmissionRefusedError);
@@ -403,7 +404,7 @@ describe('a first sign-in the port would rather keep waiting', () => {
 describe('AuthService.createAccount without a password', () => {
   it('makes an account for single sign-on, with no hash stored', async () => {
     const { db, captured } = makeFakeDb([[{ ...ROW, passwordHash: null }]]);
-    const user = await new AuthService(db, makeConfig()).createAccount('Alice@Example.com', '');
+    const user = await new AuthService(db, makeConfig(), undefined, noBotAddresses).createAccount('Alice@Example.com', '');
     expect(user.email).toBe('alice@example.com');
     // The index column is written with the address; the handle indexes it.
     expect(captured.values[0]).toEqual({ email: 'alice@example.com', emailBidx: 'alice@example.com', name: 'alice' });
@@ -412,7 +413,7 @@ describe('AuthService.createAccount without a password', () => {
   it('asks the admission port, as any new account does', async () => {
     const { port, asked } = recordingPort({ ok: true });
     const { db } = makeFakeDb([[], [{ ...ROW, passwordHash: null }]]);
-    await new AuthService(db, makeConfig(), port).createAccount('alice@example.com', 'Alice');
+    await new AuthService(db, makeConfig(), port, noBotAddresses).createAccount('alice@example.com', 'Alice');
     expect(asked).toEqual([['alice@example.com', 'admin-create']]);
   });
 });

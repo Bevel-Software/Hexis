@@ -122,4 +122,17 @@ describe('createTokenVerifier — internal-token source resolution', () => {
       auth: { source: 'external', userId: 'user-A', scope: 'write' },
     });
   });
+
+  it('a token made as a bot, verified without the bots mechanism, loads nothing — it is not told the account is gone', async () => {
+    const svc = new InternalTokenService({ secret: 's' });
+    const verify = createTokenVerifier(noExternalKeys, svc);
+    const result = await verify(svc.mint({ userId: 'user-A', externalProxy: true, botUserId: 'u-bot' }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.auth.userId).toBe('user-A');
+    expect(result.auth.connection?.loadsAnything()).toBe(false);
+    // The bot it was made as is kept for the audit of the refused call.
+    expect(result.auth.stoppedBotUserId).toBe('u-bot');
+    expect(result.auth.connection?.describe()).toMatch(/has no bots, so it loads nothing/);
+  });
 });

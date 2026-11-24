@@ -3,6 +3,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('mcp');
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { ConnectionChoice } from '../bots/index.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -80,7 +81,7 @@ import {
 import { guideFirstDescription } from '../tool-registry/index.js';
 import {
   CONNECTION_META_KEY,
-  connectionRefusal,
+  unlistedToolAnswer,
   connectionWireOf,
   describeConnection,
   type ConnectionScopeWire,
@@ -162,7 +163,18 @@ export interface McpProxyOptions {
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
 export interface McpCaller {
+  /**
+   * Whom the request acts as: the person, or the bot its connection was made
+   * as — every downstream connector is dialled with THIS identity's secrets
+   * and sign-ins.
+   */
   userId: string;
+  /**
+   * The person the credential belongs to, when `userId` is a bot's: the
+   * loopback credential is minted for them, with the choice, so the loopback
+   * verifier checks again that they may act as the bot. Absent: `userId`.
+   */
+  credentialUserId?: string;
   /** The connection-key id (per-key metering rides on it), or null for an OAuth/JWT bearer. */
   tokenId: string | null;
   /**
@@ -172,13 +184,13 @@ export interface McpCaller {
    */
   connectionId?: string | null;
   /**
-   * The agent configuration the caller's credential connects as (a connection
-   * key's, or an agent connection's), or null for Everything. It rides the
-   * request's loopback identity, so every agent surface behind the loopback
-   * narrows to that agent's scope (`modules/agent-scope`); here it only keys
-   * the surface and words the handshake.
+   * Whom the caller's credential connects as (a connection key's choice, or
+   * an agent connection's): a bot's row or a legacy agent path; absent for
+   * Myself. It rides the request's loopback identity, so every agent surface
+   * behind the loopback acts as the same bot (`modules/bots`); here it only
+   * keys the surface and words the handshake.
    */
-  agentPath?: string | null;
+  connectionChoice?: ConnectionChoice | null;
   /** The raw bearer the request carried. */
   bearer: string;
   /**
@@ -261,11 +273,10 @@ interface RequestSurface {
    */
   degraded: boolean;
   /**
-   * The agent the catalog was narrowed to, as `all-tools` reported it —
-   * absent for Everything. A call to a tool not on a narrowed surface is
-   * refused by name and agent rather than as unknown, and a connection whose
-   * agent configuration cannot be used is served nothing, with the sentence that says
-   * why.
+   * The bot the connection acts as, as `all-tools` reported it — absent
+   * for Myself. A call to a platform tool the bot is not offered is refused
+   * by name and bot rather than as unknown, and a connection whose bot cannot
+   * be used is served nothing, with the sentence that says why.
    */
   connection?: ConnectionScopeWire;
 }
@@ -273,7 +284,7 @@ interface RequestSurface {
 /**
  * The `connection` a loopback answer (`all-tools`, `catalog-revision`)
  * carries, as a field to spread: validated at the boundary by the MCP
- * core's reader (HTTP loses the type), and absent for Everything.
+ * core's reader (HTTP loses the type), and absent for Myself.
  */
 function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
   const connection = connectionWireOf(body);
@@ -549,23 +560,29 @@ export class McpService {
     // The agent the connection was made as rides that token too, so the
     // surfaces behind the loopback narrow to its scope; a connection key
     // carries its own.
-    const agentPath = caller.agentPath || null;
+    const choice = caller.connectionChoice ?? null;
+    const madeAsBot = choice !== null && (choice.botUserId !== null || choice.agentPath !== null);
     const loopbackBearer =
       tokenId == null && this.internalTokens
         ? this.internalTokens.mint(
-            { userId, externalProxy: true, ...(agentPath ? { agentPath } : {}) },
+            {
+              userId: caller.credentialUserId ?? userId,
+              externalProxy: true,
+              ...(choice?.botUserId ? { botUserId: choice.botUserId } : {}),
+              ...(choice?.agentPath ? { agentPath: choice.agentPath } : {}),
+            },
             MCP_LOOPBACK_TOKEN_TTL_MS,
           )
         : bearer;
 
     let instructions: Promise<ComposedAgentInstructions> | undefined;
     const agentInstructions = () => (instructions ??= this.composeAgentInstructions());
-    // What a narrowed connection is told about itself at the handshake: the
-    // agent it is connected as, or why it loads nothing. Read off the catalog
-    // revision (cheap), not the surface (a full discovery). Everything is
-    // told nothing new, so its handshake is exactly what it was.
+    // What a connection made as a bot is told about itself at the handshake:
+    // the bot it acts as, or why it loads nothing. Read off the catalog
+    // revision (cheap), not the surface (a full discovery). Myself is told
+    // nothing new, so its handshake is exactly what it was.
     const connectionLine = async (): Promise<string | null> =>
-      agentPath ? describeConnection((await this.fetchCatalogRevision(loopbackBearer)).connection) : null;
+      madeAsBot ? describeConnection((await this.fetchCatalogRevision(loopbackBearer)).connection) : null;
     // The Audit log's view of this request — only when the request can be
     // attributed to a key, an agent connection or a page. The catalog names
     // it classifies pooled tools by are the surface's, which is looked up
@@ -581,8 +598,15 @@ export class McpService {
             : null;
     const audit =
       this.auditRecorder && principal
-        ? new RequestAudit(this.auditRecorder, userId, principal, {
+        ? new RequestAudit(this.auditRecorder, caller.credentialUserId ?? userId, principal, {
             kbManualName: EXTERNAL_KB_MANUAL_NAME,
+            // A bot's request names both: the person (above) and the bot —
+            // the bot it was made as, too, when it could not act as it.
+            ...(caller.credentialUserId
+              ? { botUserId: userId }
+              : choice?.botUserId
+                ? { botUserId: choice.botUserId }
+                : {}),
             catalogNames: () => catalogNamesHolder.current,
             loadSkills: () =>
               this.fetchSkillList(loopbackBearer).then((skills) =>
@@ -641,9 +665,9 @@ export class McpService {
           return undefined;
         }),
       ]);
-      // A connection whose agent configuration cannot be used is served NOTHING — not
-      // Everything — and the one sentence saying why rides the listing's
-      // `_meta` (the handshake carries it too).
+      // A connection whose bot cannot be used is served NOTHING — never the
+      // person's surface — and the one sentence saying why rides the
+      // listing's `_meta` (the handshake carries it too).
       if (connection?.unavailable) {
         return { tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } };
       }
@@ -858,7 +882,7 @@ export class McpService {
           answer ??
           toolError(
             retiredToolMessage(toolName) ??
-              (connection ? connectionRefusal(toolName, connection) : `Unknown tool "${toolName}".`),
+              unlistedToolAnswer(toolName, connection),
           )
         );
       }
@@ -880,9 +904,9 @@ export class McpService {
     // filtering, and progressive disclosure all live ONCE behind that REST
     // surface, never duplicated here. Neither handler needs the tool catalog.
     // The one prompt that is not a skill is the platform's `onboard`, offered
-    // only on a connection not narrowed to an agent, and only while no skill
-    // takes its name (see `promptsForSkills`).
-    const offerOnboard = agentPath === null;
+    // only on a connection made as the person themselves, and only while no
+    // skill takes its name (see `promptsForSkills`).
+    const offerOnboard = !madeAsBot;
     server.setRequestHandler(ListPromptsRequestSchema, async () => {
       const skills = await this.fetchSkillList(loopbackBearer);
       const prompts: Prompt[] = promptsForSkills(skills, offerOnboard);
@@ -988,17 +1012,20 @@ export class McpService {
     const { userId, tokenId } = caller;
     const { revision } = await this.fetchCatalogRevision(loopbackBearer);
     if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached');
-    // The agent the connection was made as is part of the key: two
-    // connections of one person made as different agents are two surfaces.
-    // (The revision already moves when the agent's FILE changes — it carries
-    // the file's digest — so an edit is a new build at the next request.)
-    // Everything adds nothing, and keeps the key it always had.
+    // Whom the connection was made as is part of the key: `userId` is
+    // already the bot's for a bot's connection, and the person who made it
+    // keys it too, so two people acting as one bot never share a surface
+    // built under the other's check. Myself adds nothing, and keeps the key
+    // it always had.
+    const choice = caller.connectionChoice;
     const key = [
       userId,
       tokenId != null ? 'key' : 'person',
       caller.scope ?? 'write',
       revision,
-      ...(caller.agentPath ? [caller.agentPath] : []),
+      ...(choice && (choice.botUserId || choice.agentPath)
+        ? [caller.credentialUserId ?? userId, choice.botUserId ?? '', choice.agentPath ?? '']
+        : []),
     ].join(POOL_KEY_SEPARATOR);
     const { value } = await this.surfaces.get(
       key,
@@ -1011,7 +1038,7 @@ export class McpService {
   /**
    * The caller's catalog revision (`GET /api/agent/catalog-revision`, the one
    * `hexis-mcp` polls), read with their bearer; null when it cannot be read.
-   * With it, the agent the caller's connection is narrowed to, when it is.
+   * With it, the bot the caller's connection acts as, when it is one.
    * A deployment or a test that does not serve the route answers 404, which
    * is not worth a line in the log; anything else is.
    */

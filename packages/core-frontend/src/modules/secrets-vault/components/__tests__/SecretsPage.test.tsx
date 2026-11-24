@@ -215,7 +215,7 @@ describe('SecretsPage', () => {
       const row = await screen.findByTestId('saved-key-probe');
       expect(row).toHaveTextContent('Connected');
       expect(row).toHaveAttribute('data-probe-state', 'connected');
-      expect(toolSecretsMock.checkToolConnection).toHaveBeenCalledWith('heyreach');
+      expect(toolSecretsMock.checkToolConnection).toHaveBeenCalledWith('heyreach', null);
       expect(screen.queryByRole('alert')).toBeNull();
     });
 
@@ -267,7 +267,7 @@ describe('SecretsPage', () => {
       await saveKey('k');
 
       await waitFor(() =>
-        expect(toolSecretsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k'),
+        expect(toolSecretsMock.setUserVar).toHaveBeenCalledWith('heyreach', 'API_KEY', 'k', null, null),
       );
       await waitFor(() => expect(screen.getByLabelText('Value for API_KEY')).toHaveValue(''));
       expect(await screen.findByTestId('saved-key-probe')).toHaveAttribute(

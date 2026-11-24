@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { createMcpAuthMiddleware } from '../mcp-auth.middleware.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IExternalApiKeyService } from '../../tool-auth/index.js';
 import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { AccountDeactivatedError, AuthBackendError } from '../../auth/account-admission.js';
+import { InternalTokenService } from '../../../__tests__/tool-wiring.js';
+import { AccountDeactivatedError, AuthBackendError } from '../../auth/index.js';
 
 const RESOURCE_METADATA_URL = 'https://bevel.example/.well-known/oauth-protected-resource/api/mcp';
 
@@ -54,7 +54,7 @@ function makeExternalApiKeyService(
 function makeOAuthProvider(
   verify?: (t: string) => Promise<{ extra?: Record<string, unknown> }>,
   /** A live agent connection's current choice, or null when revoked — live as Everything unless a test says otherwise. */
-  live?: (connectionId: string) => Promise<{ agentPath: string | null } | null>,
+  live?: (connectionId: string) => Promise<{ botUserId?: string | null; agentPath: string | null } | null>,
 ) {
   return {
     looksLikeAccessToken: (t: string) => typeof t === 'string' && t.startsWith('bevel-mcp_'),
@@ -328,22 +328,22 @@ describe('createMcpAuthMiddleware', () => {
         id: 'user-7',
         email: 'seven@example.com',
       }));
-      // Minted as Everything; the person has since re-consented as an agent.
+      // Minted as Myself; the person has since re-consented as a bot.
       const everything = internal.mint({ userId: 'user-7', externalProxy: true, connectionId: 'conn-7' }, 60_000);
-      const narrowed = makeOAuthProvider(undefined, async () => ({ agentPath: 'Agents/narrow.agent' }));
+      const narrowed = makeOAuthProvider(undefined, async () => ({ botUserId: 'bot-row-1', agentPath: null }));
       const first = makeReqRes(`Bearer ${everything}`);
       await makeMw({ internal, auth, oauth: narrowed })(first.req, first.res, first.next);
       expect(first.next).toHaveBeenCalled();
-      expect(first.req.mcpAgentPath).toBe('Agents/narrow.agent');
-      // Minted as an agent; the person has since re-consented as Everything.
+      expect(first.req.mcpConnectionChoice).toEqual({ botUserId: 'bot-row-1', agentPath: null });
+      // Minted as a bot; the person has since re-consented as Myself.
       const asAgent = internal.mint(
-        { userId: 'user-7', externalProxy: true, connectionId: 'conn-7', agentPath: 'Agents/narrow.agent' },
+        { userId: 'user-7', externalProxy: true, connectionId: 'conn-7', botUserId: 'bot-row-1' },
         60_000,
       );
       const second = makeReqRes(`Bearer ${asAgent}`);
       await makeMw({ internal, auth, oauth: makeOAuthProvider() })(second.req, second.res, second.next);
       expect(second.next).toHaveBeenCalled();
-      expect(second.req.mcpAgentPath).toBeUndefined();
+      expect(second.req.mcpConnectionChoice).toBeUndefined();
     });
 
     it('401s an exchanged grant whose agent connection was revoked — the token is stateless, the connection is not', async () => {

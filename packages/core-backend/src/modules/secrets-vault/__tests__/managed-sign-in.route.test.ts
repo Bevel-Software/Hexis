@@ -80,6 +80,8 @@ async function serve(opts: {
   status?: Status;
   canWrite?: boolean;
   port?: ManagedSignInPort | null;
+  /** The bot a `?bot=` page may be opened for. */
+  bot?: { id: string; email: string; botId: string; name: string };
 }) {
   const manuals = opts.manuals ?? [PERSONAL];
   const status = opts.status ?? {};
@@ -124,6 +126,7 @@ async function serve(opts: {
       publicBackendUrl: 'http://localhost:3000',
       publicFrontendUrl: 'http://localhost:5173',
       managedSignIns: () => (opts.port === undefined ? port : opts.port),
+      ...(opts.bot ? { bots: { actAs: async (_e: string, id: string) => (id === opts.bot!.botId ? opts.bot! : null) } } : {}),
     }),
   );
   const httpServer = await new Promise<HttpServer>((resolve) => {
@@ -169,6 +172,22 @@ describe('POST /api/secrets/tools/:slug/vars/:var/oauth/start on a managed sign-
       ref: { connectorId: 'microsoft365', scopeSet: 'read' },
       returnTo: '/skills-and-tools/connect',
     });
+    expect(beginToolOAuthByKey).not.toHaveBeenCalled();
+  });
+
+  it("refuses it on a bot's page, never asking the port: the broker's completion cannot re-check the person", async () => {
+    const { base, beginToolOAuthByKey } = await serve({
+      auth: { userId: 'u1', email: 'a@x.com' },
+      bot: { id: 'u-ops', email: 'ops@agent.hexis', botId: 'ops', name: 'Ops' },
+    });
+    const res = await fetch(`${base}/api/secrets/tools/microsoft365/vars/ACCESS_TOKEN/oauth/start?bot=ops`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/cannot be connected for a bot yet/);
+    expect(start).not.toHaveBeenCalled();
     expect(beginToolOAuthByKey).not.toHaveBeenCalled();
   });
 

@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { checkToolConnection, type ProbeVerdict } from '../services/tool-secrets.api';
 import { PROBE_UNREACHABLE } from './probe-verdict';
+import { useActingForBot } from '../services/acting-for';
 
 /**
  * Probe a tool's credential after it is SAVED, and hold the answer.
@@ -46,6 +47,13 @@ export type ProbeResult =
 interface Asked {
   slug: string;
   stamp: number;
+  /**
+   * WHOSE credential: the bot's id on a page acting for one, else null for
+   * the person. The Connect page keeps its rows mounted when its "Connect
+   * as" choice changes, so a verdict about the person's credential would
+   * otherwise sit beside the bot's variable of the same name.
+   */
+  bot: string | null;
 }
 
 /** An answer, with the configuration it is an answer ABOUT. */
@@ -112,6 +120,9 @@ export interface SavedKeyProbe {
  *   nothing and every stamp is 0.
  */
 export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
+  // The credential probed is the one just saved: the bot's on a page acting
+  // for one, else the person's.
+  const bot = useActingForBot();
   const [answer, setAnswer] = useState<Stamped | null>(null);
   /** What the probe in flight is about, or null — `checking` is DERIVED from it. */
   const [inFlight, setInFlight] = useState<Asked | null>(null);
@@ -128,7 +139,7 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
   const seq = useRef(0);
 
   /** Is this what is on screen right now? */
-  const current = (asked: Asked) => asked.slug === slug && asked.stamp === stamp;
+  const current = (asked: Asked) => asked.slug === slug && asked.stamp === stamp && asked.bot === bot;
 
   // In-flight against the CURRENT configuration only: a definition edit or a
   // tool switch mid-probe hands the button back immediately instead of waiting
@@ -138,7 +149,7 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
 
   const run = useCallback(async () => {
     const mine = ++seq.current;
-    const asked: Asked = { slug, stamp };
+    const asked: Asked = { slug, stamp, bot };
     setInFlight(asked);
     // A replacement probe makes a previous TRANSPORT failure history the
     // moment it starts — leaving that alert up while "Testing…" runs reads as
@@ -146,12 +157,12 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
     // still the last thing the provider said, and blanking it would make a
     // re-test look like it had lost the answer.
     setAnswer((prev) =>
-      prev && prev.slug === asked.slug && prev.stamp === asked.stamp && prev.result.kind === 'verdict'
+      prev && prev.slug === asked.slug && prev.stamp === asked.stamp && prev.bot === asked.bot && prev.result.kind === 'verdict'
         ? prev
         : null,
     );
     try {
-      const verdict = await checkToolConnection(slug);
+      const verdict = await checkToolConnection(slug, bot);
       // Newest-probe guard only: everything published is STAMPED and compared
       // at render, so a probe that raced a definition change stores state that
       // simply never shows — no clock to synchronise, no ref read mid-render.
@@ -189,7 +200,7 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
       // must not clear a newer probe's in-flight marker.
       if (seq.current === mine) setInFlight(null);
     }
-  }, [slug, stamp]);
+  }, [slug, stamp, bot]);
 
   const forget = useCallback(() => {
     seq.current++;
@@ -206,14 +217,14 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
       // but the newest save is the only row where the claim is current, and a
       // stale one left behind on a sibling row is exactly the thing being
       // fixed here.
-      setSubject({ slug, stamp, name: nextSubject ?? null });
+      setSubject({ slug, stamp, bot, name: nextSubject ?? null });
       // NOT awaited, and never on the save's critical path: the value is already
       // stored by the time this is called, and a probe that hangs, fails or is
       // missing entirely must cost the person nothing. The floating promise is
       // the point.
       void run();
     },
-    [run, slug, stamp],
+    [run, slug, stamp, bot],
   );
 
   return {

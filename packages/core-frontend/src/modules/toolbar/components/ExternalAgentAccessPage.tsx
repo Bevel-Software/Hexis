@@ -23,7 +23,7 @@ import { AgentInstructionsCard } from './AgentInstructionsCard';
 import { CONNECT_TOOLS_PATH } from '../../library';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin';
-import { connectedAsLabel, listAgentChoices, useConnectAsChoice } from '../../agents';
+import { connectedAsLabel, listBotChoices, useConnectAsChoice } from '../../agents';
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import {
   type ExternalApiKeySummary,
@@ -98,9 +98,9 @@ export function ExternalAgentAccessPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [label, setLabel] = useState('');
-  // "Connect as" for a new key: Everything unless an agent is picked. Until
-  // the agents answer, a key would be minted as Everything by default; when
-  // they could not be loaded, an Everything key waits to be confirmed.
+  // "Connect as" for a new key: Myself unless a bot is picked. Until the bots
+  // answer, a key would be minted as Myself by default; when they could not
+  // be loaded, a key as Myself waits to be confirmed.
   const connectAs = useConnectAsChoice();
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -134,17 +134,17 @@ export function ExternalAgentAccessPage() {
     void refresh();
   }, [refresh]);
 
-  // The agents a key may be minted as. A failure costs only the choice —
-  // Everything is always on offer — and is shown, not passed off as none.
+  // The bots a key may be minted as. A failure costs only the choice —
+  // Myself is always on offer — and is shown, not passed off as none.
   const settleConnectAs = connectAs.settle;
   useEffect(() => {
     let cancelled = false;
-    listAgentChoices().then(
-      (agents) => {
-        if (!cancelled) settleConnectAs({ agents });
+    listBotChoices().then(
+      (bots) => {
+        if (!cancelled) settleConnectAs({ bots });
       },
       () => {
-        if (!cancelled) settleConnectAs({ agents: [], failed: true });
+        if (!cancelled) settleConnectAs({ bots: [], failed: true });
       },
     );
     return () => {
@@ -531,9 +531,20 @@ export function ExternalAgentAccessPage() {
           <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-ink-muted leading-snug">
               For autonomous agents and pipelines (CI, scheduled jobs) that can't open a browser to
-              sign in. Create an external API key and give it to the agent. Each key carries your
-              identity, so any saves the agent makes appear under your name. And it only gets the
-              tools you've already connected on the Connect your tools page.
+              sign in. Create an external API key and give it to the agent.{' '}
+              {connectAs.value === null ? (
+                <>
+                  A key made as yourself carries your identity, so any saves the agent makes appear
+                  under your name. And it only gets the tools you've already connected on the Connect
+                  your tools page.
+                </>
+              ) : (
+                <>
+                  A key made as a bot carries the bot's identity, not yours: the agent reaches only what
+                  the bot is granted, its saves appear under the bot's name with you recorded as the
+                  person who made the key, and it uses the bot's own tool sign-ins.
+                </>
+              )}
             </p>
 
             <div className="border border-line rounded p-3 space-y-2">
@@ -561,10 +572,9 @@ export function ExternalAgentAccessPage() {
                 </button>
               </div>
               <ConnectAsChoice
-                agents={connectAs.agents}
+                bots={connectAs.bots}
                 value={connectAs.value}
                 disabled={creating}
-                hint="What the key loads. An agent narrows it to the tools, skills and plugins its configuration lists, and only those you may read."
                 onChange={connectAs.setValue}
                 unavailable={connectAs.unavailable}
               />
@@ -608,14 +618,9 @@ export function ExternalAgentAccessPage() {
                         <div className="flex-1 min-w-0">
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
-                            {/* Only a key made as an agent says so; Everything is what a key
-                                is unless it says otherwise, and needs no tag. */}
-                            {k.agentPath && (
-                              <>
-                                <span title={k.agentPath}>As {connectedAsLabel(k.agentPath)}</span> ·{' '}
-                              </>
-                            )}
-                            Created{' '}
+                            {/* Every key says as whom it connects: "you", a bot, or a
+                                bot it stopped acting as and why. */}
+                            {connectedAsLabel(k.connectedAs)} · Created{' '}
                             {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
                             {/* A key an admin took is not one you can reconnect — say so,
                                 or people try. Your own disconnect keeps its word. */}

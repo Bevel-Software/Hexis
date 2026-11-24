@@ -384,7 +384,7 @@ export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'>
  * `definitionPath` (a `.tool` file, or the MCP server definition a server
  * entry came from) is one the connection loads. Applied AFTER the caller's
  * read gate, so it can only take manuals away. The agent surfaces pass the
- * connection scope's `allowsConnector` (`modules/agent-scope`); absent is the
+ * connection scope's `connectorFilter` (`modules/agent-scope`); absent is the
  * whole readable catalog.
  */
 export type ConnectorScope = (definitionPath: string) => boolean;

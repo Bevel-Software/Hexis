@@ -13,6 +13,11 @@ export interface RoleRosterEntry {
   /** Individual members — emails only; group assignments live in `groups`. */
   members: string[];
   /**
+   * The {@link members} that are bots: a bot holds no role, so the line grants
+   * it nothing. Marked "Bot", never shown as a person. Absent from older servers.
+   */
+  bots?: string[];
+  /**
    * Emails the SERVER CONFIGURATION makes members, whatever `roles.yaml` says
    * — the deployment admins (`ADMIN_EMAIL`) on Admin, empty elsewhere. The
    * page renders these first, badged and with no remove control, and refuses

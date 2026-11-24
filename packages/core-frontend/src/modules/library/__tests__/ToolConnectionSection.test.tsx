@@ -3,19 +3,11 @@ import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { buttonClasses, type ButtonSize } from '../../../shared/components';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import {
-  checkToolConnection,
-  deleteAdminVar,
-  setAdminVar,
-  type ProbeVerdict,
-  type ToolSecrets,
-  type ToolSetup,
-} from '../../secrets-vault/services/tool-secrets.api';
+import { AuthContext, type AuthContextValue } from '../../auth';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { deleteAdminVar, setAdminVar, type ProbeVerdict, type ToolSecrets } from '../../secrets-vault';
+
+type ToolSetup = NonNullable<ToolSecrets['setup']>;
 
 /**
  * The section frame: the Secrets deep link, the setup banner's three audiences,
@@ -23,12 +15,18 @@ import {
  * the only order that means anything to the person who wrote it).
  */
 
+// The probe's request is made inside the secrets module (`useSavedKeyProbe`
+// calls it), so only a stand-in for that file reaches it; the suite holds the
+// stand-in itself and imports everything else through the module's entry.
+const { checkToolConnection } = vi.hoisted(() => ({
+  checkToolConnection: vi.fn<(slug: string, bot?: string | null) => Promise<ProbeVerdict>>(),
+}));
 vi.mock('../../secrets-vault/services/tool-secrets.api', () => ({
   setAdminVar: vi.fn(),
   setUserVar: vi.fn(),
   deleteAdminVar: vi.fn(),
   setOAuthClientSecret: vi.fn(),
-  checkToolConnection: vi.fn(),
+  checkToolConnection,
 }));
 vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.fn() }));
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
@@ -414,7 +412,7 @@ describe('ToolConnectionSection', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Test connection: github' }));
 
       await waitFor(() => expect(screen.getByTestId('tool-health')).toHaveTextContent('Connected'));
-      expect(checkToolConnection).toHaveBeenCalledWith('github');
+      expect(checkToolConnection).toHaveBeenCalledWith('github', null);
     });
 
     it("goes red with the provider's own words when the credential is rejected", async () => {

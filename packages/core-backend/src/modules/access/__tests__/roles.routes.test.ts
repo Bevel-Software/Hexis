@@ -11,7 +11,7 @@ import { realDisk } from '../../../__tests__/real-disk.js';
 
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/index.js';
-import { realAuthService } from '../../../__tests__/real-auth.js';
+import { realAuthService, noBotAddresses } from '../../../__tests__/real-auth.js';
 import type { VersionControlService } from '../../version-control/index.js';
 import type { VersionControlEventBus } from '../../version-control/index.js';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
@@ -173,7 +173,7 @@ async function makeHarness(
 
   // The real auth service over the same double, so the promotion's switch
   // lock and read run as they do in production (`whileSwitchedOn`).
-  const authService = realAuthService(db, { jwtSecret: 'test', adminEmail: '', adminPassword: '', allowedEmailDomains: [] });
+  const authService = realAuthService(db, { jwtSecret: 'test', adminEmail: '', adminPassword: '', allowedEmailDomains: [] }, undefined, noBotAddresses);
   vi.spyOn(authService, 'getUserById').mockImplementation(async () => ADMIN);
 
   const app = express();

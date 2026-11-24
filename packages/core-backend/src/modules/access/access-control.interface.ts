@@ -186,6 +186,14 @@ export interface AccessDecision {
 }
 
 export interface IAccessControl {
+  /**
+   * Whether `email` is a bot's address (`modules/bots`): an identity that is
+   * judged by its own grants and its groups' only, holds no role and is no
+   * admin. Synchronous: the deployment's bots are held in
+   * memory.
+   */
+  isBot(email: string): boolean;
+
   /** True iff `userEmail` has `write` on `relativePath` per the current access tree. */
   canWrite(workspaceId: string, userEmail: string, relativePath: string): Promise<boolean>;
 

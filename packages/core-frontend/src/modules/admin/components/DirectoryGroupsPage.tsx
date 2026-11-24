@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Banner } from '../../../shared/components/Banner';
+import { Badge } from '../../../shared/components/Badge';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
 import { useAppRegistry } from '../../../core/registry';
@@ -612,6 +613,12 @@ function ManualGroupCard({
               className="inline-flex max-w-full items-center gap-1.5 px-1.5 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
             >
               <span className="min-w-0 truncate max-w-[14rem]">{member}</span>
+              {/* A bot is a member like a person, and is marked as what it is. */}
+              {group.bots?.includes(member) && (
+                <Badge tone="neutral" className="shrink-0">
+                  Bot
+                </Badge>
+              )}
               <button
                 type="button"
                 onClick={() => submitRemove(member)}

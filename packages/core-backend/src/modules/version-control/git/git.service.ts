@@ -27,6 +27,7 @@ import type { VersionControlHooks, CommitValidationContext } from '../version-co
 import type { IAccessControl } from '../../access/index.js';
 import { AccessDeniedError, PushAccessRefusedError } from '../../access-model/index.js';
 import { canonicalEmail } from '../../../shared/email-identity.js';
+import { madeByTrailer } from '../made-by.js';
 import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { utf8Text } from '../../../shared/utf8-text.js';
@@ -281,6 +282,16 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
     if (isAbsence(err)) return false;
     throw err;
   }
+}
+
+/**
+ * The trailer paragraph a BOT's commit carries (`Made-by: <person>`), so
+ * the change names the person behind the bot beside the bot as its author;
+ * nothing for a person's own commit.
+ */
+function madeByArgs(madeBy: { name: string; email: string } | undefined): string[] {
+  const trailer = madeByTrailer(madeBy);
+  return trailer ? ['-m', trailer] : [];
 }
 
 /**
@@ -1180,6 +1191,7 @@ export class GitService implements IGitService {
       if (req.description && req.description.trim()) {
         args.push('-m', req.description.trim());
       }
+      args.push(...madeByArgs(user.madeBy));
       await this.git(cwd, args);
       // The commit exists from here on: reported now, before the attribution
       // read, which can fail without unmaking it — with the files the commit
@@ -1348,6 +1360,7 @@ export class GitService implements IGitService {
         'commit',
         `--author=${user.name} <${user.email}>`,
         '-m', subject,
+        ...madeByArgs(user.madeBy),
       ]);
       // The commit exists from here on: reported now, before the attribution
       // read, which can fail without unmaking it — with the files the commit
@@ -1477,12 +1490,12 @@ export class GitService implements IGitService {
         }
         await this.git(
           cwd,
-          ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, ...pathspecArgs],
+          ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, ...madeByArgs(user.madeBy), ...pathspecArgs],
           { input: pathspecInput },
         );
       } else {
         await this.git(cwd, ['add', '-A']);
-        await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject]);
+        await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', subject, ...madeByArgs(user.madeBy)]);
       }
 
       // CONTRACT: past this point the commit EXISTS, so this method must not
@@ -1920,7 +1933,7 @@ export class GitService implements IGitService {
     // NUL-delimited and with renames as a delete plus an add, so every path is
     // named verbatim, both ends of a rename included.
     const { stdout: merged } = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-renames', '-z']);
-    await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body]);
+    await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body, ...madeByArgs(user.madeBy)]);
     this.accessControl?.invalidate(workspaceId);
     this.landed(workspaceId, branch, user, merged.split('\0').filter(Boolean));
     // The publish runs here, inside the reservation the merge was made in,
@@ -2103,7 +2116,8 @@ export class GitService implements IGitService {
       requireCleanTarget?: boolean;
       /**
        * Decide whether `user` may land this merge, given the target commit it
-       * is actually built on and every path it writes. Throwing refuses, and
+       * is actually built on (`sha`), the source commit it merges
+       * (`sourceSha`) and every path it writes. Throwing refuses, and
        * refuses before anything is committed or pushed.
        *
        * Also here rather than in the caller, and for the same reason: the
@@ -2113,7 +2127,7 @@ export class GitService implements IGitService {
        * below is what makes the ref current, and a fetch that fails throws
        * instead of falling back to the stale one.
        */
-      authorize?: (target: { sha: string; changedPaths: string[] }) => Promise<void>;
+      authorize?: (target: { sha: string; sourceSha: string; changedPaths: string[] }) => Promise<void>;
       /**
        * The change request this merge applies, when it is one (the agent
        * `merge_branch` path merges no request and leaves it unset).
@@ -2193,13 +2207,16 @@ export class GitService implements IGitService {
           // that tip. Re-read every attempt: a retry happens BECAUSE the
           // target moved, which can move its roles and its file set too.
           const { stdout: targetSha } = await this.git(cwd, ['rev-parse', `origin/${targetBranch}`]);
+          // And the source commit this attempt merges, so a caller that read
+          // the request at one head can refuse when the source moved since.
+          const { stdout: sourceSha } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}`]);
           const changedPaths = await this.prChangedPathsAt(
             cwd,
             `origin/${targetBranch}`,
             `origin/${sourceBranch}`,
             { forAccessCheck: true },
           );
-          await opts.authorize({ sha: targetSha.trim(), changedPaths });
+          await opts.authorize({ sha: targetSha.trim(), sourceSha: sourceSha.trim(), changedPaths });
         }
 
         // `--no-commit --no-ff` so we author the merge commit as the human and
@@ -2252,6 +2269,7 @@ export class GitService implements IGitService {
           `--author=${user.name} <${user.email}>`,
           '-m', commit.subject,
           '-m', commit.body,
+          ...madeByArgs(user.madeBy),
         ]);
         const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
 
@@ -3833,6 +3851,31 @@ export class GitService implements IGitService {
       const at = pinned ?? (await this.publishedPrEnds(cwd, baseBranch, headBranch));
       return flattenChangedPaths(await this.prChangedEntriesBetweenCommits(cwd, at.base, at.head), opts);
     });
+  }
+
+  /**
+   * Every path a change request's merge WRITES, between the two commits a
+   * caller already holds (a detail's `baseSha` and `headSha`): the
+   * authorizing set (`forAccessCheck`) — `roles.yaml` kept, both sides of
+   * every rename — so a reader judging "may this be applied" asks about
+   * exactly the paths the merge's own check will. Read through
+   * `prChangedEntriesBetweenCommits`, which memoizes per pair of commits: a
+   * second reading of the same pair runs no second `git diff`, while the
+   * detail's displayed file list (`changedFilesForPr`) runs a diff of its own.
+   * Both ends must be FULL object names (40 hex characters, or 64 in a
+   * SHA-256 repository): they are the memo's key, and an abbreviation would
+   * key one pair of commits two ways.
+   */
+  async writtenPathsBetweenCommits(workspaceId: string, baseSha: string, headSha: string): Promise<string[]> {
+    for (const sha of [baseSha, headSha]) {
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) {
+        throw new VersionControlValidationError(`invalid commit sha: ${sha}`);
+      }
+    }
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () =>
+      flattenChangedPaths(await this.prChangedEntriesBetweenCommits(cwd, baseSha, headSha), { forAccessCheck: true }),
+    );
   }
 
   /**

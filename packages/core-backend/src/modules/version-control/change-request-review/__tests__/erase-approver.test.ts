@@ -74,7 +74,9 @@ describe('ChangeRequestReviewService.eraseApprover', () => {
       name: 'Deleted user',
     });
 
-    expect(h.order).toEqual(['timeout', 'gate:exclusive', 'update:pr_file_approvals']);
+    // The approver's own rows, then the rows that name them as the person
+    // behind a bot's approval (`modules/bots`).
+    expect(h.order).toEqual(['timeout', 'gate:exclusive', 'update:pr_file_approvals', 'update:pr_file_approvals']);
     // Exclusive on the every-request key (0) of the approval lock's class —
     // the shared form is what the per-request writers take, not this.
     expect(h.locked).toEqual([[4207, 0]]);
@@ -93,12 +95,19 @@ describe('ChangeRequestReviewService.eraseApprover', () => {
         approverEmailBidx: 'deleted-1@erased.invalid',
         approverName: 'Deleted user',
       },
+      {
+        madeByEmail: 'deleted-1@erased.invalid',
+        madeByEmailBidx: 'deleted-1@erased.invalid',
+        madeByName: 'Deleted user',
+      },
     ]);
     // WHICH rows: the ones whose blind index is the erased address's. The
     // address column holds randomized ciphertext, so a match on it finds
     // nothing — the rewrite would report success having rewritten no row, and
     // every approval of the erased person would keep their name.
-    expect(h.wheres).toHaveLength(1);
+    expect(h.wheres).toHaveLength(2);
+    expect(h.wheres[1]!.sql).toMatch(/"made_by_email_bidx" = \$1$/);
+    expect(JSON.stringify(h.wheres[1]!.params)).toContain('bob@bevel.software');
     expect(h.wheres[0]!.sql).toMatch(/"approver_email_bidx" = \$1$/);
     expect(h.wheres[0]!.sql).not.toMatch(/"approver_email" =/);
     expect(JSON.stringify(h.wheres[0]!.params)).toContain('bob@bevel.software');

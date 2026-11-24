@@ -242,17 +242,17 @@ describe('get_agent_guide', () => {
   });
 
   /**
-   * A connection made as an agent configuration is told so at the top of the
+   * A connection made as a bot is told so at the top of the
    * guide it is sent to read first (the handshake's opening line points
    * there): the start section and the whole guide open with the line naming
-   * the agent. The sections list and every single section are the same text
-   * Everything gets.
+   * the bot. The sections list and every single section are the same text
+   * Myself gets.
    */
-  it('opens the guide with the connection line for a connection made as an agent, and changes nothing else', async () => {
-    const agent = { path: 'Agents/ship-it-reviewer.agent', name: 'Ship It reviewer' };
-    const narrowed = ConnectionScope.narrowed(agent, { skills: [], connectors: [], platformTools: null }, 'fp');
+  it('opens the guide with the connection line for a connection made as a bot, and changes nothing else', async () => {
+    const agent = { path: 'ship-it@agent.hexis', name: 'Ship It reviewer' };
+    const narrowed = ConnectionScope.asBot(agent, null, 'fp');
     const line = narrowed.describe()!;
-    expect(line).toContain('"Ship It reviewer" (`Agents/ship-it-reviewer.agent`)');
+    expect(line).toContain('"Ship It reviewer" (ship-it@agent.hexis)');
     const platform = await agentGuideSections(DEFAULT_KB_LAYOUT);
     const index = platform.map((s) => ({ id: s.id, title: s.title }));
     const start = platform.find((s) => s.id === START_HERE_SECTION_ID)!;
@@ -277,8 +277,8 @@ describe('get_agent_guide', () => {
       title: access.title,
     });
 
-    // Everything: no line, no `connection`.
-    const asEverything = await serve(ConnectionScope.everything());
+    // Myself: no line, no `connection`.
+    const asEverything = await serve(ConnectionScope.myself());
     asEverything.sectionsNow([...platform]);
     expect((await asEverything.call()).body).toEqual({
       guide: start.body,

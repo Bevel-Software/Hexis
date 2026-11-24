@@ -12,23 +12,31 @@ import { toolDef } from '../../tool-helpers/index.js';
 import type { ConnectionScopeWire } from '../../agent-scope/index.js';
 
 /**
- * The MCP proxy's half of connecting as an agent. The surfaces behind the
+ * The MCP proxy's half of connecting as a bot. The surfaces behind the
  * loopback do the narrowing (pinned in the agent-scope suites); what the proxy
  * owns is the WORDING and the CACHE: a tool off a narrowed surface is refused
- * by name and agent rather than as unknown, a connection whose file is gone is
- * served an empty listing with the reason, the handshake says what the
- * connection is connected as, and two connections of one person made as
- * different agents never share a built surface.
+ * by name and bot rather than as unknown, a connection whose bot cannot be
+ * used is served an empty listing with the reason, the handshake says what
+ * the connection is connected as, and two connections of one person made as
+ * different bots never share a built surface.
  *
  * The loopback here answers each bearer as the agent surfaces would answer
- * that credential: `bevel_all` is Everything, `bevel_narrow` an agent that
- * loads `read_file` alone, `bevel_gone` one whose file was deleted.
+ * that credential: `bevel_all` is Myself, `bevel_narrow` a bot that loads
+ * `read_file` alone, `bevel_gone` one whose bot is gone for its maker.
  */
 
-const NARROW: ConnectionScopeWire = { agent: { path: 'Agents/narrow.agent', name: 'narrow' } };
+const NARROW: ConnectionScopeWire = { agent: { path: 'narrow@agent.hexis', name: 'narrow' } };
+/**
+ * A bot gone for its maker, on the wire as the deployment puts it: the
+ * connection's own choice as `path` (nothing read from the bot), a fixed
+ * label as its name, and the one sentence the bots mechanism says for it
+ * (`GONE_SENTENCE`).
+ */
 const GONE: ConnectionScopeWire = {
-  agent: { path: 'Agents/gone.agent', name: 'Agents/gone.agent' },
-  unavailable: 'This connection was made as the agent file `Agents/gone.agent`, which no longer exists.',
+  agent: { path: 'u-gone', name: 'a bot' },
+  unavailable:
+    'This connection was made as a bot that no longer exists or that you may no longer act as, ' +
+    'so it loads nothing. Make a new connection as yourself or as a bot you may act as.',
 };
 const CONNECTIONS: Record<string, ConnectionScopeWire | undefined> = {
   bevel_all: undefined,
@@ -139,19 +147,19 @@ describe('a narrowed connection', () => {
   it('lists what its agent loads, and refuses another tool by name and agent — not as unknown', async () => {
     const { mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    const client = await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' });
+    const client = await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-narrow', agentPath: null } });
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toContain('read_file');
     expect(names).not.toContain('edit_file');
     const refused = await client.callTool({ name: 'edit_file', arguments: {} });
     expect(refused.isError).toBe(true);
     expect(textOf(refused)).toBe(
-      'The tool "edit_file" is not available to this connection: it is connected as the agent "narrow" ' +
-        '(`Agents/narrow.agent`), which does not load it.',
+      'The tool "edit_file" is not available to this connection: it acts as the bot "narrow" ' +
+        '(narrow@agent.hexis), which is not offered it.',
     );
   });
 
-  it('Everything still answers an unknown tool as unknown', async () => {
+  it('Myself still answers an unknown tool as unknown', async () => {
     const { mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const client = await connect(mcp, {});
@@ -159,18 +167,22 @@ describe('a narrowed connection', () => {
       expect.arrayContaining(['read_file', 'edit_file']),
     );
     expect(textOf(await client.callTool({ name: 'nope', arguments: {} }))).toBe('Unknown tool "nope".');
+    // A tool offered only to a bot is refused by why, never "unknown".
+    expect(textOf(await client.callTool({ name: 'apply_change_request', arguments: { number: 1 } }))).toMatch(
+      /offered only to a connection made as a bot/,
+    );
   });
 
-  it('tells the agent at the handshake what it is connected as; Everything is told what it always was', async () => {
+  it('tells the agent at the handshake what it is connected as; Myself is told what it always was', async () => {
     const { mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    const narrowed = (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' }, true)).getInstructions();
+    const narrowed = (await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-narrow', agentPath: null } }, true)).getInstructions();
     const everything = (await connect(mcp, {}, true)).getInstructions();
     expect(narrowed).toBe(
-      `${everything}\n\nThis connection is connected as the agent "narrow" (\`Agents/narrow.agent\`): it loads only the ` +
-        'platform tools, connectors, skills and plugins that file lists, and of those only what you may read.',
+      `${everything}\n\nThis connection acts as the bot "narrow" (narrow@agent.hexis), not as the person who made it: ` +
+        "every read, write, skill and tool is judged for the bot's own access, with the bot's secrets and tool sign-ins.",
     );
-    expect(everything).not.toContain('connected as the agent');
+    expect(everything).not.toContain('acts as the bot');
     // Both open with the line that sends the agent to the guide, which names
     // the connection whole; the connection line stays last.
     for (const text of [narrowed, everything]) {
@@ -180,21 +192,21 @@ describe('a narrowed connection', () => {
     }
   });
 
-  it('two connections of one person made as different agents never share a built surface', async () => {
+  it('two connections of one person made as different bots never share a built surface', async () => {
     const { state, mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    await (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' })).listTools();
-    await (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/other.agent' })).listTools();
-    await (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' })).listTools();
+    await (await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-narrow', agentPath: null } })).listTools();
+    await (await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-other', agentPath: null } })).listTools();
+    await (await connect(mcp, { bearer: 'bevel_narrow', connectionChoice: { botUserId: 'bot-narrow', agentPath: null } })).listTools();
     expect(state.builds).toBe(2);
   });
 });
 
-describe('a connection whose agent file is gone', () => {
+describe('a connection whose bot is gone', () => {
   it('is served an empty listing carrying the reason, and every call — meta-tools too — answers it', async () => {
     const { mcp } = await harness();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    const client = await connect(mcp, { bearer: 'bevel_gone', agentPath: 'Agents/gone.agent' });
+    const client = await connect(mcp, { bearer: 'bevel_gone', connectionChoice: { botUserId: 'bot-gone', agentPath: null } });
     const listed = await client.listTools();
     expect(listed.tools).toEqual([]);
     expect(listed._meta).toEqual({ [CONNECTION_META_KEY]: GONE.unavailable });
@@ -203,7 +215,8 @@ describe('a connection whose agent file is gone', () => {
       expect(res.isError).toBe(true);
       expect(textOf(res)).toBe(GONE.unavailable);
     }
-    const instructions = (await connect(mcp, { bearer: 'bevel_gone', agentPath: 'Agents/gone.agent' }, true)).getInstructions();
+    const instructions = (await connect(mcp, { bearer: 'bevel_gone', connectionChoice: { botUserId: 'bot-gone', agentPath: null } }, true)).getInstructions();
     expect(instructions?.endsWith(GONE.unavailable!)).toBe(true);
+    expect(instructions).toContain('made as a bot that no longer exists');
   });
 });

@@ -3,8 +3,8 @@ import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { AccountErasureService, type IErasureParticipant } from '../account-erasure.service.js';
-import type { Database } from '../../database/connection.js';
-import { ChangeRequestReviewService } from '../../version-control/change-request-review/change-request-review.service.js';
+import type { Database } from '../../database/index.js';
+import { ChangeRequestReviewService } from '../../../__tests__/tool-wiring.js';
 
 /**
  * Erasing an account rewrites the person's name and address out of every
@@ -51,7 +51,7 @@ function statementText(statement: { queryChunks?: unknown[] }): string {
     .join(' ');
 }
 
-function harness(opts: { participants?: IErasureParticipant[] } = {}) {
+function harness(opts: { participants?: IErasureParticipant[]; row?: Record<string, unknown> } = {}) {
   /** Everything the erasure did, in order, as `<verb>:<table>` / lock labels. */
   const order: string[] = [];
   const locked: unknown[][] = [];
@@ -103,7 +103,7 @@ function harness(opts: { participants?: IErasureParticipant[] } = {}) {
               .select(fields as never)
               .from(table as never)
               .where(condition as never),
-            { limit: async () => [{ id: 'u1', email: 'Bob@Bevel.software', name: 'Bob' }] },
+            { limit: async () => [opts.row ?? { id: 'u1', email: 'Bob@Bevel.software', name: 'Bob' }] },
           ),
       }),
     }),
@@ -179,9 +179,15 @@ describe('AccountErasureService: approvals are rewritten under the approval lock
     const committed = h.order.indexOf('delete:users');
     const sweep = h.order.indexOf('after-commit:pr_file_approvals');
     expect(sweep).toBeGreaterThan(committed);
-    // The change requests get the same treatment, twice: once for the
-    // authorship, once for the refusal note of an apply that was in flight.
-    expect(h.order.filter((step) => step === 'after-commit:change_requests')).toHaveLength(2);
+    // The change requests get the same treatment, three times: once for the
+    // authorship, once for the person behind a bot that opened one, once for
+    // the refusal note of an apply that was in flight.
+    expect(h.order.filter((step) => step === 'after-commit:change_requests')).toHaveLength(3);
+    // The person behind a bot, on every record that names them beside it: an
+    // approval (twice with the approver pass), a merge and a queued save.
+    expect(h.order.filter((step) => step === 'after-commit:pr_file_approvals')).toHaveLength(2);
+    expect(h.order).toContain('after-commit:pr_merge_log');
+    expect(h.order).toContain('after-commit:pending_commits');
     // Both guarded on `users`: the marker is only recorded for a clause that
     // names it, so a sweep that dropped the `notExists` lands here instead.
     expect(h.order.filter((step) => step.startsWith('unguarded:'))).toEqual([]);
@@ -209,5 +215,11 @@ describe('AccountErasureService: approvals are rewritten under the approval lock
     expect(h.order.indexOf('after-commit:pr_file_approvals')).toBeLessThan(
       h.order.indexOf('callback'),
     );
+  });
+
+  it("refuses a bot's row before touching anything: a bot is retired, never erased", async () => {
+    const h = harness({ row: { id: 'u-bot', email: 'ops@agent.hexis', name: 'Ops', botId: 'ops' } });
+    await expect(h.svc.eraseUser('u-bot')).rejects.toThrow(/This is a bot, not a person/);
+    expect(h.order).toEqual([]);
   });
 });

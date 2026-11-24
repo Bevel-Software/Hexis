@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { Loader2, Lock, UsersRound, X } from 'lucide-react';
+import { Bot, Loader2, Lock, UsersRound, X } from 'lucide-react';
+import { Badge } from '../../../shared/components/Badge';
 import { PageShell } from '../../../shared/components/PageShell';
 import { useLatestRef } from '../../../shared/components/useLatestRef';
 import { useAdmin } from '../state/admin.context';
@@ -187,6 +188,9 @@ function RoleCard({
   // server's own sentence (`roles-admin.service.ts`), sent with the roster so
   // the page holds no copy of it to drift.
   const fixedNote = role.fixedMembersNote ?? null;
+  // Members that are bots: a bot holds no role, so the line grants it nothing.
+  // Marked "Bot", as on Groups & Members, never shown as a person.
+  const botLower = new Set((role.bots ?? []).map((m) => m.toLowerCase()));
 
   // Members shown in the UI = server members minus any optimistically-removed,
   // plus any optimistically-added not yet reflected in the server roster.
@@ -446,9 +450,14 @@ function RoleCard({
                 className="inline-flex max-w-full items-center gap-1.5 pl-1 pr-1.5 py-1 bg-sunken border border-line rounded-full text-xs text-ink"
               >
                 <span className="w-5 h-5 shrink-0 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center">
-                  {initials(email)}
+                  {botLower.has(email.toLowerCase()) ? <Bot size={11} aria-hidden="true" /> : initials(email)}
                 </span>
                 <span className="min-w-0 truncate max-w-[14rem]">{email}</span>
+                {botLower.has(email.toLowerCase()) && (
+                  <Badge tone="neutral" className="shrink-0" title="A bot holds no role; this line grants it nothing.">
+                    Bot
+                  </Badge>
+                )}
                 <button
                   type="button"
                   onClick={() => handleRemoveMember(email)}

@@ -82,7 +82,7 @@ describe('ToolSecretsPanel: an answer belongs to the tool it was asked about', (
     // And it is not merely hidden for a frame: nothing brings it back.
     await waitFor(() => expect(screen.queryByTestId('saved-key-probe')).toBeNull());
     expect(api.checkToolConnection).toHaveBeenCalledTimes(1);
-    expect(api.checkToolConnection).toHaveBeenCalledWith('github');
+    expect(api.checkToolConnection).toHaveBeenCalledWith('github', null);
   });
 
   it('probes the NEW tool when a key is saved after the swap', async () => {
@@ -100,7 +100,7 @@ describe('ToolSecretsPanel: an answer belongs to the tool it was asked about', (
     await waitFor(() =>
       expect(screen.getByTestId('saved-key-probe')).toHaveTextContent('Not working'),
     );
-    expect(api.setUserVar).toHaveBeenCalledWith('linear', 'API_KEY', 'k');
-    expect(api.checkToolConnection).toHaveBeenCalledWith('linear');
+    expect(api.setUserVar).toHaveBeenCalledWith('linear', 'API_KEY', 'k', null, null);
+    expect(api.checkToolConnection).toHaveBeenCalledWith('linear', null);
   });
 });

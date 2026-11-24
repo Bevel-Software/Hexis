@@ -16,8 +16,8 @@ import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { VersionControlEventBus } from '../version-control/index.js';
 import type { AuthService } from '../auth/index.js';
 import { ToolError, type ToolContext } from './tool.contract.js';
-import type { ToolAuth } from '../tool-auth/index.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { actingUser, type ToolAuth } from '../tool-auth/index.js';
+import { NOT_AVAILABLE_TO_CONNECTION, connectionOf } from '../agent-scope/index.js';
 
 export interface ToolContextDeps {
   authService: AuthService;
@@ -41,12 +41,6 @@ export interface ToolContextDeps {
   loadActiveGroups?: (
     read: (filename: string) => Promise<string | null>,
   ) => Promise<{ groups: GroupsIndex; sourceFile: string; health: { ok: boolean } }>;
-  /**
-   * Resolves the scope of a connection made as an agent configuration. Every
-   * deployment passes it. Absent, a credential that names an agent loads
-   * nothing — a narrowing that cannot be read is never read as Everything.
-   */
-  agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
 }
 
 /** A file's text, or null when it does not exist. Any other failure throws. */
@@ -78,8 +72,21 @@ export type ResolveToolContext = (
  */
 export function createToolContextResolver(deps: ToolContextDeps): ResolveToolContext {
   return async function resolveToolContext(auth, abortSignal, sessionId) {
-    const user = await deps.authService.getUserById(auth.userId);
-    if (!user) throw new ToolError('Your account is no longer available.', 401);
+    // A connection that loads nothing (made as a bot that cannot be used, or
+    // that its maker may no longer act as) is refused HERE, before anything is
+    // loaded for it. Every caller of a tool builds its context through this
+    // one resolver: the hosted routes and a plugin's own endpoint through
+    // `validateToken` alike. Such a connection keeps the person as its
+    // identity only so its refusal can be told; nothing runs as them.
+    const connectionScope = connectionOf(auth);
+    if (!connectionScope.loadsAnything()) {
+      throw new ToolError(connectionScope.describe() ?? 'This connection loads nothing.', 403, { code: NOT_AVAILABLE_TO_CONNECTION });
+    }
+    // A connection made as a bot acts as the bot's row; what it writes, opens
+    // and merges also names the person who made the connection.
+    const acting = await actingUser((id) => deps.authService.getUserById(id), auth);
+    if ('refused' in acting) throw new ToolError(acting.refused, 401);
+    const { user } = acting;
 
     const { loadActiveGroups } = deps;
     const validatorCache = new Map<string, WriteValidator>();
@@ -155,8 +162,6 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
       fsCache.set(branch, fs);
       return fs;
     };
-
-    const connectionScope = await resolveConnectionScope(deps.agentScope, user.email, auth.agentPath);
 
     return {
       user,

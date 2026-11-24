@@ -200,15 +200,15 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * /connect step: bind a one-time code to (user, client, redirect_uri, PKCE
    * challenge) and hand back the client redirect the browser should follow.
    *
-   * @param agentPath The "Connect as" choice — an agent configuration the consent
-   *   route has already checked the person may choose — or null for
-   *   Everything. Carried on the code to the exchange, which records it on
-   *   the agent connection.
+   * @param botUserId The "Connect as" choice — the row of a bot the consent
+   *   route has already checked the person may act as — or null for Myself.
+   *   Carried on the code to the exchange, which records it on the agent
+   *   connection.
    */
   async issueAuthCode(
     userId: string,
     st: McpAuthRequestState,
-    agentPath: string | null = null,
+    botUserId: string | null = null,
   ): Promise<{ redirectTo: string }> {
     // A state without a PKCE challenge is a Claude-link request, which the
     // marketplace bridge finishes; it must never reach the SDK's code store.
@@ -223,7 +223,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       scope: st.sc ?? null,
       resource: st.rs ?? null,
       expiresAt: new Date(Date.now() + CODE_TTL_MS),
-      ...(agentPath ? { agentPath } : {}),
+      ...(botUserId ? { botUserId } : {}),
     });
     const redirect = new URL(st.r);
     redirect.searchParams.set('code', code);
@@ -276,7 +276,13 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     if (redirectUri && redirectUri !== row.redirectUri) {
       throw new InvalidGrantError('redirect_uri does not match the authorization request');
     }
-    return this.mintTokens(row.userId, row.clientId, row.scope, row.resource, undefined, undefined, row.agentPath ?? null);
+    // A code minted before bots carries its "as an agent" choice as a path:
+    // kept on the connection as the legacy choice it is, which a call then
+    // resolves to its bot or refuses, never read as Myself.
+    return this.mintTokens(row.userId, row.clientId, row.scope, row.resource, undefined, undefined, {
+      botUserId: row.botUserId ?? null,
+      agentPath: row.botUserId ? null : (row.agentPath ?? null),
+    });
   }
 
   async exchangeRefreshToken(
@@ -471,6 +477,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
         clientId: oauthTokens.clientId,
         connectionId: oauthTokens.connectionId,
         agentPath: agentConnections.agentPath,
+        botUserId: agentConnections.botUserId,
         scope: oauthTokens.scope,
         resource: oauthTokens.resource,
         expiresAt: oauthTokens.expiresAt,
@@ -517,7 +524,9 @@ export class BevelOAuthProvider implements OAuthServerProvider {
         connectionId: row.connectionId,
         // The connection's "Connect as" choice, read off the row on every
         // verification, so a re-consent with another choice reaches the
-        // agent's very next request. Null is Everything.
+        // agent's very next request. Both null is Myself; `agentPath` is a
+        // legacy choice from before bots.
+        botUserId: row.botUserId ?? null,
         agentPath: row.agentPath ?? null,
       },
     };
@@ -587,8 +596,9 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    *   first mint, which finds or makes the live connection for (user, client).
    * @param tx The transaction the insert belongs to, when the mint must land
    *   with the statement that consumed the token it replaces (a refresh).
-   * @param agentPath The consent's "Connect as" choice, recorded on the
-   *   connection the pair is bound to (null: Everything). Only a first mint —
+   * @param choice The consent's "Connect as" choice, recorded on the
+   *   connection the pair is bound to (both null: Myself; `agentPath` only
+   *   for a code minted before bots). Only a first mint —
    *   a consent — passes it; a refresh leaves the connection's choice alone.
    *   The prune is then the caller's, before the transaction opens: a
    *   best-effort statement that fails inside a transaction would abort the
@@ -602,7 +612,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     resource: string | null,
     connectionId?: string,
     tx?: Tx,
-    agentPath?: string | null,
+    choice?: ConnectionChoiceColumns,
   ): Promise<OAuthTokens> {
     const accessToken = this.deps.tokenPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
     const refreshToken = this.refreshPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
@@ -610,7 +620,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     // A mint of its own (a sign-in) prunes here; a refresh pruned before its
     // transaction opened.
     if (!tx) await this.pruneTokenTables(now);
-    const boundTo = connectionId ?? (await this.ensureConnection(userId, clientId, agentPath));
+    const boundTo = connectionId ?? (await this.ensureConnection(userId, clientId, choice));
     const sink: Tx | Database = tx ?? this.deps.db;
     await sink.insert(oauthTokens).values({
       accessTokenHash: hashToken(accessToken),
@@ -685,19 +695,19 @@ export class BevelOAuthProvider implements OAuthServerProvider {
   }
 
   /**
-   * A live agent connection's current "Connect as" choice (`agentPath` null
-   * = Everything), or null when the connection is gone or revoked. Read on
+   * A live agent connection's current "Connect as" choice (both null =
+   * Myself), or null when the connection is gone or revoked. Read on
    * every request through the local server's exchanged grant: that token is
    * stateless and outlives a re-consent, so the choice it was minted with is
    * not the one it is served as — the row's is.
    */
-  async liveConnectionChoice(connectionId: string): Promise<{ agentPath: string | null } | null> {
+  async liveConnectionChoice(connectionId: string): Promise<{ botUserId: string | null; agentPath: string | null } | null> {
     const [row] = await this.deps.db
-      .select({ agentPath: agentConnections.agentPath })
+      .select({ botUserId: agentConnections.botUserId, agentPath: agentConnections.agentPath })
       .from(agentConnections)
       .where(and(eq(agentConnections.id, connectionId), isNull(agentConnections.revokedAt)))
       .limit(1);
-    return row ? { agentPath: row.agentPath ?? null } : null;
+    return row ? { botUserId: row.botUserId ?? null, agentPath: row.agentPath ?? null } : null;
   }
 
   /**
@@ -765,12 +775,13 @@ export class BevelOAuthProvider implements OAuthServerProvider {
    * winner's. The client's display name is snapshotted from its registration
    * at that moment.
    *
-   * `agentPath` is a consent's "Connect as" choice: written on the row made,
-   * and on the live row found — the person's latest consent is what the agent
-   * connects as. `undefined` (a refresh of a token from before connections
-   * existed) leaves a found row's choice as it is.
+   * `choice` is a consent's "Connect as" choice: written on the row made,
+   * and on the live row found — the person's latest consent is whom the
+   * agent connects as, and it replaces the row's earlier choice.
+   * `undefined` (a refresh of a token from before connections existed)
+   * leaves a found row's choice as it is.
    */
-  private async ensureConnection(userId: string, clientId: string, agentPath?: string | null): Promise<string> {
+  private async ensureConnection(userId: string, clientId: string, choice?: ConnectionChoiceColumns): Promise<string> {
     const [client] = await this.deps.db
       .select({ clientName: oauthClients.clientName })
       .from(oauthClients)
@@ -791,8 +802,11 @@ export class BevelOAuthProvider implements OAuthServerProvider {
         )
         .limit(1);
     const choose = async (id: string): Promise<string> => {
-      if (agentPath !== undefined) {
-        await this.deps.db.update(agentConnections).set({ agentPath }).where(eq(agentConnections.id, id));
+      if (choice !== undefined) {
+        await this.deps.db
+          .update(agentConnections)
+          .set({ botUserId: choice.botUserId, agentPath: choice.agentPath })
+          .where(eq(agentConnections.id, id));
       }
       return id;
     };
@@ -800,7 +814,14 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     if (existing) return choose(existing.id);
     const [inserted] = await this.deps.db
       .insert(agentConnections)
-      .values({ userId, clientId, clientName, agentKey, ...(agentPath ? { agentPath } : {}) })
+      .values({
+        userId,
+        clientId,
+        clientName,
+        agentKey,
+        ...(choice?.botUserId ? { botUserId: choice.botUserId } : {}),
+        ...(choice?.agentPath ? { agentPath: choice.agentPath } : {}),
+      })
       .onConflictDoNothing({
         target: [agentConnections.userId, agentConnections.agentKey],
         where: sql`${agentConnections.revokedAt} is null`,
@@ -811,6 +832,12 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     if (!winner) throw new Error('agent connection vanished between insert and re-read');
     return choose(winner.id);
   }
+}
+
+/** A connection's "Connect as" columns: a bot's row, or a legacy agent path from before bots; both null is Myself. */
+interface ConnectionChoiceColumns {
+  botUserId: string | null;
+  agentPath: string | null;
 }
 
 /**

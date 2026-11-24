@@ -89,7 +89,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
 
     const [row] = await this.db
       .insert(externalApiKeys)
-      .values({ userId, tokenHash, label: trimmed, kind, ...(options.agentPath ? { agentPath: options.agentPath } : {}) })
+      .values({ userId, tokenHash, label: trimmed, kind, ...(options.botUserId ? { botUserId: options.botUserId } : {}) })
       .returning();
 
     return {
@@ -118,7 +118,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
 
   async verifyAndLoadToken(
     plaintext: string,
-  ): Promise<{ tokenId: string; user: AuthUser; agentPath: string | null } | null> {
+  ): Promise<{ tokenId: string; user: AuthUser; botUserId: string | null; agentPath: string | null } | null> {
     if (!this.looksLikeExternalApiKey(plaintext)) {
       return null;
     }
@@ -136,6 +136,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
         label: externalApiKeys.label,
         lastUsedAt: externalApiKeys.lastUsedAt,
         agentPath: externalApiKeys.agentPath,
+        botUserId: externalApiKeys.botUserId,
         userId: users.id,
         email: users.email,
         name: users.name,
@@ -178,6 +179,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     return {
       tokenId: row.tokenId,
       agentPath: row.agentPath,
+      botUserId: row.botUserId,
       user: {
         id: row.userId,
         email: row.email,
@@ -356,5 +358,6 @@ function toSummary(row: typeof externalApiKeys.$inferSelect): ExternalApiKeySumm
     revokedBy: (row.revokedBy as RevokedBy | null) ?? null,
     deletedAt: row.deletedAt ? row.deletedAt.getTime() : null,
     agentPath: row.agentPath ?? null,
+    botUserId: row.botUserId ?? null,
   };
 }

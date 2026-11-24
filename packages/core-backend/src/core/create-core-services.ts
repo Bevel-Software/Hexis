@@ -116,7 +116,9 @@ import {
   MarketplaceCompilerService,
   KbPluginSource,
 } from '../modules/plugins/index.js';
-import { noAgentConfigurations, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { noBots } from '../modules/bots/index.js';
+import { BotAddressBook } from '../modules/bots/bot-address-book.js';
+import { BotService } from '../modules/bots/bot.service.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
   GitHubFacadeCredentialsService,
@@ -333,11 +335,11 @@ export interface CoreServices {
   /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
   pluginLinkIndex: PluginLinkIndex;
   /**
-   * Connecting as an agent configuration: the choices offered at consent and key
-   * mint, and the scope every agent surface narrows a connection to — see
-   * `modules/agent-scope`.
+   * Bots: identities of their own (`modules/bots`) — the choices offered at
+   * consent and key mint, whom a connection made as a bot acts as on every
+   * call, and the rows the distribution's bots are kept in.
    */
-  agentScopeService: IAgentScopeResolver;
+  botService: BotService;
   /** Link / unlink / repair shared skills into plugins. */
   pluginLinksService: PluginLinksService;
   pluginRenameService: PluginRenameService;
@@ -853,6 +855,10 @@ export async function createCoreServices(
   // gate cannot disagree about who the owner is. They did: the owner could
   // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
+  // Which addresses are bots': decided with on every access check, kept
+  // current by the bot service built below (once the distribution's
+  // directory can be), so the two share this one book.
+  const botAddresses = new BotAddressBook();
   const accessControl = new AccessControlService(
     workspaceService,
     kbDirName,
@@ -878,6 +884,7 @@ export async function createCoreServices(
       new DbHeadSeedStore(db, resolveAppVersion()),
       Date.now,
     ),
+    botAddresses,
   );
   // Creator read-grant on creation: read is default-deny and the roots grant
   // it to nobody, so every surface that starts a new folder at a root (human
@@ -911,17 +918,19 @@ export async function createCoreServices(
   // The link index resolves manifests against the released catalog, and the
   // plugin index counts through it (inline + linked), so it comes first.
   const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kb, pluginSource);
-  // What "Connect as" offers and what a connection made as an agent loads:
-  // the distribution's resolver (`CorePorts.agentScope`), made HERE with the
-  // core services it reads through — its configurations behind the person's
-  // read gate, `plugins:` expanded through the link index above — or core's
-  // default, which offers no agent and loads nothing for a path it cannot
-  // read. Made once, before anything consults it: the tool-context resolver
-  // below captures it, as the routes the server mounts do, so there is one
-  // resolver in effect and no later assignment to miss. Core owns the
-  // mechanism and no configuration (see `modules/agent-scope`).
-  const agentScopeService: IAgentScopeResolver =
-    ports.agentScope?.({ workspaceService, accessControl, kb, disk, pluginLinkIndex }) ?? noAgentConfigurations();
+  // Bots: the distribution's directory (`CorePorts.bots`), made HERE with the
+  // core services it reads through, or core's default, which supplies none.
+  // The service keeps a users row per bot and the address book the access
+  // checks above decide with; its rows are read now, before anything is
+  // decided. Core owns the mechanism and no bot (see `modules/bots`).
+  const botDirectory = ports.bots?.({ workspaceService, accessControl, kb, disk, pluginLinkIndex }) ?? noBots();
+  const botService = new BotService(db, botDirectory, botAddresses);
+  // The rows made so far. A bot the distribution names since the last boot
+  // gets its row on the first look that needs it — a listing of choices or a
+  // connection, each of which syncs first; until then its address is in no
+  // book, and nothing can act as it or sign in at it (the whole bots' domain
+  // is refused to people).
+  await botService.load();
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
@@ -947,6 +956,7 @@ export async function createCoreServices(
       loginPasswordEnabled: config.loginPasswordEnabled,
     },
     ports.accountAdmission,
+    botAddresses,
   );
   const authMiddleware = createAuthMiddleware(authService);
   // Who tells an invited person: the composition root of a distribution
@@ -1080,6 +1090,9 @@ export async function createCoreServices(
     // The opened event names the approvers as accounts; auth answers which
     // of the addresses the access model names have one.
     authService,
+    // A bot merges only where it may write every changed file: the access
+    // module says who is one.
+    (email) => accessControl.isBot(email),
   );
   // The leftover-branch cleanup asks the Deployment page at every round, so
   // switching it off there applies without a restart.
@@ -1435,8 +1448,12 @@ export async function createCoreServices(
   // agent makes), reads keys through the key service so their shape is
   // defined once, and prunes past the retention setting — read per sweep, so
   // a change on the Deployment page applies without a restart.
-  const agentAuditService = new AgentAuditService(db, externalApiKeyService, () =>
-    retentionDaysFrom(settings.resolve('auditRetentionDays')),
+  const agentAuditService = new AgentAuditService(
+    db,
+    externalApiKeyService,
+    () => retentionDaysFrom(settings.resolve('auditRetentionDays')),
+    Date.now,
+    botService,
   );
   // The embed surface. It reads files through the workspace service and
   // judges them with the same access resolver the app file page uses, so what
@@ -1557,12 +1574,22 @@ export async function createCoreServices(
   mcpResourceUrl.username = '';
   mcpResourceUrl.password = '';
   const mcpResourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(mcpResourceUrl);
+  // Whom a connection made as a bot acts as, resolved on every call by every
+  // verifier from the same two sources.
+  const connectionIdentities = {
+    bots: botService,
+    userOf: async (userId: string) => {
+      const user = await authService.getUserById(userId);
+      return user ? { id: user.id, email: user.email } : null;
+    },
+  };
   const mcpAuthMiddleware = createMcpAuthMiddleware(
     authService,
     externalApiKeyService,
     mcpOAuthProvider,
     mcpResourceMetadataUrl,
     internalTokenService,
+    connectionIdentities,
   );
 
   // ── Unified tool surface ──────────────────────────────────────────────
@@ -1584,7 +1611,6 @@ export async function createCoreServices(
     kbDirName: kbDirName,
     creatorAccess,
     loadActiveGroups,
-    agentScope: agentScopeService,
   });
   const writeAccess = ports.writeAccess ?? alwaysWritable;
   // The branch every tool call runs on is resolved by the handler, before the
@@ -1594,8 +1620,8 @@ export async function createCoreServices(
     defaultBranch: () => kb.defaultBranch,
     isMissing: (branch) => workspaceService.isBranchMissing(branch),
   });
-  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
-  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider, connectionIdentities);
+  const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider, connectionIdentities);
   // Every credential kind this server issues — connection keys, internal
   // tokens and app sessions (bearer or cookie) — so a fetch carrying another
   // user's identity of ANY kind is refused the link.
@@ -1606,7 +1632,7 @@ export async function createCoreServices(
   // Read-only manual endpoints accept the above PLUS a browser JWT, so a
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
-  const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider, connectionIdentities);
 
   // Recovery-bot identity: a synthetic `recovery-bot@bevel.local` user
   // backing (a) the recovery agent's commit authorship and (b) the
@@ -1795,7 +1821,7 @@ export async function createCoreServices(
     joinRequestsService,
     pluginJoinRequestJobs,
     pluginLinkIndex,
-    agentScopeService,
+    botService,
     pluginLinksService,
     pluginRenameService,
     marketplaceCompiler,

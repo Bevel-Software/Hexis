@@ -1,6 +1,7 @@
 import type { ITreeWalker } from '../shared/fs.contract.js';
 import type { WorkspaceService } from '../modules/workspace/index.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
+import type { IBotAddresses } from '../modules/bots/index.js';
 
 /**
  * The access resolver over a real tree, wired the way the composition root
@@ -11,6 +12,12 @@ import { AccessControlService } from '../modules/access/access-control.service.j
  * design (a module receives `IAccessControl` by injection), and this fixture
  * stands in for the root, as `real-disk.ts` does for the disk.
  */
-export function realAccessControl(workspace: WorkspaceService, kbDirName: string, disk: ITreeWalker): AccessControlService {
-  return new AccessControlService(workspace, kbDirName, disk);
+export function realAccessControl(
+  workspace: WorkspaceService,
+  kbDirName: string,
+  disk: ITreeWalker,
+  /** The bots' address book, as the root passes it; absent, nobody is a bot. */
+  bots?: IBotAddresses,
+): AccessControlService {
+  return new AccessControlService(workspace, kbDirName, disk, [], undefined, undefined, {}, undefined, undefined, undefined, bots);
 }
