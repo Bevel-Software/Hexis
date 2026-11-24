@@ -65,6 +65,9 @@ export { useCreatePage } from './hooks/useCreatePage';
 export { useMergedWorkspaceTree } from './hooks/useMergedWorkspaceTree';
 export { useOpenChangeRequests } from './hooks/useOpenChangeRequests';
 export { useWorkspaceImageResolver } from './hooks/useWorkspaceImageResolver';
+// What the explorer's `lead` (a hosting app's navigation) may be: a node
+// that renders something. The shell's folder surface narrows its `nav` to it.
+export type { GivenNode } from './components/FileExplorer';
 export {
   KB_ROUTE_PREFIX,
   openExternalHref,

@@ -41,7 +41,7 @@ import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, t
 import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
-import { TextReader } from './file-readers/text-reader.js';
+import { TextReader, isTextBytes } from './file-readers/text-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
   folderPlaceholderPath,
@@ -460,6 +460,29 @@ async function assertNotBinaryOverwrite(
 function assertBytesTextEditable(readers: FileReaderRegistry, path: string, existing: Buffer): void {
   const refusal = readers.readerFor(path).editRefusalForExisting?.(existing, path) ?? null;
   if (refusal !== null) throw binaryNotWritable('binary', refusal);
+}
+
+/**
+ * The write-refusal for the TEXT a tool was handed, as opposed to what the
+ * path's extension means or what it already holds (the gates above). A NUL
+ * character is the one thing a string can carry that is not text by
+ * `isTextBytes`: written, it makes the file binary from then on, so
+ * `read_file` answers with a notice instead of the content and the text tools
+ * refuse every attempt to repair it. A model writes one now and then where it
+ * meant another character, so the refusal says which argument holds it and
+ * where, and nothing lands.
+ */
+function assertTextContent(path: string, text: string, argument: 'content' | 'new_string'): void {
+  // Whether this is text is `isTextBytes`' answer, the same one every reader
+  // gives about the file afterwards. `indexOf` only says where the NUL is.
+  if (isTextBytes(Buffer.from(text, 'utf8'))) return;
+  const offset = text.indexOf('\u0000');
+  throw new ToolError(
+    `"${displayPath(path)}" was not written: \`${argument}\` holds a NUL character (U+0000) at offset ${offset}, and a file ` +
+      'holding one is binary, not text. Send the text again without it. [nul_in_text]',
+    400,
+    { kind: 'nul_in_text', path, argument, offset },
+  );
 }
 
 /** What a write is ALLOWED to do at a path. `create` is the default everywhere. */
@@ -1147,7 +1170,7 @@ export function registerWorkspaceTools(
    * The one tree walk (see `shared/fs.contract.ts`), for the `firstRun`
    * note's look at the knowledge folder. Optional for the harnesses about the
    * file primitives; without it `start_session` answers
-   * `{ sessionId, defaultBranch }` and never `firstRun`.
+   * `{ sessionId, defaultBranch, connectedAs }` and never `firstRun`.
    */
   disk?: ITreeWalker,
   /**
@@ -2020,7 +2043,7 @@ export function registerWorkspaceTools(
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work — minting a new id mid-run starts a second conversation as far as the server is concerned. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where the deployment offers an `ask` tool, hand it the SAME id: your reads and your questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two independent ids, which is harmless: keep passing the one you already used and ignore the other. Returns `{ sessionId, defaultBranch }`, plus `firstRun` while the knowledge base is empty: a note to act on.',
+      'Mint this conversation\'s id: the `sessionId` KnowledgeBase tools take. Call this ONCE, at the start of your work: a new id mid-run starts a second conversation. Pass the returned id as `sessionId` to every tool whose arguments list it, inside `call_tool_chain` too; the others refuse it. Where there is an `ask` tool, hand it the SAME id: reads and questions are then one conversation. RETRYING IS SAFE: a call that fails created nothing, so retry it. If a retry lands after a success you hold two ids, which is harmless: keep the one you already used. Returns `{ sessionId, defaultBranch, connectedAs }`: `connectedAs` is the agent this connection was made as (`{ path, name }`), null for Everything. Plus `firstRun` while the knowledge base is empty: a note to act on.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
@@ -2030,11 +2053,21 @@ export function registerWorkspaceTools(
         defaultBranch: str(
           "The deployment's default branch: the branch people read, and the one to pass as `branch` unless you are working on a draft.",
         ),
+        connectedAs: {
+          type: ['object', 'null'],
+          description:
+            'The agent configuration this connection was made as: its `path` and `name`. Null when the connection was made as Everything.',
+          properties: {
+            path: str('Repository-relative path of the agent configuration.'),
+            name: str('Its name, or the path when the file cannot be read.'),
+          },
+          required: ['path', 'name'],
+        },
         firstRun: str(
           `Present only while the knowledge base holds nothing but its starter guide (and a starter pack's untouched pages): what to offer the person (the guide's \`${FIRST_RUN_SECTION_ID}\` section says how).`,
         ),
       },
-      required: ['sessionId', 'defaultBranch'],
+      required: ['sessionId', 'defaultBranch', 'connectedAs'],
     },
     tags: ['workspace'],
   });
@@ -2056,8 +2089,12 @@ export function registerWorkspaceTools(
       // Read here, not at registration: the setup save applies a branch model
       // to the running graph, and the name in effect is the one to give.
       const defaultBranch = kb.defaultBranch;
+      // What the connection was made as, read off the scope the tool handler
+      // already resolved from the token: no lookup, no clone.
+      const agent = ctx.connectionScope?.toWire()?.agent;
+      const connectedAs = agent ? { path: agent.path, name: agent.name } : null;
       const firstRun = await firstRunFor(ctx);
-      return firstRun ? { sessionId, defaultBranch, firstRun } : { sessionId, defaultBranch };
+      return firstRun ? { sessionId, defaultBranch, connectedAs, firstRun } : { sessionId, defaultBranch, connectedAs };
     }),
   );
 
@@ -2967,6 +3004,7 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
+      assertTextContent(a.path as string, a.content as string, 'content');
       // NB: this is a no-op for chat + `ontology_ingest` — it only bites when a
       // routine executor has explicitly restricted THIS session's `ctx.sessionId`
       // (today only `watchlist_check`, to `.html`). Unrestricted sessions pass straight
@@ -3131,6 +3169,7 @@ export function registerWorkspaceTools(
         }
         try {
           assertNotDocumentEdit(readers, f.path);
+          assertTextContent(f.path, f.content, 'content');
           await assertNotBinaryOverwrite(readers, f.path, fs);
           // An earlier entry in this same batch counts as existing: two `create`
           // entries for one path are a mistake the commit would otherwise hide.
@@ -3223,6 +3262,7 @@ export function registerWorkspaceTools(
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
+      assertTextContent(a.path as string, a.new_string as string, 'new_string');
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);

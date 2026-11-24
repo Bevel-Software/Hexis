@@ -94,7 +94,8 @@ export function HtmlRenderer({
   // chase it; and a distribution's document carries its inlined libraries,
   // which a key built from it would compare on every render.
   const viewKey = useMemo(() => ({ reloadKey, mode, savedValue, filePath }), [reloadKey, mode, savedValue, filePath]);
-  const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath, viewKey });
+  // The source a preview's document is built from is the saved content.
+  const { toolBridge, cards } = useHtmlToolBridge({ iframeRef, filePath, viewKey, source: savedValue });
 
   const dirty = !readOnly && value !== savedValue;
 

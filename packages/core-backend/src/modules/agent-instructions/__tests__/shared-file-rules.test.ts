@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { composeAgentGuide } from '../../agent-guide/index.js';
 import { createAgentInstructionsRoutes } from '../agent-instructions.routes.js';
 import {
+  GUIDE_FIRST_LINE,
   INSTRUCTIONS_CAP,
   PLATFORM_HEADER,
   PREAMBLE_TRUNCATION_MARKER,
@@ -245,9 +246,10 @@ describe('the handshake text stays inside the length it pins', () => {
   });
 
   it('holds the worst-case instructions under the cap the caps add up to', () => {
-    // Header + the shared rules at their cap + a preamble at ITS cap + the
-    // marker a cut appends + the two blank lines between the three parts.
-    const worstCase = PLATFORM_HEADER.length + 2 + SHARED_FILE_RULES_CAP + 2 + PREAMBLE_CAP + 1 + PREAMBLE_TRUNCATION_MARKER.length;
+    // The guide-first line + header + the shared rules at their cap + a
+    // preamble at ITS cap + the marker a cut appends + the three blank lines
+    // between the four parts.
+    const worstCase = GUIDE_FIRST_LINE.length + 2 + PLATFORM_HEADER.length + 2 + SHARED_FILE_RULES_CAP + 2 + PREAMBLE_CAP + 1 + PREAMBLE_TRUNCATION_MARKER.length;
     expect(worstCase).toBeLessThanOrEqual(INSTRUCTIONS_CAP);
     // And what an actual over-long preamble produces is under it too.
     const composed = composeAgentInstructions('x'.repeat(PREAMBLE_CAP * 2));

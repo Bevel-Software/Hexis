@@ -25,7 +25,8 @@ import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
 import type { IAccessControl } from '../../access/index.js';
-import { AccessDeniedError } from '../../access-model/index.js';
+import { AccessDeniedError, PushAccessRefusedError } from '../../access-model/index.js';
+import { canonicalEmail } from '../../../shared/email-identity.js';
 import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { utf8Text } from '../../../shared/utf8-text.js';
@@ -282,6 +283,67 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
   }
 }
 
+/**
+ * The deployment's live accounts, as the protected-branch push gate asks for
+ * them. The gate asks first whether the user who authored an unpushed commit
+ * may write what it changed; an author who is not a live account — an address
+ * nobody owns, or an account that was switched off, whose old grants vouch
+ * for nothing — is never asked, and the commit is held to the PUSHER's access
+ * alone, so it is never let through unchecked.
+ *
+ * The one question is `AuthService.findActiveAccountsByEmail`, and the port
+ * has its shape so the composition root hands the auth service over as it
+ * is: which accounts are live is answered there, in one place. A lookup that
+ * fails rejects, and the push fails with it: an unanswered question is never
+ * read as "unknown author".
+ */
+export interface CommitAuthorDirectory {
+  /** The live accounts among `emails`, keyed by canonical address; switched-off and unknown addresses are left out. */
+  findActiveAccountsByEmail(emails: readonly string[]): Promise<ReadonlyMap<string, unknown>>;
+}
+
+/** One commit the next push would publish: who authored it, and the files it changed. */
+interface UnpushedCommit {
+  authorEmail: string;
+  paths: string[];
+}
+
+/**
+ * Parse `git log -z --name-only --format=%x00%H%x00%ae`. With `-z` git prints
+ * every file name raw and NUL-terminated (no quoting, no octal escapes, so a
+ * name with an umlaut is its real path), and each record opens with the
+ * format's own NUL. A file name is never empty, so an empty field always
+ * opens a record: `""`, the sha, the author, then the files up to the next
+ * empty field (the first carrying the newline git puts after the header).
+ * Output of any other shape throws: a gate that guessed at a listing it could
+ * not read would check fewer files than the push publishes.
+ */
+function parseUnpushedLog(stdout: string): UnpushedCommit[] {
+  const fields = stdout.split('\0');
+  const commits: UnpushedCommit[] = [];
+  let i = 0;
+  // Trailing NULs (after the last file, or after an empty commit's header)
+  // leave empty fields at the end: nothing follows them.
+  const end = (() => {
+    let e = fields.length;
+    while (e > 0 && fields[e - 1] === '') e--;
+    return e;
+  })();
+  while (i < end) {
+    if (fields[i] !== '' || i + 2 >= fields.length || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(fields[i + 1])) {
+      throw new Error('the unpushed commits could not be listed: git log answered in an unexpected shape');
+    }
+    const commit: UnpushedCommit = { authorEmail: fields[i + 2], paths: [] };
+    i += 3;
+    for (let first = true; i < end && fields[i] !== ''; i++, first = false) {
+      const name = first && fields[i].startsWith('\n') ? fields[i].slice(1) : fields[i];
+      if (name !== '') commit.paths.push(name);
+    }
+    commits.push(commit);
+  }
+  return commits;
+}
+
 export class GitService implements IGitService {
   // Per-workspace fetch state, kept OUTSIDE the workspace mutex on purpose.
   // `git fetch` only writes `refs/remotes/origin/*` and packs new objects —
@@ -338,6 +400,13 @@ export class GitService implements IGitService {
      * one rather than none.
      */
     private readonly gitRunner: IGitRunner = new NodeGitRunner(),
+    /**
+     * Matches an unpushed commit's author to a platform user for the
+     * protected-branch push gate (see `CommitAuthorDirectory`). Absent, no
+     * author is matched and every unpushed commit is held to the pusher's
+     * access; the composition root wires the user store.
+     */
+    private readonly commitAuthors: CommitAuthorDirectory | null = null,
   ) {}
 
   private get kbDirName(): string {
@@ -1491,13 +1560,7 @@ export class GitService implements IGitService {
       // gating it here again just refuses every non-admin the product
       // promised a plugin to.
       if (this.kb.isProtectedBranch(branch) && !opts?.systemAuthorized) {
-        const touched = await this.unpushedTouchedPaths(cwd);
-        await this.assertCanWriteAtRef(
-          workspaceId,
-          `origin/${branch}`,
-          user.email,
-          touched,
-        );
+        await this.assertUnpushedCommitsMayLand(workspaceId, cwd, branch, user);
       }
 
       // No `-u`: it writes the upstream into the config during the push, and
@@ -2333,12 +2396,25 @@ export class GitService implements IGitService {
   }
 
   /**
-   * Paths changed in commits that exist locally but not on the upstream ref —
-   * i.e. exactly what the next `push` would publish. Falls back to "every
-   * commit not reachable from any remote ref" when there's no upstream yet
-   * (first push).
+   * The commits that exist locally but not on the upstream ref — exactly what
+   * the next `push` would publish — each with its author and the files it
+   * changed, by their real paths (see `parseUnpushedLog`). Falls back to
+   * "every commit not reachable from any remote ref" when there's no upstream
+   * yet (first push).
+   *
+   * Walked along the first parent, with a merge's changes taken against its
+   * first parent: a merge brings in another branch's commits, and what it
+   * publishes is what its merger chose to bring in, so the merge, by its
+   * merger, answers for them. Walking into the merged branch instead would
+   * hold a draft's authors to the protected branch's rules, which a merge
+   * through review exists to spare them.
+   *
+   * `--no-renames`: with rename detection `--name-only` prints a moved file
+   * under its new path alone, and the path it was removed from would go
+   * unchecked. A move is a removal there and an addition here, and both are
+   * listed.
    */
-  private async unpushedTouchedPaths(cwd: string): Promise<string[]> {
+  private async unpushedCommits(cwd: string): Promise<UnpushedCommit[]> {
     let range: string[];
     try {
       await this.git(cwd, ['rev-parse', '--verify', '--quiet', '@{u}']);
@@ -2347,14 +2423,93 @@ export class GitService implements IGitService {
       range = ['HEAD', '--not', '--remotes'];
     }
     const { stdout } = await this.git(cwd, [
-      'log', '--name-only', '--pretty=format:', ...range,
+      'log', '-z', '-m', '--first-parent', '--no-renames', '--name-only', '--format=%x00%H%x00%ae', ...range,
     ]);
-    const set = new Set<string>();
-    for (const line of stdout.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed) set.add(trimmed);
+    return parseUnpushedLog(stdout);
+  }
+
+  /**
+   * The paths of `paths` that `email` may not write at `ref`, in the order
+   * given. None when the ref holds no access rules yet (bootstrap:
+   * default-allow, as `assertCanWriteAtRef` reads it).
+   */
+  private async unwritableAtRef(workspaceId: string, ref: string, email: string, paths: string[]): Promise<string[]> {
+    if (!this.accessControl || paths.length === 0) return [];
+    const result = await this.accessControl.canWriteBatchAtRef(workspaceId, ref, email, paths);
+    return result ? paths.filter((p) => !result.get(p)) : [];
+  }
+
+  /**
+   * The protected-branch push gate. A file an unpushed commit changed may
+   * land when the user who authored the commit may write it, or the pusher
+   * may:
+   *
+   *   - the author, so a push that carries a colleague's earlier commits
+   *     (stranded by a failed push of theirs) lands when THEY could write
+   *     what they changed, whatever the pusher's own access to those files;
+   *   - the pusher, so a commit nobody else can vouch for (its author lost
+   *     the right since, or never had it) does not block the branch for
+   *     everyone: a person who may write the file themselves shares it by
+   *     pushing, as they could by saving it.
+   *
+   * The pusher's own commits, and a commit whose author the platform cannot
+   * match to a user, are held to the pusher's access alone. Access is
+   * resolved at `origin/<branch>`, the published state, as before.
+   *
+   * A refusal is a `PushAccessRefusedError`: the platform refused, not the
+   * repository host, and it names the file and its writers when the pusher
+   * may read that file.
+   */
+  private async assertUnpushedCommitsMayLand(
+    workspaceId: string,
+    cwd: string,
+    branch: string,
+    user: AuthUser,
+  ): Promise<void> {
+    if (!this.accessControl) return;
+    const ref = `origin/${branch}`;
+    const pusher = canonicalEmail(user.email);
+    const matched = new Map<string, boolean>();
+    // Keyed by the canonical address of whoever a commit is judged as, so
+    // one person's commits under two spellings are one check.
+    const judged = new Map<string, { email: string; paths: Set<string> }>();
+    for (const commit of await this.unpushedCommits(cwd)) {
+      if (commit.paths.length === 0) continue;
+      const author = canonicalEmail(commit.authorEmail);
+      let email = user.email;
+      if (author !== '' && author !== pusher) {
+        let isUser = matched.get(author);
+        if (isUser === undefined) {
+          isUser = this.commitAuthors
+            ? (await this.commitAuthors.findActiveAccountsByEmail([commit.authorEmail])).size > 0
+            : false;
+          matched.set(author, isUser);
+        }
+        if (isUser) email = commit.authorEmail;
+      }
+      const key = canonicalEmail(email);
+      const entry = judged.get(key) ?? { email, paths: new Set<string>() };
+      for (const p of commit.paths) entry.paths.add(p);
+      judged.set(key, entry);
     }
-    return [...set];
+    for (const [key, { email, paths }] of judged) {
+      let refusedPaths = await this.unwritableAtRef(workspaceId, ref, email, [...paths]);
+      // What a colleague may not write, the pusher may still carry when they
+      // may write it themselves.
+      if (key !== pusher) refusedPaths = await this.unwritableAtRef(workspaceId, ref, user.email, refusedPaths);
+      if (refusedPaths.length === 0) continue;
+      const refused = refusedPaths[0];
+      const eligible = await this.accessControl.eligibleWritersAtRef(workspaceId, ref, refused);
+      // Named only to a pusher who may read it: the commit may be someone
+      // else's, on a file the pusher cannot see. Null (no rules at the
+      // ref) reads as deny, as every caller of the at-ref reads treats it.
+      const readable = (await this.accessControl.canReadAtRef(workspaceId, ref, user.email, refused)) === true;
+      throw new PushAccessRefusedError(
+        branch,
+        { path: refused, eligibleRoles: eligible?.roles ?? [], eligibleUsers: eligible?.users ?? [] },
+        readable,
+      );
+    }
   }
 
 
