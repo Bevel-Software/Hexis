@@ -11,5 +11,5 @@ export {
   type ResolvedConnection,
 } from './bots.contract.js';
 export { describeConnectionChoices, type ConnectedAs } from './connected-as.js';
-// The service, the address book, the routes and the grant rewriter are the
-// composition root's to wire: it imports them from their files.
+// The service and the address book are the composition root's to wire: it
+// imports them from their files.
