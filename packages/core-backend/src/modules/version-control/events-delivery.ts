@@ -34,7 +34,11 @@
  *     conflict, each conflicted file (its `reason` quotes them too). The person
  *     gets the paths they may read; git's words reach only a person who may
  *     read the root and every path the conflict names, and everyone else gets
- *     a fixed sentence.
+ *     a fixed sentence. A refusal by the platform's own push access check
+ *     (`accessRefusal`) quotes no git output: everyone gets the sentence that
+ *     the platform refused, and its file and writers reach only a person who
+ *     may read that file at the branch's published state, as the push gate
+ *     judged it.
  *   - `agent-tool-call`: the person whose agent made the call, as the bus
  *     already filters it; the rule says the same, so a bus that passed it on
  *     would not widen the audience.
@@ -53,7 +57,7 @@ import type { ChangeRequest, VersionControlEvent } from '@bevel-software/platfor
 import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/index.js';
-import { canReadWorkspacePath } from '../access-model/index.js';
+import { canReadWorkspacePath, pushAccessRefusalSentence } from '../access-model/index.js';
 import { normalizeWorkspacePath } from '../kb-fs/index.js';
 import { fileIsReadable, isAuthor, maySeeChangeRequest, pathsOf } from './agent-tools/change-request-read-shape.js';
 import { readablePathsAt } from './read-on-branch.js';
@@ -226,6 +230,16 @@ type GitSyncFailed = Extract<VersionControlEvent, { kind: 'git-sync-failed' }>;
  * keeps the conflicted files they may read and a fixed sentence.
  */
 async function gitSyncFailedFor(event: GitSyncFailed, email: string, access: EventAccess): Promise<VersionControlEvent> {
+  if (event.accessRefusal) {
+    // The platform's own refusal quotes no git output, so the root decides
+    // nothing: the sentence goes to everyone, and its file and writers to
+    // whoever may read that file where the push gate judged it — the
+    // branch's published state.
+    const path = event.accessRefusal.path;
+    return path !== undefined && (await access.readableAtBase(event.branch, email, [path])).has(path)
+      ? event
+      : redactGitSyncFailed(event, []);
+  }
   const conflicted = event.conflictedPaths ?? [];
   const [root, ...each] = await Promise.all([
     access.mayReadRepoPath(event.workspaceId, email, ''),
@@ -244,9 +258,17 @@ function pathOnWorkspace(event: VersionControlEvent): { workspaceId: string; pat
 
 /**
  * Same shape, so a client parses it as before: git's words are gone, and of
- * the conflicted files only `readable` remain (none, the key absent).
+ * the conflicted files only `readable` remain (none, the key absent). A
+ * refusal by the platform's own access check stays one, so the banner still
+ * says who refused: its sentence without the file or its writers, and the
+ * marker without the path.
  */
 function redactGitSyncFailed(event: GitSyncFailed, readable: string[]): VersionControlEvent {
+  if (event.accessRefusal) {
+    const refused: GitSyncFailed = { ...event, reason: pushAccessRefusalSentence(event.branch, null), accessRefusal: {} };
+    delete refused.conflictedPaths;
+    return refused;
+  }
   const redacted: GitSyncFailed = { ...event, reason: GIT_SYNC_FAILED_REDACTED_REASON };
   if (readable.length > 0) redacted.conflictedPaths = readable;
   else delete redacted.conflictedPaths;

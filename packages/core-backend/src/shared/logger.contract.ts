@@ -39,6 +39,78 @@ export interface ILogger {
   child(bindings: LogFields): ILogger;
 }
 
+type Level = 'debug' | 'info' | 'warn' | 'error';
+
+/**
+ * `impl` behind a guard: a logger call never throws into its caller.
+ *
+ * Code logs inside the `catch` that handles a failure, and goes on to
+ * degrade, retry or answer. If making or writing the record throws there
+ * (a field that refuses to be read, an error a serializer cannot list, a
+ * sink that breaks), the throw would escape that `catch` and replace the
+ * caller's own answer with the logger's, saying nothing of what failed:
+ * on 2026-11-23 every MCP tool call answered `Value of "this" must be of
+ * DOMException` that way. So the failure is caught here, and the same sink
+ * gets a plain record instead: the message, and that its record could not
+ * be serialized, and why — text only, nothing left in it to serialize, and
+ * made one line by `oneLine` before the sink sees it, whether or not that
+ * sink escapes what it writes. When
+ * even that cannot be written there is nowhere left to say it, and the call
+ * returns. The reason names the failure's type and message, never its
+ * `cause` or anything a field carried.
+ *
+ * The module handle `logger()` resolves whatever sink is installed through
+ * this, so every module's call is guarded whoever wrote the sink. The two
+ * sinks this repository ships (the console sink here, the server shell's
+ * pino sink) return their loggers through it too, for code that holds a
+ * sink directly. One guard, the same wherever a line is written.
+ */
+export function neverThrowing(impl: ILogger): ILogger {
+  const call =
+    (level: Level) =>
+    (message: string, fields?: LogFields): void => {
+      try {
+        impl[level](message, fields);
+      } catch (failure) {
+        try {
+          // Escaped here, not left to the sink: the sink that just failed may
+          // be one that does not escape (an embedding platform's, a suite's),
+          // and this record must be one line wherever it is written.
+          // `oneLine` is idempotent, so a sink that escapes again changes nothing.
+          impl[level](`${oneLine(String(message))} [the log record could not be serialized: ${describeFailure(failure)}]`);
+        } catch {
+          // The sink cannot write even plain text: nowhere is left to say so.
+        }
+      }
+    };
+  return {
+    debug: call('debug'),
+    info: call('info'),
+    warn: call('warn'),
+    error: call('error'),
+    child: (bindings) => {
+      try {
+        return neverThrowing(impl.child(bindings));
+      } catch (failure) {
+        // A child that cannot be made: the line still goes out, through the
+        // parent, and says why it lacks the child's bindings.
+        call('warn')(`a child logger could not be made; logging without its bindings: ${describeFailure(failure)}`);
+        return neverThrowing(impl);
+      }
+    },
+  };
+}
+
+/** `<type>: <message>` of what a logger threw, one line; never its cause or fields. */
+function describeFailure(failure: unknown): string {
+  try {
+    if (failure instanceof Error) return oneLine(`${failure.name}: ${failure.message}`);
+    return oneLine(String(failure));
+  } catch {
+    return 'an unreadable failure';
+  }
+}
+
 /**
  * C0 and C1 control characters (U+009B among them: the one-byte CSI that
  * starts an ANSI sequence by itself) and the JS line separators. The rule
@@ -80,11 +152,17 @@ export function oneLineError(err: Error): Error {
 
 function escapedCopy(err: Error, seen: Set<Error>): Error {
   seen.add(err);
-  const message = oneLine(err.message);
+  const rawMessage = read(err, 'message');
+  const message = oneLine(typeof rawMessage === 'string' ? rawMessage : '');
   const copy = Object.create(Object.getPrototypeOf(err) as object) as Error & { cause?: unknown };
-  Object.defineProperty(copy, 'message', { value: message, enumerable: false, writable: true, configurable: true });
-  Object.defineProperty(copy, 'name', { value: err.name, enumerable: false, writable: true, configurable: true });
-  if (typeof err.stack === 'string') {
+  // `message` and `name` are as enumerable on the copy as the original shows
+  // them: an ordinary Error inherits a non-enumerable `name`, a DOMException
+  // an enumerable one, and a serializer that lists the original's keys (pino
+  // writes `name: "TimeoutError"` for the real thing) lists the copy's alike.
+  Object.defineProperty(copy, 'message', { value: message, enumerable: enumerableIn(err, 'message'), writable: true, configurable: true });
+  Object.defineProperty(copy, 'name', { value: read(err, 'name'), enumerable: enumerableIn(err, 'name'), writable: true, configurable: true });
+  const rawStack = read(err, 'stack');
+  if (typeof rawStack === 'string') {
     // Node's stack is the error's own `toString()` — `<name>: <message>` —
     // followed by `\n    at …` frames. The frames are looked for AFTER that
     // header, not from the top: a message that itself holds a line shaped
@@ -94,12 +172,12 @@ function escapedCopy(err: Error, seen: Set<Error>): Error {
     // The frames keep their lines; each is still escaped within its line, for
     // a stack that is not Node's own (a foreign runtime's, a hand-built one)
     // and carries a control character after a frame-shaped line.
-    const head = Error.prototype.toString.call(err);
-    const frames = err.stack.startsWith(head) ? err.stack.indexOf('\n    at ', head.length) : -1;
+    const head = header(err);
+    const frames = head !== null && rawStack.startsWith(head) ? rawStack.indexOf('\n    at ', head.length) : -1;
     const stack =
       frames === -1
-        ? oneLine(err.stack)
-        : `${oneLine(err.stack.slice(0, frames))}\n${err.stack
+        ? oneLine(rawStack)
+        : `${oneLine(rawStack.slice(0, frames))}\n${rawStack
             .slice(frames + 1)
             .split('\n')
             .map(oneLine)
@@ -114,14 +192,14 @@ function escapedCopy(err: Error, seen: Set<Error>): Error {
       : typeof value === 'string'
         ? oneLine(value)
         : value;
-  const cause = (err as { cause?: unknown }).cause;
+  const cause = read(err, 'cause');
   if (cause !== undefined) {
     Object.defineProperty(copy, 'cause', { value: nested(cause), enumerable: false, writable: true, configurable: true });
   }
   // An `AggregateError`'s failures — non-enumerable there, and the whole
   // point of it; kept as enumerable as the source had it, so an ordinary
   // error that carries an `errors` list of its own still shows it.
-  const errors = (err as { errors?: unknown }).errors;
+  const errors = read(err, 'errors');
   if (Array.isArray(errors)) {
     Object.defineProperty(copy, 'errors', {
       value: errors.map(nested),
@@ -131,11 +209,94 @@ function escapedCopy(err: Error, seen: Set<Error>): Error {
     });
   }
   // Own enumerable fields (a `code`, a `status`) travel with the error.
-  for (const [key, value] of Object.entries(err)) {
-    if (!(key in copy)) (copy as unknown as Record<string, unknown>)[key] = typeof value === 'string' ? oneLine(value) : value;
+  // Defined, not assigned: an accessor of the same name on the prototype
+  // would otherwise take the assignment (and a getter-only one refuse it).
+  for (const key of Object.keys(err)) {
+    if (Object.prototype.hasOwnProperty.call(copy, key)) continue;
+    const value = read(err, key);
+    Object.defineProperty(copy, key, {
+      value: typeof value === 'string' ? oneLine(value) : value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
+  shadowInheritedAccessors(err, copy);
   // `seen` is the path down, not everything met: one failure listed twice
   // under an AggregateError is copied twice, and only a true loop is cut.
   seen.delete(err);
   return copy;
+}
+
+/**
+ * `err[key]`, or undefined when reading it throws: a getter that refuses is
+ * not a reason for logging the error to fail.
+ */
+function read(err: object, key: PropertyKey): unknown {
+  try {
+    return (err as Record<PropertyKey, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/** The error's own `toString()`, the head of a Node stack; null when it cannot be made. */
+function header(err: Error): string | null {
+  try {
+    return Error.prototype.toString.call(err);
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `for...in` over `obj` lists `key`: the nearest definition of it in the chain decides. */
+function enumerableIn(obj: object, key: PropertyKey): boolean {
+  for (let o: object | null = obj; o !== null; o = Object.getPrototypeOf(o) as object | null) {
+    const d = Object.getOwnPropertyDescriptor(o, key);
+    if (d) return d.enumerable === true;
+  }
+  return false;
+}
+
+/**
+ * The copy shares the original's prototype, so it is still an `instanceof`
+ * the original's class and a serializer names that class. But it is not an
+ * object that class built, and an accessor on that prototype which checks
+ * its receiver refuses it: DOMException's `code` throws `Value of "this"
+ * must be of DOMException`, and so does any getter behind a `#private`
+ * field or a platform brand check. Every reader that lists inherited keys
+ * (`for...in`, pino's error serializer) would reach that getter and throw.
+ *
+ * So no inherited accessor is left for a reader of the copy to reach: each
+ * is read on the original, where it works, and the copy holds the value as
+ * an own data property, as enumerable as the accessor was. (Some are read
+ * there more than once: a DOMException's `name` and `message` are accessors
+ * too, and the stack's header reads them again.) A getter
+ * that refuses the original too leaves `undefined`. The rule is about
+ * accessors, whatever class defines them. `Object.prototype` is not walked:
+ * its one accessor, `__proto__`, accepts any receiver.
+ */
+function shadowInheritedAccessors(err: Error, copy: Error): void {
+  const decided = new Set<PropertyKey>(Reflect.ownKeys(copy));
+  for (
+    let proto = Object.getPrototypeOf(err) as object | null;
+    proto !== null && proto !== Object.prototype;
+    proto = Object.getPrototypeOf(proto) as object | null
+  ) {
+    for (const key of Reflect.ownKeys(proto)) {
+      if (decided.has(key)) continue;
+      // The nearest definition is the one a read finds; a farther one of the
+      // same name is hidden behind it, accessor or not.
+      decided.add(key);
+      const d = Object.getOwnPropertyDescriptor(proto, key);
+      if (!d || d.get === undefined) continue;
+      const value = read(err, key);
+      Object.defineProperty(copy, key, {
+        value: typeof value === 'string' ? oneLine(value) : value,
+        enumerable: d.enumerable === true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
 }
