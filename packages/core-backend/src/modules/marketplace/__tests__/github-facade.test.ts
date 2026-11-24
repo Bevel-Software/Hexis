@@ -482,7 +482,7 @@ describe('the GitHub facade', () => {
   });
 
   it('a consent finish that is not a Claude link still goes to the SDK, and a Claude link without a bridge is a client error', async () => {
-    const { signAuthRequest } = await import('../../mcp/oauth/oauth-state.js');
+    const { signAuthRequest } = await import('../../mcp/index.js');
     const mcpState = signAuthRequest(STATE_SECRET, { c: 'mcp-client', r: 'http://localhost/cb', cc: 'challenge' });
     const complete = await fetch(`${a.base}/api/mcp/oauth/complete`, {
       method: 'POST',
