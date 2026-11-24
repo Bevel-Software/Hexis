@@ -123,6 +123,12 @@ async function mount(page: Page, opts: { filling?: boolean } = {}) {
   return { geometry, scrollTo, below, enter, leave, cardStyleMaxWidth };
 }
 
+// Bundling the harness with vite and building its stylesheet takes most of this, more under a parallel run.
+test.setTimeout(90_000);
+// One worker for this file, so its tests share the one bundle `bundle()` caches:
+// a build per test, in parallel, is what runs into the limit above.
+test.describe.configure({ mode: 'default' });
+
 test('entering and leaving full screen keeps the same line at the top, because the text keeps its width', async ({ page }) => {
   const r = await mount(page);
   const onPage = await r.geometry();

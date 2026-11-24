@@ -90,6 +90,12 @@ async function mount(page: Page, width: number) {
 
 const overlaps = (a: Box, b: Box) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 
+// Bundling the harness with vite and building its stylesheet takes most of this, more under a parallel run.
+test.setTimeout(90_000);
+// One worker for this file, so its tests share the one bundle `bundle()` caches:
+// a build per test, in parallel, is what runs into the limit above.
+test.describe.configure({ mode: 'default' });
+
 for (const width of [1400, 390]) {
   test(`at ${width}px wide, Download sits right beside the exit control, in one row, uncovered`, async ({ page }) => {
     const { exit, download, toolbar } = await mount(page, width);
