@@ -1068,6 +1068,31 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(state.refreshes).toBe(1);
   });
 
+  it('after the wipe a tool left out for an invalid schema stays marked, as its sibling stays listed', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({
+      acceptsToken: (t) => t === valid,
+      tools: () => [
+        { name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+        { name: 'broken', description: 'broken', inputSchema: { type: 'object', properties: {}, required: { 0: 'a' } } },
+      ],
+    });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null;
+      return 'rejected';
+    });
+    const platform = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(platform.baseUrl, KEY_INTERACTIVE);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'nothing-valid-any-more';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    // Listed from what the downstream last advertised, the tool it left out included.
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(true);
+    expect(platform.service.hiddenTools.hiddenFor('notion').map((t) => t.name)).toEqual(['notion_srv_broken']);
+  });
+
   it('after the wipe a connection-key caller does not list the tool, but a call to it still gets the sign-in link', async () => {
     quiet();
     let valid = 'token-1';
@@ -1224,11 +1249,11 @@ describe('the first call on a fresh connection, fifty at once', () => {
  * deeply nested schemas on the way OUT, after every parse in the chain had
  * approved them, so nothing short of a client's own refusal said so.
  *
- * One boundary this suite also pins, because it decides what the check can
- * ever see: a tool whose schema breaks the shape `@modelcontextprotocol/sdk`
- * models at the ROOT (`type`, `properties`, `required`) makes the SDK client
- * reject the WHOLE `tools/list` response, so that server's manual fails to
- * register and Hexis is handed none of its tools. See the last test.
+ * The schema check also has to SEE the tool. The MCP SDK client parses a
+ * `tools/list` answer whole, and so does `@utcp/mcp`'s manual parser, so a
+ * tool either of them rejects used to take its whole server down unmarked.
+ * The last tests pin that it no longer does, for one shape each parser
+ * rejected.
  */
 describe('a connected tool whose schema is invalid is not offered to agents', () => {
   let downstream: FakeDownstreamMcpServer | undefined;
@@ -1429,38 +1454,105 @@ describe('a connected tool whose schema is invalid is not offered to agents', ()
   });
 
   /**
-   * The boundary, pinned so nobody has to rediscover it: at the ROOT of a
-   * tool's input schema, `type`, `properties` and `required` are the three
-   * fields `@modelcontextprotocol/sdk` models itself
-   * (`ToolSchema.inputSchema`, with `required: z.array(z.string())`), and the
-   * client rejects the ENTIRE `tools/list` response when one tool breaks them.
-   *
-   * So for that class of defect Hexis is handed NOTHING — not the bad tool, not
-   * the good ones — and cannot hide one tool or mark it: the whole manual fails
-   * to register, which is what it did before this change too. The reason is
-   * logged, with the SDK's own message naming the tool's index.
+   * The two shapes that used to take a whole server down. A ROOT `required`
+   * that is not a list breaks the shape `@modelcontextprotocol/sdk` models
+   * itself (`ToolSchema.inputSchema`), so its client refused the whole
+   * `tools/list` answer. A nested `type` naming no JSON type passes the SDK
+   * but not `@utcp/mcp`'s manual parser, which refused all of the server's
+   * tools. Either way the server registered with nothing and no marker.
    */
-  it('cannot single out a root-level defect: the MCP SDK refuses the whole tools/list response', async () => {
-    const warnings: string[] = [];
-    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
-      warnings.push(args.map(String).join(' '));
-    });
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+  const SHAPES = [
+    {
+      shape: 'a root `required` that is not a list',
+      inputSchema: { type: 'object', properties: { a: { type: 'string' } }, required: { 0: 'a' } },
+      path: '/required',
+      reason: 'must be an array',
+    },
+    {
+      shape: 'a nested `type` that is not a JSON Schema type',
+      inputSchema: { type: 'object', properties: { w: { type: 'stringy' } } },
+      path: '/properties/w/type',
+      reason: 'must be equal to one of the allowed values',
+    },
+  ];
+
+  it.each(SHAPES)(
+    'keeps the valid tool of a server whose other tool has $shape, and hides and marks that one',
+    async ({ inputSchema, path, reason }) => {
+      const warnings: string[] = [];
+      vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+        warnings.push(args.map(String).join(' '));
+      });
+      downstream = await startFakeDownstreamMcpServer({
+        tools: () => [goodTool('fine'), { name: 'broken', description: 'broken', inputSchema }],
+      });
+      const platform = await startPlatform({ manualsFor: manualAt(downstream) });
+      const { client } = await connectSdkClient(platform.baseUrl);
+      const names = (await client.listTools()).tools.map((t) => t.name);
+
+      expect(names).toContain('notion_srv_fine');
+      expect(names).not.toContain('notion_srv_broken');
+      const res = await client.callTool({ name: 'notion_srv_fine', arguments: { text: 'hi' } });
+      expect(res.isError).toBeFalsy();
+      expect(toolText(res)).toContain('hi');
+
+      expect(platform.service.hiddenTools.hiddenFor('notion')).toEqual([
+        {
+          manual: 'notion',
+          name: 'notion_srv_broken',
+          path,
+          reason,
+          marker: `Hidden from agents: its schema is invalid at ${path} (${reason}).`,
+        },
+      ]);
+      expect(warnings.join('\n')).not.toContain('skipping manual "notion"');
+    },
+  );
+
+  it('hides and marks both shapes at once, beside a valid tool of the same server', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     downstream = await startFakeDownstreamMcpServer({
       tools: () => [
+        { name: 'root', description: 'root', inputSchema: SHAPES[0].inputSchema },
         goodTool('fine'),
-        { name: 'broken', description: 'broken', inputSchema: { type: 'object', properties: {}, required: [7] } },
+        { name: 'nested', description: 'nested', inputSchema: SHAPES[1].inputSchema },
       ],
     });
     const platform = await startPlatform({ manualsFor: manualAt(downstream) });
     const { client } = await connectSdkClient(platform.baseUrl);
     const names = (await client.listTools()).tools.map((t) => t.name);
 
-    expect(names).not.toContain('notion_srv_broken');
-    // Its sibling goes with it, and the marker cannot name what never arrived.
-    expect(names).not.toContain('notion_srv_fine');
-    expect(platform.service.hiddenTools.hiddenFor('notion')).toEqual([]);
-    expect(warnings.join('\n')).toContain('skipping manual "notion"');
-    expect(warnings.join('\n')).toContain('required');
+    expect(names).toContain('notion_srv_fine');
+    expect(names).not.toContain('notion_srv_root');
+    expect(names).not.toContain('notion_srv_nested');
+    const hidden = platform.service.hiddenTools.hiddenFor('notion');
+    expect(hidden.map(({ name, path }) => ({ name, path })).sort((x, y) => x.name.localeCompare(y.name))).toEqual([
+      { name: 'notion_srv_nested', path: SHAPES[1].path },
+      { name: 'notion_srv_root', path: SHAPES[0].path },
+    ]);
+
+    // An agent that calls one by name is told why, as for any hidden tool.
+    const call = await client.callTool({ name: 'notion_srv_root', arguments: {} });
+    expect(call.isError).toBe(true);
+    expect(toolText(call)).toContain('hidden from agents because its schema is invalid');
+  });
+
+  it('a session recovery lists the tools one by one too, so the valid tool still answers after a restart', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [goodTool('fine'), { name: 'broken', description: 'broken', inputSchema: SHAPES[0].inputSchema }],
+    });
+    const platform = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(platform.baseUrl);
+    expect((await client.callTool({ name: 'notion_srv_fine', arguments: { text: 'before' } })).isError).toBeFalsy();
+
+    await downstream.restart(); // the server forgets our session; the next call re-registers
+
+    const res = await client.callTool({ name: 'notion_srv_fine', arguments: { text: 'after' } });
+    expect(res.isError).toBeFalsy();
+    expect(toolText(res)).toContain('after');
+    expect(downstream.initializations()).toBe(2);
+    expect(platform.service.hiddenTools.hiddenFor('notion').map((t) => t.name)).toEqual(['notion_srv_broken']);
   });
 });

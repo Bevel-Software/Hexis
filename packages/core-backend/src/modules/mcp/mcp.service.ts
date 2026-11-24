@@ -65,6 +65,7 @@ import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
 import { SurfaceLogThrottle } from './surface-log-throttle.js';
 import { ToolSchemaGuard, type ScreenedHiddenTool } from './tool-schema-guard.js';
+import { listPerTool, type InvalidSchemaTools } from './per-tool-listing.js';
 import { DownstreamRefreshGuard, isDownstreamTokenRejection } from './downstream-token-refresh.js';
 import { SurfaceCache, type SurfaceCacheOptions } from './surface-cache.js';
 import { SharedDefinitions } from './shared-definitions.js';
@@ -338,6 +339,13 @@ type DownstreamAttachResult =
 interface PooledDownstream {
   /** Owns its own `mcp` protocol instance, so its sessions are its alone and `close()` ends exactly them. */
   client: CodeModeUtcpClient;
+  /**
+   * The tools the server listed whose input schema is invalid, left out of
+   * `client` so they cannot take their siblings down (see `per-tool-listing.ts`).
+   * Written by every registration of the manual, the first and any session
+   * recovery's, so it matches the listing `client`'s tools came from.
+   */
+  invalidSchemaTools: InvalidSchemaTools;
 }
 
 /**
@@ -411,9 +419,13 @@ export class McpService {
    * by catalog name — one entry per manual, replaced when the manual is next
    * discovered — and used only while the manual's definition is the one the
    * tools were discovered from, so an edited `mcp.json` never serves the old
-   * server's tools.
+   * server's tools. `invalidSchemaTools` are the ones it left out for an
+   * invalid input schema, kept beside them so their marker stays too.
    */
-  private readonly knownDownstreamTools = new Map<string, { definition: string; tools: UtcpTool[] }>();
+  private readonly knownDownstreamTools = new Map<
+    string,
+    { definition: string; tools: UtcpTool[]; invalidSchemaTools: UtcpTool[] }
+  >();
 
   /**
    * The JSON Schema check on connected tools, and the memory of what it found.
@@ -1269,6 +1281,10 @@ export class McpService {
     degraded: boolean;
   }> {
     const routes = new Map<string, DownstreamRoute>();
+    // Tools a connected server listed with an invalid input schema, left out of
+    // its manual so the rest could register: the schema guard below still
+    // screens them, which is what hides and marks them.
+    const invalidSchemaTools: UtcpTool[] = [];
     // A manual left off this surface for a failure (see RequestSurface.degraded).
     let degraded = false;
     const unavailable: UnavailableManual[] = [];
@@ -1350,7 +1366,7 @@ export class McpService {
                     `${siblings.map((s) => `"${s}"`).join(', ')} — rename one; a colliding manual is not registered`,
                 }
               : m.call_template_type === 'mcp'
-                ? await this.attachDownstream(client, m, userId, routes)
+                ? await this.attachDownstream(client, m, userId, routes, invalidSchemaTools)
                 : await registerManual(client, m);
           if (!result.ok) {
             if (isKb) return { isKb, ok: false as const, error: result.error };
@@ -1376,7 +1392,8 @@ export class McpService {
     if (routes.size > 0) routeToDownstream(client, routes);
     const utcpTools = await client.getTools();
     const flattened = utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
-    const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId, loadId);
+    const leftOut = invalidSchemaTools.map((tool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
+    const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, leftOut, manualCatalogNames, userId, loadId);
     return { tools, unavailable, catalogNames, hidden, degraded };
   }
 
@@ -1394,10 +1411,17 @@ export class McpService {
    * A client would otherwise drop such a tool itself, silently, and the agent
    * would be left without it and without a reason. Hidden here, the reason
    * reaches the people who manage the server (see {@link ToolSchemaGuard}).
+   *
+   * `leftOut` are tools a connected server listed that never reached the
+   * repository, because their schema had to be left out for the rest of the
+   * server to register (`per-tool-listing.ts`). They are screened with the
+   * rest, so they are hidden and marked the same way; there is nothing of
+   * them to remove.
    */
   private async hideInvalidSchemas(
     client: CodeModeUtcpClient,
     tools: ProxiedTool[],
+    leftOut: ProxiedTool[],
     catalogNames: ReadonlyMap<string, string>,
     userId: string,
     loadId: number,
@@ -1411,7 +1435,7 @@ export class McpService {
     // page, `list_tool_setup` and the hidden-tool answer on a call all
     // reporting a defect this process can no longer see.
     for (const manual of catalogNames.values()) byManual.set(manual, []);
-    for (const tool of tools) {
+    for (const tool of [...tools, ...leftOut]) {
       const manual = catalogNames.get(tool.manualName) ?? tool.manualName;
       byManual.set(manual, [...(byManual.get(manual) ?? []), tool]);
     }
@@ -1449,12 +1473,16 @@ export class McpService {
    * re-created instead of used after its connection was closed. Each use holds
    * a pool lease only for its own duration, so the pool never closes a
    * connection an operation is still using.
+   *
+   * The tools the server listed with an invalid input schema are not copied:
+   * they go to `invalidSchemaTools`, for the schema guard to hide and mark.
    */
   private async attachDownstream(
     client: CodeModeUtcpClient,
     template: CallTemplate,
     userId: string,
     routes: Map<string, DownstreamRoute>,
+    invalidSchemaTools: UtcpTool[],
   ): Promise<DownstreamAttachResult> {
     const key = downstreamPoolKey(userId, template);
     // The catalog name, which is what the manual's per-user variables are keyed by.
@@ -1485,13 +1513,16 @@ export class McpService {
         lease = await acquire();
       }
       let tools: UtcpTool[];
+      let invalid: UtcpTool[];
       try {
         tools = (await lease.value.client.getTools()).filter((t) => t.name.startsWith(`${manualName}.`));
+        invalid = invalidSchemaToolsOf(lease.value, manualName, template);
       } finally {
         lease.release();
       }
-      this.knownDownstreamTools.set(catalogName, { definition, tools });
+      this.knownDownstreamTools.set(catalogName, { definition, tools, invalidSchemaTools: invalid });
       await attach(tools);
+      invalidSchemaTools.push(...invalid);
       return { ok: true };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -1505,6 +1536,7 @@ export class McpService {
         const known = this.knownDownstreamTools.get(catalogName);
         if (known && known.definition === definition) {
           await attach(known.tools);
+          invalidSchemaTools.push(...known.invalidSchemaTools);
           return { ok: true };
         }
         return { ok: false, error, retryable: true, signInMissing: true };
@@ -1546,6 +1578,11 @@ export class McpService {
    * A registration that fails closes the client it built (ending whatever the
    * attempt opened) and throws, so the pool caches nothing and the caller's
    * memo records the failure.
+   *
+   * Both registrations, this one and a recovery's, list the server's tools
+   * one by one (`per-tool-listing.ts`): a tool with an invalid input schema is
+   * left out into the entry's `invalidSchemaTools` instead of failing the
+   * server's whole list.
    */
   private async connectDownstream(userId: string, template: CallTemplate): Promise<PooledDownstream> {
     // Third-party manuals are never seeded loopback credentials (see
@@ -1555,13 +1592,17 @@ export class McpService {
     // re-registers from exactly what discovery used.
     const own = structuredClone(template);
     const manualName = utcpManualName(own);
-    installSessionRecovery(client, { manualTemplate: (name) => (name === manualName ? own : undefined) });
-    const result = await registerManual(client, own);
+    const entry: PooledDownstream = { client, invalidSchemaTools: new Map() };
+    installSessionRecovery(client, {
+      manualTemplate: (name) => (name === manualName ? own : undefined),
+      withReregister: (_name, run) => listPerTool(entry.invalidSchemaTools, run),
+    });
+    const result = await listPerTool(entry.invalidSchemaTools, () => registerManual(client, own));
     if (!result.ok) {
       await client.close().catch(() => {});
       throw new Error(result.error);
     }
-    return { client };
+    return entry;
   }
 
   /**
@@ -1872,6 +1913,26 @@ function downstreamPoolKey(userId: string, template: CallTemplate): string {
 /** A short, log-safe hash of a manual's whole definition: changes whenever the definition does. */
 function templateFingerprint(template: CallTemplate): string {
   return createHash('sha256').update(JSON.stringify(template)).digest('hex').slice(0, 16);
+}
+
+/**
+ * The tools `pooled`'s server left out for an invalid input schema, as UTCP
+ * tools named the way `@utcp/mcp` names the ones it registers
+ * (`<manual>.<server>.<tool>`), so they flatten to the name an agent would
+ * have called them by. The schema is the server's, unparsed: the schema guard
+ * is shown it as sent.
+ */
+function invalidSchemaToolsOf(pooled: PooledDownstream, manualName: string, template: CallTemplate): UtcpTool[] {
+  return [...pooled.invalidSchemaTools].flatMap(([server, tools]) =>
+    tools.map((tool) => ({
+      name: `${manualName}.${server}.${tool.name}`,
+      description: '',
+      inputs: tool.inputSchema as UtcpTool['inputs'],
+      outputs: {},
+      tags: [],
+      tool_call_template: template,
+    })),
+  );
 }
 
 /**

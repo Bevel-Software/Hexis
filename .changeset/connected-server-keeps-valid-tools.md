@@ -1,0 +1,5 @@
+---
+'@bevel-software/platform-core-backend': patch
+---
+
+A connected MCP server that the hosted MCP endpoint serves (an `mcp.json` entry or an `mcp` `.tool`, not one declared `local: true`) keeps its other tools when one tool's input schema is not valid JSON Schema. The server's `tools/list` used to be parsed whole, by the MCP SDK client and then by `@utcp/mcp`, so a tool with, for example, a top-level `required` that is not a list or a nested `type` that is not a JSON Schema type failed the whole answer: the server registered with none of its tools, and nothing was marked. When the downstream pool registers a server, the first time and on a session recovery, each tool whose input schema fails the JSON Schema check is now left out before that parse, and the schema check hides and marks it as it already did for the shapes that got through (on the tool page, in `list_tool_setup`, and in the answer to an agent that calls it by name). A tool whose schema passes that check is left in the list, so the SDK's own parse still decides it, as before.
