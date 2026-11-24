@@ -313,7 +313,10 @@ describe('what the guide tells an agent', () => {
   it("says to read an area's README before structuring files there, and to keep it current", async () => {
     const placement = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## Where a new file goes').replace(/\s+/g, ' ');
     expect(placement).toContain("**Read the area's `README.md` first.**");
+    // It opens the section's list: the first rule an agent reads there.
+    expect(placement.indexOf('- **')).toBe(placement.indexOf("- **Read the area's `README.md` first.**"));
     expect(placement).toContain('the `README.md` of that folder and of each folder above it');
+    expect(placement).toContain('its layout rules come before the general ones in this guide');
     expect(placement).toContain('they never widen what you may read or write');
     expect(placement).toContain('create or update that README in the same change');
   });
