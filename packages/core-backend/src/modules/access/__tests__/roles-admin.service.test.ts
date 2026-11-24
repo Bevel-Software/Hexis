@@ -312,6 +312,24 @@ describe('RolesAdminService', () => {
     expect(versionControl.commits).toHaveLength(0);
   });
 
+  it('getRoster marks a bot written under a role as a bot, never a person', async () => {
+    await write(
+      repo,
+      'roles.yaml',
+      ROLES.replace('felix@example.com', 'felix@example.com\n    - release-helper@agent.hexis'),
+    );
+    const book = botAddressBook();
+    book.replace(['release-helper']);
+    const withBots = new AccessControlService(ws, KB, realDisk(), [], undefined, undefined, {}, undefined, undefined, undefined, book);
+    const roster = await new RolesAdminService(ws, versionControl.svc, withBots, realDisk(), KB, () => DEFAULT_BRANCH, bus.bus).getRoster(
+      ADMIN.email,
+    );
+    const sales = roster.find((r) => r.canonical === 'sales')!;
+    expect(sales.members).toEqual(['felix@example.com', 'release-helper@agent.hexis']);
+    expect(sales.bots).toEqual(['release-helper@agent.hexis']);
+    expect(roster.find((r) => r.canonical === 'admin')!.bots).toEqual([]);
+  });
+
   it('addMember persists + is idempotent', async () => {
     await svc.addMember(ADMIN, 'sales', 'New@example.com');
     expect(await readRoles()).toContain('new@example.com');
