@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AdminContext, type AdminContextValue } from '../../admin';
 
@@ -15,6 +15,7 @@ import { AdminContext, type AdminContextValue } from '../../admin';
  */
 
 const libStub = vi.hoisted(() => ({ current: null as unknown }));
+const svc = vi.hoisted(() => ({ requestPluginAccess: vi.fn() }));
 
 // The band reads the catalog from its context; the line under test is built
 // from the summaries alone, so the context is stubbed rather than driven
@@ -23,8 +24,13 @@ vi.mock('../state/library-data', async (orig) => ({
   ...(await orig<typeof import('../state/library-data')>()),
   useLibrary: () => libStub.current,
 }));
+vi.mock('../services/plugins.api', async (orig) => ({
+  ...(await orig<typeof import('../services/plugins.api')>()),
+  requestPluginAccess: svc.requestPluginAccess,
+}));
 
 import { PluginRows } from '../components/PluginRows';
+import { LibraryToastProvider } from '../state/toast';
 import type { LibraryContextValue } from '../state/library-data';
 import type { PluginEntry } from '../utils/plugin-entries';
 import type { PluginSummary, PluginPrincipals } from '../services/plugins.api';
@@ -32,13 +38,14 @@ import type { PluginSummary, PluginPrincipals } from '../services/plugins.api';
 /** A person as the plugin listing sends one: by email, no display name. */
 const person = (email: string) => ({ name: '', email });
 
-function row(owners: PluginPrincipals, writers: PluginPrincipals) {
+/** One plugin row, for a member (the default) or for someone it is locked to. */
+function row(owners: PluginPrincipals, writers: PluginPrincipals, member = true) {
   const summary: PluginSummary = {
     name: 'qa-spaced',
     displayName: 'QA Spaced',
     folders: ['Plugins/QA Spaced'],
     linksAreManaged: true,
-    canRead: true,
+    canRead: member,
     canWrite: false,
     isOwner: false,
     skillCount: 0,
@@ -59,7 +66,7 @@ function row(owners: PluginPrincipals, writers: PluginPrincipals) {
     toolCount: 0,
     attention: 0,
     urgent: false,
-    member: true,
+    member,
   };
   libStub.current = {
     loading: false,
@@ -77,7 +84,9 @@ function row(owners: PluginPrincipals, writers: PluginPrincipals) {
   render(
     <MemoryRouter>
       <AdminContext.Provider value={{ isAdmin: false } as AdminContextValue}>
-        <PluginRows entries={[entry]} />
+        <LibraryToastProvider>
+          <PluginRows entries={[entry]} />
+        </LibraryToastProvider>
       </AdminContext.Provider>
     </MemoryRouter>,
   );
@@ -107,5 +116,24 @@ describe("a plugin row's run-by line", () => {
     row({ roles: [], users: [] }, { roles: ['Admin'], users: [] });
 
     expect(screen.getByText('Run by Admin')).toBeInTheDocument();
+  });
+
+  it('asks the owner it names when a reader subscribes from the row, and says so', async () => {
+    svc.requestPluginAccess.mockResolvedValue({ state: 'pending', number: null });
+    row(
+      { roles: [], users: [person('qa-user@example.com')] },
+      { roles: ['Admin'], users: [person('qa-user@example.com')] },
+      false,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for QA Spaced' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Subscribe' }));
+
+    expect(svc.requestPluginAccess).toHaveBeenCalledWith('qa-spaced');
+    expect(
+      await screen.findByText(
+        'Asked qa-user@example.com. You get its skills and tools once they grant access.',
+      ),
+    ).toBeInTheDocument();
   });
 });

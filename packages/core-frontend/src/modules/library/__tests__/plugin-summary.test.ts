@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { pluginLabel, pluginNameForPath, pluginsHoldingTool } from '../utils/plugin-summary';
+import {
+  adminNamesOf,
+  ownersTextOf,
+  pluginLabel,
+  pluginNameForPath,
+  pluginsHoldingTool,
+} from '../utils/plugin-summary';
 
 const summaries = [
   { name: 'gtm', displayName: 'Go To Market', folders: ['Plugins/GTM'] },
@@ -63,5 +69,31 @@ describe('pluginsHoldingTool', () => {
     expect(pluginsHoldingTool('Plugins/Shared/observability-archive/old.tool', withRoots)).toEqual([]);
     const older = [{ name: 'gtm', folders: ['Plugins/GTM'] }];
     expect(pluginsHoldingTool('Plugins/Shared/observability/grafana.tool', older)).toEqual([]);
+  });
+});
+
+/**
+ * Who runs a plugin, as every line that names them reads it: the row and the
+ * locked page (`ownersTextOf`), a skill page's reviewer (`ownersTextOf` of the
+ * skill's plugin) and the Subscribe confirmations (`adminNamesOf`). The
+ * listing sends a person by email with an empty `name`.
+ */
+describe('ownersTextOf and adminNamesOf', () => {
+  const person = { name: '', email: 'qa-user@example.com' };
+
+  it('name an owner sent by email alone by that email, not the Admin role among the writers', () => {
+    const summary = { owners: { roles: [], users: [person] }, writers: { roles: ['Admin'], users: [person] } };
+    expect(ownersTextOf(summary)).toBe('qa-user@example.com');
+    expect(adminNamesOf(summary)).toEqual(['qa-user@example.com']);
+  });
+
+  it('keep a named person by name, and fall back to Admin only with no owner', () => {
+    const named = { name: 'Olga Ivanova', email: 'olga@example.com' };
+    expect(ownersTextOf({ owners: { roles: [], users: [named] }, writers: { roles: [], users: [] } })).toBe(
+      'Olga Ivanova',
+    );
+    const ownerless = { owners: { roles: [], users: [] }, writers: { roles: ['Admin'], users: [] } };
+    expect(ownersTextOf(ownerless)).toBe('Admin');
+    expect(adminNamesOf(ownerless)).toEqual(['Admin']);
   });
 });
