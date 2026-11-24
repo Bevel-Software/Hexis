@@ -174,8 +174,11 @@ on the default branch; one they cannot read refuses the call. A
 
 For a file sent as one part of a form, set that `content_type` to
 `multipart/form-data` and declare that body input as an object: each property
-is a part. One with `format: file-path` is sent as the file, named as in its
-path; text goes as written, other values as JSON, `null` not at all.
+is a part. One with `format: file-path` is sent as the file, with the name in
+its path and the media type of its extension; text goes as written, other
+values as JSON. A part left out or `null` is not sent. A file part that is
+there but is not one path refuses the call, as does a file that cannot be
+read, before anything is sent.
 
 ### Adding a third-party tool
 
