@@ -136,7 +136,7 @@ function makePendingCommits(): PendingCommitsService {
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
     countPending: vi.fn().mockResolvedValue(0),
-    queuedOnBranch: vi.fn().mockResolvedValue({ queued: 0, stuck: 0, needsAttention: null }),
+    queuedOnBranch: vi.fn().mockResolvedValue({ queued: 0, stuck: [], needsAttention: null }),
     hasAnyForWorkspace: vi.fn().mockResolvedValue(false),
     startupReconcile: vi.fn().mockResolvedValue(undefined),
   } as unknown as PendingCommitsService;
@@ -503,7 +503,7 @@ describe('VersionControlService.updateBranch', () => {
     const git = gitThatMerges({ kind: 'merged', sha: 'm', from: 'x', resolvedPaths: [] });
     const pending = makePendingCommits();
     (pending.queuedOnBranch as ReturnType<typeof vi.fn>).mockImplementation(async (branch: string) =>
-      branch === 'target-company-state' ? { queued: 2, stuck: 0, needsAttention: null } : { queued: 0, stuck: 0, needsAttention: null },
+      branch === 'target-company-state' ? { queued: 2, stuck: [], needsAttention: null } : { queued: 0, stuck: [], needsAttention: null },
     );
     const svc = build(git, pending);
     svc.mergeWaitForPendingCommits = { timeoutMs: 30, pollMs: 5 };
@@ -2123,7 +2123,7 @@ describe('VersionControlService.mergeBranch — waits for the source branch\'s p
         const stuck = mine.filter((r) => r.status === 'needs_attention');
         return {
           queued: mine.filter((r) => r.status === 'pending' || r.status === 'running').length,
-          stuck: stuck.length,
+          stuck: stuck.map((r) => ({ workspaceId: r.workspaceId, path: r.path })),
           needsAttention: stuck[0] ? stuck[0].lastError : null,
         };
       }),
@@ -2265,6 +2265,28 @@ describe('VersionControlService.mergeBranch — waits for the source branch\'s p
     // Asked once, then once more after the rows with nothing left to push were cleared.
     expect(service.queuedOnBranch).toHaveBeenCalledTimes(2);
     expect(merge).not.toHaveBeenCalled();
+  });
+
+  it('names a stuck file outside the knowledge base: it carries no read rules, as the shared read contract says', async () => {
+    const { service } = memoryQueue([
+      row({ status: 'needs_attention', lastError: 'push rejected', path: 'Plugins/x/SKILL.md' }),
+      row({ status: 'needs_attention', lastError: 'push rejected', path: 'knowledge-base/Secret.md' }),
+    ]);
+    const { svc } = harness(service);
+    const outcome = await svc.mergeBranch(makeUser(), SOURCE, TARGET);
+    // The access stub reads no knowledge-base file: that one is counted, the other named.
+    expect(outcome).toMatchObject({ kind: 'pending-commits', stuck: { files: ['Plugins/x/SKILL.md'], more: 1 } });
+  });
+
+  it('names the stuck files from the read that refused, so a failing second read cannot turn the refusal into an error', async () => {
+    const { service } = memoryQueue([row({ status: 'needs_attention', lastError: 'push rejected', path: 'Plugins/x/SKILL.md' })]);
+    service.listNeedsAttention.mockRejectedValue(new Error('connection reset'));
+    const { svc } = harness(service);
+    await expect(svc.mergeBranch(makeUser(), SOURCE, TARGET)).resolves.toMatchObject({
+      kind: 'pending-commits',
+      needsAttention: 'push rejected',
+      stuck: { files: ['Plugins/x/SKILL.md'], more: 0 },
+    });
   });
 
   it('answers nothing-to-merge with the target\'s tip when the source has nothing the target lacks', async () => {

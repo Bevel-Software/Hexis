@@ -270,26 +270,28 @@ export type MergeBranchOutcome =
   | PendingCommitsRefusal;
 
 /**
- * A merge out of `branch`, or an update of it, refused before anything was
- * merged because saves on it have not reached the shared repository: they are
- * still being committed (the merge waited and they did not land in time), or
- * one of them failed and `needsAttention` carries the worker's message.
+ * A merge or an update refused before anything was merged because saves on
+ * `branch` have not reached the shared repository. `branch` is the branch
+ * whose saves blocked it: a merge's source, or either side of an update.
  *
- * `stuck`, present with `needsAttention`, names the files whose failed save is
- * still missing from the repository: at most ten the caller may read, and
- * `more`, how many others there are (past the ten, or not the caller's to
- * read). Saving such a file again lands it. A failed save that git confirms
- * has nothing left to push is cleared before this answer is built, so it is
- * not counted; one that could not be checked is kept, and counted.
+ * Either the saves are still being committed (the wait ran out), or one of
+ * them failed. Then `needsAttention` carries the worker's message and `stuck`
+ * names the files of the failed saves: at most ten the caller may read, and
+ * `more`, how many others (past the ten, or not the caller's to read). Saving
+ * such a file again lands it. A failed save git confirms has nothing left to
+ * push is cleared before this answer is built and is not counted; one that
+ * could not be checked is kept, and counted.
  */
-export type PendingCommitsRefusal = {
-  kind: 'pending-commits';
-  branch: string;
-  pending: number;
-  needsAttention?: string;
-  stuck?: { files: string[]; more: number };
-  message: string;
-};
+export type PendingCommitsRefusal =
+  | { kind: 'pending-commits'; branch: string; pending: number; message: string }
+  | {
+      kind: 'pending-commits';
+      branch: string;
+      pending: number;
+      needsAttention: string;
+      stuck: { files: string[]; more: number };
+      message: string;
+    };
 
 /**
  * What updating a branch from another (`updateBranch`) did: the merge's own

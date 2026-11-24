@@ -16,8 +16,8 @@ An agent drafts, proposes and syncs; people approve and apply, in the app.
   moments after the call returns; there is no separate push. `branch_status`
   lists writes still landing. `share_current_branch` is only for sharing
   again after a refused push, and `commit_change` only for a file a tool left
-  uncommitted (`unzip` does). A sync refused over saves that never landed
-  names their files in `stuck`: save them again.
+  uncommitted (`unzip` does). A sync refused over failed saves lists up to
+  ten in `stuck` (`more` counts the rest): save them again.
 - **Propose** with `open_change_request`
   (`sourceBranch` = the draft, `targetBranch` = the protected branch, a
   `title`), then give the person the request's `url`. It first brings the

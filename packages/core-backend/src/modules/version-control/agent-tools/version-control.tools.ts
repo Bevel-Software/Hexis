@@ -90,17 +90,17 @@ const changeRequestUrlSchema: JsonSchema = {
 const STUCK_OUTPUT: JsonSchema = {
   type: 'object',
   description:
-    '`pending-commits` with `needsAttention`: the files whose failed save is still missing from the shared repository. ' +
-    'Saving such a file again lands it, and the merge then goes through. `files`: at most ten you may read; `more`: ' +
-    'how many others (past ten, or not yours to read: ask a person who can read them).',
+    'Present only with `needsAttention`: the files of the failed saves the shared repository is not known to hold. ' +
+    'Saving such a file again lands it; then retry. `files`: at most ten you may read; `more`: how many others ' +
+    '(past ten, or not yours to read: ask a person who can read them).',
   properties: {
-    files: { type: 'array', items: { type: 'string' } },
-    more: { type: 'integer' },
+    files: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+    more: { type: 'integer', minimum: 0 },
   },
   required: ['files', 'more'],
 };
 
-const changeRequestUrlNoteSchema: JsonSchema ={ type: 'string', description: 'Present only when `url` is relative — how to get absolute links.' };
+const changeRequestUrlNoteSchema: JsonSchema = { type: 'string', description: 'Present only when `url` is relative — how to get absolute links.' };
 
 /** `{ number, url, urlNote? }` of a change request summary or detail. */
 function linkOf(cr: { number: number; url: string; urlNote?: string }): { number: number; url: string; urlNote?: string } {

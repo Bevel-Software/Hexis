@@ -108,7 +108,7 @@ import {
   VersionControlValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, toKbRelative, type IChangeReadGate } from '../access-model/index.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, resolveReadableMap, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -4435,16 +4435,19 @@ export class VersionControlService implements IVersionControlService {
    * commit escalated to a person ends the wait at once: nothing will land it.
    * Before that answer is given, the escalated rows whose save has nothing
    * left to push are cleared (`clearEscalatedCommits`), once per call, and
-   * the queue is asked again: only a row whose change is still missing from
-   * the repository refuses the merge.
+   * the queue is asked again: a row still there (its change missing, or not
+   * checkable) refuses the merge, and comes back in `stuck`, from the same
+   * read that decided the refusal.
    *
    * Polls the queue rather than draining it: the worker's own per-workspace
    * serialization stays the only writer to the clone, and the row is deleted
    * only after its push, so "no row" means the remote holds the commit.
    */
-  private async awaitPendingCommits(
-    branch: string,
-  ): Promise<{ ok: true } | { ok: false; pending: number; needsAttention?: string }> {
+  private async awaitPendingCommits(branch: string): Promise<
+    | { ok: true }
+    | { ok: false; pending: number }
+    | { ok: false; pending: number; needsAttention: string; stuck: Array<{ workspaceId: string; path: string }> }
+  > {
     const { timeoutMs, pollMs } = this.mergeWaitForPendingCommits;
     const deadline = Date.now() + timeoutMs;
     let cleared = false;
@@ -4455,7 +4458,7 @@ export class VersionControlService implements IVersionControlService {
         cleared = true;
         continue;
       }
-      if (needsAttention !== null) return { ok: false, pending: queued + stuck, needsAttention };
+      if (needsAttention !== null) return { ok: false, pending: queued + stuck.length, needsAttention, stuck };
       if (queued === 0) return { ok: true };
       if (Date.now() >= deadline) return { ok: false, pending: queued };
       await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
@@ -4526,17 +4529,19 @@ export class VersionControlService implements IVersionControlService {
   /**
    * The `pending-commits` answer of a merge out of `branch` or an update of
    * it, built in this one place for both. When escalated rows refused it,
-   * `stuck` names their files: at most ten `user` may read, sorted, and how
-   * many more there are. A file `user` may not read, or whose verdict could
-   * not be had, is counted and never named.
+   * `stuck` names their files (the rows the wait read, no second query): at
+   * most ten `user` may read, sorted, and how many more there are. Readability
+   * is the shared read contract (`resolveReadableMap`: a path outside the
+   * knowledge base carries no read rules). A file `user` may not read, or
+   * whose verdict could not be had, is counted and never named.
    */
   private async pendingCommitsRefusal(
     user: AuthUser,
     branch: string,
-    waited: { pending: number; needsAttention?: string },
+    waited: Exclude<Awaited<ReturnType<VersionControlService['awaitPendingCommits']>>, { ok: true }>,
     retry: 'merge' | 'update',
   ): Promise<PendingCommitsRefusal> {
-    if (!waited.needsAttention) {
+    if (!('needsAttention' in waited)) {
       return {
         kind: 'pending-commits',
         branch,
@@ -4544,19 +4549,20 @@ export class VersionControlService implements IVersionControlService {
         message: `${waited.pending} write(s) on "${branch}" are still being committed. Nothing was merged. Retry the ${retry} shortly.`,
       };
     }
-    const rows = await this.pendingCommits.listNeedsAttention(branch);
+    const rows = waited.stuck;
     const all = [...new Set(rows.map((r) => r.path))].sort();
     const readable = new Set<string>();
     for (const workspaceId of new Set(rows.map((r) => r.workspaceId))) {
       const mine = [...new Set(rows.filter((r) => r.workspaceId === workspaceId).map((r) => r.path))];
-      const byKb = new Map<string, string>();
-      for (const p of mine) {
-        const rel = toKbRelative(p, this.kb.kbDirName);
-        if (rel !== null) byKb.set(p, rel);
-      }
       try {
-        const verdict = await this.accessControl.canReadBatch(workspaceId, user.email, [...new Set(byKb.values())]);
-        for (const [p, rel] of byKb) if (verdict.get(rel) === true) readable.add(p);
+        const verdict = await resolveReadableMap(
+          (wid, email, rels) => this.accessControl.canReadBatch(wid, email, rels),
+          workspaceId,
+          user.email,
+          this.kb.kbDirName,
+          mine,
+        );
+        for (const p of mine) if (verdict.get(p) === true) readable.add(p);
       } catch (err) {
         log.warn('could not resolve read access to the stuck saves; none named:', { err: sanitizeError(err) });
       }
@@ -4569,7 +4575,7 @@ export class VersionControlService implements IVersionControlService {
       needsAttention: waited.needsAttention,
       stuck: { files, more: all.length - files.length },
       message:
-        `A save on "${branch}" failed and never reached the shared repository: ${waited.needsAttention} ` +
+        `A save on "${branch}" failed and the shared repository is not known to hold it: ${waited.needsAttention} ` +
         `Nothing was merged. Tell the user: saving each file in \`stuck\` again lands it, then ${retry} again.`,
     };
   }
