@@ -58,14 +58,28 @@ describe('hasSetAsideCopy', () => {
     expect(await hasSetAsideCopy(setAsideRoot, 'main')).toBe(false);
 
     const copy = await folderWith('workspaces/main/knowledge-base', 'unpushed.md', 'local work');
+    await fs.writeFile(path.join(copy, '.git'), 'gitdir: /somewhere/knowledge-base.git/worktrees/main\n', 'utf8');
     await setAsideClone(copy, path.join(setAsideRoot, setAsideStamp(), 'main'));
 
     expect(await hasSetAsideCopy(setAsideRoot, 'main')).toBe(true);
     expect(await hasSetAsideCopy(setAsideRoot, 'alice-draft')).toBe(false);
   });
 
-  // Root reads through any mode, so the refused read cannot be staged for it.
-  it.skipIf(process.getuid?.() === 0)('throws when the set-aside root cannot be read: a failed read is not absence', async () => {
+  it('does not take the repository set aside beside its worktrees for a workspace named like it', async () => {
+    const workspaces = path.join(root, 'workspaces');
+    const setAsideRoot = setAsideRootFor(workspaces);
+    // Where a set-aside of the repository puts it: `<stamp>/<repository folder name>`, a bare repository.
+    const bare = await folderWith('repository/knowledge-base.git', 'HEAD', 'ref: refs/heads/main\n');
+    await fs.mkdir(path.join(bare, 'objects'));
+    await setAsideClone(bare, path.join(setAsideRoot, setAsideStamp(), 'knowledge-base.git'));
+
+    // A branch may be named `knowledge-base.git`; its workspace id is that name.
+    expect(await hasSetAsideCopy(setAsideRoot, 'knowledge-base.git')).toBe(false);
+  });
+
+  // Root reads through any mode, and Windows does not enforce POSIX modes, so
+  // the refused read cannot be staged for either.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('throws when the set-aside root cannot be read: a failed read is not absence', async () => {
     const setAsideRoot = path.join(root, 'replaced-working-copies');
     await fs.mkdir(setAsideRoot);
     await fs.chmod(setAsideRoot, 0o000);

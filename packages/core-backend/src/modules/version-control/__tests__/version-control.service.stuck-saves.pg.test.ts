@@ -358,7 +358,7 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
       await laterSave(w, 'a.md', '# a, saved again\n');
       await stuckRow(w, { path: `${KB}/Data/QA/a.md` });
       // The copy that was set aside may still hold the bytes the row was escalated for.
-      await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-03T10-00-00-000Z', workspaceIdForBranch(MAIN)), { recursive: true });
+      await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-03T10-00-00-000Z', workspaceIdForBranch(MAIN), '.git'), { recursive: true });
       expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 1 });
       expect(await rowsLeft(w)).toEqual([{ path: `${KB}/Data/QA/a.md`, status: 'needs_attention' }]);
     },
@@ -379,8 +379,9 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
     PG_TEST_TIMEOUT,
   );
 
-  // Root reads through any mode, so the refused read cannot be staged for it.
-  it.skipIf(process.getuid?.() === 0)(
+  // Root reads through any mode, and Windows does not enforce POSIX modes, so
+  // the refused read cannot be staged for either.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'keeps a row whose workspace folder cannot be read: a failed read is not absence',
     async () => {
       const w = world;
