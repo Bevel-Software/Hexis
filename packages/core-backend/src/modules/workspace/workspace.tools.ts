@@ -4021,16 +4021,19 @@ export function registerWorkspaceTools(
       // editing is skipped, never written over their unsaved work.
       const locked: string[] = [];
       const unsaved: { path: string; reason: string }[] = [];
+      // `releaseLockUntouched` (never `releaseLockNoCommit`, which discards
+      // the path back to HEAD) wherever no commit is queued: the bytes on
+      // disk stay, whether this archive wrote them or a prior save did.
       const release = async (file: string, commit: boolean): Promise<void> => {
         if (!commit) {
-          await vcs.releaseLockNoCommit(workspaceId, branch, file, ctx.user).catch(() => undefined);
+          await vcs.releaseLockUntouched(workspaceId, branch, file, ctx.user).catch(() => undefined);
           return;
         }
         try {
           await vcs.releaseLock(workspaceId, branch, file, ctx.user);
         } catch (err) {
-          // Hand the lock back, so `save_file` can take it again.
-          await vcs.releaseLockNoCommit(workspaceId, branch, file, ctx.user).catch(() => undefined);
+          // Hand the lock back with the extracted bytes kept, so `save_file` can take it and commit them.
+          await vcs.releaseLockUntouched(workspaceId, branch, file, ctx.user).catch(() => undefined);
           const why = err instanceof Error ? err.message : String(err);
           unsaved.push({ path: file, reason: `Not committed (${why}); save it with save_file.` });
         }
@@ -4061,6 +4064,9 @@ export function registerWorkspaceTools(
                 }
                 writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
                 await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsRelPath);
+                // An archive may carry the same path twice: the later entry
+                // overwrites the earlier under the lock this call already holds.
+                if (locked.includes(wsRelPath)) return;
                 const acquired = await vcs.acquireLock(workspaceId, branch, wsRelPath, ctx.user);
                 if (!acquired.acquired) {
                   throw new ToolError(
@@ -4080,7 +4086,7 @@ export function registerWorkspaceTools(
         throw err;
       }
       // A locked entry the extraction skipped after its guard (a size cap, a
-      // directory) wrote nothing: its lock goes back without a commit.
+      // directory) wrote nothing: its lock goes back untouched.
       const written = new Set(result.extracted);
       for (const file of locked) await release(file, written.has(file));
       return unsaved.length > 0 ? { ...result, unsaved } : result;

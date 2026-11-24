@@ -117,6 +117,8 @@ let lockCalls: string[] = [];
 let lockedByOthers = new Set<string>();
 /** Paths whose `releaseLock` throws, as a commit that could not be queued. */
 let failingReleases = new Set<string>();
+/** Locks currently held by the caller in the stand-in lock table. */
+let heldLocks = new Set<string>();
 /** When set, the `unzipFile` stand-in throws after writing this many entries. */
 let unzipThrowAfter: number | null = null;
 /** Every folder turn a tool took, as `workspaceId:dir`. */
@@ -273,6 +275,7 @@ async function start(
   lockCalls = [];
   lockedByOthers = new Set();
   failingReleases = new Set();
+  heldLocks = new Set();
   unzipThrowAfter = null;
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
@@ -334,19 +337,29 @@ async function start(
         return { destination: '', extracted, skipped };
       },
     } as never,
+    // A stateful lock table, as the real one: a held lock refuses every
+    // second acquire, its holder's included, until a release drops it.
     versionControlService: {
       acquireLock: async (_ws: string, _branch: string, file: string) => {
         lockCalls.push(`acquire ${file}`);
-        return lockedByOthers.has(file)
-          ? { acquired: false, lock: { holderName: 'Ana' } }
-          : { acquired: true };
+        if (lockedByOthers.has(file)) return { acquired: false, lock: { holderName: 'Ana' } };
+        if (heldLocks.has(file)) return { acquired: false, lock: { holderName: 'N' } };
+        heldLocks.add(file);
+        return { acquired: true };
       },
       releaseLock: async (_ws: string, _branch: string, file: string) => {
         lockCalls.push(`release ${file}`);
+        // A commit that cannot be queued leaves the lock held, as the real release does.
         if (failingReleases.has(file)) throw new Error('queue unavailable');
+        heldLocks.delete(file);
+      },
+      releaseLockUntouched: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`hand back untouched ${file}`);
+        heldLocks.delete(file);
       },
       releaseLockNoCommit: async (_ws: string, _branch: string, file: string) => {
-        lockCalls.push(`hand back ${file}`);
+        lockCalls.push(`discard ${file}`);
+        heldLocks.delete(file);
       },
     } as never,
     events: {} as never,
@@ -5185,13 +5198,29 @@ describe('agent read/write hooks', () => {
     expect(body.unsaved).toEqual([
       { path: `${KB_DIR}/out/one.md`, reason: 'Not committed (queue unavailable); save it with save_file.' },
     ]);
+    // Handed back UNTOUCHED: `releaseLockNoCommit` would discard the extracted bytes back to HEAD.
     expect(lockCalls).toEqual([
       `acquire ${KB_DIR}/out/one.md`,
       `acquire ${KB_DIR}/out/two.md`,
       `release ${KB_DIR}/out/one.md`,
-      `hand back ${KB_DIR}/out/one.md`,
+      `hand back untouched ${KB_DIR}/out/one.md`,
       `release ${KB_DIR}/out/two.md`,
     ]);
+    expect(lockCalls.some((c) => c.startsWith('discard'))).toBe(false);
+    // No lock is left held, so `save_file` (an acquire and its release on the same table) can take it.
+    expect([...heldLocks]).toEqual([]);
+  });
+
+  it('unzip writes a path the archive carries twice under the one lock it already holds', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: unknown[] };
+    expect(body.skipped).toEqual([]);
+    expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`]);
+    expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/twice.md`, `release ${KB_DIR}/out/twice.md`]);
   });
 
   it('unzip commits what it already wrote when the extraction fails part-way', async () => {

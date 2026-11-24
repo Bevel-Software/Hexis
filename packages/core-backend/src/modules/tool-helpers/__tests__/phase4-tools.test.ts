@@ -49,7 +49,7 @@ const workspaceService = {
 const versionControlService = {
   acquireLock: async () => ({ acquired: true }),
   releaseLock: async () => undefined,
-  releaseLockNoCommit: async () => undefined,
+  releaseLockUntouched: async () => undefined,
 } as never;
 const events = {} as never;
 const accessControl = {
