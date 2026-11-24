@@ -2127,6 +2127,14 @@ describe('VersionControlService.mergeBranch — waits for the source branch\'s p
           needsAttention: stuck[0] ? stuck[0].lastError : null,
         };
       }),
+      listNeedsAttention: vi.fn(async (branch?: string) =>
+        table.filter((r) => r.status === 'needs_attention' && (branch === undefined || r.branch === branch)),
+      ),
+      removeEscalated: vi.fn(async (ids: readonly string[]) => {
+        const gone = table.filter((r) => r.status === 'needs_attention' && ids.includes(r.id));
+        for (const r of gone) table.splice(table.indexOf(r), 1);
+        return gone;
+      }),
     };
     return { service: service as unknown as PendingCommitsService & typeof service, table };
   }
@@ -2136,9 +2144,14 @@ describe('VersionControlService.mergeBranch — waits for the source branch\'s p
     (git as unknown as Record<string, unknown>).remoteBranchExists = vi.fn().mockResolvedValue(true);
     const merge = vi.fn(async (): Promise<unknown> => ({ kind: 'merged', sha: 'merge-sha', mergeCommit: 'merge-sha' }));
     (git as unknown as Record<string, unknown>).mergeChangeRequest = merge;
+    // Every working copy exists, and every path asked about is still missing from the repository:
+    // a row that needs attention stays, as these tests are about the wait, not the clearing.
+    (git as unknown as Record<string, unknown>).unpublishedPaths = vi.fn(async (_ws: string, _b: string, paths: string[]) => new Set(paths));
+    const workspaces = makeWorkspaceService();
+    (workspaces.hasBootstrappedWorkspace as ReturnType<typeof vi.fn>).mockResolvedValue(true);
     const svc = new VersionControlService(
       makeDb([{ number: 12, sourceBranch: 'alice/feat', targetBranch: DEFAULT_BRANCH, state: 'open' }]),
-      git, makePrs(), makeChangeRequestReview(), makeWorkspaceService(), makeAccessControl(), makeFileLockService(),
+      git, makePrs(), makeChangeRequestReview(), workspaces, makeAccessControl(), makeFileLockService(),
       pending, testKbContext(), openChangeGate(),
     );
     svc.mergeWaitForPendingCommits = wait;
@@ -2245,9 +2258,12 @@ describe('VersionControlService.mergeBranch — waits for the source branch\'s p
       branch: SOURCE,
       pending: 2,
       needsAttention: 'push rejected: protected ref',
+      // The access stub reads nothing as readable: the file is counted, never named.
+      stuck: { files: [], more: 1 },
       message: expect.stringContaining('push rejected: protected ref'),
     });
-    expect(service.queuedOnBranch).toHaveBeenCalledTimes(1);
+    // Asked once, then once more after the rows with nothing left to push were cleared.
+    expect(service.queuedOnBranch).toHaveBeenCalledTimes(2);
     expect(merge).not.toHaveBeenCalled();
   });
 

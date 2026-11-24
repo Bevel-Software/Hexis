@@ -4506,7 +4506,7 @@ export class VersionControlService implements IVersionControlService {
         done.push(...group.filter((r) => !unpublished.has(r.path)).map((r) => r.id));
       } catch (err) {
         log.warn(
-          `could not check ${group.length} stuck save(s) on "${printable(rowBranch)}" in workspace ${printable(workspaceId)}; kept:`,
+          `could not check ${group.length} stuck save(s) on ${printable(rowBranch)} in workspace ${printable(workspaceId)}; kept:`,
           { err: sanitizeError(err) },
         );
       }
@@ -4514,8 +4514,8 @@ export class VersionControlService implements IVersionControlService {
     try {
       for (const row of await this.pendingCommits.removeEscalated(done)) {
         log.info(
-          `cleared a stuck save with nothing left to push: branch="${printable(row.branch)}" ` +
-            `path="${printable(row.path)}" queued=${row.queuedAt.toISOString()}`,
+          `cleared a stuck save with nothing left to push: branch=${printable(row.branch)} ` +
+            `path=${printable(row.path)} queued=${row.queuedAt.toISOString()}`,
         );
       }
     } catch (err) {
