@@ -137,8 +137,8 @@ export async function createAccount(
 /**
  * Set or reset the password of the account with this id (a row of the User
  * accounts page). It changes that account and never makes one: when the
- * account is gone (another admin deleted it, say) the server refuses with
- * "No such user" and nothing is created.
+ * account is gone (another admin deleted it, say) the server refuses, in
+ * words the dialog shows as they are, and nothing is created.
  */
 export async function setAccountPassword(userId: string, password: string): Promise<void> {
   const res = await authFetch(`/api/admin/accounts/${encodeURIComponent(userId)}/password`, {

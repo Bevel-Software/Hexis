@@ -393,17 +393,17 @@ describe("account routes — setting a password from an account's row", () => {
     expect(authService.createAccountWithoutPassword).not.toHaveBeenCalled();
   });
 
-  it('answers 404 "No such user" for an account that is gone, before the write or by the time of it, and makes none', async () => {
+  it('answers 404, in words, for an account that is gone, before the write or by the time of it, and makes none', async () => {
     const base = await listen(makeApp({ admin: true }));
     const before = await setPassword(base, 'missing', { password: 'long-enough-pw' });
     expect(before.status).toBe(404);
-    expect(await before.json()).toEqual({ error: 'No such user' });
+    expect(await before.json()).toEqual({ error: 'This account no longer exists.' });
     expect(authService.setPassword).not.toHaveBeenCalled();
 
     vi.mocked(authService.setPassword).mockResolvedValueOnce(false);
     const during = await setPassword(base, 'u2', { password: 'long-enough-pw' });
     expect(during.status).toBe(404);
-    expect(await during.json()).toEqual({ error: 'No such user' });
+    expect(await during.json()).toEqual({ error: 'This account no longer exists.' });
 
     expect(authService.createAccount).not.toHaveBeenCalled();
     expect(authService.createAccountWithoutPassword).not.toHaveBeenCalled();

@@ -100,7 +100,7 @@ describe.skipIf(!PG_ADMIN_URL)('setting a password from an account row, on a rea
 
       const res = await setPassword(kim.id, 'new-password-1');
       expect(res.status).toBe(404);
-      expect(await res.json()).toEqual({ error: 'No such user' });
+      expect(await res.json()).toEqual({ error: 'This account no longer exists.' });
       // The deletion stands: no account at that address, and nobody signs in with either password.
       expect(await listed('kim@acme.test')).toEqual([]);
       expect(await signsIn('kim@acme.test', 'new-password-1')).toBe(false);
@@ -121,7 +121,7 @@ describe.skipIf(!PG_ADMIN_URL)('setting a password from an account row, on a rea
       const res = await setPassword(lena.id, 'new-password-1');
       expect(deleted).toBe(204);
       expect(res.status).toBe(404);
-      expect(await res.json()).toEqual({ error: 'No such user' });
+      expect(await res.json()).toEqual({ error: 'This account no longer exists.' });
       expect(await listed('lena@acme.test')).toEqual([]);
       expect(await signsIn('lena@acme.test', 'new-password-1')).toBe(false);
     },

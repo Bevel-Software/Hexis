@@ -19,6 +19,12 @@ import './auth.middleware.js'; // Express Request augmentation
 const OWNER_PASSWORD_REFUSAL = "The owner's password can't be set by another admin; the owner sets it on their Account page.";
 
 /**
+ * The 404 of a password set from an account's row, in words for the dialog
+ * that shows it: that dialog names an account the list held when it opened.
+ */
+const ACCOUNT_GONE = 'This account no longer exists.';
+
+/**
  * Admin account management — the ONE account surface (the core User Accounts
  * page): list accounts, create/reset password accounts, and permanently
  * erase one (the GDPR Art. 17 path — hard-deletes the user's personal data
@@ -190,7 +196,7 @@ export function createAccountRoutes(
     try {
       const target = await authService.getUserById(userId);
       if (!target) {
-        res.status(404).json({ error: 'No such user' });
+        res.status(404).json({ error: ACCOUNT_GONE });
         return;
       }
       if (isAnotherAdminsOwner(target.email, req.userEmail)) {
@@ -198,7 +204,7 @@ export function createAccountRoutes(
         return;
       }
       if (!(await authService.setPassword(userId, password))) {
-        res.status(404).json({ error: 'No such user' });
+        res.status(404).json({ error: ACCOUNT_GONE });
         return;
       }
       res.status(204).end();

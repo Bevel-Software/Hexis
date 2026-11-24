@@ -356,7 +356,7 @@ describe('UserAccountsPage', () => {
     // Bob is listed when the page loads; another admin deletes him while the
     // Reset dialog is open, so the next read no longer has him.
     vi.mocked(listAccounts).mockResolvedValueOnce([ALICE, BOB]).mockResolvedValueOnce([ALICE]);
-    vi.mocked(setAccountPassword).mockRejectedValueOnce(new Error('No such user'));
+    vi.mocked(setAccountPassword).mockRejectedValueOnce(new Error('This account no longer exists.'));
     renderPage();
     await waitFor(() => screen.getByText('Bob'));
     // Bob's row, found whether or not the open dialog hides the page from assistive tech.
@@ -368,7 +368,7 @@ describe('UserAccountsPage', () => {
     await userEvent.click(dialog.getByRole('button', { name: 'Reset password' }));
 
     // Said in the dialog, which stays open, and never reported as a reset.
-    expect(await dialog.findByRole('alert')).toHaveTextContent('No such user');
+    expect(await dialog.findByRole('alert')).toHaveTextContent('This account no longer exists.');
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     // The list is read again, and the account that is gone leaves it.
     await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
