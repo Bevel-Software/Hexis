@@ -1,5 +1,5 @@
 ---
-'@bevel-software/platform-core-backend': patch
+'@bevel-software/platform-core-backend': minor
 ---
 
 The hosted MCP endpoint reads a caller's catalog revision in process. It asks for the revision on every request, to pick the caller's cached tool client, and it asked with an HTTP request to `GET /api/agent/catalog-revision` on the same server, behind a 15 second limit of its own. A busy server answered itself late, the limit fired, and the request built a surface it could not cache. The route and the endpoint now call one reader (`createCatalogRevisionReader` in `core/catalog-revision.ts`), so the two cannot answer differently. The route is unchanged for the local server, which still polls it. The reader is asked for the caller the request's credential resolved to, which is what the route's auth resolves the same bearer to. When the reader fails, the request builds a surface of its own and keeps it to itself, as it did when the loopback failed.
@@ -11,3 +11,5 @@ A surface built while the manual list could not be read is no longer kept. Befor
 `createCatalogRevisionRoutes` takes either a reader (`read`) or the sources to make one from, not both.
 
 The manual list, the skills and tool discovery are still read over loopback; those are the next steps of hx-tool-surface-is-built-without-a-loopback-call.
+
+A minor release, not a patch: the exported `CoreServices` gains a required member, `readCatalogRevision`. Code that builds or mocks a `CoreServices` by hand must add it.
