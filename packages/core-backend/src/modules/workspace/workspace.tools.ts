@@ -4026,10 +4026,40 @@ export function registerWorkspaceTools(
       // would stage everything under it, checked or not.
       const written = new Set<string>();
       const unsaved: { path: string; reason: string }[] = [];
+      const mayNotBeCommitted = 'It may not be committed; save it with save_file (saving a committed file changes nothing).';
+      // When this call took each lock. A lock is held from its entry's write
+      // to the end of the extraction, and a long archive can outlast its
+      // lease (60 s). A lapsed lock may be someone else's by then, the
+      // person's own editor's included, under this call's own user id, which
+      // a heartbeat or a release cannot tell apart. So before a lock is used
+      // again or handed back, its lease is renewed and checked to be the
+      // acquisition this call took. One that lapsed with nobody taking it is
+      // taken again when `retake` asks (so its file still commits); one held
+      // by anyone else is left alone.
+      const acquisitions = new Map<string, string>();
+      type Hold = { held: true } | { held: false; holderName?: string };
+      const holdOwn = async (file: string, retake: boolean): Promise<Hold> => {
+        const renewed = await vcs.heartbeatLock(workspaceId, branch, file, ctx.user).catch(() => null);
+        if (renewed) {
+          return renewed.acquiredAt === acquisitions.get(file) ? { held: true } : { held: false, holderName: renewed.holderName };
+        }
+        if (!retake) return { held: false };
+        const again = await vcs.acquireLock(workspaceId, branch, file, ctx.user);
+        if (!again.acquired) return { held: false, holderName: again.lock.holderName };
+        acquisitions.set(file, again.lock.acquiredAt);
+        return { held: true };
+      };
       // `releaseLockUntouched` (never `releaseLockNoCommit`, which discards
       // the path back to HEAD) wherever no commit is queued: the bytes on
       // disk stay, whether this archive wrote them or a prior save did.
       const release = async (file: string, commit: boolean): Promise<void> => {
+        const hold = await holdOwn(file, commit).catch((): Hold => ({ held: false }));
+        if (!hold.held) {
+          // Not this call's lock any more: it is neither committed nor handed
+          // back, and a file this call wrote under it is reported.
+          if (commit) unsaved.push({ path: file, reason: mayNotBeCommitted });
+          return;
+        }
         if (!commit) {
           await vcs.releaseLockUntouched(workspaceId, branch, file, ctx.user).catch(() => undefined);
           return;
@@ -4046,9 +4076,7 @@ export function registerWorkspaceTools(
           // drained that commit already, so "nothing queued" is a maybe, and
           // the answer says so: saving a committed file again changes nothing.
           const queued = await vcs.hasQueuedCommit(workspaceId, branch, file).catch(() => false);
-          if (!queued) {
-            unsaved.push({ path: file, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' });
-          }
+          if (!queued) unsaved.push({ path: file, reason: mayNotBeCommitted });
         }
       };
       let result: Awaited<ReturnType<typeof ctx.workspaceService.unzipFile>>;
@@ -4077,34 +4105,24 @@ export function registerWorkspaceTools(
                 }
                 writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
                 await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsRelPath);
-                const takeLock = async (): Promise<void> => {
-                  const acquired = await vcs.acquireLock(workspaceId, branch, wsRelPath, ctx.user);
-                  if (!acquired.acquired) {
-                    throw new ToolError(
-                      `${acquired.lock.holderName ?? 'Another person'} is editing this file, so it was not extracted over their work.`,
-                      409,
-                    );
-                  }
-                };
+                const editedBy = (holderName?: string): ToolError =>
+                  new ToolError(`${holderName ?? 'Another person'} is editing this file, so it was not extracted over their work.`, 409);
                 // An archive may carry the same path twice: the later entry
-                // overwrites the earlier under the lock this call already holds.
-                // A long archive can outlast that lock's lease, and a lapsed
-                // lock may be someone else's by now, so the lease is renewed
-                // before the rewrite; one that lapsed is taken again as a first
-                // entry's is, which skips the entry if another person holds it.
+                // overwrites the earlier under the lock this call took for it,
+                // once that lock is checked to be still this call's (see
+                // `holdOwn`); one someone else holds now skips the entry.
                 // The earlier write no longer stands for what is on disk: only
                 // this rewrite, once complete, marks the path written again, so
                 // a rewrite that fails part-way is never committed.
                 if (locked.includes(wsRelPath)) {
-                  const renewed = await vcs.heartbeatLock(workspaceId, branch, wsRelPath, ctx.user).then(
-                    () => true,
-                    () => false,
-                  );
-                  if (!renewed) await takeLock();
+                  const hold = await holdOwn(wsRelPath, true);
+                  if (!hold.held) throw editedBy(hold.holderName);
                   written.delete(wsRelPath);
                   return;
                 }
-                await takeLock();
+                const acquired = await vcs.acquireLock(workspaceId, branch, wsRelPath, ctx.user);
+                if (!acquired.acquired) throw editedBy(acquired.lock.holderName);
+                acquisitions.set(wsRelPath, acquired.lock.acquiredAt);
                 locked.push(wsRelPath);
               },
               (wsRelPath) => written.add(wsRelPath),

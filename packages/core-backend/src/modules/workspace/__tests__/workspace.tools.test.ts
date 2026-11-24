@@ -127,9 +127,13 @@ let queuedDespiteFailure = new Set<string>();
 let unzipThrowAfter: number | null = null;
 /**
  * Locks whose lease runs out before their next heartbeat, as a long archive can outlast
- * one: `free` lapsed and nobody took it, `taken` lapsed and another person (Ana) holds it now.
+ * one: `free` lapsed and nobody took it, `taken` lapsed and another person (Ana) holds it now,
+ * `editor` lapsed and the person's own editor took it, under this call's own user id.
  */
-let lapsedLeases = new Map<string, 'free' | 'taken'>();
+let lapsedLeases = new Map<string, 'free' | 'taken' | 'editor'>();
+/** The stamp of the acquisition holding each lock now, as the real lock's `acquiredAt`. */
+let acquiredAt = new Map<string, string>();
+let acquisitionCount = 0;
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -288,6 +292,8 @@ async function start(
   queuedDespiteFailure = new Set();
   unzipThrowAfter = null;
   lapsedLeases = new Map();
+  acquiredAt = new Map();
+  acquisitionCount = 0;
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -355,25 +361,33 @@ async function start(
       },
     } as never,
     // A stateful lock table, as the real one: a held lock refuses every
-    // second acquire, its holder's included, until a release drops it.
+    // second acquire, its holder's included, until a release drops it. Each
+    // acquisition is stamped, as the real `acquiredAt` is, and a heartbeat
+    // answers the stamp of whichever acquisition holds the lock now.
     versionControlService: {
       acquireLock: async (_ws: string, _branch: string, file: string) => {
         lockCalls.push(`acquire ${file}`);
         if (lockedByOthers.has(file)) return { acquired: false, lock: { holderName: 'Ana' } };
         if (heldLocks.has(file)) return { acquired: false, lock: { holderName: 'N' } };
         heldLocks.add(file);
-        return { acquired: true };
+        acquiredAt.set(file, `t${++acquisitionCount}`);
+        return { acquired: true, lock: { holderName: 'N', acquiredAt: acquiredAt.get(file) } };
       },
       heartbeatLock: async (_ws: string, _branch: string, file: string) => {
         lockCalls.push(`heartbeat ${file}`);
         const lapse = lapsedLeases.get(file);
         if (lapse) {
+          lapsedLeases.delete(file);
           heldLocks.delete(file);
           if (lapse === 'taken') lockedByOthers.add(file);
+          if (lapse === 'editor') {
+            heldLocks.add(file);
+            acquiredAt.set(file, `t${++acquisitionCount}`);
+          }
         }
-        // As the real heartbeat: only a live lock the caller holds is renewed.
+        // As the real heartbeat: only a live lock held under the caller's user id is renewed.
         if (!heldLocks.has(file)) throw new Error('lock not held');
-        return {};
+        return { holderName: 'N', acquiredAt: acquiredAt.get(file) };
       },
       releaseLock: async (_ws: string, _branch: string, file: string) => {
         lockCalls.push(`release ${file}`);
@@ -5197,7 +5211,9 @@ describe('agent read/write hooks', () => {
     expect(lockCalls).toEqual([
       `acquire ${KB_DIR}/out/access.md`,
       `acquire ${KB_DIR}/out/page.md`,
+      `heartbeat ${KB_DIR}/out/access.md`,
       `release ${KB_DIR}/out/access.md`,
+      `heartbeat ${KB_DIR}/out/page.md`,
       `release ${KB_DIR}/out/page.md`,
     ]);
     expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
@@ -5216,7 +5232,12 @@ describe('agent read/write hooks', () => {
       { path: `${KB_DIR}/out/held.md`, reason: 'Ana is editing this file, so it was not extracted over their work.' },
     ]);
     expect(body.unsaved).toBeUndefined();
-    expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/held.md`, `acquire ${KB_DIR}/out/free.md`, `release ${KB_DIR}/out/free.md`]);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/held.md`,
+      `acquire ${KB_DIR}/out/free.md`,
+      `heartbeat ${KB_DIR}/out/free.md`,
+      `release ${KB_DIR}/out/free.md`,
+    ]);
   });
 
   it('unzip lists a file whose commit failed under unsaved, and hands its lock back so save_file can take it', async () => {
@@ -5255,8 +5276,10 @@ describe('agent read/write hooks', () => {
     expect(lockCalls).toEqual([
       `acquire ${KB_DIR}/out/one.md`,
       `acquire ${KB_DIR}/out/two.md`,
+      `heartbeat ${KB_DIR}/out/one.md`,
       `release ${KB_DIR}/out/one.md`,
       `hand back untouched ${KB_DIR}/out/one.md`,
+      `heartbeat ${KB_DIR}/out/two.md`,
       `release ${KB_DIR}/out/two.md`,
     ]);
     expect(lockCalls.some((c) => c.startsWith('discard'))).toBe(false);
@@ -5275,6 +5298,7 @@ describe('agent read/write hooks', () => {
     expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`]);
     expect(lockCalls).toEqual([
       `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
       `heartbeat ${KB_DIR}/out/twice.md`,
       `release ${KB_DIR}/out/twice.md`,
     ]);
@@ -5298,7 +5322,8 @@ describe('agent read/write hooks', () => {
     expect(body.skipped).toEqual([
       { path: `${KB_DIR}/out/twice.md`, reason: 'Ana is editing this file, so it was not extracted over their work.' },
     ]);
-    // The first copy is on disk under her lock now, so this call could not commit it, and says so.
+    // The first copy is on disk under her lock now: this call neither commits it nor hands her
+    // lock back, and says so.
     expect(body.unsaved).toEqual([
       { path: `${KB_DIR}/out/twice.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
     ]);
@@ -5306,9 +5331,60 @@ describe('agent read/write hooks', () => {
       `acquire ${KB_DIR}/out/twice.md`,
       `heartbeat ${KB_DIR}/out/twice.md`,
       `acquire ${KB_DIR}/out/twice.md`,
-      `release ${KB_DIR}/out/twice.md`,
-      `hand back untouched ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `acquire ${KB_DIR}/out/twice.md`,
     ]);
+  });
+
+  it('unzip does not write a path carried twice over the person\'s own editor, which took the lock after the lease lapsed', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    // The editor holds the lock under this call's own user id, so a heartbeat alone renews it;
+    // only the acquisition's stamp tells it is not this call's.
+    lapsedLeases = new Map([[`${KB_DIR}/out/twice.md`, 'editor']]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      extracted: string[];
+      skipped: { path: string; reason: string }[];
+      unsaved?: { path: string; reason: string }[];
+    };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/twice.md`, reason: 'N is editing this file, so it was not extracted over their work.' },
+    ]);
+    expect(body.unsaved).toEqual([
+      { path: `${KB_DIR}/out/twice.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
+    ]);
+    // The editor's lock is neither released with a commit nor handed back.
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+    ]);
+    expect([...heldLocks]).toEqual([`${KB_DIR}/out/twice.md`]);
+  });
+
+  it('unzip takes a lapsed lock again before releasing it, so a file early in a long archive still commits', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/early.md`, `${KB_DIR}/out/late.md`];
+    // The archive outlasts the first file's lease, and nobody takes it in between.
+    lapsedLeases = new Map([[`${KB_DIR}/out/early.md`, 'free']]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/early.md`,
+      `acquire ${KB_DIR}/out/late.md`,
+      `heartbeat ${KB_DIR}/out/early.md`,
+      `acquire ${KB_DIR}/out/early.md`,
+      `release ${KB_DIR}/out/early.md`,
+      `heartbeat ${KB_DIR}/out/late.md`,
+      `release ${KB_DIR}/out/late.md`,
+    ]);
+    expect([...heldLocks]).toEqual([]);
   });
 
   it('unzip takes a lapsed lock again before writing a path carried twice, when nobody took it', async () => {
@@ -5326,6 +5402,7 @@ describe('agent read/write hooks', () => {
       `acquire ${KB_DIR}/out/twice.md`,
       `heartbeat ${KB_DIR}/out/twice.md`,
       `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
       `release ${KB_DIR}/out/twice.md`,
     ]);
     expect([...heldLocks]).toEqual([]);
@@ -5343,6 +5420,7 @@ describe('agent read/write hooks', () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(lockCalls).toEqual([
       `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
       `heartbeat ${KB_DIR}/out/twice.md`,
       `hand back untouched ${KB_DIR}/out/twice.md`,
     ]);
@@ -5362,8 +5440,11 @@ describe('agent read/write hooks', () => {
       `acquire ${KB_DIR}/out/one.md`,
       `acquire ${KB_DIR}/out/two.md`,
       `acquire ${KB_DIR}/out/three.md`,
+      `heartbeat ${KB_DIR}/out/one.md`,
       `release ${KB_DIR}/out/one.md`,
+      `heartbeat ${KB_DIR}/out/two.md`,
       `release ${KB_DIR}/out/two.md`,
+      `heartbeat ${KB_DIR}/out/three.md`,
       `hand back untouched ${KB_DIR}/out/three.md`,
     ]);
     expect([...heldLocks]).toEqual([]);
@@ -5398,6 +5479,7 @@ describe('agent read/write hooks', () => {
     expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
     expect(lockCalls).toEqual([
       `acquire ${KB_DIR}/out/one.md`,
+      `heartbeat ${KB_DIR}/out/one.md`,
       `release ${KB_DIR}/out/one.md`,
       `hand back untouched ${KB_DIR}/out/one.md`,
     ]);
@@ -5411,7 +5493,11 @@ describe('agent read/write hooks', () => {
     refuseWrites('Not in this conversation.', `${KB_DIR}/out/blocked.md`);
     const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
     expect(res.status).toBe(200);
-    expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/keep.md`, `release ${KB_DIR}/out/keep.md`]);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/keep.md`,
+      `heartbeat ${KB_DIR}/out/keep.md`,
+      `release ${KB_DIR}/out/keep.md`,
+    ]);
   });
 
   it('unzip skips the refused entry with the hook\'s message and extracts the others', async () => {

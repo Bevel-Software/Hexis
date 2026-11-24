@@ -47,7 +47,8 @@ const workspaceService = {
 } as never;
 // Enough of the locks for `unzip`, which writes each entry under its lock and commits it on release.
 const versionControlService = {
-  acquireLock: async () => ({ acquired: true }),
+  acquireLock: async () => ({ acquired: true, lock: { acquiredAt: 't1' } }),
+  heartbeatLock: async () => ({ acquiredAt: 't1' }),
   releaseLock: async () => undefined,
   releaseLockUntouched: async () => undefined,
   hasQueuedCommit: async () => false,
