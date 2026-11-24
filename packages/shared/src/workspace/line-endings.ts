@@ -62,8 +62,10 @@ function sameLine(a: string, b: string): boolean {
  *    ending keeps none).
  *
  * So text nobody changed comes back exactly as `original`, an all-CRLF or
- * all-LF file keeps its ending on every line, and one edit to a mixed file
- * changes only the lines it touched. Only CRLF and LF are line endings here.
+ * all-LF file keeps its ending on every line, and one edit (one run of
+ * changed lines) to a mixed file shows as no more changed lines than the edit
+ * itself. Two edits apart in a mixed file also give the untouched lines
+ * between them the majority ending. Only CRLF and LF are line endings here.
  */
 export function restoreLineEndings(original: string, edited: string): string {
   const before = linesOf(original);

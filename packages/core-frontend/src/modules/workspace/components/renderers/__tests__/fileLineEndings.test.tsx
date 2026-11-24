@@ -228,4 +228,54 @@ describe('restoreLineEndings', () => {
     expect(restoreLineEndings('a\r\nb\nc\r\n', 'a\nB\nc\n')).toBe('a\r\nB\r\nc\r\n');
     expect(restoreLineEndings('a\nb\r\nc\n', 'a\nB\nc\n')).toBe('a\nB\nc\n');
   });
+
+  it('adds one line when a copy of a neighbouring line is inserted, and leaves the neighbours alone', () => {
+    // `y\n` keeps its LF; the one new line takes the majority's CRLF.
+    expect(restoreLineEndings('x\r\ny\nz\r\n', 'x\ny\ny\nz\n')).toBe('x\r\ny\ny\r\nz\r\n');
+  });
+
+  /**
+   * Every file of up to three lines over two texts and both endings (the last
+   * line with or without one), and every single run of changed lines in it:
+   * lines i..j replaced by up to two new lines, copies of their neighbours
+   * included. What git would show as changed (lines removed plus lines added,
+   * endings counted) is never more than the edit itself.
+   */
+  it("never shows one edit as more changed lines than the edit, duplicates and mixed endings included", () => {
+    const changedLines = (a: string[], b: string[]) => {
+      const dp = a.map(() => new Array<number>(b.length + 1).fill(0)).concat([new Array(b.length + 1).fill(0)]);
+      for (let i = a.length - 1; i >= 0; i--)
+        for (let j = b.length - 1; j >= 0; j--)
+          dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      return a.length + b.length - 2 * dp[0][0];
+    };
+    const lineSets = (n: number): string[][] =>
+      n === 0 ? [[]] : lineSets(n - 1).flatMap((ls) => ['a', 'b'].flatMap((t) => ['\r\n', '\n'].map((e) => [...ls, t + e])));
+    const inserts = (n: number): string[][] =>
+      n === 0 ? [[]] : inserts(n - 1).flatMap((ls) => ['a', 'b', 'c'].map((t) => [...ls, `${t}\n`]));
+    let cases = 0;
+    for (let n = 0; n <= 3; n++) {
+      for (const full of lineSets(n)) {
+        // The same lines, and (when there are any) with the last one unended.
+        const variants = n === 0 ? [full] : [full, [...full.slice(0, -1), full[n - 1].replace(/\r?\n$/, '')]];
+        for (const lines of variants) {
+          const file = lines.join('');
+          const typed = linesOf(asTyped(file));
+          for (let i = 0; i <= n; i++)
+            for (let j = i; j <= n; j++)
+              for (let k = 0; k <= 2; k++)
+                for (const added of inserts(k)) {
+                  // Text typed after an unended last line joins that line: not a run of whole lines.
+                  if (i === n && k > 0 && n > 0 && !file.endsWith('\n')) continue;
+                  const edited = [...typed.slice(0, i), ...added, ...typed.slice(j)].join('');
+                  const saved = restoreLineEndings(file, edited);
+                  expect(asTyped(saved)).toBe(edited);
+                  expect(changedLines(lines, linesOf(saved))).toBeLessThanOrEqual(j - i + k);
+                  cases++;
+                }
+        }
+      }
+    }
+    expect(cases).toBeGreaterThan(5000);
+  });
 });
