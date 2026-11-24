@@ -2910,6 +2910,11 @@ export class GitService implements IGitService {
    * is not what `origin/<branch>` holds while HEAD is not on `origin/<branch>`
    * either. A path that names something beside the clone, and finds bytes
    * there, counts too, as does a path that is not a valid relative path.
+   * A path given a time in `savedAfter` counts too unless HEAD holds a
+   * commit made after that time that changed it (a later save of the file,
+   * or its deletion): what the caller needs when the bytes it asks about may
+   * sit in another copy of the workspace, and only a later save published
+   * here stands for them.
    *
    * Publication PROOF for the caller, so it never answers on a guess: the
    * branch is fetched first, everything runs in ONE reservation of the
@@ -2917,7 +2922,12 @@ export class GitService implements IGitService {
    * that cannot be asked — the remote unreachable, the branch not checked
    * out here or not on the remote, a git failure — throws.
    */
-  async unpublishedPaths(workspaceId: string, branch: string, paths: readonly string[]): Promise<Set<string>> {
+  async unpublishedPaths(
+    workspaceId: string,
+    branch: string,
+    paths: readonly string[],
+    savedAfter: ReadonlyMap<string, Date> = new Map(),
+  ): Promise<Set<string>> {
     assertValidBranchName(branch);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
@@ -2938,6 +2948,31 @@ export class GitService implements IGitService {
         ? new Set<string>()
         : new Set((await this.git(cwd, ['diff', '--no-renames', '-z', '--name-only', head, remote])).stdout.split('\0'));
       const workspaceDir = await this.workspaceService.getWorkspacePath(workspaceId);
+      // When HEAD last changed each path asked about with a time (committer time, seconds): one walk for all of them.
+      const lastChanged = new Map<string, number>();
+      // A path that is not a valid one counts below without asking git, and must not fail the walk for the others.
+      const timed = [...savedAfter.keys()].map((p) => path.posix.normalize(this.stripRepoPrefix(p))).filter((p) => {
+        try {
+          assertValidRelativePath(p);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (timed.length > 0) {
+        // Only commits after the earliest time can count; a commit the walk stops short of is not seen, so its path is kept.
+        const since = Math.floor(Math.min(...[...savedAfter.values()].map((d) => d.getTime())) / 1000);
+        const { stdout } = await this.git(cwd, [
+          'log', '-z', '--no-renames', `--since=@${since}`, '--format=@%ct', '--name-only', 'HEAD', '--',
+          ...timed.map((p) => `:(literal)${p}`),
+        ]);
+        let at = 0;
+        for (const token of stdout.split('\0')) {
+          const name = token.replace(/^\n/, '');
+          if (/^@\d+$/.test(name) && !timed.includes(name)) at = Number(name.slice(1));
+          else if (name) lastChanged.set(name, Math.max(lastChanged.get(name) ?? 0, at));
+        }
+      }
       const unpublished = new Set<string>();
       for (const p of paths) {
         const repoRelative = path.posix.normalize(this.stripRepoPrefix(p));
@@ -2949,7 +2984,9 @@ export class GitService implements IGitService {
           continue;
         }
         const beside = p === this.stripRepoPrefix(p) && (await existsForCommitCheck(path.join(workspaceDir, p)));
-        if (beside || isDirty(repoRelative) || changedSincePush.has(repoRelative)) unpublished.add(p);
+        const after = savedAfter.get(p);
+        const notSavedSince = after !== undefined && !((lastChanged.get(repoRelative) ?? 0) * 1000 > after.getTime());
+        if (beside || notSavedSince || isDirty(repoRelative) || changedSincePush.has(repoRelative)) unpublished.add(p);
       }
       return unpublished;
     });

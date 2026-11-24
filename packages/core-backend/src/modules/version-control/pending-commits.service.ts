@@ -34,10 +34,8 @@
  *                                                    (status='needs_attention')
  */
 
-import { and, asc, eq, inArray, isNull, lt, min, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, min, or, sql, type SQL } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
-import { printable } from '../../shared/printable.js';
-import { sanitizeError } from './sanitize-error.js';
 
 const log = logger('pending-commits');
 import type { Database } from '../database/index.js';
@@ -313,38 +311,10 @@ export class PendingCommitsService {
   }
 
   /**
-   * Commit + push landed. Drop the row, and with it every save of the same
-   * file on the same branch that was escalated to `needs_attention` before
-   * this one was queued: the branch now holds a later save of that file,
-   * which is how a person lands a stuck save, whichever working copy (live
-   * or set aside) the old bytes were in. One log line per row removed so.
-   * Removing them is best effort: the commit has landed whatever happens to
-   * them, so a failure is logged and the rows wait for the next check.
+   * Commit + push landed. Drop the row.
    */
   async markSucceeded(id: string): Promise<void> {
-    const [landed] = await this.db.delete(pendingCommits).where(eq(pendingCommits.id, id)).returning();
-    if (!landed) return;
-    try {
-      const superseded = await this.db
-        .delete(pendingCommits)
-        .where(
-          and(
-            eq(pendingCommits.branch, landed.branch),
-            eq(pendingCommits.path, landed.path),
-            eq(pendingCommits.status, 'needs_attention'),
-            lt(pendingCommits.queuedAt, landed.queuedAt),
-          ),
-        )
-        .returning();
-      for (const row of superseded) {
-        log.info(
-          `cleared a stuck save, saved again since: branch=${printable(row.branch)} ` +
-            `path=${printable(row.path)} queued=${row.queuedAt.toISOString()}`,
-        );
-      }
-    } catch (err) {
-      log.warn('could not clear the stuck saves of a file saved again; kept:', { err: sanitizeError(err) });
-    }
+    await this.db.delete(pendingCommits).where(eq(pendingCommits.id, id));
   }
 
   /**
@@ -387,8 +357,8 @@ export class PendingCommitsService {
    * `needs_attention` until `VersionControlService` finds nothing of its save
    * left to push (checked before a merge out of the branch is refused over
    * it, and at startup), then it is removed. A save of the same file lands as
-   * a row of its own, which is how a person lands a change still missing, and
-   * removes this row once it has landed (see `markSucceeded`). The
+   * a row of its own, which is how a person lands a change still missing; once
+   * it has landed, that same check finds nothing of this row left to push. The
    * worker emits a `'system'` feedback notice in the same pass — that lives
    * in the worker, not here, so the service stays storage-only.
    */
@@ -417,8 +387,8 @@ export class PendingCommitsService {
    *
    * `needs_attention`, not deleted — the same rule as everything else about a
    * replacement: the reason is on the row, and while the copy that was set
-   * aside is kept, the row is removed only once the file is saved again on
-   * its branch (see `markSucceeded`).
+   * aside is kept, the row is removed only once a later save of the file has
+   * landed on its branch (`VersionControlService.clearEscalatedCommits`).
    * `running` rows go too: the worker checks the row back in when it finishes,
    * and a row it is mid-flight with is exactly one whose destination just
    * changed under it.

@@ -380,12 +380,13 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
   );
 
   it(
-    'keeps a settled row of a workspace that was set aside, though a fresh working copy is back in its place',
+    'keeps a settled row of a workspace that was set aside when no save of its file has landed since it was queued',
     async () => {
       const w = world;
       // Settled in the live working copy: without the set-aside copy this row would clear (the first test).
       await laterSave(w, 'a.md', '# a, saved again\n');
-      await stuckRow(w, { path: `${KB}/Data/QA/a.md` });
+      // Queued after that save, so the save does not stand for it.
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md`, queuedAt: new Date(Date.now() + 5_000) });
       // The copy that was set aside may still hold the bytes the row was escalated for.
       await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-03T10-00-00-000Z', workspaceIdForBranch(MAIN), '.git'), { recursive: true });
       expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 1 });
@@ -395,33 +396,56 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
   );
 
   it(
-    'a row of a workspace that was set aside clears once its file is saved again and that save lands; later rows stay',
+    'a row of a workspace that was set aside clears once a later save of its file has landed, by a direct commit or the queue',
+    async () => {
+      const w = world;
+      await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-03T10-00-00-000Z', workspaceIdForBranch(MAIN), '.git'), { recursive: true });
+      for (const name of ['a', 'b', 'clean']) await stuckRow(w, { path: `${KB}/Data/QA/${name}.md` });
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({
+        kind: 'pending-commits',
+        stuck: { files: [`${KB}/Data/QA/a.md`, `${KB}/Data/QA/b.md`, `${KB}/Data/QA/clean.md`], more: 0 },
+      });
+
+      // a.md committed and pushed directly, as a batch write (`write_files`) lands it; b.md through the queue.
+      await laterSave(w, 'a.md', '# a, saved again after the replacement\n');
+      const notify = await saveAgain(w, 'b.md', '# b, saved again after the replacement\n');
+
+      // clean.md was never saved again: its row stays and still refuses the merge.
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({
+        kind: 'pending-commits',
+        stuck: { files: [`${KB}/Data/QA/clean.md`], more: 0 },
+      });
+      expect(await rowsLeft(w)).toEqual([{ path: `${KB}/Data/QA/clean.md`, status: 'needs_attention' }]);
+      for (const name of ['a', 'b']) {
+        expect(w.logs).toContain(
+          `cleared a stuck save with nothing left to push: branch="${MAIN}" path="${KB}/Data/QA/${name}.md" queued=${NOV_2.toISOString()}`,
+        );
+      }
+      expect(notify).not.toHaveBeenCalled();
+
+      // Deleting the file is a later save of it too; then nothing blocks the merge.
+      await laterSave(w, 'clean.md', null);
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'merged' });
+      expect(await rowsLeft(w)).toEqual([]);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'of several stuck rows of one file of a set-aside workspace, none clears before a save made after the latest of them',
     async () => {
       const w = world;
       await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-03T10-00-00-000Z', workspaceIdForBranch(MAIN), '.git'), { recursive: true });
       await stuckRow(w, { path: `${KB}/Data/QA/a.md` });
-      // Escalated after the save below was queued: that save does not stand for it.
-      const later = await stuckRow(w, { path: `${KB}/Data/QA/a.md`, queuedAt: new Date('2099-01-01T00:00:00.000Z') });
+      await laterSave(w, 'a.md', '# a, saved between the two failed saves\n');
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md`, queuedAt: new Date(Date.now() + 5_000) });
+      // Beside them, a path that is not a valid one stays without failing the check of the others.
+      await stuckRow(w, { path: `${KB}/../escape.md` });
       await stuckRow(w, { path: `${KB}/Data/QA/b.md` });
-      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({
-        kind: 'pending-commits',
-        stuck: { files: [`${KB}/Data/QA/a.md`, `${KB}/Data/QA/b.md`], more: 0 },
-      });
+      await laterSave(w, 'b.md', '# b, saved again\n');
 
-      const notify = await saveAgain(w, 'a.md', '# a, saved again after the replacement\n');
-
-      expect((await w.db.select({ id: pendingCommits.id, path: pendingCommits.path }).from(pendingCommits)).sort((x, y) => x.path.localeCompare(y.path)))
-        .toEqual([{ id: later, path: `${KB}/Data/QA/a.md` }, { id: expect.any(String), path: `${KB}/Data/QA/b.md` }]);
-      expect(w.logs).toContain(
-        `cleared a stuck save, saved again since: branch="${MAIN}" path="${KB}/Data/QA/a.md" queued=${NOV_2.toISOString()}`,
-      );
-      expect(notify).not.toHaveBeenCalled();
-
-      // Saved again too, the last ones go, and the merge goes through.
-      await w.db.delete(pendingCommits).where(eq(pendingCommits.id, later));
-      await saveAgain(w, 'b.md', '# b, saved again after the replacement\n');
-      expect(await rowsLeft(w)).toEqual([]);
-      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'merged' });
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 3 });
+      expect((await rowsLeft(w)).map((r) => r.path)).toEqual([`${KB}/../escape.md`, `${KB}/Data/QA/a.md`, `${KB}/Data/QA/a.md`]);
     },
     PG_TEST_TIMEOUT,
   );

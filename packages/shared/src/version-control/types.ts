@@ -280,7 +280,8 @@ export type MergeBranchOutcome =
  * `more`, how many others (past the ten, or not the caller's to read). Saving
  * such a file again lands it. A failed save git confirms has nothing left to
  * push is cleared before this answer is built and is not counted; one that
- * could not be checked, or whose workspace was set aside, is kept, and counted.
+ * could not be checked, or whose workspace was set aside and has no later save
+ * of the file, is kept, and counted.
  */
 export type PendingCommitsRefusal =
   | { kind: 'pending-commits'; branch: string; pending: number; message: string }

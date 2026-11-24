@@ -2518,7 +2518,7 @@ export class WorkspaceService implements IWorkspaceService {
    * and the like throw. The folder is read before the set-aside root, so a
    * set-aside that moves it in between is found there.
    */
-  async workingCopyOf(workspaceId: string): Promise<'live' | 'set-aside' | 'gone'> {
+  async workingCopyOf(workspaceId: string): Promise<'live' | 'live-and-set-aside' | 'set-aside' | 'gone'> {
     if (!workspaceId) throw new Error('Invalid workspace ID');
     const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
     let live = this.branchDirs.has(branchForWorkspaceId(workspaceId));
@@ -2534,9 +2534,8 @@ export class WorkspaceService implements IWorkspaceService {
         throw new Error(`Workspace "${workspaceId}" has a folder but no working copy.`);
       }
     }
-    if (await hasSetAsideCopy(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), workspaceId)) {
-      return 'set-aside';
-    }
+    const setAside = await hasSetAsideCopy(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), workspaceId);
+    if (setAside) return live ? 'live-and-set-aside' : 'set-aside';
     return live ? 'live' : 'gone';
   }
 

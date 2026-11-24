@@ -4495,11 +4495,15 @@ export class VersionControlService implements IVersionControlService {
    * set-aside copy of it, is removed too (`IWorkspaceService.workingCopyOf`):
    * nothing is left that could hold its bytes; a folder that cannot be read
    * is not absent. A row of a workspace that was ever set aside (a replaced
-   * or moved repository) is kept, live working copy or not: the set-aside
-   * copy may hold its bytes, and the row is what points a person at them.
-   * Every other row is kept — its change is missing, or the check could not
-   * be made. A person lands any kept row by saving the file again: once that
-   * save has landed, `PendingCommitsService.markSucceeded` removes it.
+   * or moved repository) is held to more: the set-aside copy may hold its
+   * bytes, so it is removed only when, besides the above, the live working
+   * copy's HEAD holds a commit made after the row was queued (after the
+   * latest row of that file, when it has several) that changed the file —
+   * a later save of it, landed by whichever tool saved it. With no live
+   * working copy beside the set-aside one, it is kept. Every other row is
+   * kept — its change is missing, or the check could not be made. A person
+   * lands any kept row by saving the file again, and this check then finds
+   * it settled.
    *
    * Asked before a merge out of a branch is refused over such rows, and once
    * at startup. Never throws: a working copy that cannot be checked keeps its
@@ -4546,9 +4550,20 @@ export class VersionControlService implements IVersionControlService {
           );
           continue;
         }
+        // Beside a set-aside copy, the live one settles a row only with a save of its file made after the row.
+        const savedAfter = new Map<string, Date>();
+        if (copy === 'live-and-set-aside') {
+          for (const r of group) {
+            const latest = savedAfter.get(r.path);
+            if (!latest || r.queuedAt > latest) savedAfter.set(r.path, r.queuedAt);
+          }
+        }
         const unpublished = copy === 'gone'
           ? new Set<string>()
-          : await beforeDeadline(this.git.unpublishedPaths(workspaceId, rowBranch, group.map((r) => r.path)), deadline);
+          : await beforeDeadline(
+            this.git.unpublishedPaths(workspaceId, rowBranch, group.map((r) => r.path), savedAfter),
+            deadline,
+          );
         const after = await workingCopies.workingCopyOf(workspaceId);
         if (after !== copy) throw new Error(`its working copy went from "${copy}" to "${after}" while it was checked`);
         done.push(...group.filter((r) => !unpublished.has(r.path)).map((r) => r.id));
