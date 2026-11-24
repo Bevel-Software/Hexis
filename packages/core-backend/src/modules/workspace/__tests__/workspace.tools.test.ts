@@ -5207,7 +5207,7 @@ describe('agent read/write hooks', () => {
     const body = (await res.json()) as { unsaved?: { path: string; reason: string }[] };
     expect(body.unsaved).toEqual([
       // The answer names no infrastructure; the cause is logged on the server.
-      { path: `${KB_DIR}/out/one.md`, reason: 'Its commit could not be queued; save it with save_file.' },
+      { path: `${KB_DIR}/out/one.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
     ]);
     // Handed back UNTOUCHED: `releaseLockNoCommit` would discard the extracted bytes back to HEAD.
     expect(lockCalls).toEqual([

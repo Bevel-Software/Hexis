@@ -3959,7 +3959,7 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Extract a .zip already in the workspace (defaults to the zip\'s parent). Returns extracted files + skipped entries. Existing files are overwritten. ' +
-      'Each extracted file is committed and shared moments later, like any write; a file someone is editing is skipped, and `unsaved` lists any whose commit failed (save them with `save_file`).',
+      'Each extracted file is committed and shared moments later, like any write; a file someone is editing is skipped, and `unsaved` lists any that may not be committed (save them with `save_file`; saving a committed file changes nothing).',
     inputs: {
       type: 'object',
       properties: {
@@ -3987,7 +3987,7 @@ export function registerWorkspaceTools(
         },
         unsaved: {
           type: 'array',
-          description: 'Present only when the commit of some extracted files could not be queued: each is on disk, uncommitted, for `save_file`.',
+          description: 'Present only when some extracted files may not be committed: each is on disk; save it with `save_file` (saving a committed file changes nothing).',
           items: {
             type: 'object',
             properties: { path: str('Workspace-relative path of the extracted file.'), reason: str('What to do about it.') },
@@ -4042,9 +4042,13 @@ export function registerWorkspaceTools(
           // Hand the lock back with the extracted bytes kept, so `save_file` can take it and commit them.
           await vcs.releaseLockUntouched(workspaceId, branch, file, ctx.user).catch(() => undefined);
           // A release can fail AFTER it queued the commit (the lock row's drop
-          // is the step after the enqueue): only the queue can say.
+          // is the step after the enqueue), so ask the queue. It can also have
+          // drained that commit already, so "nothing queued" is a maybe, and
+          // the answer says so: saving a committed file again changes nothing.
           const queued = await vcs.hasQueuedCommit(workspaceId, branch, file).catch(() => false);
-          if (!queued) unsaved.push({ path: file, reason: 'Its commit could not be queued; save it with save_file.' });
+          if (!queued) {
+            unsaved.push({ path: file, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' });
+          }
         }
       };
       let result: Awaited<ReturnType<typeof ctx.workspaceService.unzipFile>>;
