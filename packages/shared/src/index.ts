@@ -14,6 +14,7 @@ export * from './workspace/kb-layout.js';
 export * from './workspace/join-request.js';
 export * from './workspace/frontmatter.js';
 export * from './workspace/md-links.js';
+export * from './workspace/markdown-code-span.js';
 export * from './workspace/placeholder.js';
 export * from './workspace/frontmatter-carriers.js';
 export * from './workspace/platform-files.js';
