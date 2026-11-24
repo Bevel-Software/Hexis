@@ -1640,6 +1640,7 @@ export class AccessControlService implements IAccessControl {
       undefined,
       limits.now,
     ),
+    /**
      * Which addresses are bots' (`modules/bots`), read on every decision.
      * Defaulted for the same reason as `deploymentOwners`: the fixtures that
      * construct this service directly run without bots. Without it every bot
