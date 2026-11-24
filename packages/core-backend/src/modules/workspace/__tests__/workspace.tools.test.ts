@@ -125,6 +125,11 @@ let heldLocks = new Set<string>();
 let queuedDespiteFailure = new Set<string>();
 /** When set, the `unzipFile` stand-in throws after writing this many entries. */
 let unzipThrowAfter: number | null = null;
+/**
+ * Locks whose lease runs out before their next heartbeat, as a long archive can outlast
+ * one: `free` lapsed and nobody took it, `taken` lapsed and another person (Ana) holds it now.
+ */
+let lapsedLeases = new Map<string, 'free' | 'taken'>();
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -282,6 +287,7 @@ async function start(
   heldLocks = new Set();
   queuedDespiteFailure = new Set();
   unzipThrowAfter = null;
+  lapsedLeases = new Map();
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -358,8 +364,21 @@ async function start(
         heldLocks.add(file);
         return { acquired: true };
       },
+      heartbeatLock: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`heartbeat ${file}`);
+        const lapse = lapsedLeases.get(file);
+        if (lapse) {
+          heldLocks.delete(file);
+          if (lapse === 'taken') lockedByOthers.add(file);
+        }
+        // As the real heartbeat: only a live lock the caller holds is renewed.
+        if (!heldLocks.has(file)) throw new Error('lock not held');
+        return {};
+      },
       releaseLock: async (_ws: string, _branch: string, file: string) => {
         lockCalls.push(`release ${file}`);
+        // As the real release: a lock the caller no longer holds is refused, never committed.
+        if (!heldLocks.has(file)) throw new Error('lock not held');
         // A commit that cannot be queued leaves the lock held, as the real release does.
         // The cause carries a line break, as queue errors quoting outside text can.
         if (failingReleases.has(file)) throw new Error('queue unavailable\n[forged] line');
@@ -5245,7 +5264,7 @@ describe('agent read/write hooks', () => {
     expect([...heldLocks]).toEqual([]);
   });
 
-  it('unzip writes a path the archive carries twice under the one lock it already holds', async () => {
+  it('unzip writes a path the archive carries twice under the one lock it already holds, renewing its lease first', async () => {
     const base = await start();
     await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
     unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
@@ -5254,7 +5273,62 @@ describe('agent read/write hooks', () => {
     const body = (await res.json()) as { extracted: string[]; skipped: unknown[] };
     expect(body.skipped).toEqual([]);
     expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`]);
-    expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/twice.md`, `release ${KB_DIR}/out/twice.md`]);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `release ${KB_DIR}/out/twice.md`,
+    ]);
+  });
+
+  it('unzip does not write a path carried twice over a person who took its lock after the lease lapsed', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    // The archive outlasts the first copy's lease, and Ana takes the lock before the second copy.
+    lapsedLeases = new Map([[`${KB_DIR}/out/twice.md`, 'taken']]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      extracted: string[];
+      skipped: { path: string; reason: string }[];
+      unsaved?: { path: string; reason: string }[];
+    };
+    // The second copy is never written over her work.
+    expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/twice.md`, reason: 'Ana is editing this file, so it was not extracted over their work.' },
+    ]);
+    // The first copy is on disk under her lock now, so this call could not commit it, and says so.
+    expect(body.unsaved).toEqual([
+      { path: `${KB_DIR}/out/twice.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
+    ]);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `acquire ${KB_DIR}/out/twice.md`,
+      `release ${KB_DIR}/out/twice.md`,
+      `hand back untouched ${KB_DIR}/out/twice.md`,
+    ]);
+  });
+
+  it('unzip takes a lapsed lock again before writing a path carried twice, when nobody took it', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    lapsedLeases = new Map([[`${KB_DIR}/out/twice.md`, 'free']]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: unknown[]; unsaved?: unknown };
+    expect(body.skipped).toEqual([]);
+    expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`]);
+    expect(body.unsaved).toBeUndefined();
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `acquire ${KB_DIR}/out/twice.md`,
+      `release ${KB_DIR}/out/twice.md`,
+    ]);
+    expect([...heldLocks]).toEqual([]);
   });
 
   it('unzip does not commit a path the archive carries twice when the second write fails part-way', async () => {
@@ -5267,7 +5341,11 @@ describe('agent read/write hooks', () => {
     unzipThrowAfter = 1;
     const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
     expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/twice.md`, `hand back untouched ${KB_DIR}/out/twice.md`]);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `hand back untouched ${KB_DIR}/out/twice.md`,
+    ]);
     expect([...heldLocks]).toEqual([]);
   });
 

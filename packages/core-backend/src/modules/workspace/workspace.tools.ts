@@ -4077,22 +4077,34 @@ export function registerWorkspaceTools(
                 }
                 writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
                 await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsRelPath);
+                const takeLock = async (): Promise<void> => {
+                  const acquired = await vcs.acquireLock(workspaceId, branch, wsRelPath, ctx.user);
+                  if (!acquired.acquired) {
+                    throw new ToolError(
+                      `${acquired.lock.holderName ?? 'Another person'} is editing this file, so it was not extracted over their work.`,
+                      409,
+                    );
+                  }
+                };
                 // An archive may carry the same path twice: the later entry
                 // overwrites the earlier under the lock this call already holds.
+                // A long archive can outlast that lock's lease, and a lapsed
+                // lock may be someone else's by now, so the lease is renewed
+                // before the rewrite; one that lapsed is taken again as a first
+                // entry's is, which skips the entry if another person holds it.
                 // The earlier write no longer stands for what is on disk: only
                 // this rewrite, once complete, marks the path written again, so
                 // a rewrite that fails part-way is never committed.
                 if (locked.includes(wsRelPath)) {
+                  const renewed = await vcs.heartbeatLock(workspaceId, branch, wsRelPath, ctx.user).then(
+                    () => true,
+                    () => false,
+                  );
+                  if (!renewed) await takeLock();
                   written.delete(wsRelPath);
                   return;
                 }
-                const acquired = await vcs.acquireLock(workspaceId, branch, wsRelPath, ctx.user);
-                if (!acquired.acquired) {
-                  throw new ToolError(
-                    `${acquired.lock.holderName ?? 'Another person'} is editing this file, so it was not extracted over their work.`,
-                    409,
-                  );
-                }
+                await takeLock();
                 locked.push(wsRelPath);
               },
               (wsRelPath) => written.add(wsRelPath),
