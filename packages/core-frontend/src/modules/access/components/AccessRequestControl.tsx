@@ -8,6 +8,7 @@ import {
   type AccessRequestStatus,
   type RequestLevel,
 } from '../requests.api';
+import { VERB_HELP } from '../verb-help';
 
 /**
  * "You can read this, but you can't share it" — with something to do about it.
@@ -118,7 +119,11 @@ export function AccessRequestControl({
         className="flex items-center gap-4"
       >
         {(['write', 'owner'] as const).map((option) => (
-          <label key={option} className="flex items-center gap-1.5 text-detail text-ink">
+          <label
+            key={option}
+            className="flex items-center gap-1.5 text-detail text-ink"
+            title={VERB_HELP[option]}
+          >
             <input
               type="radio"
               name="access-request-level"
@@ -126,6 +131,7 @@ export function AccessRequestControl({
               checked={level === option}
               disabled={sending}
               onChange={() => setLevel(option)}
+              aria-description={VERB_HELP[option]}
             />
             {LEVEL_WORDS[option]}
           </label>

@@ -1,5 +1,6 @@
 import { ExternalLink, Users } from 'lucide-react';
 import { Badge, Surface } from '../../../shared/components';
+import { VERB_HELP } from '../../access';
 import { cn } from '../../../lib/utils';
 import { ItemMenuFrame } from './ItemActionsMenu';
 import { NameWithBadges } from './NameWithBadges';
@@ -172,7 +173,14 @@ export function LibraryCard({
       </Badge>
     ) : null,
     owned && !pending ? (
-      <Badge key="owner" tone="outline" size="xs" className="shrink-0 uppercase">
+      <Badge
+        key="owner"
+        tone="outline"
+        size="xs"
+        className="shrink-0 uppercase"
+        title={VERB_HELP.owner}
+        aria-description={VERB_HELP.owner}
+      >
         Owner
       </Badge>
     ) : null,

@@ -22,7 +22,7 @@ import { useWorkspace, kbFileUrl, useFileNav, useFileNodeId, useNodeIdNav, useWo
 import { useGit } from '../../../git';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
 import { cancelPullRequest } from '../../../pr';
-import { useFileAccess, offersManageAccess } from '../../../access';
+import { useFileAccess, offersManageAccess, VERB_HELP } from '../../../access';
 import { proposeChange, suggestionBranchFor, listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
 import {
   getOrCreateWorkspace,
@@ -704,7 +704,13 @@ export function SkillPage({
             {skill?.name ?? name}
           </h1>
           {skill && owned && (
-            <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+            <Badge
+              tone="outline"
+              size="xs"
+              className="shrink-0 uppercase"
+              title={VERB_HELP.owner}
+              aria-description={VERB_HELP.owner}
+            >
               Owner
             </Badge>
           )}

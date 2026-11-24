@@ -63,6 +63,7 @@ import { AccessRequestControl } from './AccessRequestControl';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { useAccessRequests } from '../hooks/useAccessRequests';
 import { listAccessRequests, reconcileAccessRequest, LEVEL_WORDS } from '../requests.api';
+import { VERB_HELP } from '../verb-help';
 
 interface Props {
   entry: FileTreeEntry;
@@ -480,6 +481,19 @@ function summarizeVerbs(v: VerbSet): string {
   else if (v.read) parts.push('Can read');
   if (v.download) parts.push('Can download');
   return parts.length ? parts.join(', ') : 'No access';
+}
+
+/**
+ * What the verbs `summarizeVerbs` names mean, one line each in the same order,
+ * for its tooltip and accessible description. Undefined when it names none.
+ */
+function summaryHelp(v: VerbSet): string | undefined {
+  const tier = tierOf(v);
+  const lines = [
+    ...(tier ? [VERB_HELP[ROLE_TO_VERB[tier]]] : []),
+    ...(v.download ? [VERB_HELP.download] : []),
+  ];
+  return lines.length ? lines.join(' ') : undefined;
 }
 
 /**
@@ -1809,6 +1823,7 @@ export function ManageAccessDialog({
                     (role, i) => {
                       const checked = p.verbs[ROLE_TO_KEY[role]];
                       const note = verbNote(p, ROLE_TO_VERB[role]);
+                      const help = VERB_HELP[ROLE_TO_VERB[role]];
                       // Where a click on this item takes the row; null means
                       // nowhere from here, and the item says so by being off.
                       const next = nextVerbSet(p.verbs, role);
@@ -1829,8 +1844,9 @@ export function ManageAccessDialog({
                             // The note is the row's own explanation, not part of
                             // what the item DOES: keep it out of the name ("Can
                             // read"), and give it to assistive tech as the
-                            // description it is.
-                            aria-description={note}
+                            // description it is, ahead of what the verb means.
+                            title={help}
+                            aria-description={note ? `${note}. ${help}` : help}
                             onClick={() => next && doApplyVerbSet(p, next)}
                             trailing={
                               <span className="flex items-center gap-1.5">
@@ -1882,7 +1898,9 @@ export function ManageAccessDialog({
         ) : (
           <span className="ml-auto flex shrink-0 items-center gap-2 text-detail text-ink-muted">
             {inviteAction(p)}
-            {summarizeVerbs(p.verbs)}
+            <span title={summaryHelp(p.verbs)} aria-description={summaryHelp(p.verbs)}>
+              {summarizeVerbs(p.verbs)}
+            </span>
           </span>
         )}
       </div>
@@ -2148,6 +2166,8 @@ export function ManageAccessDialog({
                           disabled={disabled}
                           active={checked}
                           aria-pressed={checked}
+                          title={VERB_HELP[k]}
+                          aria-description={VERB_HELP[k]}
                           onClick={() =>
                             setNewVerbs((v) => {
                               const on = !v[k];
@@ -2171,6 +2191,8 @@ export function ManageAccessDialog({
                       disabled={conferredByOthers(newVerbs, 'download')}
                       active={effectiveNewVerbs.download}
                       aria-pressed={effectiveNewVerbs.download}
+                      title={VERB_HELP.download}
+                      aria-description={VERB_HELP.download}
                       // Same rule as the tiers: unticking download keeps the
                       // read it implied.
                       onClick={() =>

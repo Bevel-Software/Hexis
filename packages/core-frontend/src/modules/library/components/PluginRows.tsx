@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ExternalLink, UserPlus, Users } from 'lucide-react';
 import { Badge, Banner } from '../../../shared/components';
 import { useAdmin } from '../../admin';
+import { VERB_HELP } from '../../access';
 import { useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
 import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
@@ -226,7 +227,13 @@ function badgesOf(entry: PluginEntry): ReactNode {
   return (
     <>
       {owner && (
-        <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+        <Badge
+          tone="outline"
+          size="xs"
+          className="shrink-0 uppercase"
+          title={VERB_HELP.owner}
+          aria-description={VERB_HELP.owner}
+        >
           Owner
         </Badge>
       )}

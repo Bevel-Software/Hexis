@@ -729,11 +729,15 @@ describe('SkillPage', () => {
     );
   });
 
-  it('shows the Owner badge to an owner', async () => {
+  it('shows the Owner badge to an owner, with what Owner means', async () => {
+    const OWNER =
+      'Owner: everything Can edit and Can download allow. Owners are also named as the people to ask about it.';
     renderPage(true);
     await screen.findByRole('heading', { name: 'newsletter' });
 
-    expect(screen.getByText('Owner')).toBeInTheDocument();
+    const pill = screen.getByText('Owner');
+    expect(pill).toHaveAttribute('title', OWNER);
+    expect(pill).toHaveAccessibleDescription(OWNER);
   });
 
   it('hides the Owner badge from non-owners', async () => {
