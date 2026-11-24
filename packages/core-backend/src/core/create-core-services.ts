@@ -1624,12 +1624,21 @@ export async function createCoreServices(
   // runs under the commit-worker lease, right before the worker starts (see
   // `withStartupTask` below). At boot, before the lease, it would reset rows
   // the outgoing process of a redeploy is still committing.
-  const reconcileQueue = () =>
-    pendingCommitsService.startupReconcile(
-      workspaceService.knownWorkspaces(),
-      { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
-      { email: recoveryBot.email, name: recoveryBot.name },
-    );
+  //
+  // Then every save escalated to a person is checked once: one whose bytes the
+  // shared repository already holds is cleared before any merge is asked for
+  // (`clearEscalatedCommits` never throws; what it cannot check it keeps).
+  const reconcileQueue = async () => {
+    try {
+      await pendingCommitsService.startupReconcile(
+        workspaceService.knownWorkspaces(),
+        { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
+        { email: recoveryBot.email, name: recoveryBot.name },
+      );
+    } finally {
+      await versionControlService.clearEscalatedCommits();
+    }
+  };
   const pendingCommitsWorker = new PendingCommitsWorker({
     service: pendingCommitsService,
     // The service IS the driver — passed directly rather than wrapped in a

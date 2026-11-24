@@ -353,10 +353,14 @@ export class PendingCommitsService {
   }
 
   /**
-   * Terminal failure. Row stays in `needs_attention` forever (until an
-   * admin deletes or repairs it). The worker emits a `'system'` feedback
-   * notice in the same pass — that lives in the worker, not here, so the
-   * service stays storage-only.
+   * Terminal failure: the worker stops trying. The row stays in
+   * `needs_attention` until `VersionControlService` finds nothing of its save
+   * left to push (checked before a merge out of the branch is refused over
+   * it, and at startup), then it is removed. A save of the same file lands as
+   * a row of its own, which is how a person lands a change still missing; once
+   * it has landed, that same check finds nothing of this row left to push. The
+   * worker emits a `'system'` feedback notice in the same pass — that lives
+   * in the worker, not here, so the service stays storage-only.
    */
   async markNeedsAttention(id: string, error: string): Promise<void> {
     await this.db
@@ -370,8 +374,8 @@ export class PendingCommitsService {
   }
 
   /**
-   * Take every commit still queued for `branch` out of the worker's reach and
-   * onto the admin surface, and answer how many moved.
+   * Take every commit still queued for `branch` out of the worker's reach,
+   * and answer how many moved.
    *
    * The one caller is the knowledge-base repository being REPLACED. A release
    * ENQUEUES the bytes and only then drops its lock, so the moment the locks
@@ -382,8 +386,9 @@ export class PendingCommitsService {
    * file, overwritten by a change nobody made to it.
    *
    * `needs_attention`, not deleted — the same rule as everything else about a
-   * replacement. The bytes are still in the row, the reason is on it, and they
-   * show up on the pending-commit admin surface for a person to decide about.
+   * replacement: the reason is on the row, and while the copy that was set
+   * aside is kept, the row is removed only once a later save of the file has
+   * landed on its branch (`VersionControlService.clearEscalatedCommits`).
    * `running` rows go too: the worker checks the row back in when it finishes,
    * and a row it is mid-flight with is exactly one whose destination just
    * changed under it.
@@ -433,9 +438,9 @@ export class PendingCommitsService {
    * `running` both count: a row the worker holds is still not in git, and a
    * row it holds for too long is exactly the stall this measures.
    * `needs_attention` does not: that row has already been escalated through
-   * the notice sink and sits on the admin surface, and counting it here would
-   * keep the deployment "degraded" until triage rather than saying whether
-   * draining keeps up.
+   * the notice sink and waits for a person to save the file again, and
+   * counting it here would keep the deployment "degraded" until then rather
+   * than saying whether draining keeps up.
    */
   async oldestQueuedAt(): Promise<Date | null> {
     const [row] = await this.db
@@ -446,15 +451,32 @@ export class PendingCommitsService {
   }
 
   /**
-   * Admin / dashboard surface. Returns everything stuck in
-   * `needs_attention` for triage.
+   * Every row escalated to `needs_attention` — on `branch` when one is
+   * named — oldest first. What `VersionControlService` checks against git to
+   * clear the rows whose save has nothing left to push.
    */
-  async listNeedsAttention(): Promise<PendingCommit[]> {
+  async listNeedsAttention(branch?: string): Promise<PendingCommit[]> {
+    const escalated = eq(pendingCommits.status, 'needs_attention');
     const rows = await this.db
       .select()
       .from(pendingCommits)
-      .where(eq(pendingCommits.status, 'needs_attention'));
+      .where(branch === undefined ? escalated : and(escalated, eq(pendingCommits.branch, branch)))
+      .orderBy(asc(pendingCommits.queuedAt), asc(pendingCommits.id));
     return rows.map(rowToPending);
+  }
+
+  /**
+   * Delete the rows of `ids` that are still `needs_attention`, and answer the
+   * ones deleted. The status is part of the statement, so a row the worker
+   * drives (`pending`, `running`) is never removed here, whatever id is passed.
+   */
+  async removeEscalated(ids: readonly string[]): Promise<PendingCommit[]> {
+    if (ids.length === 0) return [];
+    const removed = await this.db
+      .delete(pendingCommits)
+      .where(and(inArray(pendingCommits.id, [...ids]), eq(pendingCommits.status, 'needs_attention')))
+      .returning();
+    return removed.map(rowToPending);
   }
 
   /**
@@ -479,18 +501,26 @@ export class PendingCommitsService {
   /**
    * What still stands between `branch`'s saved files and its remote: how many
    * commits are queued (`pending` or `running` — a row the worker holds is not
-   * pushed yet either), how many were escalated to `needs_attention`, and the
-   * message of the oldest of those, or null when none was.
+   * pushed yet either), which were escalated to `needs_attention` (their
+   * working copy and path, oldest first), and the message of the oldest of
+   * those, or null when none was.
    *
    * Keyed on the branch the row was written for, not a workspace id: the
    * question is asked by `mergeBranch`, which merges what the REMOTE holds of
    * that branch, whichever clone the bytes are waiting in.
    */
-  async queuedOnBranch(
-    branch: string,
-  ): Promise<{ queued: number; stuck: number; needsAttention: string | null }> {
+  async queuedOnBranch(branch: string): Promise<{
+    queued: number;
+    stuck: Array<{ workspaceId: string; path: string }>;
+    needsAttention: string | null;
+  }> {
     const rows = await this.db
-      .select({ status: pendingCommits.status, lastError: pendingCommits.lastError })
+      .select({
+        status: pendingCommits.status,
+        lastError: pendingCommits.lastError,
+        workspaceId: pendingCommits.workspaceId,
+        path: pendingCommits.path,
+      })
       .from(pendingCommits)
       .where(eq(pendingCommits.branch, branch))
       // Oldest first, so the message reported is the same on every call.
@@ -498,7 +528,7 @@ export class PendingCommitsService {
     const stuck = rows.filter((r) => r.status === 'needs_attention');
     return {
       queued: rows.filter((r) => r.status === 'pending' || r.status === 'running').length,
-      stuck: stuck.length,
+      stuck: stuck.map((r) => ({ workspaceId: r.workspaceId, path: r.path })),
       needsAttention:
         stuck.length === 0 ? null : (stuck[0]?.lastError || 'A queued commit on this branch failed and needs a person.'),
     };

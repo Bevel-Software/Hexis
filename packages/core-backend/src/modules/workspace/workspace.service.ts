@@ -42,7 +42,7 @@ import {
   isMissingRemoteBranchFailure,
 } from '../../shared/domain-errors.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
-import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
+import { hasSetAsideCopy, setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import { workingCopyShape } from './kb-repository.js';
 import { readTmpRef, stageTmpRef, statTmpRef, sweepTmpFolder, TMP_MAX_AGE_MS, type TmpFileStat } from './workspace-tmp.js';
 import type { IKbRepository } from './kb-repository.contract.js';
@@ -2511,6 +2511,32 @@ export class WorkspaceService implements IWorkspaceService {
       return false;
     }
     return this.hasWorkingCopy(path.join(workspaceDir, this.kbDirName)).catch(() => false);
+  }
+
+  /**
+   * See `IWorkspaceService.workingCopyOf`. Absent means ENOENT; EACCES, EIO
+   * and the like throw. The folder is read before the set-aside root, so a
+   * set-aside that moves it in between is found there.
+   */
+  async workingCopyOf(workspaceId: string): Promise<'live' | 'live-and-set-aside' | 'set-aside' | 'gone'> {
+    if (!workspaceId) throw new Error('Invalid workspace ID');
+    const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
+    let live = this.branchDirs.has(branchForWorkspaceId(workspaceId));
+    if (!live) {
+      live = await fs.stat(workspaceDir).then(
+        () => true,
+        (err: unknown) => {
+          if (isAbsence(err)) return false;
+          throw err;
+        },
+      );
+      if (live && !(await this.hasWorkingCopy(this.repoRoot(workspaceDir)))) {
+        throw new Error(`Workspace "${workspaceId}" has a folder but no working copy.`);
+      }
+    }
+    const setAside = await hasSetAsideCopy(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), workspaceId);
+    if (setAside) return live ? 'live-and-set-aside' : 'set-aside';
+    return live ? 'live' : 'gone';
   }
 
   /**

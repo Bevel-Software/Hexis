@@ -62,6 +62,17 @@ export interface IWorkspaceService {
   deleteFile(workspaceId: string, relativePath: string): Promise<void>;
   moveEntry(workspaceId: string, oldRelativePath: string, newRelativePath: string): Promise<void>;
   getWorkspacePath(workspaceId: string): Promise<string>;
+  /**
+   * Where `workspaceId`'s working copy can still be on disk, without
+   * bootstrapping it: `'live'` when its working copy is in place, and
+   * `'live-and-set-aside'` when a copy of it was also set aside (a replaced
+   * or moved repository; that copy may hold what was never pushed);
+   * `'set-aside'` when only the set-aside copy is left, `'gone'` only when
+   * its folder is shown absent and nothing was set aside.
+   * Throws when it cannot tell (an invalid id, a failed read, a folder with
+   * no working copy), so a caller acting on `'gone'` never acts on a guess.
+   */
+  workingCopyOf(workspaceId: string): Promise<'live' | 'live-and-set-aside' | 'set-aside' | 'gone'>;
   /** Remove the workspace's transient `tmp/` dir (staged docs, tool-chain spills). */
   clearTmp(workspaceId: string): Promise<void>;
 }

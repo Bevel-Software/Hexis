@@ -2,12 +2,13 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middleware.js';
-import { createToolContextResolver } from '../../../tool-helpers/tool-context.js';
-import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
-import { createManualRoutes } from '../../../tool-registry/manual.routes.js';
+import { ToolRegistry, createManualRoutes } from '../../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  createToolAuthMiddleware,
+  createToolContextResolver,
+  createToolHandlerFactory,
+} from '../../../../__tests__/tool-wiring.js';
 import { ToolError } from '../../../tool-helpers/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../../../workspace/index.js';
@@ -83,6 +84,15 @@ function detailOf(files: Record<string, unknown>[]): Record<string, unknown> {
 const BIG = () => detailOf(Array.from({ length: 27 }, (_, i) => addedFile(i)));
 
 let calls: unknown[][] = [];
+/** A merge refused over a save the repository is not known to hold, as the service answers it. */
+const STUCK_REFUSAL = {
+  kind: 'pending-commits',
+  branch: 'me/stuck',
+  pending: 3,
+  needsAttention: '422 the repository host refused the push',
+  stuck: { files: ['knowledge-base/Notes/A.md'], more: 2 },
+  message: 'A save on "me/stuck" failed and the shared repository is not known to hold it.',
+};
 /** What the service answers `openChangeRequest` with; a test replaces it. */
 let opened: Record<string, unknown> = BIG();
 /** Set to make `openChangeRequest` throw instead. */
@@ -145,6 +155,7 @@ const versionControlService = {
   mergeBranch: async (user: { id: string }, source: string, target: string) => {
     calls.push(['mergeBranch', user.id, source, target]);
     if (source === 'me/conflicting') return { kind: 'conflicts-need-resolution', conflictedPaths: ['A.md'] };
+    if (source === 'me/stuck') return STUCK_REFUSAL;
     if (source === 'me/proposed') {
       throw new OpenChangeRequestBlocksMergeError(source, target, 12);
     }
@@ -231,6 +242,7 @@ const versionControlService = {
     opts: { from?: string; resolutions?: { path: string; content?: string }[]; validateWrite?: (wsPath: string, content: string) => Promise<void> },
   ) => {
     calls.push(['updateBranch', ws, user.id, opts]);
+    if (opts.from === 'me/stuck') return STUCK_REFUSAL;
     // As the service: the caller's write gate is asked for every resolution that brings content.
     for (const r of opts.resolutions ?? []) if (r.content !== undefined && opts.validateWrite) await opts.validateWrite(`knowledge-base/${r.path}`, r.content);
     if (opts.from === 'me/conflicting' && opts.resolutions?.length) {
@@ -476,6 +488,27 @@ describe('registerVersionControlTools', () => {
       const body = JSON.stringify(await res.json());
       expect(body).toContain('#12');
       expect(body).toMatch(/review #12 in the app/);
+    });
+
+    it('merge_branch and update_branch hand the caller the stuck files the service named, and document the field', async () => {
+      const base = await start();
+      const merged = await post(`${base}/api/agent/tools/merge_branch`, writeTok(), { source: 'me/stuck', target: 'me/draft' });
+      expect(merged.status).toBe(200);
+      expect(await merged.json()).toEqual({ outcome: STUCK_REFUSAL });
+      const updated = await post(`${base}/api/agent/tools/update_branch`, writeTok(), { branch: 'me/draft', from: 'me/stuck' });
+      expect(updated.status).toBe(200);
+      expect(await updated.json()).toEqual(STUCK_REFUSAL);
+      for (const tools of [await registryRef!.listInternal(), await registryRef!.listExternal()]) {
+        const mergeTool = tools.find((t) => t.name === 'merge_branch')!;
+        const updateTool = tools.find((t) => t.name === 'update_branch')!;
+        const mergeOut = (mergeTool.outputs as { properties: { outcome: { properties: Record<string, unknown> } } }).properties.outcome.properties;
+        const updateOut = (updateTool.outputs as { properties: Record<string, unknown> }).properties;
+        for (const stuck of [mergeOut.stuck, updateOut.stuck] as Array<{ description: string; properties: Record<string, unknown> }>) {
+          expect(Object.keys(stuck.properties)).toEqual(['files', 'more']);
+          expect(stuck.description).toMatch(/at most ten you may read/);
+        }
+        for (const t of [mergeTool, updateTool]) expect(t.description, t.name).toMatch(/`stuck` names the files to save again/);
+      }
     });
 
     it('merge_branch requires both branches', async () => {

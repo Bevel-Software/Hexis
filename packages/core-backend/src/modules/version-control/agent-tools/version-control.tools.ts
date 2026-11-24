@@ -86,6 +86,20 @@ const changeRequestUrlSchema: JsonSchema = {
     'Link a person can open: absolute (`https://<public address>/change-requests/<number>`) when the deployment ' +
     'has a public address configured, else the relative in-app path (with `urlNote`).',
 };
+/** `merge_branch` and `update_branch` answer the same `pending-commits` refusal, so they describe it once. */
+const STUCK_OUTPUT: JsonSchema = {
+  type: 'object',
+  description:
+    'Present only with `needsAttention`: the files of the failed saves the shared repository is not known to hold. ' +
+    'Saving such a file again lands it; then retry. `files`: at most ten you may read; `more`: how many others ' +
+    '(past ten, or not yours to read: ask a person who can read them).',
+  properties: {
+    files: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+    more: { type: 'integer', minimum: 0 },
+  },
+  required: ['files', 'more'],
+};
+
 const changeRequestUrlNoteSchema: JsonSchema = { type: 'string', description: 'Present only when `url` is relative — how to get absolute links.' };
 
 /** `{ number, url, urlNote? }` of a change request summary or detail. */
@@ -551,7 +565,7 @@ export function registerVersionControlTools(
   mount({
     name: 'merge_branch',
     description:
-      'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
+      'Merge `source` into `target` as you, and publish `target`. An agent proposes and syncs; ' +
       'a person merges: this never lands a change request. It refuses while a change request from `source` ' +
       'into `target` is open (naming it): ask the user to review it in the app. It refuses ' +
       'when `target` is a protected branch unless you could commit every changed file directly to it (never ' +
@@ -560,9 +574,9 @@ export function registerVersionControlTools(
       'is always allowed, even with the draft\'s request open. ' +
       'Writes are committed asynchronously; it waits up to 20s for those on `source`. ' +
       'Returns `merged` with the merge commit; `nothing-to-merge` with `target`\'s tip when it already holds ' +
-      'all of `source`; `pending-commits` (nothing merged) when writes are still committing — retry shortly — ' +
-      'or one failed (`needsAttention`: tell the user); or `conflicts-need-resolution` with the conflicting ' +
-      'paths (nothing is written; resolve them on `source` and merge again).',
+      'all of `source`; `pending-commits` (nothing merged) while writes commit (retry shortly) or one failed ' +
+      '(`needsAttention`: tell the user; `stuck` names the files to save again); or ' +
+      '`conflicts-need-resolution` with the conflicting paths (nothing written; resolve on `source`, merge again).',
     // Names both branches itself; the merge runs in `target`'s workspace.
     skipBranch: true,
     inputs: {
@@ -600,6 +614,7 @@ export function registerVersionControlTools(
                 'Present when `kind` is `pending-commits` and a queued commit failed: the worker\'s message. ' +
                 'Waiting will not help; tell the user.',
             },
+            stuck: STUCK_OUTPUT,
             message: { type: 'string', description: 'Present when `kind` is `pending-commits` — what to do next.' },
           },
           required: ['kind'],
@@ -1033,7 +1048,8 @@ export function registerVersionControlTools(
       '`list_file_changes` shows intent), then call again with `resolutions`, one per conflicted path: ' +
       '`content` (the resolved text) or `choose` (`ours`, `theirs`, `delete`). Only conflicted paths are ' +
       'written here; other edits go through the file tools. Answers `merged`, `nothing-to-merge`, ' +
-      '`conflicts` again (something changed meanwhile), or `pending-commits` (writes still landing: retry).',
+      '`conflicts` again (something changed meanwhile), or `pending-commits` (writes still landing: retry; or one ' +
+      'failed: `stuck` names the files to save again).',
     inputs: {
       type: 'object',
       properties: {
@@ -1096,6 +1112,7 @@ export function registerVersionControlTools(
         branch: { type: 'string', description: '`pending-commits`: the branch whose writes are not committed yet.' },
         pending: { type: 'integer', description: '`pending-commits`: how many.' },
         needsAttention: { type: 'string', description: '`pending-commits`: a queued commit failed; the worker\'s message. Tell the user.' },
+        stuck: STUCK_OUTPUT,
         message: { type: 'string', description: '`pending-commits`: what to do next.' },
       },
       required: ['kind'],

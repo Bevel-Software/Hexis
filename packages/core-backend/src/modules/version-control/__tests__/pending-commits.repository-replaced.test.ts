@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { PendingCommitsService } from '../pending-commits.service.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 
 /**
  * Commits still queued for a branch when the knowledge-base repository is
@@ -117,7 +117,7 @@ describe('PendingCommitsService.markNeedsAttentionInWorkspace', () => {
  * message, because nothing will land it without a person.
  */
 describe('PendingCommitsService.queuedOnBranch', () => {
-  function selectDb(rows: Array<{ status: string; lastError: string | null }>) {
+  function selectDb(rows: Array<{ status: string; lastError: string | null; workspaceId?: string; path?: string }>) {
     const orderBy = vi.fn(async () => rows);
     const where = vi.fn(() => ({ orderBy }));
     const db = { select: vi.fn(() => ({ from: () => ({ where }) })) } as unknown as Database;
@@ -131,7 +131,7 @@ describe('PendingCommitsService.queuedOnBranch', () => {
     ]);
     await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
       queued: 2,
-      stuck: 0,
+      stuck: [],
       needsAttention: null,
     });
     // Keyed on the branch column.
@@ -140,15 +140,18 @@ describe('PendingCommitsService.queuedOnBranch', () => {
     expect(sql.params).toEqual(['alice/draft']);
   });
 
-  it('reports the oldest needs_attention row\'s message alongside the count', async () => {
+  it('reports the oldest needs_attention row\'s message alongside the stuck rows, oldest first', async () => {
     const { db, orderBy } = selectDb([
       { status: 'pending', lastError: null },
-      { status: 'needs_attention', lastError: 'push rejected' },
-      { status: 'needs_attention', lastError: 'later' },
+      { status: 'needs_attention', lastError: 'push rejected', workspaceId: 'ws-a', path: 'knowledge-base/a.md' },
+      { status: 'needs_attention', lastError: 'later', workspaceId: 'ws-a', path: 'knowledge-base/b.md' },
     ]);
     await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
       queued: 1,
-      stuck: 2,
+      stuck: [
+        { workspaceId: 'ws-a', path: 'knowledge-base/a.md' },
+        { workspaceId: 'ws-a', path: 'knowledge-base/b.md' },
+      ],
       needsAttention: 'push rejected',
     });
     // "Oldest" is the query's order, so every call reports the same message.
@@ -158,10 +161,10 @@ describe('PendingCommitsService.queuedOnBranch', () => {
   });
 
   it('falls back to a message when a stuck row has an empty error, so it is never read as retryable', async () => {
-    const { db } = selectDb([{ status: 'needs_attention', lastError: '' }]);
+    const { db } = selectDb([{ status: 'needs_attention', lastError: '', workspaceId: 'ws-a', path: 'knowledge-base/c.md' }]);
     await expect(new PendingCommitsService(db).queuedOnBranch('alice/draft')).resolves.toEqual({
       queued: 0,
-      stuck: 1,
+      stuck: [{ workspaceId: 'ws-a', path: 'knowledge-base/c.md' }],
       needsAttention: 'A queued commit on this branch failed and needs a person.',
     });
   });
@@ -170,7 +173,7 @@ describe('PendingCommitsService.queuedOnBranch', () => {
     const { db } = selectDb([]);
     await expect(new PendingCommitsService(db).queuedOnBranch('quiet')).resolves.toEqual({
       queued: 0,
-      stuck: 0,
+      stuck: [],
       needsAttention: null,
     });
   });

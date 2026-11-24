@@ -261,17 +261,38 @@ export type MergeChangeRequestOutcome =
  *  - `nothing-to-merge`          — the target already contained the source;
  *                                  `sha` is the target's unchanged tip.
  *  - `conflicts-need-resolution` — stopped on conflicts, nothing written.
- *  - `pending-commits`           — writes on the source are still being
- *                                  committed (the merge waited for them and
- *                                  they did not land in time), or one of them
- *                                  failed and `needsAttention` carries the
- *                                  worker's message. Nothing was merged.
+ *  - `pending-commits`           — see {@link PendingCommitsRefusal}.
  */
 export type MergeBranchOutcome =
   | { kind: 'merged'; sha: string }
   | { kind: 'nothing-to-merge'; sha: string }
   | { kind: 'conflicts-need-resolution'; conflictedPaths: string[] }
-  | { kind: 'pending-commits'; branch: string; pending: number; needsAttention?: string; message: string };
+  | PendingCommitsRefusal;
+
+/**
+ * A merge or an update refused before anything was merged because saves on
+ * `branch` have not reached the shared repository. `branch` is the branch
+ * whose saves blocked it: a merge's source, or either side of an update.
+ *
+ * Either the saves are still being committed (the wait ran out), or one of
+ * them failed. Then `needsAttention` carries the worker's message and `stuck`
+ * names the files of the failed saves: at most ten the caller may read, and
+ * `more`, how many others (past the ten, or not the caller's to read). Saving
+ * such a file again lands it. A failed save git confirms has nothing left to
+ * push is cleared before this answer is built and is not counted; one that
+ * could not be checked, or whose workspace was set aside and has no later save
+ * of the file, is kept, and counted.
+ */
+export type PendingCommitsRefusal =
+  | { kind: 'pending-commits'; branch: string; pending: number; message: string }
+  | {
+      kind: 'pending-commits';
+      branch: string;
+      pending: number;
+      needsAttention: string;
+      stuck: { files: string[]; more: number };
+      message: string;
+    };
 
 /**
  * What updating a branch from another (`updateBranch`) did: the merge's own
@@ -281,7 +302,7 @@ export type MergeBranchOutcome =
  */
 export type UpdateBranchOutcome =
   | MergeIntoBranchOutcome
-  | { kind: 'pending-commits'; branch: string; pending: number; needsAttention?: string; message: string };
+  | PendingCommitsRefusal;
 
 /**
  * What deleting a branch would do, as an agent's `delete_branch` preview
