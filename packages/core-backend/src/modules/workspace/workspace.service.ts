@@ -42,7 +42,7 @@ import {
   isMissingRemoteBranchFailure,
 } from '../../shared/domain-errors.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
-import { setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
+import { hasSetAsideCopy, setAsideClone, setAsideRepository, setAsideRootFor, setAsideStamp } from './set-aside-clone.js';
 import { workingCopyShape } from './kb-repository.js';
 import { readTmpRef, stageTmpRef, statTmpRef, sweepTmpFolder, TMP_MAX_AGE_MS, type TmpFileStat } from './workspace-tmp.js';
 import type { IKbRepository } from './kb-repository.contract.js';
@@ -2514,25 +2514,37 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
-   * True only when the workspace's folder is shown absent (ENOENT): nothing
-   * is left on disk that could hold its files. False when it has a working
-   * copy. Throws for everything else — an invalid id, a read that fails
-   * (EACCES, EIO), a folder with no working copy in it — so a caller that
-   * acts on "gone" never acts on a guess. Never bootstraps, unlike
-   * `hasBootstrappedWorkspace`, which reads every failure as "not there".
+   * Where the files of `workspaceId`'s working copy can still be on disk.
+   * `'set-aside'` when a copy of it was set aside (a replaced or moved
+   * repository), whether or not a working copy is back in its place: that
+   * copy may hold what was never pushed. `'live'` when its working copy is in
+   * place and nothing was set aside. `'gone'` only when its folder is shown
+   * absent (ENOENT) and nothing was set aside. Throws for everything else
+   * (an invalid id, a read that fails with EACCES or EIO, a folder with no
+   * working copy in it), so a caller that acts on `'gone'` never acts on a
+   * guess. The folder is read before the set-aside root, so a set-aside that
+   * moves it in between is found there. Never bootstraps.
    */
-  async workspaceIsGone(workspaceId: string): Promise<boolean> {
+  async workingCopyOf(workspaceId: string): Promise<'live' | 'set-aside' | 'gone'> {
     if (!workspaceId) throw new Error('Invalid workspace ID');
     const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
-    if (this.branchDirs.has(branchForWorkspaceId(workspaceId))) return false;
-    try {
-      await fs.stat(workspaceDir);
-    } catch (err) {
-      if (isAbsence(err)) return true;
-      throw err;
+    let live = this.branchDirs.has(branchForWorkspaceId(workspaceId));
+    if (!live) {
+      live = await fs.stat(workspaceDir).then(
+        () => true,
+        (err: unknown) => {
+          if (isAbsence(err)) return false;
+          throw err;
+        },
+      );
+      if (live && !(await this.hasWorkingCopy(this.repoRoot(workspaceDir)))) {
+        throw new Error(`Workspace "${workspaceId}" has a folder but no working copy.`);
+      }
     }
-    if (await this.hasWorkingCopy(this.repoRoot(workspaceDir))) return false;
-    throw new Error(`Workspace "${workspaceId}" has a folder but no working copy.`);
+    if (await hasSetAsideCopy(setAsideRootFor(this.workspacesRoot, this.setAsideRoot), workspaceId)) {
+      return 'set-aside';
+    }
+    return live ? 'live' : 'gone';
   }
 
   /**

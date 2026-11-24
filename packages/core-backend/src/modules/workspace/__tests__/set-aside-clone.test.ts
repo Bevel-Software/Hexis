@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { setAsideClone } from '../set-aside-clone.js';
+import { hasSetAsideCopy, setAsideClone, setAsideRootFor, setAsideStamp } from '../set-aside-clone.js';
 
 /**
  * Setting a working copy aside is the one thing between a replaced repository
@@ -48,5 +48,31 @@ describe('setAsideClone', () => {
     // The earlier one is whole, and so is the one that was to be moved.
     expect(await fs.readFile(path.join(dest, 'unpushed.md'), 'utf8')).toBe('an earlier copy');
     expect(await fs.readFile(path.join(copy, 'unpushed.md'), 'utf8')).toBe('this copy');
+  });
+});
+
+describe('hasSetAsideCopy', () => {
+  it('finds the copy a set-aside made of a workspace, and only that workspace', async () => {
+    const workspaces = path.join(root, 'workspaces');
+    const setAsideRoot = setAsideRootFor(workspaces);
+    expect(await hasSetAsideCopy(setAsideRoot, 'main')).toBe(false);
+
+    const copy = await folderWith('workspaces/main/knowledge-base', 'unpushed.md', 'local work');
+    await setAsideClone(copy, path.join(setAsideRoot, setAsideStamp(), 'main'));
+
+    expect(await hasSetAsideCopy(setAsideRoot, 'main')).toBe(true);
+    expect(await hasSetAsideCopy(setAsideRoot, 'alice-draft')).toBe(false);
+  });
+
+  // Root reads through any mode, so the refused read cannot be staged for it.
+  it.skipIf(process.getuid?.() === 0)('throws when the set-aside root cannot be read: a failed read is not absence', async () => {
+    const setAsideRoot = path.join(root, 'replaced-working-copies');
+    await fs.mkdir(setAsideRoot);
+    await fs.chmod(setAsideRoot, 0o000);
+    try {
+      await expect(hasSetAsideCopy(setAsideRoot, 'main')).rejects.toThrow();
+    } finally {
+      await fs.chmod(setAsideRoot, 0o755);
+    }
   });
 });

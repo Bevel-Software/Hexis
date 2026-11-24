@@ -234,3 +234,30 @@ export async function setAsideRepository(
     return worktrees.map(({ id }) => id);
   });
 }
+
+/**
+ * Whether a copy of `workspaceId`'s working copy was set aside under `root`:
+ * a `<stamp>/<workspace id>` folder, where every set-aside above puts one.
+ * Such a copy may hold what was never pushed, and it is kept indefinitely,
+ * so a caller asking whether a workspace's bytes are anywhere asks this too.
+ * Only absence answers no: a folder that cannot be read throws.
+ */
+export async function hasSetAsideCopy(root: string, workspaceId: string): Promise<boolean> {
+  let stamps: import('node:fs').Dirent[];
+  try {
+    stamps = await fs.readdir(root, { withFileTypes: true });
+  } catch (err) {
+    if (isAbsence(err)) return false;
+    throw err;
+  }
+  for (const stamp of stamps) {
+    if (!stamp.isDirectory()) continue;
+    try {
+      await fs.lstat(path.join(root, stamp.name, workspaceId));
+      return true;
+    } catch (err) {
+      if (!isAbsence(err)) throw err;
+    }
+  }
+  return false;
+}

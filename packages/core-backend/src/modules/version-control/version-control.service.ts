@@ -4470,11 +4470,15 @@ export class VersionControlService implements IVersionControlService {
    * branch) whose save has nothing left to push: the file is the same in the
    * working copy as at HEAD, and the shared repository holds HEAD's version of
    * it (`GitService.unpublishedPaths`, one fetch and one reservation per
-   * working copy). A row whose workspace folder is shown absent
-   * (`WorkspaceService.workspaceIsGone`) is removed too: nothing is left that
-   * could hold its bytes; a folder that cannot be read is not absent. Every other row is kept — its change is
-   * missing, or the check could not be made — and a person lands it by saving
-   * the file again, after which this clears it the same way.
+   * working copy). A row whose workspace folder is shown absent, with no
+   * set-aside copy of it, is removed too (`WorkspaceService.workingCopyOf`):
+   * nothing is left that could hold its bytes; a folder that cannot be read
+   * is not absent. A row of a workspace that was ever set aside (a replaced
+   * or moved repository) is kept, live working copy or not: the set-aside
+   * copy may hold its bytes, and the row is what points a person at them.
+   * Every other row is kept — its change is missing, or the check could not
+   * be made — and a person lands it by saving the file again, after which
+   * this clears it the same way.
    *
    * Asked before a merge out of a branch is refused over such rows, and once
    * at startup. Never throws: a working copy that cannot be checked keeps its
@@ -4504,7 +4508,15 @@ export class VersionControlService implements IVersionControlService {
     for (const group of groups.values()) {
       const { workspaceId, branch: rowBranch } = group[0]!;
       try {
-        const unpublished = (await this.workspaceService.workspaceIsGone(workspaceId))
+        const copy = await this.workspaceService.workingCopyOf(workspaceId);
+        if (copy === 'set-aside') {
+          log.info(
+            `kept ${group.length} stuck save(s) on ${printable(rowBranch)}: a set-aside copy of workspace ` +
+              `${printable(workspaceId)} may hold them`,
+          );
+          continue;
+        }
+        const unpublished = copy === 'gone'
           ? new Set<string>()
           : await this.git.unpublishedPaths(workspaceId, rowBranch, group.map((r) => r.path));
         done.push(...group.filter((r) => !unpublished.has(r.path)).map((r) => r.id));

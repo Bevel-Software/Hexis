@@ -89,10 +89,11 @@ async function makeWorld(): Promise<World> {
     await runGit(dir, ['config', 'user.name', 'Workspace']);
   }
 
-  // Whether a workspace is gone is the real service's answer over the same folders: absence only, never a failed read.
+  // Where a workspace's files are is the real service's answer over the same folders: absence only, never a failed read,
+  // and a set-aside copy (under `<root>/replaced-working-copies`, the default beside the workspaces root) counts.
   const realWorkspaces = newWorkspaceService(workspaceRoot, upstream, testKbContext(), realDisk());
   const workspaces = {
-    workspaceIsGone: (id: string) => realWorkspaces.workspaceIsGone(id),
+    workingCopyOf: (id: string) => realWorkspaces.workingCopyOf(id),
     getWorkspacePath: async (id: string) => path.join(workspaceRoot, id),
     hasBootstrappedWorkspace: async (id: string) =>
       fs.stat(path.join(repo(id), '.git')).then(() => true, () => false),
@@ -324,12 +325,42 @@ describe.skipIf(!PG_ADMIN_URL)('stuck saves clear themselves once nothing of the
   );
 
   it(
-    'removes a row whose working copy no longer exists',
+    'removes a row whose working copy no longer exists, in place or set aside',
     async () => {
       const w = world;
-      await stuckRow(w, { path: `${KB}/Data/QA/a.md`, workspaceId: 'a-working-copy-set-aside' });
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md`, workspaceId: 'a-deleted-branch' });
       expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'nothing-to-merge' });
       expect(await rowsLeft(w)).toEqual([]);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps a row whose working copy was set aside when the repository was replaced, and refuses as before',
+    async () => {
+      const w = world;
+      // Where a set-aside puts a working copy: <set-aside root>/<stamp>/<workspace id>. Its folder under the workspaces root is gone.
+      await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-03T10-00-00-000Z', 'replaced', '.git'), { recursive: true });
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md`, workspaceId: 'replaced' });
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 1 });
+      await w.svc.clearEscalatedCommits();
+      expect(await rowsLeft(w)).toEqual([{ path: `${KB}/Data/QA/a.md`, status: 'needs_attention' }]);
+      expect(w.logs.filter((l) => l.startsWith('kept 1 stuck save(s)'))).toHaveLength(2);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps a settled row of a workspace that was set aside, though a fresh working copy is back in its place',
+    async () => {
+      const w = world;
+      // Settled in the live working copy: without the set-aside copy this row would clear (the first test).
+      await laterSave(w, 'a.md', '# a, saved again\n');
+      await stuckRow(w, { path: `${KB}/Data/QA/a.md` });
+      // The copy that was set aside may still hold the bytes the row was escalated for.
+      await fs.mkdir(path.join(w.root, 'replaced-working-copies', '2026-11-03T10-00-00-000Z', workspaceIdForBranch(MAIN)), { recursive: true });
+      expect(await w.svc.mergeBranch(alice, MAIN, DRAFT)).toMatchObject({ kind: 'pending-commits', pending: 1 });
+      expect(await rowsLeft(w)).toEqual([{ path: `${KB}/Data/QA/a.md`, status: 'needs_attention' }]);
     },
     PG_TEST_TIMEOUT,
   );
