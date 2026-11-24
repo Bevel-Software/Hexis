@@ -35,8 +35,13 @@ afterEach(async () => {
 });
 
 interface HarnessOptions {
-  /** `'throws'`: the manual list reader fails. Default: it answers the harness's manuals. */
-  manualList?: 'throws';
+  /**
+   * `'throws'`: the manual list reader fails. `'stalls'`: it never answers.
+   * Default: it answers the harness's manuals.
+   */
+  manualList?: 'throws' | 'stalls';
+  /** The limit on an in-process read, in event-loop time. Absent, the service's own. */
+  inProcessReadLimitMs?: number;
   /** Records the Audit log's events. */
   auditRecorder?: { record: (e: AgentEventInput) => void };
 }
@@ -123,8 +128,10 @@ async function harness(opts: HarnessOptions = {}) {
       readManualList: async (who, { remoteOnly }) => {
         state.manualListReads.push({ ...who, remoteOnly });
         if (opts.manualList === 'throws') throw new Error('the manual catalog could not be read');
+        if (opts.manualList === 'stalls') await new Promise<never>(() => {});
         return { manuals: [kbManual, ...state.manuals] };
       },
+      ...(opts.inProcessReadLimitMs !== undefined ? { inProcessReadLimitMs: opts.inProcessReadLimitMs } : {}),
     },
     undefined,
     undefined,
@@ -222,6 +229,39 @@ describe('McpService — the manual list is read in process', () => {
     // manuals until their catalog next changed.
     expect(state.manualListReads).toHaveLength(2);
     expect(state.loopbackReads).toEqual([]);
+  });
+});
+
+describe('McpService — an in-process read that never answers', () => {
+  // The loopback request each read replaces ended at its limit, and the
+  // request was served without what it could not read. A read made in process
+  // is held to a limit too, counted in event-loop time (`shared/loop-time-limit.ts`).
+  it('a manual list read ends at its limit: the platform tools are served, and nothing is kept', async () => {
+    const { state, mcp } = await harness({ manualList: 'stalls', inProcessReadLimitMs: 150 });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const started = performance.now();
+    expect(await toolNames(await connect(mcp))).toContain('read_file');
+    expect(performance.now() - started).toBeGreaterThanOrEqual(140);
+    expect(await toolNames(await connect(mcp))).toContain('read_file');
+    expect(state.manualListReads).toHaveLength(2);
+  });
+
+  it('a skill list read ends at its limit: the prompts are listed without the skills', async () => {
+    const { state, mcp } = await harness({ inProcessReadLimitMs: 150 });
+    state.listSkills = () => new Promise<never>(() => {});
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { prompts } = await (await connect(mcp)).listPrompts();
+    expect(prompts.map((p) => p.name)).toEqual(['onboard']);
+    expect(errors.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain('skill list_skills could not be read');
+  });
+
+  it('a skill read ends at its limit: the prompt is answered as unknown', async () => {
+    const { state, mcp } = await harness({ inProcessReadLimitMs: 150 });
+    state.getSkill = () => new Promise<never>(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect((await connect(mcp)).getPrompt({ name: 'rfi' })).rejects.toThrow('Unknown skill "rfi".');
   });
 });
 

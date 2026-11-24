@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { InternalTokenService } from '../internal-token.service.js';
 import { createTokenVerifier, externalCallerAuth } from '../tool-auth.middleware.js';
 import type { IExternalApiKeyService } from '../external-api-key.interface.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import type { AuthService } from '../../auth/index.js';
 
 /**
  * `externalCallerAuth` describes the caller the hosted MCP endpoint reads

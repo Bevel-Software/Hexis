@@ -266,8 +266,8 @@ export interface McpSkillReads {
 const LOOPBACK_TIMEOUT_MS = 15_000;
 
 /**
- * Upper bound on a read made in process (the catalog revision), as long as the
- * loopback request it replaces was given. The loopback's limit ran on the
+ * Upper bound on a read made in process (the catalog revision, the manual
+ * list, a skill read), as long as the loopback request it replaces was given. The loopback's limit ran on the
  * clock, so a busy server passed it on a read that needed milliseconds. This
  * one is counted in time the event loop was free to run: a busy server does
  * not use it up, and a read that waits on something that never answers still
@@ -1263,7 +1263,9 @@ export class McpService {
    * One skill tool's answer, or null when it refused or failed: in process
    * when the composition handed over the reads (`readSkillsWith`), over
    * loopback otherwise. A failure is logged under the tool's name and degrades
-   * to null either way — a skill read must not throw into the MCP request.
+   * to null either way — a skill read must not throw into the MCP request. A
+   * read in process is held to {@link IN_PROCESS_READ_LIMIT_MS}, as the
+   * loopback request was to its limit.
    *
    * The in-process answer is passed through JSON, as the route's answer was on
    * its way here, so what the handlers below read is what they always read.
@@ -1272,12 +1274,12 @@ export class McpService {
     bearer: string,
     tool: 'list_skills' | 'get_skill',
     body: Record<string, unknown>,
-    inProcess: (reads: McpSkillReads) => Promise<unknown>,
+    read: (reads: McpSkillReads) => Promise<unknown>,
   ): Promise<unknown> {
     const reads = this.skillReads;
     if (!reads) return this.loopbackTool(bearer, tool, body);
     try {
-      return JSON.parse(JSON.stringify((await inProcess(reads)) ?? null)) as unknown;
+      return JSON.parse(JSON.stringify((await this.inProcess(read(reads))) ?? null)) as unknown;
     } catch (err) {
       // A refusal the route answers with a status (a connection that loads
       // nothing is refused the skills on every `prompts/list`) is one line,
@@ -1329,7 +1331,9 @@ export class McpService {
   /**
    * The caller's manual list as the `all-tools` route answers it, or null when
    * it could not be read: in process when the composition offers a reader
-   * (`McpProxyOptions.readManualList`), over loopback otherwise.
+   * (`McpProxyOptions.readManualList`), over loopback otherwise. Either way
+   * the read ends at a limit, and a list not read by then is one that could
+   * not be read.
    *
    * The in-process answer is passed through JSON, as the route's answer was on
    * its way here, so the validation that follows is handed exactly what it
@@ -1350,7 +1354,9 @@ export class McpService {
         | null;
     }
     try {
-      const answer = await read({ userId: caller.userId, agentPath: caller.agentPath || null }, { remoteOnly: true });
+      const answer = await this.inProcess(
+        read({ userId: caller.userId, agentPath: caller.agentPath || null }, { remoteOnly: true }),
+      );
       return JSON.parse(JSON.stringify(answer)) as { manuals?: unknown; connection?: unknown };
     } catch (err) {
       log.error('the manual list could not be read:', { err });

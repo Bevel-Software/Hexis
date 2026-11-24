@@ -56,7 +56,7 @@ import {
   registerPluginsTools,
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
-import { externalCallerAuth } from '../modules/tool-auth/tool-auth.middleware.js';
+import { externalCallerAuth } from '../modules/tool-auth/index.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,

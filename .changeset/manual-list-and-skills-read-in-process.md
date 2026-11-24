@@ -10,6 +10,8 @@ The skills are read by the handlers the two skill routes run. `registerSkillsToo
 
 The caller is the one the request's credential resolved to. `externalCallerAuth` in `modules/tool-auth` describes it, and a test holds it to what the tool-auth verifier resolves the old loopback bearer to.
 
+Each read in process is held to 15 seconds of event-loop time (`withinLoopTime`), the limit the catalog revision read has. A busy server does not use it up. A read that never answers ends there, and the request is then served as it was when the loopback request passed its limit: the platform tools alone, not kept, or no skills.
+
 The routes are unchanged for the local server and for scripts, which still call them. A composition that does not hand the endpoint a reader keeps reading over loopback. Nothing an agent can observe changes: tool names, arguments, answers, prompts and the agent guide are the same.
 
 Tool discovery (`GET /api/agent/utcp`) and tool calls still go over loopback. Discovery is the last step of hx-tool-surface-is-built-without-a-loopback-call.

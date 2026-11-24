@@ -102,7 +102,7 @@ import { ToolManualService } from '../modules/tool-manuals/tool-manuals.service.
 import { PendingToolsService } from '../modules/tool-manuals/pending-tools.service.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
-import { createManualListReader, type ManualListReader } from '../modules/tool-manuals/tool-manuals.routes.js';
+import { createManualListReader, type ManualListReader } from '../modules/tool-manuals/index.js';
 import {
   PluginIndexService,
   pluginFolderBelowRoot,
