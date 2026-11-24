@@ -55,6 +55,7 @@ import type {
   MergeChangeRequestOutcome,
   MergeResolution,
   OpenChangeRequestInput,
+  PendingCommitsRefusal,
   RemoteSyncPullResult,
   UpdateBranchOutcome,
   UpdateChangeRequestFields,
@@ -80,7 +81,7 @@ import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspa
 import type { IAccessControl } from '../access/index.js';
 import type { FileLockService } from './file-lock.service.js';
 import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
-import type { PendingCommitsService } from './pending-commits.service.js';
+import type { PendingCommit, PendingCommitsService } from './pending-commits.service.js';
 import type { VersionControlEventBus } from './event-bus.js';
 import { describeSyncFailure, sanitizeError } from './sanitize-error.js';
 import { VersionControlHooks } from './version-control-hooks.js';
@@ -107,7 +108,7 @@ import {
   VersionControlValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, toKbRelative, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -4432,6 +4433,10 @@ export class VersionControlService implements IVersionControlService {
   /**
    * Wait until no commit is queued on `branch`, or the bound runs out. A
    * commit escalated to a person ends the wait at once: nothing will land it.
+   * Before that answer is given, the escalated rows whose save has nothing
+   * left to push are cleared (`clearEscalatedCommits`), once per call, and
+   * the queue is asked again: only a row whose change is still missing from
+   * the repository refuses the merge.
    *
    * Polls the queue rather than draining it: the worker's own per-workspace
    * serialization stays the only writer to the clone, and the row is deleted
@@ -4442,13 +4447,131 @@ export class VersionControlService implements IVersionControlService {
   ): Promise<{ ok: true } | { ok: false; pending: number; needsAttention?: string }> {
     const { timeoutMs, pollMs } = this.mergeWaitForPendingCommits;
     const deadline = Date.now() + timeoutMs;
+    let cleared = false;
     for (;;) {
       const { queued, stuck, needsAttention } = await this.pendingCommits.queuedOnBranch(branch);
+      if (needsAttention !== null && !cleared) {
+        await this.clearEscalatedCommits(branch);
+        cleared = true;
+        continue;
+      }
       if (needsAttention !== null) return { ok: false, pending: queued + stuck, needsAttention };
       if (queued === 0) return { ok: true };
       if (Date.now() >= deadline) return { ok: false, pending: queued };
       await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
     }
+  }
+
+  /**
+   * Remove the rows escalated to `needs_attention` (on `branch`, or on every
+   * branch) whose save has nothing left to push: the file is the same in the
+   * working copy as at HEAD, and the shared repository holds HEAD's version of
+   * it (`GitService.unpublishedPaths`, one fetch and one reservation per
+   * working copy). A row whose working copy is gone is removed too: nothing is
+   * left that could hold its bytes. Every other row is kept — its change is
+   * missing, or the check could not be made — and a person lands it by saving
+   * the file again, after which this clears it the same way.
+   *
+   * Asked before a merge out of a branch is refused over such rows, and once
+   * at startup. Never throws: a working copy that cannot be checked keeps its
+   * rows and is logged. Each removal is one log line and no notice; the
+   * notice went out when the row was marked. `pending` and `running` rows are
+   * never read or touched here.
+   *
+   * The check and the delete are not one reservation, and need not be: a
+   * `needs_attention` row is driven by nobody, so nothing can change what it
+   * stands for in between, and a save of the same file made meanwhile is a
+   * row of its own that carries those bytes.
+   */
+  async clearEscalatedCommits(branch?: string): Promise<void> {
+    let rows: PendingCommit[];
+    try {
+      rows = await this.pendingCommits.listNeedsAttention(branch);
+    } catch (err) {
+      log.warn('could not read the stuck saves; none cleared:', { err: sanitizeError(err) });
+      return;
+    }
+    const groups = new Map<string, PendingCommit[]>();
+    for (const row of rows) {
+      const key = `${row.workspaceId}\u0000${row.branch}`;
+      groups.set(key, [...(groups.get(key) ?? []), row]);
+    }
+    const done: string[] = [];
+    for (const group of groups.values()) {
+      const { workspaceId, branch: rowBranch } = group[0]!;
+      try {
+        const unpublished = (await this.workspaceService.hasBootstrappedWorkspace(workspaceId))
+          ? await this.git.unpublishedPaths(workspaceId, rowBranch, group.map((r) => r.path))
+          : new Set<string>();
+        done.push(...group.filter((r) => !unpublished.has(r.path)).map((r) => r.id));
+      } catch (err) {
+        log.warn(
+          `could not check ${group.length} stuck save(s) on "${printable(rowBranch)}" in workspace ${printable(workspaceId)}; kept:`,
+          { err: sanitizeError(err) },
+        );
+      }
+    }
+    try {
+      for (const row of await this.pendingCommits.removeEscalated(done)) {
+        log.info(
+          `cleared a stuck save with nothing left to push: branch="${printable(row.branch)}" ` +
+            `path="${printable(row.path)}" queued=${row.queuedAt.toISOString()}`,
+        );
+      }
+    } catch (err) {
+      log.warn('could not remove the stuck saves found settled; kept:', { err: sanitizeError(err) });
+    }
+  }
+
+  /**
+   * The `pending-commits` answer of a merge out of `branch` or an update of
+   * it, built in this one place for both. When escalated rows refused it,
+   * `stuck` names their files: at most ten `user` may read, sorted, and how
+   * many more there are. A file `user` may not read, or whose verdict could
+   * not be had, is counted and never named.
+   */
+  private async pendingCommitsRefusal(
+    user: AuthUser,
+    branch: string,
+    waited: { pending: number; needsAttention?: string },
+    retry: 'merge' | 'update',
+  ): Promise<PendingCommitsRefusal> {
+    if (!waited.needsAttention) {
+      return {
+        kind: 'pending-commits',
+        branch,
+        pending: waited.pending,
+        message: `${waited.pending} write(s) on "${branch}" are still being committed. Nothing was merged. Retry the ${retry} shortly.`,
+      };
+    }
+    const rows = await this.pendingCommits.listNeedsAttention(branch);
+    const all = [...new Set(rows.map((r) => r.path))].sort();
+    const readable = new Set<string>();
+    for (const workspaceId of new Set(rows.map((r) => r.workspaceId))) {
+      const mine = [...new Set(rows.filter((r) => r.workspaceId === workspaceId).map((r) => r.path))];
+      const byKb = new Map<string, string>();
+      for (const p of mine) {
+        const rel = toKbRelative(p, this.kb.kbDirName);
+        if (rel !== null) byKb.set(p, rel);
+      }
+      try {
+        const verdict = await this.accessControl.canReadBatch(workspaceId, user.email, [...new Set(byKb.values())]);
+        for (const [p, rel] of byKb) if (verdict.get(rel) === true) readable.add(p);
+      } catch (err) {
+        log.warn('could not resolve read access to the stuck saves; none named:', { err: sanitizeError(err) });
+      }
+    }
+    const files = all.filter((p) => readable.has(p)).slice(0, 10);
+    return {
+      kind: 'pending-commits',
+      branch,
+      pending: waited.pending,
+      needsAttention: waited.needsAttention,
+      stuck: { files, more: all.length - files.length },
+      message:
+        `A save on "${branch}" failed and never reached the shared repository: ${waited.needsAttention} ` +
+        `Nothing was merged. Tell the user: saving each file in \`stuck\` again lands it, then ${retry} again.`,
+    };
   }
 
   /** The one question `mergeBranch` refuses on: is a request from `source` into `target` open? */
@@ -4486,20 +4609,7 @@ export class VersionControlService implements IVersionControlService {
     // creating, deleting and opening requests on these branches, and must not
     // be held for seconds of waiting on a queue.
     const settled = await this.awaitPendingCommits(sourceBranch);
-    if (!settled.ok) {
-      const message = settled.needsAttention
-        ? `A commit queued on "${sourceBranch}" failed and needs a person: ${settled.needsAttention} ` +
-          `Nothing was merged. Tell the user; merge again once it has been resolved.`
-        : `${settled.pending} write(s) on "${sourceBranch}" are still being committed. ` +
-          `Nothing was merged. Retry the merge shortly.`;
-      return {
-        kind: 'pending-commits',
-        branch: sourceBranch,
-        pending: settled.pending,
-        ...(settled.needsAttention ? { needsAttention: settled.needsAttention } : {}),
-        message,
-      };
-    }
+    if (!settled.ok) return this.pendingCommitsRefusal(user, sourceBranch, settled, 'merge');
 
     // Under the lifecycle lock of BOTH branches, the same protocol
     // `openChangeRequest` follows — and for the same window. That method holds
@@ -5040,19 +5150,7 @@ export class VersionControlService implements IVersionControlService {
     // waiting on a queue.
     for (const b of from === branch ? [branch] : [from, branch]) {
       const settled = await this.awaitPendingCommits(b);
-      if (!settled.ok) {
-        const message = settled.needsAttention
-          ? `A commit queued on "${b}" failed and needs a person: ${settled.needsAttention} ` +
-            'Nothing was merged. Tell the user; update again once it has been resolved.'
-          : `${settled.pending} write(s) on "${b}" are still being committed. Nothing was merged. Retry shortly.`;
-        return {
-          kind: 'pending-commits',
-          branch: b,
-          pending: settled.pending,
-          ...(settled.needsAttention ? { needsAttention: settled.needsAttention } : {}),
-          message,
-        };
-      }
+      if (!settled.ok) return this.pendingCommitsRefusal(user, b, settled, 'update');
     }
     // Under the lifecycle lock of both branches, as `mergeBranch` and
     // `openChangeRequest` run: the "no open request" answer is only sound

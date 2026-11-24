@@ -2903,6 +2903,57 @@ export class GitService implements IGitService {
   }
 
   /**
+   * Of `paths` (workspace-relative, as a save names them), the ones this
+   * clone of `branch` may still hold something of that the shared repository
+   * lacks: the working copy differs from HEAD there (an ignored or untracked
+   * file counts; a file absent from both does not), or HEAD's version of it
+   * is not what `origin/<branch>` holds while HEAD is not on `origin/<branch>`
+   * either. A path that names something beside the clone, and finds bytes
+   * there, counts too, as does a path that is not a valid relative path.
+   *
+   * Publication PROOF for the caller, so it never answers on a guess: the
+   * branch is fetched first, everything runs in ONE reservation of the
+   * workspace (no commit or push can land between the reads), and anything
+   * that cannot be asked — the remote unreachable, the branch not checked
+   * out here or not on the remote, a git failure — throws.
+   */
+  async unpublishedPaths(workspaceId: string, branch: string, paths: readonly string[]): Promise<Set<string>> {
+    assertValidBranchName(branch);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const checkedOut = await this.currentBranch(cwd);
+      if (checkedOut !== branch) {
+        throw new Error(`workspace "${workspaceId}" has "${checkedOut}" checked out, not "${branch}"`);
+      }
+      const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
+      const { stdout: status } = await this.git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching']);
+      // A folder git reports whole (an ignored one) ends in `/`: it covers every path under it.
+      const dirty = parsePorcelainZ(status);
+      const isDirty = (p: string) => dirty.some((d) => d === p || (d.endsWith('/') && p.startsWith(d)));
+      const head = (await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim();
+      const remote = (await this.git(cwd, ['rev-parse', '--verify', `${remoteRef}^{commit}`])).stdout.trim();
+      const changedSincePush = (await this.isAncestorUnlocked(cwd, head, remote))
+        ? new Set<string>()
+        : new Set((await this.git(cwd, ['diff', '--no-renames', '-z', '--name-only', head, remote])).stdout.split('\0'));
+      const workspaceDir = await this.workspaceService.getWorkspacePath(workspaceId);
+      const unpublished = new Set<string>();
+      for (const p of paths) {
+        const repoRelative = path.posix.normalize(this.stripRepoPrefix(p));
+        try {
+          assertValidRelativePath(p);
+          assertValidRelativePath(repoRelative);
+        } catch {
+          unpublished.add(p);
+          continue;
+        }
+        const beside = p === this.stripRepoPrefix(p) && (await existsForCommitCheck(path.join(workspaceDir, p)));
+        if (beside || isDirty(repoRelative) || changedSincePush.has(repoRelative)) unpublished.add(p);
+      }
+      return unpublished;
+    });
+  }
+
+  /**
    * Whether this clone's HEAD already holds everything origin has on its
    * branch: a push would then fast-forward origin to HEAD, and no cooperative
    * pull-rebase would replay origin's commits INTO HEAD first. Asked after a

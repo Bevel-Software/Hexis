@@ -353,10 +353,13 @@ export class PendingCommitsService {
   }
 
   /**
-   * Terminal failure. Row stays in `needs_attention` forever (until an
-   * admin deletes or repairs it). The worker emits a `'system'` feedback
-   * notice in the same pass — that lives in the worker, not here, so the
-   * service stays storage-only.
+   * Terminal failure: the worker stops trying. The row stays in
+   * `needs_attention` until `VersionControlService` finds nothing of its save
+   * left to push (checked before a merge out of the branch is refused over
+   * it, and at startup), then it is removed. A save of the same file lands as
+   * a row of its own, which is how a person lands a change still missing. The
+   * worker emits a `'system'` feedback notice in the same pass — that lives
+   * in the worker, not here, so the service stays storage-only.
    */
   async markNeedsAttention(id: string, error: string): Promise<void> {
     await this.db
@@ -370,8 +373,8 @@ export class PendingCommitsService {
   }
 
   /**
-   * Take every commit still queued for `branch` out of the worker's reach and
-   * onto the admin surface, and answer how many moved.
+   * Take every commit still queued for `branch` out of the worker's reach,
+   * and answer how many moved.
    *
    * The one caller is the knowledge-base repository being REPLACED. A release
    * ENQUEUES the bytes and only then drops its lock, so the moment the locks
@@ -382,8 +385,9 @@ export class PendingCommitsService {
    * file, overwritten by a change nobody made to it.
    *
    * `needs_attention`, not deleted — the same rule as everything else about a
-   * replacement. The bytes are still in the row, the reason is on it, and they
-   * show up on the pending-commit admin surface for a person to decide about.
+   * replacement: the reason is on the row, and it is removed only once nothing
+   * of its save is left to push (see `markNeedsAttention`), which for the old
+   * working copy's bytes is at the next check after the re-clone.
    * `running` rows go too: the worker checks the row back in when it finishes,
    * and a row it is mid-flight with is exactly one whose destination just
    * changed under it.
@@ -433,9 +437,9 @@ export class PendingCommitsService {
    * `running` both count: a row the worker holds is still not in git, and a
    * row it holds for too long is exactly the stall this measures.
    * `needs_attention` does not: that row has already been escalated through
-   * the notice sink and sits on the admin surface, and counting it here would
-   * keep the deployment "degraded" until triage rather than saying whether
-   * draining keeps up.
+   * the notice sink and waits for a person to save the file again, and
+   * counting it here would keep the deployment "degraded" until then rather
+   * than saying whether draining keeps up.
    */
   async oldestQueuedAt(): Promise<Date | null> {
     const [row] = await this.db
@@ -446,15 +450,32 @@ export class PendingCommitsService {
   }
 
   /**
-   * Admin / dashboard surface. Returns everything stuck in
-   * `needs_attention` for triage.
+   * Every row escalated to `needs_attention` — on `branch` when one is
+   * named — oldest first. What `VersionControlService` checks against git to
+   * clear the rows whose save has nothing left to push.
    */
-  async listNeedsAttention(): Promise<PendingCommit[]> {
+  async listNeedsAttention(branch?: string): Promise<PendingCommit[]> {
+    const escalated = eq(pendingCommits.status, 'needs_attention');
     const rows = await this.db
       .select()
       .from(pendingCommits)
-      .where(eq(pendingCommits.status, 'needs_attention'));
+      .where(branch === undefined ? escalated : and(escalated, eq(pendingCommits.branch, branch)))
+      .orderBy(asc(pendingCommits.queuedAt), asc(pendingCommits.id));
     return rows.map(rowToPending);
+  }
+
+  /**
+   * Delete the rows of `ids` that are still `needs_attention`, and answer the
+   * ones deleted. The status is part of the statement, so a row the worker
+   * drives (`pending`, `running`) is never removed here, whatever id is passed.
+   */
+  async removeEscalated(ids: readonly string[]): Promise<PendingCommit[]> {
+    if (ids.length === 0) return [];
+    const removed = await this.db
+      .delete(pendingCommits)
+      .where(and(inArray(pendingCommits.id, [...ids]), eq(pendingCommits.status, 'needs_attention')))
+      .returning();
+    return removed.map(rowToPending);
   }
 
   /**
