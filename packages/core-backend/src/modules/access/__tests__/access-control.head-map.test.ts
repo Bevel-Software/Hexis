@@ -207,19 +207,21 @@ describe('AccessControlService: reads answered from the map of the head commit',
     reset();
     const paths = [...Object.keys(FILES), 'Team/New.md'];
     expect((await svc.canReadBatch('ws', 'mem@x.io', paths)).get('Team/New.md')).toBe(true);
-    // The access files are the ones already held: only the new file is read.
-    expect(gitLog).toEqual(['ls-tree', 'cat-file']);
-    expect(opened).toEqual([]);
+    // The access files are the ones already held: only the new file is read, from the checkout, which git's stat
+    // cache says holds the commit's version (asked before and after the read).
+    expect(gitLog).toEqual(['ls-tree', 'diff-index', 'diff-index']);
+    expect(opened).toEqual([path.join('Team', 'New.md')]);
 
     // A commit that changes what a file declares is answered from the new version.
     expect((await svc.canReadBatch('ws', 'nobody@x.io', paths)).get('Team/Own.md')).toBe(false);
     await commit('own page opened', { 'Team/Own.md': '# own, now plain\n' });
     reset();
     expect((await svc.canReadBatch('ws', 'nobody@x.io', paths)).get('Team/Own.md')).toBe(true);
-    expect(gitLog).toEqual(['ls-tree', 'cat-file']);
-    expect(opened).toEqual([]);
+    expect(gitLog).toEqual(['ls-tree', 'diff-index', 'diff-index']);
+    expect(opened).toEqual([path.join('Team', 'Own.md')]);
 
-    // A commit that changes an access file is read, and its rules decide.
+    // A commit that changes an access file is read, and its rules decide. An `access.md` is read through git, never
+    // from the checkout: its body decides what it declares, so its start alone would not do.
     await commit('team closed to members', { 'Team/access.md': '---\nread:\n  - deny Member\n---\n' });
     reset();
     expect((await svc.canReadBatch('ws', 'mem@x.io', paths)).get('Team/Doc.md')).toBe(false);
@@ -250,11 +252,11 @@ describe('AccessControlService: reads answered from the map of the head commit',
     svc.invalidate('ws');
     expect(await read()).toBe(false);
 
-    // Committed: the map of the new commit answers, without opening the file.
+    // Committed: the map of the new commit answers, reading the one changed file's start.
     await git('commit', '-qam', 'top restricted');
     reset();
     expect(await read()).toBe(false);
-    expect(opened).toEqual([]);
+    expect(opened).toEqual(['Top.md']);
   });
 
   it('answers a batch from one commit when a commit lands while the batch is being answered', async () => {
@@ -352,6 +354,24 @@ describe('AccessControlService: reads answered from the map of the head commit',
     });
   }, 120_000);
 
+  it('never remembers what a file changed on disk and not committed declares as its commit version', async () => {
+    // A restriction on disk that no commit holds.
+    await write(repo, { 'Team/Doc.md': DENY_ALL });
+    const svc = service();
+    // The map holds the commit's version: the page is open to members.
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Doc.md'])).get('Team/Doc.md')).toBe(true);
+    // Another checkout of the same commit shares what versions declare: it must find the commit's version
+    // remembered, not the disk's.
+    await execFileAsync('git', ['clone', '-q', repo, path.join(root, 'ws2', KB)]);
+    reset();
+    expect((await svc.canReadBatch('ws2', 'mem@x.io', ['Team/Doc.md', 'Team/Own.md']))).toEqual(
+      new Map([
+        ['Team/Doc.md', true],
+        ['Team/Own.md', false],
+      ]),
+    );
+  }, 120_000);
+
   it('takes no member from a roles or groups file changed on disk and not committed, where the checkout alone would', async () => {
     await commit('a page for the platform group', { 'Team/Plat.md': '---\nread:\n  - deny everyone\n  - Platform\n---\n# plat\n' });
     const svc = service();
@@ -427,7 +447,11 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
   }, 120_000);
 
-  it('reads the file versions of a first map in parts no larger than the limit', async () => {
+  it('reads the file versions git cannot vouch for on disk through git, in parts no larger than the limit', async () => {
+    // Every file touched: git's stat cache no longer vouches that the checkout holds the commit's version, though
+    // the bytes are the same, so each version is read through git.
+    const later = new Date(Date.now() + 60_000);
+    for (const rel of Object.keys(FILES)) await fs.utimes(path.join(repo, rel), later, later);
     const svc = service({ chunkBytes: 64 });
     const paths = Object.keys(FILES);
     expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
@@ -436,15 +460,26 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect(gitLog.filter((a) => a === 'cat-file').length).toBeGreaterThan(5);
   }, 120_000);
 
+  it('reads the start of each file from the checkout where git vouches for it, and only the access.md files through git', async () => {
+    const svc = service();
+    const paths = Object.keys(FILES);
+    await svc.canReadBatch('ws', 'nobody@x.io', paths);
+    // Two batched reads through git: the model's of the access files, and the access.md files' own declarations
+    // (their body decides). Every other file is read from the checkout.
+    expect(gitLog.filter((a) => a === 'cat-file')).toHaveLength(2);
+    expect(opened.some((p) => p.endsWith('access.md'))).toBe(false);
+    expect(opened).toEqual(expect.arrayContaining([path.join('Team', 'Big.transcript'), path.join('Team', 'pic.png')]));
+    expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
+  }, 120_000);
+
   it('answers from the checkout when reading the file versions fails, and makes the map once git answers again', async () => {
     const paths = Object.keys(FILES);
     let clock = 1_000_000;
     let failing = true;
-    // The second batched read of a build is the one for the file versions.
-    let reads = 0;
+    // Asking git which files it can vouch for on disk is the first step of reading the file versions.
     const svc = service({}, undefined, {
       now: () => clock,
-      failGit: (args) => args[0] === 'cat-file' && failing && ++reads === 2,
+      failGit: (args) => args[0] === 'diff-index' && failing,
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect((await svc.canReadBatch('ws', 'nobody@x.io', paths)).get('Team/Own.md')).toBe(false);
@@ -487,14 +522,14 @@ describe('AccessControlService: reads answered from the map of the head commit',
     await copyToPlain();
 
     // A second process begins from the seed: one read for the seed's
-    // declaring files, one for the commit's access files, one for the page
-    // added since. No other file version is read.
+    // declaring files, one for the commit's access files, and the page added
+    // since, read from the checkout git vouches for. No other file is read.
     reset();
     const second = service({}, store);
     const all = [...paths, 'Team/Since.md'];
     expect((await second.canReadBatch('ws', 'nobody@x.io', all)).get('Team/Since.md')).toBe(false);
-    expect(gitLog).toEqual(['ls-tree', 'cat-file', 'ls-tree', 'cat-file', 'cat-file']);
-    expect(opened).toEqual([]);
+    expect(gitLog).toEqual(['ls-tree', 'cat-file', 'ls-tree', 'cat-file', 'diff-index', 'diff-index']);
+    expect(opened).toEqual([path.join('Team', 'Since.md')]);
     expect(await answers(second, 'ws', all)).toEqual(await answers(service(), 'plain', all));
   }, 120_000);
 

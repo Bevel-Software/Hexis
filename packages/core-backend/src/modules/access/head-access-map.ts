@@ -4,7 +4,8 @@ import { readRevSha } from '../kb-fs/index.js';
 import { accessMdSelfEntries, isAccessMdPath, parseOwnAccessEntries, type OwnEntries } from '../access-model/index.js';
 import { catFileBatchBytes } from './cat-file-batch.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
-import { frontmatterHeadOfBytes } from './frontmatter-head.js';
+import path from 'node:path';
+import { frontmatterHead, frontmatterHeadOfBytes } from './frontmatter-head.js';
 import { detachEntries } from './own-entries-memo.js';
 import type { CommitPaths, ITreeIndexer } from './tree-index.js';
 
@@ -135,10 +136,16 @@ interface Unseen {
  * versions it holds that no earlier commit held: a save changes one file, so
  * a head that moves reads one file. What a file version declares is
  * remembered by its object id, so a version is read once for every branch
- * and commit that holds it. Everything is read through git, never from the
- * checkout: a checkout may already hold a newer version of a file than the
- * commit, and what that version says must not be remembered as the older
- * one's.
+ * and commit that holds it.
+ *
+ * Versions are read from the checkout, which costs the start of each file
+ * (the frontmatter head) where git would return all of it. Only a file git
+ * says is the same on disk as in the commit (`git diff-index <commit>`, from
+ * its stat cache, asked before and after the reads) is read from the disk;
+ * a file that differs, or changed while it was read, is read through git, so
+ * the map, the memo and the seed hold only facts true of the commit's
+ * versions. A change on disk counts once it is a commit, whose changed
+ * files are read like any other's.
  *
  * A commit that lists a symbolic link or a submodule gets no map: what the
  * checkout holds there is not what the commit holds, and the old way reads
@@ -270,7 +277,8 @@ export class HeadMaps<M> implements IHeadMaps<M> {
         return;
       }
       unseen.set(key, { objectId, key, size: file.size, paths: [path] });
-      wait += file.size;
+      // Read from the checkout, a version costs its start, not its size; an `access.md` is read whole, through git.
+      wait += isAccessMdPath(path) ? file.size : Math.min(file.size, DISK_HEAD_COST);
     });
     if (!built || irregular) {
       built?.release();
@@ -281,7 +289,7 @@ export class HeadMaps<M> implements IHeadMaps<M> {
     }
     const finish = async (): Promise<HeadMap<M> | null> => {
       try {
-        await this.read(repoDir, [...unseen.values()], own);
+        await this.readAtCheckout(repoDir, commit, [...unseen.values()], own);
       } catch (err) {
         built.release();
         this.rememberWithout(commit, this.now() + HeadMaps.RETRY_MS);
@@ -300,6 +308,49 @@ export class HeadMaps<M> implements IHeadMaps<M> {
     this.warming.add(commit);
     void finish().finally(() => this.warming.delete(commit));
     return null;
+  }
+
+  /**
+   * Read the versions in `unseen` for the map of `commit`, which the checkout at `repoDir` stands on: from the
+   * checkout where git says the file is the same there as in the commit, through git everywhere else. Remembers
+   * what each version declares and notes the ones that declare something in `own`, as `read` does. The map holds
+   * the commit's versions only, never a newer one on disk: its model is the commit's, and a page read as the disk
+   * has it beside rules read as the commit has them could pair a restriction's old place with its new one, and
+   * keep it nowhere.
+   */
+  private async readAtCheckout(repoDir: string, commit: string, unseen: Unseen[], own: Map<string, OwnEntries>): Promise<void> {
+    const before = await this.changedOnDisk(repoDir, commit);
+    const viaGit: Unseen[] = [];
+    const fromDisk: Unseen[] = [];
+    // An `access.md` says what it declares for itself only with its body read too (`accessMdSelfEntries`), so it is
+    // never read from its start alone: it goes through git, in parts, as before. There are few, and they are small.
+    for (const u of unseen) (isAccessMdPath(u.paths[0]!) || u.paths.some((p) => before.has(p)) ? viaGit : fromDisk).push(u);
+    const read = await inParallel(fromDisk, (u) => readDeclaredOnDisk(repoDir, u.paths[0]!));
+    // A file written while it was read differs now: what was read of it is no fact about its version.
+    const after = await this.changedOnDisk(repoDir, commit);
+    fromDisk.forEach((u, i) => {
+      const declared = read[i]!;
+      if (declared === GONE || u.paths.some((p) => after.has(p))) {
+        viaGit.push(u);
+        return;
+      }
+      this.rememberBlob(u.key, declared);
+      if (declared !== null) for (const p of u.paths) own.set(p, declared);
+    });
+    await this.read(repoDir, viaGit, own);
+  }
+
+  /** The files whose state on disk differs from `commit` (staged or not), from git's stat cache: no file is read. */
+  private async changedOnDisk(repoDir: string, commit: string): Promise<Set<string>> {
+    const { stdout } = await this.git.run(repoDir, ['diff-index', '--name-only', '-z', commit, '--'], { encoding: 'buffer' });
+    const changed = new Set<string>();
+    for (let off = 0; off < stdout.length; ) {
+      let end = stdout.indexOf(0, off);
+      if (end < 0) end = stdout.length;
+      if (end > off) changed.add(stdout.toString('utf8', off, end));
+      off = end + 1;
+    }
+    return changed;
   }
 
   /** Read the versions in `unseen` from git, remember what each declares, and note the ones that declare something in `own`. */
@@ -405,6 +456,42 @@ export class HeadMaps<M> implements IHeadMaps<M> {
       if (oldest !== undefined) this.without.delete(oldest);
     }
   }
+}
+
+/** What a version costs to read from the checkout at most: the start of the file, up to its frontmatter's end. */
+const DISK_HEAD_COST = 64 * 1024;
+/** Files read from the checkout at once. */
+const DISK_READS_AT_ONCE = 16;
+/** A file the checkout no longer holds. */
+const GONE = Symbol('gone');
+
+/**
+ * What the file at `relativePath` in the checkout declares for itself, read as `read` reads such a version: to the
+ * end of its frontmatter, never further. Not for an `access.md`, whose body decides what it declares (it goes
+ * through git).
+ */
+async function readDeclaredOnDisk(repoDir: string, relativePath: string): Promise<OwnEntries | null | typeof GONE> {
+  const file = path.join(repoDir, relativePath);
+  let head: string;
+  try {
+    head = await frontmatterHead(file);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return GONE;
+    throw err;
+  }
+  return detachEntries(parseOwnAccessEntries(head));
+}
+
+/** `read` for each item, at most `DISK_READS_AT_ONCE` at a time, in order. */
+async function inParallel<T, R>(items: readonly T[], read: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (let i = next++; i < items.length; i = next++) out[i] = await read(items[i]!);
+  };
+  await Promise.all(Array.from({ length: Math.min(DISK_READS_AT_ONCE, items.length) }, worker));
+  return out;
 }
 
 /**
