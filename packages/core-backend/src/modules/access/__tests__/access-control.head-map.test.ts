@@ -335,6 +335,23 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect((await svc.canReadBatch('ws', 'mem@x.io', asked)).get('Team/Loose/A.md')).toBe(false);
   }, 120_000);
 
+  it('answers from the checkout for a commit that holds a submodule, keeping every denial', async () => {
+    // A gitlink: what the checkout holds at that path is not what the commit holds, so the commit gets no map.
+    await git('update-index', '--add', '--cacheinfo', `160000,${await git('rev-parse', 'HEAD')},Vendor/sub`);
+    await git('commit', '-qm', 'a submodule');
+    // A rule written on disk and never committed: the checkout takes it, a map of the commit would not (see the
+    // test above), so it shows which of the two answers.
+    await write(repo, { 'Team/Loose/access.md': '---\nread:\n  - deny everyone\n---\n', 'Team/Loose/A.md': '# a\n' });
+    const asked = ['Team/Own.md', 'Team/Secret/A.md', 'Team/Loose/A.md', 'Team/Doc.md', 'Top.md'];
+    expect(Object.fromEntries(await service().canReadBatch('ws', 'mem@x.io', asked))).toEqual({
+      'Team/Own.md': false,
+      'Team/Secret/A.md': false,
+      'Team/Loose/A.md': false,
+      'Team/Doc.md': true,
+      'Top.md': true,
+    });
+  }, 120_000);
+
   it('takes no member from a roles or groups file changed on disk and not committed, where the checkout alone would', async () => {
     await commit('a page for the platform group', { 'Team/Plat.md': '---\nread:\n  - deny everyone\n  - Platform\n---\n# plat\n' });
     const svc = service();

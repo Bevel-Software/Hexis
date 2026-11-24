@@ -9,23 +9,11 @@
  * commit adds to it and takes from it. A path held by the cached commits that
  * share a base is then held once, and such a commit costs what it changed.
  *
- * The strings come from {@link parseNulListing}, which decodes each path from
- * the bytes git printed: a path is a string of its own, never a view onto the
- * listing, so nothing an index keeps holds a listing alive.
+ * The strings come from `visitTreeListing` (`commit-listing.ts`), which
+ * decodes each path from the bytes git printed: a path is a string of its own,
+ * never a view onto the listing, so nothing an index keeps holds a listing
+ * alive.
  */
-
-/** Split `git ls-tree -z` output into paths, each decoded on its own from the bytes. */
-export function parseNulListing(bytes: Buffer): string[] {
-  const out: string[] = [];
-  let off = 0;
-  while (off < bytes.length) {
-    let end = bytes.indexOf(0, off);
-    if (end < 0) end = bytes.length;
-    if (end > off) out.push(bytes.toString('utf8', off, end));
-    off = end + 1;
-  }
-  return out;
-}
 
 /** What a cached at-ref model asks of its commit's paths. */
 export interface CommitPaths {
