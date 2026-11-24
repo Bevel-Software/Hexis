@@ -479,7 +479,10 @@ export function PluginPage() {
               ? "Something in this plugin's definition was left out:"
               : `${definitionWarnings.length} things in this plugin's definition were left out:`}
           </span>
-          <ul className="mt-1 list-disc pl-5">
+          {/* `break-words`: a warning quotes a path from the manifest as
+              written, and one with no hyphen or space would otherwise run
+              past the banner's edge and be cut. */}
+          <ul className="mt-1 list-disc break-words pl-5">
             {definitionWarnings.map((w, i) => (
               // Two warnings may read the same; the position tells them apart.
               <li key={`${i}:${w}`}>{w}</li>
