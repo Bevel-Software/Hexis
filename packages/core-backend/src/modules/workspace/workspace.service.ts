@@ -2270,6 +2270,12 @@ export class WorkspaceService implements IWorkspaceService {
      * the whole extraction. Omitted by non-agent / human callers.
      */
     guardWrite?: (wsRelativePath: string) => Promise<void>,
+    /**
+     * Told each file's workspace-relative target once its bytes are on disk:
+     * what the caller may commit, even when the extraction fails after it.
+     * Directory entries are created, not written, and are never reported.
+     */
+    onWritten?: (wsRelativePath: string) => void,
   ): Promise<UnzipResult> {
     const { workspaceDir, relativePath: zipRelativePath, absolutePath: zipAbsolute } =
       await this.resolveInsideRepo(workspaceId, zipWsPath);
@@ -2473,6 +2479,7 @@ export class WorkspaceService implements IWorkspaceService {
       await fs.writeFile(targetAbsolute, data);
       totalUncompressed += data.byteLength;
       extracted.push(relForReport);
+      onWritten?.(relForReport);
       await this.diffService?.syncFromDisk(workspaceId, relForReport);
     }
 

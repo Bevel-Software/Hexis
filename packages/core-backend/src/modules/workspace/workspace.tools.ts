@@ -3987,10 +3987,10 @@ export function registerWorkspaceTools(
         },
         unsaved: {
           type: 'array',
-          description: 'Present only when some extracted files could not be committed: each is on disk, uncommitted, with the reason.',
+          description: 'Present only when the commit of some extracted files could not be queued: each is on disk, uncommitted, for `save_file`.',
           items: {
             type: 'object',
-            properties: { path: str('Workspace-relative path of the extracted file.'), reason: str('Why its commit failed.') },
+            properties: { path: str('Workspace-relative path of the extracted file.'), reason: str('What to do about it.') },
             required: ['path', 'reason'],
           },
         },
@@ -4020,6 +4020,11 @@ export function registerWorkspaceTools(
       // Taking the lock BEFORE the write means an entry another person is
       // editing is skipped, never written over their unsaved work.
       const locked: string[] = [];
+      // The files whose bytes are on disk, as the extraction reports them:
+      // the only paths a release may commit. A directory entry is guarded
+      // (so locked) and then created, not written; committing its lock
+      // would stage everything under it, checked or not.
+      const written = new Set<string>();
       const unsaved: { path: string; reason: string }[] = [];
       // `releaseLockUntouched` (never `releaseLockNoCommit`, which discards
       // the path back to HEAD) wherever no commit is queued: the bytes on
@@ -4032,10 +4037,14 @@ export function registerWorkspaceTools(
         try {
           await vcs.releaseLock(workspaceId, branch, file, ctx.user);
         } catch (err) {
+          // The diagnostics stay here; the answer names no infrastructure.
+          log.warn(`unzip: releasing ${file} on ${branch} failed: ${err instanceof Error ? err.message : String(err)}`);
           // Hand the lock back with the extracted bytes kept, so `save_file` can take it and commit them.
           await vcs.releaseLockUntouched(workspaceId, branch, file, ctx.user).catch(() => undefined);
-          const why = err instanceof Error ? err.message : String(err);
-          unsaved.push({ path: file, reason: `Not committed (${why}); save it with save_file.` });
+          // A release can fail AFTER it queued the commit (the lock row's drop
+          // is the step after the enqueue): only the queue can say.
+          const queued = await vcs.hasQueuedCommit(workspaceId, branch, file).catch(() => false);
+          if (!queued) unsaved.push({ path: file, reason: 'Its commit could not be queued; save it with save_file.' });
         }
       };
       let result: Awaited<ReturnType<typeof ctx.workspaceService.unzipFile>>;
@@ -4076,19 +4085,21 @@ export function registerWorkspaceTools(
                 }
                 locked.push(wsRelPath);
               },
+              (wsRelPath) => written.add(wsRelPath),
             ),
           'Nothing to extract',
         );
       } catch (err) {
-        // A failure part-way through an archive: what was already written is
-        // committed rather than left on disk outside every commit.
-        for (const file of locked) await release(file, true);
+        // A failure part-way through an archive: the files already written
+        // are committed rather than left on disk outside every commit; every
+        // other lock (a directory, the entry the failure stopped) goes back
+        // untouched.
+        for (const file of locked) await release(file, written.has(file));
         throw err;
       }
       // A locked entry the extraction did not write as a file (a directory
-      // entry, which is guarded and then only created) is not in `extracted`:
-      // its lock goes back untouched.
-      const written = new Set(result.extracted);
+      // entry, which is guarded and then only created): its lock goes back
+      // untouched.
       for (const file of locked) await release(file, written.has(file));
       return unsaved.length > 0 ? { ...result, unsaved } : result;
     },

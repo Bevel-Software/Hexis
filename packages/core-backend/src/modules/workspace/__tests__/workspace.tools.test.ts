@@ -119,6 +119,8 @@ let lockedByOthers = new Set<string>();
 let failingReleases = new Set<string>();
 /** Locks currently held by the caller in the stand-in lock table. */
 let heldLocks = new Set<string>();
+/** Paths whose failed release had already queued their commit (the lock drop failed after the enqueue). */
+let queuedDespiteFailure = new Set<string>();
 /** When set, the `unzipFile` stand-in throws after writing this many entries. */
 let unzipThrowAfter: number | null = null;
 /** Every folder turn a tool took, as `workspaceId:dir`. */
@@ -276,6 +278,7 @@ async function start(
   lockedByOthers = new Set();
   failingReleases = new Set();
   heldLocks = new Set();
+  queuedDespiteFailure = new Set();
   unzipThrowAfter = null;
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
@@ -314,6 +317,7 @@ async function start(
         zipRel: string,
         destRel?: string,
         guardWrite?: (wsRelativePath: string) => Promise<void>,
+        onWritten?: (wsRelativePath: string) => void,
       ) => {
         // Recorded so a test can assert the PATHS the tool handed over — both
         // ends normalised into the repository.
@@ -326,11 +330,16 @@ async function start(
         const extracted: string[] = [];
         const skipped: { path: string; reason: string }[] = [];
         for (const entry of unzipEntries) {
-          if (unzipThrowAfter !== null && extracted.length === unzipThrowAfter) throw new Error('disk full');
+          // Past its guard and before its bytes land: the entry is locked and never written.
+          const failsMidEntry = unzipThrowAfter !== null && extracted.length === unzipThrowAfter;
           try {
             await guardWrite?.(entry);
+            if (failsMidEntry) throw Object.assign(new Error('disk full'), { midEntry: true });
             extracted.push(entry);
+            onWritten?.(entry);
           } catch (err) {
+            // A failure of the extraction itself is not a refused entry: it ends the archive.
+            if ((err as { midEntry?: boolean }).midEntry) throw err;
             skipped.push({ path: entry, reason: err instanceof Error ? err.message : 'refused' });
           }
         }
@@ -361,6 +370,7 @@ async function start(
         lockCalls.push(`discard ${file}`);
         heldLocks.delete(file);
       },
+      hasQueuedCommit: async (_ws: string, _branch: string, file: string) => queuedDespiteFailure.has(file),
     } as never,
     events: {} as never,
     getFilesystem: async () => fs,
@@ -5196,7 +5206,8 @@ describe('agent read/write hooks', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { unsaved?: { path: string; reason: string }[] };
     expect(body.unsaved).toEqual([
-      { path: `${KB_DIR}/out/one.md`, reason: 'Not committed (queue unavailable); save it with save_file.' },
+      // The answer names no infrastructure; the cause is logged on the server.
+      { path: `${KB_DIR}/out/one.md`, reason: 'Its commit could not be queued; save it with save_file.' },
     ]);
     // Handed back UNTOUCHED: `releaseLockNoCommit` would discard the extracted bytes back to HEAD.
     expect(lockCalls).toEqual([
@@ -5223,18 +5234,39 @@ describe('agent read/write hooks', () => {
     expect(lockCalls).toEqual([`acquire ${KB_DIR}/out/twice.md`, `release ${KB_DIR}/out/twice.md`]);
   });
 
-  it('unzip commits what it already wrote when the extraction fails part-way', async () => {
+  it('unzip commits only the files it finished writing when the extraction fails part-way', async () => {
     const base = await start();
     await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
     unzipEntries = [`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`, `${KB_DIR}/out/three.md`];
+    // `three.md` passes its guard (so it is locked) and the extraction fails before its bytes land,
+    // as a directory entry is locked and never written: its lock goes back untouched, never committed.
     unzipThrowAfter = 2;
     const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(lockCalls).toEqual([
       `acquire ${KB_DIR}/out/one.md`,
       `acquire ${KB_DIR}/out/two.md`,
+      `acquire ${KB_DIR}/out/three.md`,
       `release ${KB_DIR}/out/one.md`,
       `release ${KB_DIR}/out/two.md`,
+      `hand back untouched ${KB_DIR}/out/three.md`,
+    ]);
+    expect([...heldLocks]).toEqual([]);
+  });
+
+  it('unzip does not report a file unsaved when its release failed after queueing the commit', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/one.md`];
+    failingReleases = new Set([`${KB_DIR}/out/one.md`]);
+    queuedDespiteFailure = new Set([`${KB_DIR}/out/one.md`]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/one.md`,
+      `release ${KB_DIR}/out/one.md`,
+      `hand back untouched ${KB_DIR}/out/one.md`,
     ]);
   });
 

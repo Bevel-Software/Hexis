@@ -50,6 +50,7 @@ const versionControlService = {
   acquireLock: async () => ({ acquired: true }),
   releaseLock: async () => undefined,
   releaseLockUntouched: async () => undefined,
+  hasQueuedCommit: async () => false,
 } as never;
 const events = {} as never;
 const accessControl = {
