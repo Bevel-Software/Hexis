@@ -3,7 +3,7 @@
 // does not load the implementations.
 export type { SkillService } from './skills.service.js';
 export type { PendingSkillsService } from './pending-skills.service.js';
-export { registerSkillsTools } from './skills.tools.js';
+export { registerSkillsTools, type SkillReads } from './skills.tools.js';
 export { createSkillsRoutes } from './skills.routes.js';
 export { AllowedToolsChecker } from './allowed-tools-check.js';
 export type { IAllowedToolsChecker, AllowedToolWarning } from './allowed-tools-check.js';

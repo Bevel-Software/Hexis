@@ -102,6 +102,7 @@ import { ToolManualService } from '../modules/tool-manuals/tool-manuals.service.
 import { PendingToolsService } from '../modules/tool-manuals/pending-tools.service.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
+import { createManualListReader, type ManualListReader } from '../modules/tool-manuals/tool-manuals.routes.js';
 import {
   PluginIndexService,
   pluginFolderBelowRoot,
@@ -189,7 +190,7 @@ import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/
 import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
 import { createToolContextResolver } from '../modules/tool-helpers/tool-context.js';
 import { alwaysWritable, type IWriteAccess } from '../modules/write-access/write-access.js';
-import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
+import { createInProcessToolCaller, createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
 import { resolveAppVersion } from '../version.js';
@@ -432,6 +433,12 @@ export interface CoreServices {
    * answer differently (`core/catalog-revision.ts`).
    */
   readCatalogRevision: CatalogRevisionReader;
+  /**
+   * Reads one caller's manual list. The route `GET /agent/all-tools` answers
+   * with it and the MCP endpoint calls it directly when it builds a caller's
+   * tool surface, so the two cannot answer differently.
+   */
+  readManualList: ManualListReader;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -449,6 +456,12 @@ export interface CoreServices {
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
   toolHandlerFactory: ReturnType<typeof createToolHandlerFactory>;
+  /**
+   * Calls a hosted discovery read as a function, with the context and the
+   * connection scope its route runs with. The hosted MCP endpoint reads the
+   * skills behind its prompts through it.
+   */
+  inProcessTool: ReturnType<typeof createInProcessToolCaller>;
   /** Whether the deployment may be changed right now — `ports.writeAccess`, or always. */
   writeAccess: IWriteAccess;
   // ── Server-time seams (enterprise overwrites after construction) ────────
@@ -1392,7 +1405,7 @@ export async function createCoreServices(
 
   // MCP (remote agent access). ExternalApiKeyService handles connection-key
   // lifecycle. McpService is a GENERIC, STATELESS proxy: per request it
-  // discovers the caller's catalog at /api/agent/all-tools over loopback and
+  // reads the caller's catalog (what /api/agent/all-tools answers them) and
   // re-exposes every tool, dispatching calls back through the REST tool
   // surface (so agent logic + metering live there, once). No MCP session is
   // kept, so a restart is invisible to connected clients.
@@ -1500,6 +1513,13 @@ export async function createCoreServices(
     // manual would otherwise leave a running local server on the old one.
     mcpApps: mcpAppService,
   });
+  // The caller's manual list, shared the same way and for the same reason: the
+  // endpoint reads it when it builds a caller's tool surface.
+  const readManualList = createManualListReader({
+    toolManuals: toolManualService,
+    resolveUserEmail: async (userId) => (await authService.getUserById(userId))?.email,
+    agentScope: agentScopeService,
+  });
   const mcpService = new McpService(
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
@@ -1527,6 +1547,8 @@ export async function createCoreServices(
       readFileBody: async (userId, ref) => fileBodies.read(await authService.getUserById(userId), ref),
       // Asked on every request, so answered in process and not over loopback.
       readCatalogRevision,
+      // Read for every surface build, in process for the same reason.
+      readManualList,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1616,6 +1638,9 @@ export async function createCoreServices(
     defaultBranch: () => kb.defaultBranch,
     isMissing: (branch) => workspaceService.isBranchMissing(branch),
   });
+  // The same context and connection scope, for a hosted read this process
+  // calls as a function (the MCP endpoint's skill reads).
+  const inProcessTool = createInProcessToolCaller(resolveToolContext);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   // Every credential kind this server issues — connection keys, internal
@@ -1853,6 +1878,7 @@ export async function createCoreServices(
     embedService,
     mcpAppService,
     readCatalogRevision,
+    readManualList,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,
@@ -1863,6 +1889,7 @@ export async function createCoreServices(
     toolAuthMiddleware,
     manualAuthMiddleware,
     toolHandlerFactory,
+    inProcessTool,
     writeAccess,
     // Server-time seams — defaults here; the enterprise overlay overwrites
     // (or, for the array, pushes into) these after construction.

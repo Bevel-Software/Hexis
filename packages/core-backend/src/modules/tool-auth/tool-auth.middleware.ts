@@ -223,6 +223,33 @@ export function createTokenVerifier(
 }
 
 /**
+ * The `ToolAuth` of an external caller this process has already
+ * authenticated: what the verifier above resolves the hosted MCP endpoint's
+ * loopback bearer to. That bearer is the caller's own connection key (the
+ * key's user, id and agent) or an `externalProxy` token minted for the user
+ * and the agent their connection was made as (no key id, no connection id).
+ * Kept beside the verifier so the two stay one description of that caller.
+ *
+ * For code that calls a hosted read as a function and not over loopback
+ * (`createInProcessToolCaller` in `modules/tool-helpers`).
+ */
+export function externalCallerAuth(caller: {
+  userId: string;
+  /** The connection key's id, or null for a caller with no key. */
+  tokenId: string | null;
+  /** The agent configuration the credential connects as, or null for Everything. */
+  agentPath: string | null;
+}): ToolAuth {
+  return {
+    source: 'external',
+    userId: caller.userId,
+    ...(caller.tokenId ? { tokenId: caller.tokenId } : {}),
+    ...(caller.agentPath ? { agentPath: caller.agentPath } : {}),
+    scope: 'write',
+  };
+}
+
+/**
  * The one auth gate every tool endpoint applies — a THIN Express adapter over
  * `createTokenVerifier`: parse the bearer header, run the shared verify core,
  * normalize the result to `req.toolAuth` (or the matching status). All auth logic

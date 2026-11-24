@@ -56,6 +56,7 @@ import {
   registerPluginsTools,
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
+import { externalCallerAuth } from '../modules/tool-auth/tool-auth.middleware.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -535,12 +536,22 @@ export async function createCoreServer(
   // one-time link is the whole credential an agent's `curl` carries. Every
   // file behind it was judged when `request_file_download` issued it.
   toolsRouter.use(createAgentDownloadRoutes({ downloads: core.agentDownloadStore, identify: core.agentDownloadFetcher }));
-  registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker, {
+  const skillReads = registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService, allowedToolsChecker, {
     accessControl: core.accessControl,
     defaultWorkspaceId: () => core.kb.defaultWorkspaceId(),
     // A skill's files as committed on the default branch, for the whole-skill
     // verdict: the same clone and the same git the skill's history is read from.
     committedFiles: core.gitService,
+  });
+  // The hosted MCP endpoint serves skills as prompts. It reads them by calling
+  // the two reads above as functions, as the caller its request authenticated,
+  // and not by sending this server a request. Set here because the reads are
+  // made here, after the endpoint's service.
+  const listSkillsInProcess = core.inProcessTool(skillReads.listSkills);
+  const getSkillInProcess = core.inProcessTool(skillReads.getSkill);
+  core.mcpService.readSkillsWith({
+    list: (caller) => listSkillsInProcess(externalCallerAuth(caller)),
+    get: (caller, name) => getSkillInProcess(externalCallerAuth(caller), { name }),
   });
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
@@ -590,6 +601,8 @@ export async function createCoreServer(
       pluginIndex: core.pluginIndexService,
     },
     core.agentScopeService,
+    // The reader the MCP endpoint calls in process: one computation, two callers.
+    core.readManualList,
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the

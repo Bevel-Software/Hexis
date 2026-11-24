@@ -19,10 +19,46 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { NOT_AVAILABLE_TO_CONNECTION, resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import {
+  NOT_AVAILABLE_TO_CONNECTION,
+  resolveConnectionScope,
+  type ConnectionScopeWire,
+  type IAgentScopeResolver,
+} from '../agent-scope/index.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
+
+/** Who a manual list is read for: what a request's credential resolved to. */
+export interface ManualListCaller {
+  userId?: string | null;
+  /** The agent configuration the credential connects as; absent or null for Everything. */
+  agentPath?: string | null;
+}
+
+/** A caller's manuals, and the agent their connection is narrowed to. */
+export interface ManualListAnswer {
+  /** The platform manual first, then each `.tool` the caller may read. */
+  manuals: CallTemplate[];
+  connection?: ConnectionScopeWire;
+}
+
+/**
+ * Reads one caller's manual list. `remoteOnly` leaves out the manuals that only
+ * a locally installed MCP server can run.
+ */
+export type ManualListReader = (caller: ManualListCaller, opts: { remoteOnly: boolean }) => Promise<ManualListAnswer>;
+
+/** What a manual list is read from. */
+export interface ManualListSources {
+  toolManuals: Pick<IToolManualService, 'toManualCallTemplates'>;
+  resolveUserEmail: ResolveUserEmail;
+  /**
+   * Resolves the scope of a connection made as an agent configuration, so the
+   * list holds only the connectors it loads (`modules/agent-scope`).
+   */
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
+}
 
 const callTemplateSerializer = new CallTemplateSerializer();
 
@@ -36,6 +72,38 @@ function kbManualTemplate(): CallTemplate {
     content_type: 'application/json',
     headers: { Authorization: 'Bearer ${CONNECTION_KEY}' },
   });
+}
+
+/**
+ * Reads one caller's manual list. The ONE place it is computed: the
+ * `GET /agent/all-tools` route below answers with it, and the hosted MCP
+ * endpoint calls it directly (`McpProxyOptions.readManualList`) when it builds
+ * a caller's tool surface.
+ *
+ * Called directly, and not over HTTP, for the reason the catalog revision is
+ * (`core/catalog-revision.ts`): the endpoint and this code are one process, and
+ * a request the server sends itself waits on the event loop it is already
+ * running on, behind a limit of its own. The caller is the one the request's
+ * credential resolved to, which is what the route's `manualAuth` resolves the
+ * same bearer to.
+ */
+export function createManualListReader(deps: ManualListSources): ManualListReader {
+  return async (caller, { remoteOnly }) => {
+    const userId = caller.userId;
+    const email = userId ? await deps.resolveUserEmail(userId).catch(() => undefined) : undefined;
+    // A connection made as an agent configuration lists only the connectors that
+    // file loads, and says which agent it is — the MCP proxy words its
+    // refusals and its handshake from that. Everything lists as it always
+    // did, with no `connection` at all.
+    const scope = await resolveConnectionScope(deps.agentScope, email, caller.agentPath);
+    const within = scope.connectorFilter();
+    const userManuals = email
+      ? await deps.toolManuals.toManualCallTemplates(email, within ? { remoteOnly, within } : { remoteOnly })
+      : [];
+    const manuals: CallTemplate[] = [kbManualTemplate(), ...userManuals];
+    const connection = scope.toWire();
+    return connection ? { manuals, connection } : { manuals };
+  };
 }
 
 /**
@@ -70,6 +138,12 @@ export function createToolManualsAgentRoutes(
    * `all-tools` lists only the connectors it loads (`modules/agent-scope`).
    */
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
+  /**
+   * The reader `all-tools` answers with. The composition root passes the one
+   * it also hands the MCP endpoint, so the route and the endpoint cannot answer
+   * differently. Absent, the route reads through the services above.
+   */
+  readManualList: ManualListReader = createManualListReader({ toolManuals: toolManualService, resolveUserEmail, agentScope }),
 ): express.Router {
   const router = express.Router();
 
@@ -85,22 +159,12 @@ export function createToolManualsAgentRoutes(
 
   router.get('/agent/all-tools', manualAuth, async (req, res) => {
     try {
-      const email = await callerEmail(req);
       // Default remote-safe: exclude local-only manuals unless the caller (a locally
       // installed MCP server) explicitly opts in with `?remote=false`.
       const remoteOnly = req.query.remote !== 'false';
-      // A connection made as an agent configuration lists only the connectors that
-      // file loads, and says which agent it is — the MCP proxy words its
-      // refusals and its handshake from that. Everything lists as it always
-      // did, with no `connection` at all.
-      const scope = await resolveConnectionScope(agentScope, email, req.toolAuth?.agentPath);
-      const within = scope.connectorFilter();
-      const userManuals = email
-        ? await toolManualService.toManualCallTemplates(email, within ? { remoteOnly, within } : { remoteOnly })
-        : [];
-      const manuals: CallTemplate[] = [kbManualTemplate(), ...userManuals];
-      const connection = scope.toWire();
-      res.json(connection ? { manuals, connection } : { manuals });
+      res.json(
+        await readManualList({ userId: req.toolAuth?.userId, agentPath: req.toolAuth?.agentPath }, { remoteOnly }),
+      );
     } catch (err) {
       log.error('all-tools failed:', { err });
       res.status(500).json({ error: 'Failed to list tools' });
