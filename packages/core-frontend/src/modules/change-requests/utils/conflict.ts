@@ -61,8 +61,12 @@ export function conflictResolutionPrompt(
  * the quoting early nor be changed to keep it from doing so: git allows one
  * in a branch name and in a path, and a name with it replaced names nothing.
  * The same rule as `markdownCodeSpan` in core-backend's agent instructions.
+ *
+ * A missing name quotes as an empty one: a summary built by hand (the file
+ * viewer's tests build one) can come without its branch fields.
  */
-function codeSpan(text: string): string {
+function codeSpan(name: string | undefined): string {
+  const text = name ?? '';
   const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
   const fence = '`'.repeat(longestRun + 1);
   const padded = text.startsWith('`') || text.endsWith('`') ? ` ${text} ` : text;
