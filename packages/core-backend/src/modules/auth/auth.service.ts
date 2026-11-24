@@ -507,13 +507,48 @@ export class AuthService implements IAccountSwitchGuard {
   }
 
   /**
+   * Set or reset the password of the account with this id: the User
+   * accounts page's Set password and Reset password, from the account's
+   * row. It changes an account that is there and never makes one. The
+   * write is an UPDATE by id, so an account deleted before it lands (by
+   * another admin, say) is not written at all and the answer is false, as
+   * for an id that never had an account. {@link createAccount}, which
+   * upserts by address, would make a new account there instead.
+   *
+   * It refuses the passwords {@link createAccount} refuses, in the same
+   * order: one for the accounts the platform runs its own work as, one for
+   * the deployment admin, then one the policy rejects. The admission port
+   * is not asked: it is asked only before an account is created. Like
+   * {@link createAccount}, the session generation moves on with the write,
+   * so every session opened with the old password ends.
+   */
+  async setPassword(userId: string, password: string): Promise<boolean> {
+    const [row] = await this.db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    if (!row) return false;
+    this.assertNotSystemAccount(row.email);
+    if (this.isEnvAdminEmail(row.email)) {
+      throw new PasswordRefusedError(ENV_ADMIN_PASSWORD_REFUSAL);
+    }
+    this.assertPasswordPolicy(password);
+    const passwordHash = await hashPassword(password);
+    const [changed] = await this.db
+      .update(users)
+      .set({ passwordHash, sessionVersion: sql`${users.sessionVersion} + 1`, updatedAt: new Date() })
+      .where(eq(users.id, userId))
+      .returning({ id: users.id });
+    this.activeCache.delete(userId);
+    return changed !== undefined;
+  }
+
+  /**
    * Is `email` the deployment admin — the account whose password is set in
    * the deployment environment (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set)
    * rather than stored on its row? The single definition behind
    * {@link loginWithPassword} (which accepts only the environment password
-   * for it), {@link changePassword} and {@link createAccount} (which both
-   * refuse to store a hash for it), so those three can never disagree about
-   * who the deployment admin is. `email` must already be canonical.
+   * for it), {@link changePassword}, {@link createAccount} and
+   * {@link setPassword} (which all refuse to store a hash for it), so they
+   * can never disagree about who the deployment admin is. `email` must
+   * already be canonical.
    *
    * Independent of whether password sign-in is switched on: the refusals
    * hold while it is off too, or a hash could be stored for that address in

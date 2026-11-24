@@ -3,7 +3,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
 import { AccountHooks, type AccountInvitedEvent } from '../account-hooks.js';
-import { AuthService } from '../auth.service.js';
+import { AuthService, PasswordRefusedError } from '../auth.service.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from '../account-admission.js';
 import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 import { hashPassword } from '../password-hash.js';
@@ -27,6 +27,8 @@ const authService = {
   getUserById: vi.fn(async (id: string) => (id === 'missing' ? null : { id, email: `${id}@example.com`, name: id })),
   isOwnerEmail: vi.fn((email: string) => email.trim().toLowerCase() === 'root@example.com'),
   assertDeletable: vi.fn(() => {}),
+  // False, as the service answers, when the account is gone by the time of the write.
+  setPassword: vi.fn(async () => true),
 } as unknown as AuthService;
 
 // Satisfies the route's narrow Pick<IAccountErasureService, 'eraseUser'>
@@ -366,6 +368,94 @@ describe('account routes — admin gate', () => {
     expect(tooShort.status).toBe(400);
     const body = (await tooShort.json()) as { error: string };
     expect(body.error).toContain('at least 8');
+  });
+});
+
+describe("account routes — setting a password from an account's row", () => {
+  afterEach(() => {
+    vi.mocked(authService.setPassword).mockReset().mockResolvedValue(true);
+    vi.mocked(authService.createAccountWithoutPassword).mockClear();
+  });
+
+  const setPassword = (base: string, userId: string, body: unknown) =>
+    fetch(`${base}/api/admin/accounts/${userId}/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('sets it on the account by id and answers 204, never through the upsert by address', async () => {
+    const base = await listen(makeApp({ admin: true }));
+    const res = await setPassword(base, 'u2', { password: 'long-enough-pw' });
+    expect(res.status).toBe(204);
+    expect(authService.setPassword).toHaveBeenCalledWith('u2', 'long-enough-pw');
+    expect(authService.createAccount).not.toHaveBeenCalled();
+    expect(authService.createAccountWithoutPassword).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 "No such user" for an account that is gone, before the write or by the time of it, and makes none', async () => {
+    const base = await listen(makeApp({ admin: true }));
+    const before = await setPassword(base, 'missing', { password: 'long-enough-pw' });
+    expect(before.status).toBe(404);
+    expect(await before.json()).toEqual({ error: 'No such user' });
+    expect(authService.setPassword).not.toHaveBeenCalled();
+
+    vi.mocked(authService.setPassword).mockResolvedValueOnce(false);
+    const during = await setPassword(base, 'u2', { password: 'long-enough-pw' });
+    expect(during.status).toBe(404);
+    expect(await during.json()).toEqual({ error: 'No such user' });
+
+    expect(authService.createAccount).not.toHaveBeenCalled();
+    expect(authService.createAccountWithoutPassword).not.toHaveBeenCalled();
+  });
+
+  it('refuses non-admins, and a password that is not text, before anything is read or written', async () => {
+    const nonAdmin = await listen(makeApp({ admin: false }));
+    const refused = await setPassword(nonAdmin, 'u2', { password: 'long-enough-pw' });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: 'Admins only' });
+    server.close();
+
+    const base = await listen(makeApp({ admin: true }));
+    for (const body of [{}, { password: null }, { password: 12345678 }]) {
+      const res = await setPassword(base, 'u2', body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'password must be a string' });
+    }
+    expect(authService.setPassword).not.toHaveBeenCalled();
+  });
+
+  it("answers the service's refusal in its words, and a fault with a 500 that names nothing of it", async () => {
+    const base = await listen(makeApp({ admin: true }));
+    vi.mocked(authService.setPassword).mockRejectedValueOnce(
+      new PasswordRefusedError('System accounts cannot be given a password'),
+    );
+    const refused = await setPassword(base, 'u2', { password: 'long-enough-pw' });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: 'System accounts cannot be given a password' });
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      vi.mocked(authService.setPassword).mockRejectedValueOnce(new Error('relation "users" does not exist'));
+      const failed = await setPassword(base, 'u2', { password: 'long-enough-pw' });
+      expect(failed.status).toBe(500);
+      expect(await failed.json()).toEqual({ error: 'Could not set the password' });
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("refuses another admin setting the owner's password, and leaves the owner setting their own", async () => {
+    const other = await listen(makeApp({ admin: true }));
+    const refused = await setPassword(other, 'root', { password: 'long-enough-pw' });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toMatch(/^The owner's password can't be set by another admin/);
+    expect(authService.setPassword).not.toHaveBeenCalled();
+    server.close();
+
+    const owner = await listen(makeApp({ admin: true, email: 'Root@Example.com' }));
+    expect((await setPassword(owner, 'root', { password: 'long-enough-pw' })).status).toBe(204);
+    expect(authService.setPassword).toHaveBeenCalledWith('root', 'long-enough-pw');
   });
 });
 
@@ -771,6 +861,19 @@ describe('account routes — the owner cannot be locked out', () => {
       });
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toMatch(/^The owner's password can't be set by another admin/);
+    });
+
+    it(`refuses it from the owner's row too, writing nothing, ${label}`, async () => {
+      const { app, updates } = makeOwnerApp(adminPassword, OWNER_ROW);
+      const base = await listen(app);
+      const res = await fetch(`${base}/api/admin/accounts/owner/password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: 'long-enough-pw' }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toMatch(/^The owner's password can't be set by another admin/);
+      expect(updates).toEqual([]);
     });
 
     it(`answers an email that is not text with a 400, not a crash, ${label}`, async () => {

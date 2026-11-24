@@ -15,6 +15,7 @@ import {
   getAccountReferences,
   listAccounts,
   reactivateAccount,
+  setAccountPassword,
   type AccountReferences,
   type AccountSummary,
 } from '../../auth/services/account.api';
@@ -26,6 +27,7 @@ vi.mock('../../auth/services/account.api', () => ({
   reactivateAccount: vi.fn(),
   getAccountReferences: vi.fn(),
   listAccounts: vi.fn(),
+  setAccountPassword: vi.fn(),
 }));
 
 const REFS = {
@@ -129,6 +131,7 @@ beforeEach(() => {
   vi.mocked(createAccount).mockReset().mockResolvedValue({});
   vi.mocked(deactivateAccount).mockReset().mockResolvedValue(undefined);
   vi.mocked(reactivateAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(setAccountPassword).mockReset().mockResolvedValue(undefined);
 });
 
 describe('UserAccountsPage', () => {
@@ -306,12 +309,13 @@ describe('UserAccountsPage', () => {
     expect(within(dialog).getByRole('button', { name: 'Reset password' })).toBeInTheDocument();
     // It asks before it does anything: the question is on screen and nothing
     // has been sent until the confirm button is pressed.
-    expect(createAccount).not.toHaveBeenCalled();
+    expect(setAccountPassword).not.toHaveBeenCalled();
     await userEvent.type(within(dialog).getByLabelText('New password'), 'fresh-password-2');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Reset password' }));
-    await waitFor(() =>
-      expect(createAccount).toHaveBeenCalledWith('bob@example.com', '', 'fresh-password-2'),
-    );
+    // By the row's id, never by address: an address is what the upsert that
+    // makes accounts is keyed on.
+    await waitFor(() => expect(setAccountPassword).toHaveBeenCalledWith('u-bob', 'fresh-password-2'));
+    expect(createAccount).not.toHaveBeenCalled();
     // ...and the banner reports the act that was actually performed.
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Password reset for bob@example.com',
@@ -327,7 +331,7 @@ describe('UserAccountsPage', () => {
     await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-2');
     await userEvent.click(dialog.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(createAccount).not.toHaveBeenCalled();
+    expect(setAccountPassword).not.toHaveBeenCalled();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(listAccounts).toHaveBeenCalledTimes(1);
   });
@@ -341,12 +345,35 @@ describe('UserAccountsPage', () => {
     expect(dialog.getByRole('button', { name: 'Set password' })).toBeDisabled();
     await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-1');
     await userEvent.click(dialog.getByRole('button', { name: 'Set password' }));
-    await waitFor(() =>
-      expect(createAccount).toHaveBeenCalledWith('alice@example.com', '', 'fresh-password-1'),
-    );
+    // The id and the password, and no name to write over theirs.
+    await waitFor(() => expect(setAccountPassword).toHaveBeenCalledWith('u-alice', 'fresh-password-1'));
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Password set for alice@example.com',
     );
+  });
+
+  it('a reset for an account deleted meanwhile shows the refusal in the dialog and drops the row', async () => {
+    // Bob is listed when the page loads; another admin deletes him while the
+    // Reset dialog is open, so the next read no longer has him.
+    vi.mocked(listAccounts).mockResolvedValueOnce([ALICE, BOB]).mockResolvedValueOnce([ALICE]);
+    vi.mocked(setAccountPassword).mockRejectedValueOnce(new Error('No such user'));
+    renderPage();
+    await waitFor(() => screen.getByText('Bob'));
+    // Bob's row, found whether or not the open dialog hides the page from assistive tech.
+    const bobsRow = () => screen.queryByRole('button', { name: 'Delete account bob@example.com', hidden: true });
+    await userEvent.click(screen.getByRole('button', { name: 'Reset password for bob@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-2');
+    expect(bobsRow()).toBeInTheDocument();
+    await userEvent.click(dialog.getByRole('button', { name: 'Reset password' }));
+
+    // Said in the dialog, which stays open, and never reported as a reset.
+    expect(await dialog.findByRole('alert')).toHaveTextContent('No such user');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    // The list is read again, and the account that is gone leaves it.
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bobsRow()).not.toBeInTheDocument());
+    expect(createAccount).not.toHaveBeenCalled();
   });
 
   it('deletes an account after confirmation', async () => {

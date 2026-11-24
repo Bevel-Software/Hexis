@@ -7,12 +7,12 @@ import { useAuth } from '../../auth';
 import { useInviteDialog } from '../../onboarding';
 import { useLatestRequest } from '../../../lib/latest-request';
 import {
-  createAccount,
   deactivateAccount,
   deleteAccount,
   getAccountReferences,
   listAccounts,
   reactivateAccount,
+  setAccountPassword,
   type AccountReferences,
   type AccountSummary,
 } from '../../auth';
@@ -289,13 +289,16 @@ export function UserAccountsPage() {
     setSavingPassword(true);
     setPasswordError(null);
     try {
-      // No name → the upsert keeps the account's existing display name.
-      await createAccount(passwordTarget.email, '', newPassword);
+      // By the row's id, never by address: an account deleted since the list
+      // was read is refused, not made again.
+      await setAccountPassword(passwordTarget.id, newPassword);
       setPasswordDone({ email: passwordTarget.email, action: passwordAction(passwordTarget) });
       setPasswordTarget(null);
       refresh();
     } catch (err) {
       setPasswordError(err instanceof Error ? err.message : "Couldn't save the password.");
+      // Read the list again, so a row whose account is gone leaves it.
+      refresh();
     } finally {
       setSavingPassword(false);
     }
