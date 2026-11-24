@@ -4038,7 +4038,7 @@ export function registerWorkspaceTools(
           await vcs.releaseLock(workspaceId, branch, file, ctx.user);
         } catch (err) {
           // The diagnostics stay here; the answer names no infrastructure.
-          log.warn(`unzip: releasing ${file} on ${branch} failed: ${err instanceof Error ? err.message : String(err)}`);
+          log.warn(`unzip: releasing ${printable(file)} on ${printable(branch)} failed: ${printable(err instanceof Error ? err.message : String(err))}`);
           // Hand the lock back with the extracted bytes kept, so `save_file` can take it and commit them.
           await vcs.releaseLockUntouched(workspaceId, branch, file, ctx.user).catch(() => undefined);
           // A release can fail AFTER it queued the commit (the lock row's drop
