@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import type { CoreConfig } from '../../../core-config.js';
 import jwt from 'jsonwebtoken';
 import { AuthService, PasswordChangedMeanwhileError, PasswordRefusedError } from '../auth.service.js';

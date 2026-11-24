@@ -3,12 +3,8 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UserAccountsPage } from '../components/UserAccountsPage';
 import { AdminContext } from '../state/admin.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
-  InviteDialogContext,
-  type InviteDialogController,
-} from '../../onboarding/state/invite-dialog.context';
-import {
+  AuthContext,
   createAccount,
   deactivateAccount,
   deleteAccount,
@@ -18,9 +14,13 @@ import {
   setAccountPassword,
   type AccountReferences,
   type AccountSummary,
-} from '../../auth/services/account.api';
+  type AuthContextValue,
+} from '../../auth';
+import { useInviteDialog, type InviteDialogController } from '../../onboarding';
 
-vi.mock('../../auth/services/account.api', () => ({
+// The auth entry as it is, but for the account calls the page makes.
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   createAccount: vi.fn(),
   deactivateAccount: vi.fn(),
   deleteAccount: vi.fn(),
@@ -28,6 +28,13 @@ vi.mock('../../auth/services/account.api', () => ({
   getAccountReferences: vi.fn(),
   listAccounts: vi.fn(),
   setAccountPassword: vi.fn(),
+}));
+
+// The Invite dialog's controller, as the onboarding entry hands it to the
+// page: each render answers whatever the test last gave it.
+vi.mock('../../onboarding', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../onboarding')>()),
+  useInviteDialog: vi.fn(() => null),
 }));
 
 const REFS = {
@@ -97,6 +104,7 @@ function renderPage(opts: { isAdmin?: boolean; invite?: InviteDialogController |
     login: vi.fn(async () => {}),
     logout: vi.fn(),
   };
+  vi.mocked(useInviteDialog).mockReturnValue(opts.invite === undefined ? null : opts.invite);
   return render(
     <AuthContext.Provider value={auth}>
       <AdminContext.Provider
@@ -111,9 +119,7 @@ function renderPage(opts: { isAdmin?: boolean; invite?: InviteDialogController |
           runRolesRecovery: async () => {},
         }}
       >
-        <InviteDialogContext.Provider value={opts.invite === undefined ? null : opts.invite}>
-          <UserAccountsPage />
-        </InviteDialogContext.Provider>
+        <UserAccountsPage />
       </AdminContext.Provider>
     </AuthContext.Provider>,
   );
@@ -711,6 +717,7 @@ describe('UserAccountsPage — inviting new users', () => {
       ALICE,
       { ...BOB, id: 'u-lena', email: 'lena@example.com', name: 'lena' },
     ]);
+    vi.mocked(useInviteDialog).mockReturnValue(controller(1));
     view.rerender(
       <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
         <AdminContext.Provider
@@ -725,9 +732,7 @@ describe('UserAccountsPage — inviting new users', () => {
             runRolesRecovery: async () => {},
           }}
         >
-          <InviteDialogContext.Provider value={controller(1)}>
-            <UserAccountsPage />
-          </InviteDialogContext.Provider>
+          <UserAccountsPage />
         </AdminContext.Provider>
       </AuthContext.Provider>,
     );
@@ -746,26 +751,27 @@ describe('UserAccountsPage — inviting new users', () => {
       .mockReset()
       .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
       .mockResolvedValue(withLena);
-    const page = (revision: number) => (
-      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
-        <AdminContext.Provider
-          value={{
-            isAdmin: true,
-            unreadCount: 0,
-            lastSeen: null,
-            markSeen: () => {},
-            refresh: () => {},
-            rolesConfigCorrupted: false,
-            rolesConfigErrors: [],
-            runRolesRecovery: async () => {},
-          }}
-        >
-          <InviteDialogContext.Provider value={controller(revision)}>
+    const page = (revision: number) => {
+      vi.mocked(useInviteDialog).mockReturnValue(controller(revision));
+      return (
+        <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+          <AdminContext.Provider
+            value={{
+              isAdmin: true,
+              unreadCount: 0,
+              lastSeen: null,
+              markSeen: () => {},
+              refresh: () => {},
+              rolesConfigCorrupted: false,
+              rolesConfigErrors: [],
+              runRolesRecovery: async () => {},
+            }}
+          >
             <UserAccountsPage />
-          </InviteDialogContext.Provider>
-        </AdminContext.Provider>
-      </AuthContext.Provider>
-    );
+          </AdminContext.Provider>
+        </AuthContext.Provider>
+      );
+    };
     const view = render(page(0));
     view.rerender(page(1));
     expect(await screen.findByText('lena')).toBeInTheDocument();
@@ -785,26 +791,27 @@ describe('UserAccountsPage — inviting new users', () => {
       .mockResolvedValueOnce([ALICE])
       .mockImplementationOnce(() => new Promise((resolve) => (answerSwitch = resolve)))
       .mockImplementationOnce(() => new Promise((resolve) => (answerSend = resolve)));
-    const page = (revision: number) => (
-      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
-        <AdminContext.Provider
-          value={{
-            isAdmin: true,
-            unreadCount: 0,
-            lastSeen: null,
-            markSeen: () => {},
-            refresh: () => {},
-            rolesConfigCorrupted: false,
-            rolesConfigErrors: [],
-            runRolesRecovery: async () => {},
-          }}
-        >
-          <InviteDialogContext.Provider value={controller(revision)}>
+    const page = (revision: number) => {
+      vi.mocked(useInviteDialog).mockReturnValue(controller(revision));
+      return (
+        <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+          <AdminContext.Provider
+            value={{
+              isAdmin: true,
+              unreadCount: 0,
+              lastSeen: null,
+              markSeen: () => {},
+              refresh: () => {},
+              rolesConfigCorrupted: false,
+              rolesConfigErrors: [],
+              runRolesRecovery: async () => {},
+            }}
+          >
             <UserAccountsPage />
-          </InviteDialogContext.Provider>
-        </AdminContext.Provider>
-      </AuthContext.Provider>
-    );
+          </AdminContext.Provider>
+        </AuthContext.Provider>
+      );
+    };
     const view = render(page(0));
     await user.click(await screen.findByRole('button', { name: 'Switch off alice@example.com' }));
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Switch off' }));
