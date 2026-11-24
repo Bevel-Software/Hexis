@@ -51,6 +51,7 @@ import { emailsInView, holderPrincipals, labelAccountHolders, resolveAccessView 
 import type { AccessView, LabelledAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
+import type { AppRole } from './capability-registry.js';
 import type { Database } from '../database/index.js';
 import { users } from '../database/index.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
@@ -98,6 +99,8 @@ export function createAccessRoutes(
   disk: ITreeWalker,
   /** This deployment's configured admins — the break-glass recovery roster. */
   recoveryAdmins: readonly string[] = [],
+  /** The roles the app built on core defines (`ServerExtensions.appRoles`). */
+  appRoles: readonly AppRole[] = [],
 ): express.Router {
   const router = express.Router({ mergeParams: true });
   const { kbDirName } = kb;
@@ -111,6 +114,7 @@ export function createAccessRoutes(
     () => kb.defaultBranch,
     eventBus,
     recoveryAdmins,
+    appRoles,
   );
 
   // Roles and groups are authoritative on the DEFAULT branch — the Roles

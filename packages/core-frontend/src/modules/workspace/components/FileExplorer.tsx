@@ -2392,13 +2392,28 @@ export function UploadNotices() {
 // (`checkoutRoot` lives in `../utils/fileTree` — the one lookup every
 // surface that reads the workspace tree goes through.)
 
+/** A node that is there: `ReactNode` without what renders nothing by being `null`, `undefined` or a boolean. */
+export type GivenNode = Exclude<ReactNode, null | undefined | boolean>;
+
 /**
  * The Knowledge app's file tree. With `roots`, the tree of the folder surface
  * an app mounts for the roots it claims (see `AppDef.roots`): those
  * top-level folders as sections, in that order, and nothing else of the
  * knowledge base. Without it, every root no app claims.
+ *
+ * `lead` is what the hosting app puts above its folders: its own navigation,
+ * in the same scrolling column, so the app has one sidebar and not a column
+ * of its own beside this one. `fileOnScreen` is false while that app shows a
+ * page of its own in place of the viewer: a tab may still be open behind the
+ * page, and its row is not the current place. `lead` is a `GivenNode`, so
+ * absent is `undefined` and nothing else: a `null` or `false` from the app
+ * is turned into `undefined` by the surface before it gets here.
  */
-export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
+export function FileExplorer({
+  roots,
+  lead,
+  fileOnScreen = true,
+}: { roots?: readonly string[]; lead?: GivenNode; fileOnScreen?: boolean } = {}) {
   const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
   const claims = useRootClaims();
   const { openFile } = useFileNav();
@@ -2418,7 +2433,10 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
   const checkout = useMemo(() => checkoutRoot(mergedTree, kbDirName), [mergedTree, kbDirName]);
   // The pane workspace's own navigation: the open tab is the current row, and
   // a click opens the file on the checked-out branch.
-  const nav = useMemo<TreeNav>(() => ({ activePath: openFilePath, open: openFile }), [openFilePath, openFile]);
+  const nav = useMemo<TreeNav>(
+    () => ({ activePath: fileOnScreen ? openFilePath : null, open: openFile }),
+    [fileOnScreen, openFilePath, openFile],
+  );
 
   // Pinned folders — a personal, client-side shortcut list surfaced at the top
   // of the explorer. Stored as relativePaths in localStorage; toggled from the
@@ -2637,15 +2655,31 @@ export function FileExplorer({ roots }: { roots?: readonly string[] } = {}) {
             which nobody is wondering — the useful heading says what they are.
 
             Same padding as the Library's `SectionLabel`, because it is the
-            same thing: a heading over a list of places. */}
-        <div className="px-2.5 pb-1.5 text-label uppercase text-ink-faint">Company Context</div>
+            same thing: a heading over a list of places.
+
+            Under a hosting app's own rows (`lead`) the heading is drawn only
+            over pins: with none it would be a second heading over nothing,
+            between the app's navigation and its folders. */}
+        {lead}
+        {(lead === undefined || pinnedEntries.length > 0) && (
+          <div className={`px-2.5 pb-1.5 text-label uppercase text-ink-faint ${lead === undefined ? '' : 'pt-3'}`}>
+            Company Context
+          </div>
+        )}
         {pinnedEntries.map((e) => (
           <FileTreeNode key={`pin:${e.relativePath}`} entry={e} depth={0} collapseChildren />
         ))}
         {/* Knowledge's own rows (the graph view): not part of a narrowed tree. */}
         {!roots &&
           explorerItems.map(({ id, Component }) => <Component key={id} tree={mergedTree} />)}
-        <div className="mx-3 my-2 border-t border-line" />
+        {/* Under a hosting app's own rows the folders get a heading of their
+            own in place of the rule: the rows above are screens, these are
+            files, and the heading says which is which. */}
+        {lead === undefined ? (
+          <div className="mx-3 my-2 border-t border-line" data-testid="file-explorer-folders-rule" />
+        ) : (
+          <div className="px-2.5 pb-1.5 pt-3 text-label uppercase text-ink-faint">Files</div>
+        )}
         {!mergedTree ? (
           <div className="px-3 py-4 text-xs text-ink-muted">Loading...</div>
         ) : !checkout ? (

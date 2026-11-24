@@ -56,6 +56,7 @@ import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVault
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import type { IToolManualService } from '../tool-manuals/index.js';
 import type { SpillStore } from '../workspace/index.js';
+import { installFileBodies } from '../code-mode/index.js';
 import type { HiddenToolSource } from '../../shared/hidden-tools.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/index.js';
@@ -148,6 +149,15 @@ export interface McpProxyOptions {
    * tool lists its built-in hint.
    */
   readOnlyOverrides?: () => Promise<Readonly<Record<string, boolean>>>;
+  /**
+   * Reads the file a tool call names as its body, as the caller with this user
+   * id: a knowledge-base path their access lets them read, or a staged file of
+   * theirs (`__tmp__/…`). Set, a call to an `http` tool whose body property is
+   * declared `format: file-path` sends that file's bytes instead of the path
+   * (`installFileBodies` in `modules/code-mode`). Absent, the path goes out as
+   * the agent wrote it.
+   */
+  readFileBody?: (userId: string, ref: string) => Promise<Uint8Array>;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -180,8 +190,8 @@ export interface McpCaller {
   /**
    * The knowledge-base path of the HTML page whose script made this request,
    * as the person signed in to the app. The route accepts it from a session
-   * caller only. Its calls are recorded in the Audit log under the page, and
-   * it is served the platform's own tools only (see `buildSurface`).
+   * caller only. Its calls are recorded in the Audit log under the page. It is
+   * served the person's own tools, as their agent is.
    */
   page?: string | null;
 }
@@ -922,8 +932,8 @@ export class McpService {
    * so the Audit log shows the page's attempt beside its allowed calls.
    *
    * The tool is named the way the page named it (its MCP name) and recorded
-   * the way that call would have been: through the page's surface, which the
-   * page's earlier calls have normally left warm.
+   * the way that call would have been: through the person's surface, which
+   * the page's earlier calls have normally left warm.
    */
   async recordPageRefusal(
     caller: Pick<McpCaller, 'userId' | 'bearer' | 'scope'>,
@@ -949,7 +959,7 @@ export class McpService {
     await runInRequest(ctx, async () => {
       let utcpName = toolName;
       if (!META_TOOL_NAMES.has(toolName)) {
-        const surface = await this.surfaceFor({ ...caller, tokenId: null, page }, loopbackBearer);
+        const surface = await this.surfaceFor({ ...caller, tokenId: null }, loopbackBearer);
         catalogNames = surface.catalogNames;
         utcpName =
           surface.tools.find((t) => t.mcpName === toolName)?.utcpName ?? surface.hidden.get(toolName)?.utcpName ?? toolName;
@@ -962,12 +972,10 @@ export class McpService {
    * The caller's tool surface: the one cached for their catalog revision, or
    * a fresh build that is then cached.
    *
-   * The key is the person, the kind of caller (a connection key, a person
+   * The key is the person, the kind of caller (a connection key, or a person
    * through OAuth or their session — the latter two reach the same loopback
-   * identity — or an HTML page the person is viewing, whose surface holds the
-   * platform's own tools only), the credential's scope, and the catalog
-   * revision. So a page's surface is never served to the person's agent, nor
-   * the person's to a page. The revision
+   * identity; an HTML page the person is viewing is the person), the
+   * credential's scope, and the catalog revision. The revision
    * is asked for on every request, with the request's own bearer, so it is
    * the caller's CURRENT catalog that picks the surface: a manual released,
    * edited or put out of their reach moves it, and the request builds anew.
@@ -978,9 +986,8 @@ export class McpService {
    */
   private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
     const { userId, tokenId } = caller;
-    const platformOnly = Boolean(caller.page);
     const { revision } = await this.fetchCatalogRevision(loopbackBearer);
-    if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached', platformOnly);
+    if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached');
     // The agent the connection was made as is part of the key: two
     // connections of one person made as different agents are two surfaces.
     // (The revision already moves when the agent's FILE changes — it carries
@@ -988,14 +995,14 @@ export class McpService {
     // Everything adds nothing, and keeps the key it always had.
     const key = [
       userId,
-      tokenId != null ? 'key' : platformOnly ? 'page' : 'person',
+      tokenId != null ? 'key' : 'person',
       caller.scope ?? 'write',
       revision,
       ...(caller.agentPath ? [caller.agentPath] : []),
     ].join(POOL_KEY_SEPARATOR);
     const { value } = await this.surfaces.get(
       key,
-      () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss', platformOnly),
+      () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss'),
       (built) => (built.degraded ? DEGRADED_SURFACE_MAX_AGE_MS : undefined),
     );
     return value;
@@ -1041,27 +1048,18 @@ export class McpService {
    * Logs one line with the time each half took and whether it was a cache
    * miss, so a build is measured rather than assumed, and a log that shows
    * one line for two requests shows the second was served warm.
-   *
-   * `platformOnly` builds an HTML page's surface: the platform manual alone,
-   * so no `.tool` manual's or plugin MCP server's tool is listed to a page,
-   * or callable from it, directly or in a chain (a chain runs on this
-   * surface's client). The platform manual still answers with the viewer's
-   * access and its `write` tags.
    */
   private async buildSurface(
     userId: string,
     tokenId: string | null,
     loopbackBearer: string,
     cache: 'miss' | 'uncached',
-    platformOnly: boolean,
   ): Promise<RequestSurface> {
     const started = performance.now();
     // The list of manuals this caller gets: the KB manual + each `.tool` they
     // can read. Fetched over loopback with the caller's key, so ACL filtering
     // lives ONCE behind the REST surface.
-    const { manuals, connection }: { manuals: CallTemplate[]; connection?: ConnectionScopeWire } = platformOnly
-      ? { manuals: [this.kbManualTemplate()] }
-      : await this.fetchManualTemplates(loopbackBearer);
+    const { manuals, connection } = await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(userId, manuals);
     const discovered = await this.discoverTools(client, manuals, userId);
@@ -1231,6 +1229,13 @@ export class McpService {
       utcpClientConfig(userId, variables, this.opts.secretsScope),
     );
     bindRequestBearer(client);
+    // A tool whose body is declared a file path sends the file's bytes, read as
+    // this caller. Installed before any manual is registered, so the argument
+    // checks registration installs sit over it and see the path as the agent
+    // gave it. Only here: the swap acts on `http` tools, and a pooled client
+    // carries a third-party MCP server's tools alone.
+    const readFileBody = this.opts.readFileBody;
+    if (readFileBody) installFileBodies(client, (ref) => readFileBody(userId, ref));
     return client;
   }
 

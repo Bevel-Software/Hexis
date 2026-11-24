@@ -3,7 +3,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import type { AuthContextValue } from '../state/auth.context';
 import { loginWithPassword, fetchCurrentUser } from '../services/auth.api';
 import { getToken, setToken, clearToken } from '../../../lib/api';
-import { clearAccountStorage } from '../../../lib/accountStorage';
+import { clearAccountStorage } from '../state/accountStorage';
 import { consumeSsoCallback, OAUTH_ERROR_KEY } from '../services/sso';
 
 export function useAuthState(): AuthContextValue {

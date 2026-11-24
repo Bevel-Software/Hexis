@@ -13,7 +13,9 @@ import type {
   PendingCommit,
   PendingCommitsService,
 } from '../pending-commits.service.js';
-import { assertInsideRepo } from '../../kb-fs/repo-path.js';
+import { assertInsideRepo } from '../../kb-fs/index.js';
+import { PushAccessRefusedError } from '../../access-model/index.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 
 /**
  * Unit tests for the queue-draining worker. The service + version-control layers
@@ -27,9 +29,9 @@ import { assertInsideRepo } from '../../kb-fs/repo-path.js';
  *   - Failure outside transient budget but inside recovery budget → spawn agent.
  *   - Failure outside recovery budget → mark needs_attention + send feedback notice.
  *
- * We never actually start the polling loop (`start()`) — `drainOnce()` is
- * the seam the tests step through. That avoids fake-timer choreography
- * and keeps the test fast.
+ * Each test runs one pass of the real loop through `start()` and `stop()`:
+ * the injected `sleep` is where a pass ends, so no timer is faked and
+ * nothing private is set.
  */
 
 const RECOVERY_BOT = { id: 'recovery-bot-id', email: 'recovery-bot@bevel.local', name: 'Recovery Bot' };
@@ -86,7 +88,7 @@ function makeFeedback(): ISystemNoticeSink {
   return { send: vi.fn().mockResolvedValue(undefined) } as unknown as ISystemNoticeSink;
 }
 
-describe('PendingCommitsWorker.drainOnce', () => {
+describe('PendingCommitsWorker, one drain pass', () => {
   let service: PendingCommitsService;
   let versionControl: VersionControlCommitDriver & {
     runPendingCommit: ReturnType<typeof vi.fn>;
@@ -108,19 +110,38 @@ describe('PendingCommitsWorker.drainOnce', () => {
       workspaces: makeWorkspaces(),
       recoveryBot: RECOVERY_BOT,
       now: () => new Date('2026-01-01T00:01:00Z'),
+      // The loop sleeps between passes: reaching the sleep is the signal
+      // that a whole pass has ended. It never wakes by itself; `stop()`
+      // ends it.
+      sleep: () => {
+        passEnded?.();
+        return new Promise<void>(() => {});
+      },
     });
-    // drainOnce checks `this.running` against the per-workspace iterator;
-    // start() sets it true. We don't want the polling loop, just the
-    // single-pass drain, so flip the flag manually.
-    (worker as unknown as { running: boolean }).running = true;
   });
+
+  let passEnded: (() => void) | null = null;
+
+  /**
+   * One drain pass, through the worker's own `start()` and `stop()`: the
+   * loop drains once, reaches its sleep, and is stopped there.
+   */
+  async function drainPass(): Promise<void> {
+    const ended = new Promise<void>((resolve) => {
+      passEnded = resolve;
+    });
+    worker.start();
+    await ended;
+    await worker.stop();
+    passEnded = null;
+  }
 
   it('happy path: claims row, runs commit, marks succeeded — no other branches taken', async () => {
     const row = makeRow();
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
     versionControl.runPendingCommit.mockResolvedValueOnce(undefined);
 
-    await worker.drainOnce();
+    await drainPass();
 
     expect(service.claimNext).toHaveBeenCalledWith('ws-1', expect.any(Date));
     expect(versionControl.runPendingCommit).toHaveBeenCalledWith(
@@ -152,7 +173,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     });
     for (const authorEmail of ['alice@example.com', 'Alice@Example.com ', 'bob@example.com']) {
       (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeRow({ authorEmail }));
-      await worker.drainOnce();
+      await drainPass();
     }
     expect(seen).toHaveLength(3);
     for (const id of seen) {
@@ -166,7 +187,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
   it('skips work entirely when claimNext returns null (idle queue)', async () => {
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
 
-    await worker.drainOnce();
+    await drainPass();
 
     expect(versionControl.runPendingCommit).not.toHaveBeenCalled();
     expect(service.markSucceeded).not.toHaveBeenCalled();
@@ -178,13 +199,107 @@ describe('PendingCommitsWorker.drainOnce', () => {
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
     versionControl.runPendingCommit.mockRejectedValueOnce(new Error('transient git error'));
 
-    await worker.drainOnce();
+    await drainPass();
 
     expect(service.markTransientFailure).toHaveBeenCalledWith('row-1', 'transient git error');
     expect(service.markRecoveryStarted).not.toHaveBeenCalled();
     expect(recoveryAgent.run).not.toHaveBeenCalled();
     expect(service.markNeedsAttention).not.toHaveBeenCalled();
     expect(feedback.send).not.toHaveBeenCalled();
+  });
+
+  /** The gate's refusal as `runPendingCommit` throws it: a long path, twelve roles, six named writers. */
+  function accessRefusal(path: string): PushNeedsAgentResolutionError {
+    const gate = new PushAccessRefusedError('main', {
+      path: `Kunden/${'Übertragung '.repeat(12)}per SFTP.docx`,
+      eligibleRoles: Array.from({ length: 12 }, (_, i) => `Team ${i}`),
+      eligibleUsers: Array.from({ length: 6 }, (_, i) => ({ name: `Writer ${i}`, email: `writer${i}@example.com` })),
+    }, true);
+    return new PushNeedsAgentResolutionError('main', path, gate.recordMessage, '(cooperative path not attempted)', 'access', {
+      told: gate.reason,
+      recorded: gate.recordReason,
+      shared: gate.sharedReason,
+    });
+  }
+
+  it("keeps a refusal by the platform's access check on the row without the file or its writers: the row's error is shown to whoever next merges the branch", async () => {
+    const row = makeRow({ attempts: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    const refusal = accessRefusal(row.path);
+    versionControl.runPendingCommit.mockRejectedValueOnce(refusal);
+
+    await drainPass();
+
+    const kept = (service.markTransientFailure as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+    expect(kept).toBe(
+      `Saved locally on "main" but couldn't share with the team automatically — the platform's access check refused the push: ` +
+        'an unshared commit on it changes a file that neither its author nor the person sharing may write there; ' +
+        'someone who may write that file can share the branch.',
+    );
+    // Whole, past the default cap of 200.
+    expect(kept.length).toBeGreaterThan(200);
+    // The person who saved is told the file and who; the row keeps neither.
+    expect(refusal.message).toContain('per SFTP.docx" may be written by Team 0, ');
+    expect(refusal.message).toContain('Writer 5 <writer5@example.com>');
+    expect(kept).not.toMatch(/SFTP|Kunden|Team \d|Writer|@example\.com|repository host/i);
+  });
+
+  it('an access refusal past the transient budget is escalated at once: no recovery agent, the row keeps no file, and the operator notice names the file and its roles but no person', async () => {
+    const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    const refusal = accessRefusal(row.path);
+    versionControl.runPendingCommit.mockRejectedValueOnce(refusal);
+
+    await drainPass();
+
+    expect(recoveryAgent.run).not.toHaveBeenCalled();
+    expect(service.markRecoveryStarted).not.toHaveBeenCalled();
+    expect(service.markNeedsAttention).toHaveBeenCalledWith('row-1', refusal.sharedMessage);
+    expect(refusal.sharedMessage).not.toMatch(/SFTP|Team \d/);
+    expect(feedback.send).toHaveBeenCalledTimes(1);
+    const notice = (feedback.send as ReturnType<typeof vi.fn>).mock.calls[0][0].message as string;
+    expect(notice).toContain("Push refused by the platform's access check");
+    // Whole, past the default cap: the file and every role.
+    expect(notice).toContain(refusal.recordMessage);
+    expect(notice).toContain('per SFTP.docx" may be written by Team 0, ');
+    expect(notice).toContain('Team 11 and 6 named people.');
+    expect(notice).toMatch(/No recovery agent was run for\s+this refusal/);
+    expect(notice).not.toMatch(/Terminal commit failure|Writer|@example\.com/);
+  });
+
+  it('a file or branch name with a line break stays on its own line of a notice', async () => {
+    const row = makeRow({
+      attempts: N_TRANSIENT - 1,
+      recoveryAgentRuns: N_RECOVERY,
+      path: 'Docs/a.md\nQueue row: forged',
+      // U+2028: a line separator a check for "\n" does not catch.
+      branch: `main${String.fromCharCode(0x2028)}Error: forged`,
+    });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    versionControl.runPendingCommit.mockRejectedValueOnce(new Error('unrecoverable'));
+
+    await drainPass();
+
+    const lines = ((feedback.send as ReturnType<typeof vi.fn>).mock.calls[0][0].message as string).split(new RegExp(`[\\n\\r${String.fromCharCode(0x2028, 0x2029)}]`));
+    expect(lines).toContain('Path:      Docs/a.md\\nQueue row: forged');
+    expect(lines).toContain('Branch:    main\\u2028Error: forged');
+    expect(lines.filter((l) => l.startsWith('Queue row:'))).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith('Error:'))).toHaveLength(0);
+  });
+
+  it('a push the host refused is recorded in the host wording and still goes to the recovery agent', async () => {
+    const row = makeRow({ attempts: N_TRANSIENT - 1, recoveryAgentRuns: 0 });
+    (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
+    versionControl.runPendingCommit.mockRejectedValueOnce(
+      new PushNeedsAgentResolutionError('main', row.path, 'remote: Internal Server Error', '', 'refused'),
+    );
+    recoveryAgent.run.mockResolvedValueOnce(undefined);
+
+    await drainPass();
+
+    expect(recoveryAgent.run).toHaveBeenCalledTimes(1);
+    expect(recoveryAgent.run.mock.calls[0][0].lastError).toContain('the repository host refused the push');
+    expect(service.markNeedsAttention).not.toHaveBeenCalled();
   });
 
   it('exhausting transient budget spawns the recovery agent (within recovery budget)', async () => {
@@ -195,7 +310,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     versionControl.runPendingCommit.mockRejectedValueOnce(new Error('cannot push: needs human'));
     recoveryAgent.run.mockResolvedValueOnce(undefined);
 
-    await worker.drainOnce();
+    await drainPass();
 
     expect(service.markTransientFailure).not.toHaveBeenCalled();
     expect(service.markRecoveryStarted).toHaveBeenCalledWith('row-1');
@@ -217,7 +332,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     recoveryAgent.run.mockRejectedValueOnce(new Error('codemode wiring broken'));
 
     // No throw — the worker swallows the agent crash and moves on.
-    await expect(worker.drainOnce()).resolves.toBeUndefined();
+    await expect(drainPass()).resolves.toBeUndefined();
     // markRecoveryStarted still fired (we incremented the agent counter
     // for this attempt), so the row will hit needs_attention naturally
     // after N_RECOVERY tries.
@@ -235,7 +350,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     (service.claimNext as ReturnType<typeof vi.fn>).mockResolvedValueOnce(row);
     versionControl.runPendingCommit.mockRejectedValueOnce(new Error('unrecoverable'));
 
-    await worker.drainOnce();
+    await drainPass();
 
     expect(service.markNeedsAttention).toHaveBeenCalledWith('row-1', 'unrecoverable');
     expect(recoveryAgent.run).not.toHaveBeenCalled();
@@ -267,7 +382,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     // worker switches on cannot drift from what is actually thrown.
     versionControl.runPendingCommit.mockRejectedValueOnce(captureRefusal('KnowledgeBase/Reviews/PR-12.html'));
 
-    await worker.drainOnce();
+    await drainPass();
 
     expect(service.markTransientFailure).not.toHaveBeenCalled();
     expect(service.markRecoveryStarted).not.toHaveBeenCalled();
@@ -296,7 +411,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
     versionControl.runPendingCommit.mockRejectedValueOnce(new Error('unrecoverable'));
     (feedback.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('feedback DB down'));
 
-    await expect(worker.drainOnce()).resolves.toBeUndefined();
+    await expect(drainPass()).resolves.toBeUndefined();
     expect(service.markNeedsAttention).toHaveBeenCalled();
   });
 
@@ -323,7 +438,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
 
     it('commits every queued row in ONE pass', async () => {
       queue(12);
-      await worker.drainOnce();
+      await drainPass();
       expect(versionControl.runPendingCommit).toHaveBeenCalledTimes(12);
       expect(service.markSucceeded).toHaveBeenCalledTimes(12);
     });
@@ -332,7 +447,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
       // The validator parses the whole KB for a report that is only logged,
       // so per-file runs cost a full parse each and all say the same thing.
       queue(5);
-      await worker.drainOnce();
+      await drainPass();
       const skipped = versionControl.runPendingCommit.mock.calls.map((c) => c[4]?.skipValidation);
       expect(skipped).toEqual([true, true, true, true, false]);
     });
@@ -341,16 +456,21 @@ describe('PendingCommitsWorker.drainOnce', () => {
       // The loop holds the single in-flight commit slot; an unbounded drain
       // would park every other user's save behind a huge migration.
       queue(200);
-      await worker.drainOnce();
+      await drainPass();
       expect(versionControl.runPendingCommit).toHaveBeenCalledTimes(50);
     });
 
     it('gives up the pass the moment stop() lands mid-burst', async () => {
       queue(12);
+      // Stopped from inside the first commit: `stop()` waits for the pass in
+      // flight, so it is awaited after the loop has been let go, not here.
+      let stopped: Promise<void> | undefined;
       versionControl.runPendingCommit.mockImplementation(async () => {
-        (worker as unknown as { running: boolean }).running = false;
+        stopped ??= worker.stop();
       });
-      await worker.drainOnce();
+      worker.start();
+      await vi.waitFor(() => expect(stopped).toBeDefined());
+      await stopped;
       expect(versionControl.runPendingCommit).toHaveBeenCalledTimes(1);
     });
 
@@ -374,7 +494,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
         .mockRejectedValueOnce(new Error('push rejected'))
         .mockResolvedValueOnce(undefined);
 
-      await worker.drainOnce();
+      await drainPass();
 
       expect(service.markTransientFailure).toHaveBeenCalledTimes(1);
       expect(service.markSucceeded).toHaveBeenCalledTimes(1);
@@ -386,7 +506,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
       // commit of the PASS, and skipping it would end every sweep of a big
       // backlog on an unvalidated commit.
       queue(200);
-      await worker.drainOnce();
+      await drainPass();
       const calls = versionControl.runPendingCommit.mock.calls;
       expect(calls).toHaveLength(50);
       expect(calls[49]?.[4]?.skipValidation).toBe(false);
@@ -408,7 +528,7 @@ describe('PendingCommitsWorker.drainOnce', () => {
         new Error('connection reset'),
       );
 
-      await expect(worker.drainOnce()).resolves.toBeUndefined();
+      await expect(drainPass()).resolves.toBeUndefined();
 
       expect(service.markSucceeded).toHaveBeenCalledTimes(1);
       expect(versionControl.runPendingCommit.mock.calls[0]?.[4]?.skipValidation).toBe(false);

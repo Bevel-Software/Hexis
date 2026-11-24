@@ -1,16 +1,17 @@
 import { createContext, useContext } from 'react';
 import { authFetch } from '../../../../lib/api';
+import { AccountChangedError } from '../../../auth';
 
 /**
  * The app's half of `window.bevel.tools`: what answers an HTML page's tool
  * calls, and what decides when the viewer is asked first.
  *
  * A page's call is answered over the hosted MCP server (`POST /api/mcp`) with
- * the viewer's session and the page's path (`X-Bevel-Page`). For such a call
- * the server serves the platform's own tools only, under the viewer's
- * access — no `.tool` manual's, no plugin MCP server's, nothing of the
- * enterprise agent's internal tools — and records it in the Audit log under
- * the page's path. The five members map to what an agent calls:
+ * the viewer's session and the page's path (`X-Bevel-Page`), so a page sees
+ * and reaches exactly the tools the viewer's own agent does — the same
+ * listing, the same refusals, nothing of the enterprise agent's internal
+ * tools — and the server records it in the Audit log under the page's path.
+ * The five members map to what an agent calls:
  *
  *   searchTools(query)        → `list_tools`, narrowed to the names that
  *                               contain every word of `query` (all of them
@@ -22,8 +23,8 @@ import { authFetch } from '../../../../lib/api';
  *                               upload endpoint, then `apply_file_upload`
  *
  * A call that only reads runs at once. A call that may write — a tool the
- * deployment's UTCP manual tags `write`, a tool the manual does not list
- * (nothing says it only reads; the server answers it as unknown), every
+ * deployment's UTCP manual tags `write`, a tool the manual does not list (a
+ * `.tool`'s, a plugin's MCP server's: nothing says they only read), every
  * chain (a chain may call writers) and every upload — waits for the viewer's
  * answer to one card per page view, unless this browser remembers an Allow
  * for the page's exact source. See {@link PageConsent}.
@@ -311,7 +312,15 @@ export class PageToolsClient {
         }
         return map;
       })
-      .catch(() => null);
+      .catch((err: unknown) => {
+        // A session that is no longer this view's account's is not an
+        // unreadable manual: the call fails with it, and nothing is kept.
+        if (err instanceof AccountChangedError) {
+          this.writing = undefined;
+          throw err;
+        }
+        return null;
+      });
     return this.writing;
   }
 
@@ -519,7 +528,9 @@ const CLOSED_MESSAGE = 'The page was closed before the viewer answered.';
  * Answer one of a page's tool calls: wait out an open card, ask for consent
  * when the call may write, run it, and say how it went. A call whose view
  * ended (its `consent` closed) before it was decided runs nothing and is
- * answered `closed`. Never throws — every outcome is a response for the frame.
+ * answered `closed`. A call whose client refuses to send as another account
+ * (`AccountChangedError`, from the auth module's `accountFetch`) is answered
+ * `account_changed`. Never throws — every outcome is a response for the frame.
  */
 export async function answerToolCall(
   msg: ToolCallMessage,
@@ -563,6 +574,7 @@ export async function answerToolCall(
               : await client.callTool(a, b);
     return { type: 'bevel.tool.response', requestId: msg.requestId, ok: true, result };
   } catch (err) {
+    if (err instanceof AccountChangedError) return fail(err.message, 'account_changed');
     return fail(err instanceof Error ? err.message : String(err), err instanceof PageToolError ? err.code : undefined);
   }
 }
