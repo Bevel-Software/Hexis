@@ -11,12 +11,17 @@ const wsApi = vi.hoisted(() => ({
   })),
   writeFile: vi.fn(async () => {}),
 }));
-vi.mock('../../workspace/services/workspace.api', () => wsApi);
+// The real error class, so the flow tells statuses apart exactly as it does in the app.
+vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace/services/workspace.api')>()),
+  ...wsApi,
+}));
 vi.mock('../../pr/services/pr-open.api', () => ({ openChangeRequest: vi.fn(async () => null) }));
 const listMine = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
 vi.mock('../services/change-requests.api', () => ({ listMyChangeRequests: listMine }));
 
 import { ensureKnowledgeSuggestionWorkspace, proposeKnowledgeChange } from '../services/propose.api';
+import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 
 const rae = { email: 'reader@example.com', id: 'u9-1234-abcd' };
 
@@ -104,10 +109,8 @@ describe('proposeKnowledgeChange: the branch the proposal goes to cannot be open
    * page shows a failed proposal's message as it is: "HTTP 410" told the
    * person nothing about why or what to do.
    */
-  it('says that nothing was sent and to try again, not the bare status', async () => {
-    wsApi.getOrCreateWorkspace.mockRejectedValueOnce(new Error('HTTP 410'));
-
-    const sent = proposeKnowledgeChange({
+  const propose = () =>
+    proposeKnowledgeChange({
       repoRelativePath: 'KnowledgeBase/Finance/month-end-close.md',
       content: 'four days',
       userEmail: rae.email,
@@ -115,9 +118,24 @@ describe('proposeKnowledgeChange: the branch the proposal goes to cannot be open
       userName: 'Rae',
     });
 
-    await expect(sent).rejects.toThrow(
+  it('says that nothing was sent and to try again, not the bare status', async () => {
+    wsApi.getOrCreateWorkspace.mockRejectedValueOnce(new WorkspaceApiError(410));
+
+    await expect(propose()).rejects.toThrow(
       "Nothing was sent: your proposal couldn't be saved for review just now. Try again in a moment.",
     );
+    expect(wsApi.writeFile).not.toHaveBeenCalled();
+  });
+
+  /**
+   * "Try again in a moment" is only true where a second attempt can work. A
+   * lapsed session's 401 is not one of those, and keeps its own answer.
+   */
+  it('passes an answer that trying again cannot fix through as it came', async () => {
+    const lapsed = new WorkspaceApiError(401);
+    wsApi.getOrCreateWorkspace.mockRejectedValueOnce(lapsed);
+
+    await expect(propose()).rejects.toBe(lapsed);
     expect(wsApi.writeFile).not.toHaveBeenCalled();
   });
 });

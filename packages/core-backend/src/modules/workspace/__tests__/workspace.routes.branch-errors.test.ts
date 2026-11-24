@@ -70,17 +70,18 @@ async function makeHarness(
 }
 
 describe('GET /api/workspace — a branch that cannot be opened', () => {
-  let server: Server | null = null;
+  // Every server a test starts, so a test that asks twice leaves none behind.
+  let servers: Server[] = [];
   afterEach(async () => {
-    if (server) {
-      const s = server;
+    const started = servers;
+    servers = [];
+    for (const s of started) {
       // fetch's pooled keep-alive socket keeps the server open until the 5s
       // keepAliveTimeout fires; drop the idle connections so teardown is
       // immediate instead of costing five seconds a test.
       s.closeAllConnections();
       await new Promise<void>((resolve, reject) => s.close((err) => (err ? reject(err) : resolve())));
     }
-    server = null;
   });
 
   const get = async (
@@ -88,7 +89,7 @@ describe('GET /api/workspace — a branch that cannot be opened', () => {
     bootstrap: (branch: string) => Promise<unknown>,
   ): Promise<{ status: number; body: Record<string, unknown>; cacheControl: string | null }> => {
     const h = await makeHarness(bootstrap);
-    server = h.server;
+    servers.push(h.server);
     const res = await fetch(`${h.baseUrl}/api/workspace?branch=${encodeURIComponent(branch)}`);
     return {
       status: res.status,

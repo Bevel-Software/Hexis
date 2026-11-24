@@ -5,7 +5,7 @@ import {
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import { createBranch, deleteBranch, GitApiError } from '../../git';
-import { getOrCreateWorkspace, writeFile } from '../../workspace';
+import { getOrCreateWorkspace, writeFile, WorkspaceApiError } from '../../workspace';
 import { openChangeRequest, fetchPrDetail } from '../../pr';
 import { listMyChangeRequests } from './change-requests.api';
 
@@ -161,8 +161,13 @@ async function ensureFresh(branch: string): Promise<KnowledgeSuggestionTarget> {
     ({ workspace } = await getOrCreateWorkspace(branch));
   } catch (err) {
     // The read's own message is a bare status ("HTTP 410"), which tells the
-    // person neither what happened nor what to do. This attempt has written
-    // nothing and opened no request, and the next one runs this step again.
+    // person neither what happened nor what to do. Said in words only where
+    // trying again is the step: the branch was not there (404, 410: the next
+    // attempt runs this step again, creating it) or the server or the network
+    // failed. Any other answer, a lapsed session's 401 say, keeps its own.
+    // Either way no proposal content was sent and no request was opened.
+    const status = err instanceof WorkspaceApiError ? err.status : null;
+    if (status !== null && status !== 404 && status !== 410 && status < 500) throw err;
     throw new Error("Nothing was sent: your proposal couldn't be saved for review just now. Try again in a moment.", {
       cause: err,
     });
