@@ -278,6 +278,16 @@ interface RequestSurface {
    */
   degraded: boolean;
   /**
+   * The caller's manual list could not be read (the `all-tools` loopback
+   * failed, or answered nothing usable), so this surface carries the platform
+   * manual alone. It answers the request that built it and is never kept:
+   * served from the cache it would hide every `.tool` of the caller until
+   * their catalog revision moved, a secret of theirs changed, or the process
+   * restarted. A failed read says nothing about the catalog, so the next
+   * request reads it again.
+   */
+  catalogUnread: boolean;
+  /**
    * The agent the catalog was narrowed to, as `all-tools` reported it —
    * absent for Everything. A call to a tool not on a narrowed surface is
    * refused by name and agent rather than as unknown, and a connection whose
@@ -1020,7 +1030,10 @@ export class McpService {
     const { value } = await this.surfaces.get(
       key,
       () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss'),
-      (built) => (built.degraded ? DEGRADED_SURFACE_MAX_AGE_MS : undefined),
+      // A surface whose catalog could not be read is not kept at all (its
+      // entry ends as it is made); one missing a manual that failed is kept
+      // for the refresh window; any other for as long as it is used.
+      (built) => (built.catalogUnread ? 0 : built.degraded ? DEGRADED_SURFACE_MAX_AGE_MS : undefined),
     );
     return value;
   }
@@ -1098,7 +1111,7 @@ export class McpService {
     // The list of manuals this caller gets: the KB manual + each `.tool` they
     // can read. Fetched over loopback with the caller's key, so ACL filtering
     // lives ONCE behind the REST surface.
-    const { manuals, connection } = await this.fetchManualTemplates(loopbackBearer);
+    const { manuals, connection, unread } = await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(userId, manuals);
     const discovered = await this.discoverTools(client, manuals, userId);
@@ -1123,7 +1136,7 @@ export class McpService {
           (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
       );
     }
-    return { ...discovered, client, tools, ...(connection ? { connection } : {}) };
+    return { ...discovered, client, tools, catalogUnread: unread, ...(connection ? { connection } : {}) };
   }
 
   /**
@@ -1205,12 +1218,16 @@ export class McpService {
    */
   private async fetchManualTemplates(
     bearer: string,
-  ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire }> {
+  ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire; unread: boolean }> {
     // This is the REMOTE proxy, so ask for remote-capable manuals only — local-only
     // `.tool`s are surfaced instead via the `list_local_tools` tool in the KB manual.
     const body = (await this.loopbackJson(bearer, '/api/agent/all-tools?remote=true', 'all-tools')) as
       | { manuals?: unknown; connection?: unknown }
       | null;
+    // No answer, or one without a list: the catalog was not read. The request
+    // is still served the platform manual below, and the surface built from it
+    // is marked so that it is never cached (`RequestSurface.catalogUnread`).
+    const unread = !Array.isArray(body?.manuals);
     const rawManuals: unknown[] = Array.isArray(body?.manuals) ? body.manuals : [];
 
     const out: CallTemplate[] = [];
@@ -1228,7 +1245,7 @@ export class McpService {
     }
     // Always include the KB manual, even if `all-tools` was unavailable/regressed.
     if (!hasKb) out.unshift(this.kbManualTemplate());
-    return { manuals: out, ...connectionOf(body) };
+    return { manuals: out, unread, ...connectionOf(body) };
   }
 
   /** The KB manual's discovery template — the fallback if `all-tools` is unavailable. */

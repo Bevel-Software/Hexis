@@ -169,15 +169,19 @@ export function createCatalogRevisionReader(deps: CatalogRevisionSources): Catal
  * of what they may read, per-caller, ACL-filtered by the two services
  * themselves.
  *
- * `read` is the reader the composition root also hands the MCP endpoint, so
- * the route and the endpoint cannot answer differently. Absent, the route
- * makes its own from the same sources.
+ * It is handed EITHER a reader or the sources to make one from, never both:
+ * two would leave a reader that ignores the sources passed beside it. The
+ * composition root hands it the reader it also hands the MCP endpoint, so the
+ * route and the endpoint cannot answer differently.
  */
 export function createCatalogRevisionRoutes(
-  deps: CatalogRevisionSources & { manualAuth: RequestHandler; read?: CatalogRevisionReader },
+  deps: { manualAuth: RequestHandler } & (
+    | (CatalogRevisionSources & { read?: undefined })
+    | ({ read: CatalogRevisionReader } & { [K in keyof CatalogRevisionSources]?: undefined })
+  ),
 ): express.Router {
   const router = express.Router();
-  const read = deps.read ?? createCatalogRevisionReader(deps);
+  const read = deps.read === undefined ? createCatalogRevisionReader(deps) : deps.read;
 
   router.get('/agent/catalog-revision', deps.manualAuth, async (req: Request, res) => {
     try {

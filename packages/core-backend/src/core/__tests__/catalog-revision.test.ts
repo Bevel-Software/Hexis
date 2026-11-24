@@ -155,23 +155,36 @@ describe('GET /agent/catalog-revision', () => {
     };
   }
 
-  it('answers what the reader answers when it is called as a function, for the same caller', async () => {
-    // The hosted MCP endpoint calls the reader directly, on every request, and
-    // the local server polls the route: the two must be one answer.
+  it('the reader, called as a function, answers the fingerprint of what the two services list that caller', async () => {
+    // The hosted MCP endpoint calls the reader directly, on every request. The
+    // expectation is computed here from the lists, not read back off the route.
     const manuals = [manualLine('serper'), manualLine('granola')];
     const skills = [skill(), skill({ name: 'brief', path: 'Skills/Ops/brief' })];
-    const { url } = await mount({ manuals, skills, userId: 'u1' });
-    const overHttp = await (await fetch(`${url}/agent/catalog-revision`)).json();
+    const view = { uri: 'ui://hexis/page.html', text: '<html>v1</html>' };
+    const catalogFingerprints = vi.fn(async () => manuals);
+    const listSkills = vi.fn(async () => skills);
+    const resolveUserEmail = vi.fn(async () => 'someone@example.com');
 
     const read = createCatalogRevisionReader({
-      toolManuals: { catalogFingerprints: async () => manuals } as never,
-      skills: { listSkills: async () => skills } as never,
-      resolveUserEmail: async () => 'someone@example.com',
+      toolManuals: { catalogFingerprints } as never,
+      skills: { listSkills } as never,
+      resolveUserEmail,
+      mcpApps: { manifest: async () => ({ resources: [view] }) },
     });
 
-    expect(await read({ userId: 'u1' })).toEqual(overHttp);
-    // A caller nobody can resolve is an empty catalog on both, never a failure.
-    expect(await read({})).toEqual({ revision: catalogRevision([], []), tools: 0, skills: 0 });
+    expect(await read({ userId: 'u1' })).toEqual({
+      revision: catalogRevision(manuals, skills, [view]),
+      tools: 2,
+      skills: 2,
+    });
+    // Asked as that caller, by their email: the access filtering is the services' own.
+    expect(resolveUserEmail).toHaveBeenCalledWith('u1');
+    expect(catalogFingerprints).toHaveBeenCalledWith('someone@example.com');
+    expect(listSkills).toHaveBeenCalledWith('someone@example.com');
+    // A caller nobody can resolve is an empty catalog, never a failure, and the lists are not asked.
+    catalogFingerprints.mockClear();
+    expect(await read({})).toEqual({ revision: catalogRevision([], [], [view]), tools: 0, skills: 0 });
+    expect(catalogFingerprints).not.toHaveBeenCalled();
   });
 
   it('serves the reader it is handed, asked for the caller its auth resolved', async () => {
@@ -179,13 +192,10 @@ describe('GET /agent/catalog-revision', () => {
     const app = express();
     app.use(
       createCatalogRevisionRoutes({
-        toolManuals: { catalogFingerprints: vi.fn() } as never,
-        skills: { listSkills: vi.fn() } as never,
         manualAuth: (req, _res, next) => {
           req.toolAuth = { userId: 'u1', agentPath: 'Agents/support.agent' } as never;
           next();
         },
-        resolveUserEmail: async () => 'someone@example.com',
         read,
       }),
     );

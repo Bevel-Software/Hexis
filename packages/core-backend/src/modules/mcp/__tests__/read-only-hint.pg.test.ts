@@ -25,12 +25,15 @@ afterEach(async () => {
 }, PG_TEST_TIMEOUT);
 afterAll(dropScratchDatabases, PG_TEST_TIMEOUT);
 
-async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer; catalogRevision?: boolean } = {}) {
+async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'hosted-mcp-hints-'));
   stops.push(() => rm(root, { recursive: true, force: true }));
   const repository = join(root, 'repository');
   await cp(defaultKbTemplateDir(), repository, { recursive: true });
   await writeFile(join(repository, 'roles.yaml'), 'roles:\n  Admin:\n    - admin@example.com\n');
+  // Requests the server receives on the two routes the endpoint used to ask
+  // itself for. Both still answer as the production composition does.
+  const hits = { allTools: 0, revisionRoute: 0 };
   const git = (args: string[]) => promisify(execFile)('git', args, { cwd: repository });
   await git(['init', '-q', '-b', 'main']);
   await git(['add', '.']);
@@ -65,6 +68,7 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer; catal
   const app = await createCoreServer(core, {
     preAuth(app) {
       app.get('/api/agent/all-tools', core.manualAuthMiddleware, (_req, res) => {
+        hits.allTools += 1;
         res.json({ manuals: [
           { name: 'KNOWLEDGE_BASE', call_template_type: 'http', http_method: 'GET',
             url: '${API_URL}/api/agent/utcp', content_type: 'application/json',
@@ -73,9 +77,11 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer; catal
             config: { mcpServers: { srv: { transport: 'http', url: opts.downstream.url } } } }] : []),
         ] });
       });
-      app.get('/api/agent/catalog-revision', core.manualAuthMiddleware, (_req, res) => {
-        if (opts.catalogRevision) res.json({ revision: 'unchanged-catalog' });
-        else res.sendStatus(404);
+      // Counted and passed on: the production route answers. The endpoint
+      // reads the revision in process, so only an HTTP caller lands here.
+      app.get('/api/agent/catalog-revision', (_req, _res, next) => {
+        hits.revisionRoute += 1;
+        next();
       });
     },
   }, { boot: false });
@@ -94,8 +100,17 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer; catal
     });
     expect(response.status).toBe(200);
   };
-  return { baseUrl, key, setHint };
+  return { baseUrl, key, setHint, core, userId: user.id, hits };
 }
+
+/** A path a key is recorded with. No file is there: core reads none (see the last test). */
+const AGENT_PATH = 'Agents/narrow.agent';
+
+const revisionOverHttp = async (baseUrl: string, key: string) =>
+  (await (await fetch(`${baseUrl}/api/agent/catalog-revision`, { headers: { Authorization: `Bearer ${key}` } })).json()) as {
+    revision: string;
+    connection?: unknown;
+  };
 
 async function connect(baseUrl: string, key: string): Promise<Client> {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), {
@@ -135,8 +150,11 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint lists the read-only hint
     });
   });
 
-  it("lists an admin's change on the client's NEXT tools/list, with no reconnect, and a reset undoes it", async () => {
-    const { baseUrl, key, setHint } = await startPlatform();
+  // The endpoint reads the caller's revision in process, so on this
+  // composition the tool surface is always the cached one: each of the two
+  // tests below ends by showing it was built once.
+  it("lists an admin's change on the client's NEXT tools/list, with no reconnect and from the cached surface, and a reset undoes it", async () => {
+    const { baseUrl, key, setHint, hits } = await startPlatform();
     const client = await connect(baseUrl, key);
     expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
 
@@ -153,33 +171,18 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint lists the read-only hint
     expect(listed.read_file).toEqual({ readOnlyHint: true });
     expect(listed.write_file).toEqual({ readOnlyHint: false });
     expect(listed.call_tool_chain).toEqual({ readOnlyHint: false });
-  });
-
-  it("lists an admin's change and its reset on the next tools/list when the tool surface is cached", async () => {
-    const { baseUrl, key, setHint } = await startPlatform({ catalogRevision: true });
-    const client = await connect(baseUrl, key);
-    expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
-
-    await setHint('read_file', false);
-    await setHint('write_file', true);
-    let listed = await annotationsOf(client);
-    expect(listed.read_file).toEqual({ readOnlyHint: false });
-    expect(listed.write_file).toEqual({ readOnlyHint: true });
-
-    for (const name of ['read_file', 'write_file']) await setHint(name, null);
-    listed = await annotationsOf(client);
-    expect(listed.read_file).toEqual({ readOnlyHint: true });
-    expect(listed.write_file).toEqual({ readOnlyHint: false });
+    expect(hits.allTools).toBe(1);
   });
 
   it('does not keep an override in the cached surface: one set before the surface is built is undone by its reset', async () => {
-    const { baseUrl, key, setHint } = await startPlatform({ catalogRevision: true });
+    const { baseUrl, key, setHint, hits } = await startPlatform();
     await setHint('read_file', false);
     const client = await connect(baseUrl, key);
     expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: false });
 
     await setHint('read_file', null);
     expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
+    expect(hits.allTools).toBe(1);
   });
 
   it('lists a tool from a plugin MCP server with conservative effects', async () => {
@@ -190,5 +193,59 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint lists the read-only hint
     const proxied = tools.find((t) => t.name.endsWith('echo'));
     expect(proxied).toBeDefined();
     expect(proxied?.annotations).toEqual({ readOnlyHint: false });
+  });
+});
+
+/**
+ * The same composition, for where the endpoint gets a caller's catalog
+ * revision: from the reader `createCoreServices` hands it, called as a
+ * function, and not from `GET /api/agent/catalog-revision` on its own server.
+ */
+describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the catalog revision in process', () => {
+  it('sends its own revision route no request, and keeps the tool surface between requests', async () => {
+    const { baseUrl, key, hits } = await startPlatform();
+    const client = await connect(baseUrl, key);
+    await client.listTools();
+    await client.listTools();
+    await client.listTools();
+    expect(hits.revisionRoute).toBe(0);
+    // Built once. A request with no revision builds a surface of its own, so
+    // one build over three requests is a revision that was read each time.
+    expect(hits.allTools).toBe(1);
+  });
+
+  it('answers a caller over HTTP what the reader answers in process', async () => {
+    const { baseUrl, key, core, userId, hits } = await startPlatform();
+    const overHttp = await revisionOverHttp(baseUrl, key);
+    expect(hits.revisionRoute).toBe(1);
+    expect(overHttp.revision).toMatch(/^[0-9a-f]{32}$/);
+    expect(overHttp).toEqual(await core.readCatalogRevision({ userId, agentPath: null }));
+    expect(overHttp.connection).toBeUndefined();
+  });
+
+  // Open core has no agent configurations of its own: a distribution supplies
+  // them (`CorePorts.agentScope`). So a key recorded as an agent is told here
+  // that its agent cannot be read. The sentence names the key's agent, and the
+  // reader answers it only when it is asked with that agent.
+  it('asks for the caller its key resolves to: a key recorded as an agent is told about that agent at the handshake', async () => {
+    const { baseUrl, core, userId, hits } = await startPlatform();
+    const { plaintext: agentKey } = await core.externalApiKeyService.mint(userId, 'as-an-agent', { agentPath: AGENT_PATH });
+    const told = `This connection was made as the agent \`${AGENT_PATH}\`, which no longer exists or which you can no longer read`;
+    const client = await connect(baseUrl, agentKey);
+    expect(client.getInstructions()).toContain(told);
+    expect(hits.revisionRoute).toBe(0);
+
+    // The route resolves the same key to the same caller, and so to the same answer.
+    const overHttp = await revisionOverHttp(baseUrl, agentKey);
+    expect(overHttp.connection).toEqual({
+      agent: { path: AGENT_PATH, name: AGENT_PATH },
+      unavailable: expect.stringContaining(told),
+    });
+    expect(overHttp).toEqual(await core.readCatalogRevision({ userId, agentPath: AGENT_PATH }));
+    expect(overHttp.revision).not.toBe((await core.readCatalogRevision({ userId, agentPath: null })).revision);
+
+    // A key with no agent, for the same person, is told nothing of the kind.
+    const { plaintext: plainKey } = await core.externalApiKeyService.mint(userId, 'everything');
+    expect((await connect(baseUrl, plainKey)).getInstructions()).not.toContain('made as the agent');
   });
 });
