@@ -121,6 +121,9 @@ describe('ToolSecretsPanel: a value of only whitespace is not offered for saving
       expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     }
     expect(api.setUserVar).not.toHaveBeenCalled();
+    // A real value is still offered: the button is held by the whitespace, not always.
+    fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: 'k' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
   });
 
   it('keeps a client secret’s Save disabled', () => {
@@ -144,5 +147,7 @@ describe('ToolSecretsPanel: a value of only whitespace is not offered for saving
     render(<ToolSecretsPanel tool={signIn} onChanged={() => {}} />);
     fireEvent.change(screen.getByLabelText('Client secret for SIGNIN'), { target: { value: '   ' } });
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Client secret for SIGNIN'), { target: { value: 'cs' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
   });
 });
