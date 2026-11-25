@@ -9,25 +9,28 @@ import type { PullRequestSummary } from '@bevel-software/platform-shared';
  * page and opened a request. The review said `+2 −0` and showed an empty green
  * bar: the comment renders to nothing, so the text was nowhere on screen while
  * "Approve this file" was offered. The same held for a YAML comment in the
- * frontmatter. Every line the request adds or removes is now visible, marked.
+ * frontmatter. Both are now visible, marked.
  */
 
+// The pr module through its entry, as the dialog reaches it: the request's
+// detail is the answer under test; no other verb is called here.
 const detailMock = vi.hoisted(() => ({ fetchPrDetail: vi.fn() }));
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: detailMock.fetchPrDetail }));
+vi.mock('../../pr', () => ({
+  fetchPrDetail: detailMock.fetchPrDetail,
+  openChangeRequest: vi.fn(),
+  updateChangeRequest: vi.fn(),
+  approvePrFile: vi.fn(),
+  revertPrFile: vi.fn(),
+  unapprovePrFile: vi.fn(),
+  deleteChangeRequest: vi.fn(),
+  cancelPullRequest: vi.fn(),
+  mergePullRequest: vi.fn(),
+  refreshChangeRequestFromTarget: vi.fn(),
+}));
 
 const readMock = vi.hoisted(() => ({ readFileOnBranch: vi.fn() }));
 vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: readMock.readFileOnBranch,
-}));
-vi.mock('../../pr/services/pr-approvals.api', () => ({
-  approvePrFile: vi.fn(),
-  revertPrFile: vi.fn(),
-  unapprovePrFile: vi.fn(),
-}));
-vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: vi.fn() }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({
-  cancelPullRequest: vi.fn(),
-  deleteChangeRequest: vi.fn(),
 }));
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';

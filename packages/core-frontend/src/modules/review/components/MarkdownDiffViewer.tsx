@@ -2,16 +2,20 @@ import { useMemo } from 'react';
 import Markdown from 'react-markdown';
 import { Parser } from 'yaml';
 import { isFrontmatterFence, type FileDiffPayload } from '@bevel-software/platform-shared';
-import { computeDiff, type DiffLine, parseFrontmatter, labelFor, type FrontmatterData } from '../../workspace';
-import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
 import {
+  computeDiff,
+  type DiffLine,
+  parseFrontmatter,
+  labelFor,
+  type FrontmatterData,
   KB_REMARK_PLUGINS,
   KB_DIFF_REHYPE_PLUGINS,
   KB_DIFF_CHANGE_REHYPE_PLUGINS,
   useKbMarkdownComponents,
   type KbImageResolver,
-} from '../../workspace/components/renderers/kbMarkdownPipeline';
-import type { KbLinkTarget } from '../../workspace';
+  type KbLinkTarget,
+} from '../../workspace';
+import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
 
 const MAX_RENDERED_LINES = 5000;
 
@@ -438,8 +442,8 @@ function DiffPreview({
 
   // Each block is parsed as a standalone document, so the space-escaping that
   // makes `[Foo](Some File.md)` resolve has to be applied per fragment.
-  // A changed fragment shows its comments as source (see
-  // KB_DIFF_CHANGE_REHYPE_PLUGINS): every line the change touches is visible.
+  // A changed fragment shows its HTML comments as source (see
+  // KB_DIFF_CHANGE_REHYPE_PLUGINS).
   const fragment = (
     text: string,
     { changed, fragmentComponents = components }: { changed: boolean; fragmentComponents?: typeof components },

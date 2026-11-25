@@ -138,8 +138,9 @@ function revealComments(node: HastNode): void {
 
 /**
  * The diff pipeline for a CHANGED fragment: {@link KB_DIFF_REHYPE_PLUGINS}
- * plus the comment reveal, so every line a change adds or removes is on
- * screen. Unchanged fragments keep the plain diff pipeline: a comment nobody
+ * plus the comment reveal, so an HTML comment a change adds or removes is on
+ * screen. (Other markdown that renders nothing, such as an unused link
+ * reference definition, still renders nothing here.) Unchanged fragments keep the plain diff pipeline: a comment nobody
  * touched stays out of the way, as it does on the page.
  */
 export const KB_DIFF_CHANGE_REHYPE_PLUGINS: PluginList = [
