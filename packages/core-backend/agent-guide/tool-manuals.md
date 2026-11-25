@@ -31,10 +31,10 @@ into `mcp.json` where it can. Do not write new ones.)
 **`id` is the manual's identity**: the namespace its secrets bind to and its
 address. Use lowercase `snake_case`. Without an `id`, the `name`, then the file
 name, is used. It must be unique among all `.tool` files and `mcp.json` server
-names, and names differing only in `-` and `_` collide: the second is refused
-(an `mcp.json` server wins over a `.tool`), not renamed, and `list_tool_setup`
-names it under `invalid` (of two people's personal tools, the later one). The
-same service in two plugins needs two ids, each with its own secrets and access.
+names, and names differing only in `-` and `_` collide. One is refused, not
+renamed, and `list_tool_setup` names it under `invalid`: an `mcp.json` server
+beats a `.tool`, an older personal tool a newer. The same service in two
+plugins needs two ids, each with its own secrets and access.
 
 ### Secrets: `${VAR}` and `variables`
 

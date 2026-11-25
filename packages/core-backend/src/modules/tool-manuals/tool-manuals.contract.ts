@@ -395,14 +395,15 @@ export type LiveDeclaration =
   | { refused: string; manual?: undefined; variable?: undefined };
 
 /**
- * The one question the catalog asks of git: when a file landed, as it is now, on the
- * scanned branch (unix seconds), or null when no commit added it yet. It
+ * The one question the catalog asks of git: where a file landed, as it is now, on the
+ * scanned branch (its add commit's position on the first-parent chain, lower
+ * is earlier), or null when no commit added it yet. It
  * settles which of two people's personal tools keeps a secret namespace both
  * claim — the one that was there first — so a later write never takes an
  * earlier tool, or the secrets set for it, away from its owner.
  */
 export interface ToolManualHistorySource {
-  addedAt(workspaceId: string, repoRelativePath: string): Promise<number | null>;
+  addedPosition(workspaceId: string, repoRelativePath: string): Promise<number | null>;
 }
 
 export interface IToolManualService {

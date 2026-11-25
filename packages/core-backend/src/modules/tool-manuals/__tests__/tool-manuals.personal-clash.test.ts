@@ -78,11 +78,14 @@ describe('two people, one tool id, each in their own personal plugin', () => {
     await mkdir(dirname(join(repo, rel)), { recursive: true });
     await writeFile(join(repo, rel), body);
   };
-  /** Write and commit, each commit a day after the last. */
+  /**
+   * Write and commit, every commit in the SAME second: which one came first
+   * is the commits' order, never the clock's. With commit dates the
+   * zzz-first case below fell back to path order and served aaa's newcomer.
+   */
   const land = async (rel: string, body: string) => {
     await put(rel, body);
     await git(['add', '--', rel]);
-    commitAt += 86_400;
     await git(['commit', '-m', `add ${rel}`], commitAt);
   };
 
@@ -101,7 +104,7 @@ describe('two people, one tool id, each in their own personal plugin', () => {
       realVersionControlHooks(),
       testKbContext({ kbDirName: KB_DIR }),
     );
-    return { addedAt: g.addedAt.bind(g) };
+    return { addedPosition: g.addedPosition.bind(g) };
   };
   const servedTo = async (svc: ToolManualService, email: string) => (await svc.listAccessibleCatalog(email)).tools;
   const reportedTo = async (svc: ToolManualService, email: string) => (await svc.listAccessibleCatalog(email)).invalid;
@@ -162,7 +165,7 @@ describe('two people, one tool id, each in their own personal plugin', () => {
     await land(AAA, tool('a'));
     await land(ZZZ, tool('z'));
     const svc = catalog({
-      addedAt: async () => {
+      addedPosition: async () => {
         throw new Error('git is unavailable');
       },
     });

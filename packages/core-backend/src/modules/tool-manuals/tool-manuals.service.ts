@@ -1153,7 +1153,7 @@ export class ToolManualService implements IToolManualService {
       try {
         const history = this.history;
         if (!history) throw new Error('no history source is wired');
-        landed = await Promise.all(members.map((m) => history.addedAt(wsId, m.path)));
+        landed = await Promise.all(members.map((m) => history.addedPosition(wsId, m.path)));
       } catch (err) {
         log.warn(`a personal tool namespace clash could not be settled: ${printable((err as Error)?.message ?? String(err))}`);
         for (const slot of slots) {
@@ -1167,7 +1167,8 @@ export class ToolManualService implements IToolManualService {
         }
         continue;
       }
-      // Not committed yet is newest; a tie keeps the path order.
+      // Not committed yet is newest; a tie (one commit added both) keeps the
+      // path order.
       const at = (k: number) => landed[k] ?? Number.POSITIVE_INFINITY;
       const byLanding = members
         .map((m, k) => ({ m, k }))

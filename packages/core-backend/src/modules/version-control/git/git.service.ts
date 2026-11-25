@@ -4778,11 +4778,14 @@ export class GitService implements IGitService {
   }
 
   /**
-   * When `repoRelativePath` landed on HEAD as it is now (unix seconds of the
-   * LATEST commit that added it: a file deleted and added again starts over),
-   * or null when no commit on HEAD added it — a file written but not
-   * committed yet. What decides which of two personal tools keeps a secret
-   * namespace both claim: the one that was there first.
+   * Where `repoRelativePath` landed on HEAD as it is now: the position, on
+   * HEAD's first-parent chain, of the LATEST commit that added it (a file
+   * deleted and added again starts over), or null when no commit on HEAD
+   * added it — a file written but not committed yet. What decides which of
+   * two personal tools keeps a secret namespace both claim: the one that was
+   * there first. A position, not a commit date: two commits made in the same
+   * second, or under a clock that went back, keep their order; two files
+   * added by one commit share one position.
    *
    * First-parent: a file added on a draft reached HEAD when the draft was
    * merged (merges are `--no-ff`), not when the draft's own commit was made.
@@ -4792,15 +4795,19 @@ export class GitService implements IGitService {
    * can only extend, and a file committed a moment after this read is the
    * newer claimant either way, which is what null already says.
    */
-  async addedAt(workspaceId: string, repoRelativePath: string): Promise<number | null> {
+  async addedPosition(workspaceId: string, repoRelativePath: string): Promise<number | null> {
     const cwd = await this.repoDir(workspaceId);
     const { stdout } = await this.git(cwd, [
-      'log', '--first-parent', '--diff-filter=A', '--format=%ct', 'HEAD', '--', repoRelativePath,
+      'log', '--first-parent', '--diff-filter=A', '--format=%H', 'HEAD', '--', repoRelativePath,
     ]);
     // Newest first; no `--max-count`, which git applies BEFORE `--diff-filter`
     // and would answer null for a file edited since it was added.
     const added = stdout.split('\n')[0]?.trim() ?? '';
-    return added === '' ? null : Number(added);
+    if (added === '') return null;
+    // That commit is on HEAD's first-parent chain, so its own first-parent
+    // depth is its position on the chain.
+    const { stdout: depth } = await this.git(cwd, ['rev-list', '--first-parent', '--count', added]);
+    return Number(depth.trim());
   }
 
   /**
