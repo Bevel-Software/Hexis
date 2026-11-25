@@ -280,7 +280,7 @@ export function registerVersionControlTools(
     name: 'commit_change',
     description:
       'Commit, as you, the one file left uncommitted on `branch`, without sharing it. Writes commit and share ' +
-      'on their own moments later (`branch_status` lists those still landing); `unzip` leaves its files uncommitted. ' +
+      'on their own moments later (`branch_status` lists those still landing), `unzip`\'s extracted files too. ' +
       'If several files are uncommitted, returns a structured error listing them; commit them one at a time. ' +
       'Refused on protected branches without write permission.',
     inputs: {
@@ -310,7 +310,7 @@ export function registerVersionControlTools(
     name: 'save_file',
     description:
       'Schedule the file at <path> for commit + push using whatever bytes are on disk (no content ' +
-      'rewrite) — for files left uncommitted, such as those `unzip` extracts. On lock contention returns ' +
+      'rewrite) — for files left uncommitted, such as those `unzip` lists under `unsaved`. On lock contention returns ' +
       '`{ saved: false, reason }` rather than throwing. The commit lands asynchronously.',
     inputs: {
       type: 'object',
