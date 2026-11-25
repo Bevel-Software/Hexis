@@ -51,6 +51,69 @@ function toManual(tools: UtcpTool[]) {
  * on top of it. (External callers are always write-scoped, so the external
  * manual needs no variant.)
  */
+/** Who a manual is built for: what a request's credential resolved to. */
+export interface ManualCaller {
+  userId?: string | null;
+  /** The agent configuration the credential connects as; absent or null for Everything. */
+  agentPath?: string | null;
+}
+
+/** Builds the per-caller context a `ToolProvider` words its def from. */
+function contextBuilder(resolveUserEmail?: ResolveUserEmail, agentScope?: Pick<IAgentScopeResolver, 'resolve'>) {
+  // Resolve the caller's email so a `ToolProvider` (e.g. the skill tools) can
+  // tailor its def to who's asking. Best-effort — a failure just yields an
+  // empty (global) context.
+  return async function context(caller: ManualCaller): Promise<ToolManualContext> {
+    const userId = caller.userId;
+    if (!userId) return {};
+    let userEmail: string | undefined;
+    try {
+      userEmail = resolveUserEmail ? await resolveUserEmail(userId) : undefined;
+    } catch {
+      userEmail = undefined;
+    }
+    // Everything adds nothing to the context, so its providers are asked
+    // exactly what they were asked before connections could be narrowed.
+    const agentPath = caller.agentPath;
+    const connectionScope = agentPath ? await resolveConnectionScope(agentScope, userEmail, agentPath) : undefined;
+    return {
+      userId,
+      ...(userEmail !== undefined ? { userEmail } : {}),
+      ...(connectionScope ? { connectionScope } : {}),
+    };
+  };
+}
+
+/**
+ * Reads one caller's external manual: the platform's own tools as
+ * `GET /agent/utcp` serves them. The ONE place it is built: the route below
+ * answers with it, and the hosted MCP endpoint calls it directly
+ * (`McpProxyOptions.readPlatformManual`) when it discovers the platform's
+ * tools for a caller's surface.
+ *
+ * Called directly, and not over HTTP, for the reason the catalog revision is
+ * (`core/catalog-revision.ts`): the endpoint and this code are one process, and
+ * a request the server sends itself waits on the event loop it is already
+ * running on, behind a limit of its own.
+ */
+export function createExternalManualReader(
+  registry: IToolRegistry,
+  resolveUserEmail?: ResolveUserEmail,
+  readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
+  agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
+): (caller: ManualCaller) => Promise<ReturnType<typeof toManual>> {
+  const context = contextBuilder(resolveUserEmail, agentScope);
+  return async (caller) => {
+    const ctx = await context(caller);
+    const tools = await registry.listExternal(ctx);
+    // A connection made as an agent configuration is offered only the platform
+    // tools that file loads; a call to another is refused at its route.
+    const scope = ctx.connectionScope;
+    const offered = scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools;
+    return toManual(readOnlyHints ? readOnlyHints.apply(offered) : offered);
+  };
+}
+
 export function createManualRoutes(
   registry: IToolRegistry,
   manualAuth: RequestHandler,
@@ -72,37 +135,14 @@ export function createManualRoutes(
 ): express.Router {
   const router = express.Router();
 
-  // Build the per-caller context once per request: resolve the caller's email
-  // so a `ToolProvider` (e.g. the skill tools) can tailor its def to who's
-  // asking. Best-effort — a failure just yields an empty (global) context.
-  async function context(req: Request): Promise<ToolManualContext> {
-    const userId = req.toolAuth?.userId;
-    if (!userId) return {};
-    let userEmail: string | undefined;
-    try {
-      userEmail = resolveUserEmail ? await resolveUserEmail(userId) : undefined;
-    } catch {
-      userEmail = undefined;
-    }
-    // Everything adds nothing to the context, so its providers are asked
-    // exactly what they were asked before connections could be narrowed.
-    const agentPath = req.toolAuth?.agentPath;
-    const connectionScope = agentPath ? await resolveConnectionScope(agentScope, userEmail, agentPath) : undefined;
-    return {
-      userId,
-      ...(userEmail !== undefined ? { userEmail } : {}),
-      ...(connectionScope ? { connectionScope } : {}),
-    };
-  }
+  // The per-caller context, built once per request.
+  const contextOf = contextBuilder(resolveUserEmail, agentScope);
+  const context = (req: Request): Promise<ToolManualContext> =>
+    contextOf({ userId: req.toolAuth?.userId, agentPath: req.toolAuth?.agentPath });
+  const readExternalManual = createExternalManualReader(registry, resolveUserEmail, readOnlyHints, agentScope);
 
   router.get('/agent/utcp', manualAuth, async (req, res) => {
-    const ctx = await context(req);
-    const tools = await registry.listExternal(ctx);
-    // A connection made as an agent configuration is offered only the platform
-    // tools that file loads; a call to another is refused at its route.
-    const scope = ctx.connectionScope;
-    const offered = scope ? tools.filter((t) => scope.allowsPlatformTool(t.name)) : tools;
-    res.json(toManual(readOnlyHints ? readOnlyHints.apply(offered) : offered));
+    res.json(await readExternalManual({ userId: req.toolAuth?.userId, agentPath: req.toolAuth?.agentPath }));
   });
   router.get('/agent/internal/utcp', manualAuth, requireInternalSource, async (req, res) => {
     const internal = await registry.listInternal(await context(req));

@@ -20,6 +20,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import '@utcp/http'; // side effect: registers the 'http' UTCP communication protocol
 import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (native MCP-server `.tool` sources)
+import { registerCallable } from '@utcp/direct-call'; // and registers the 'direct-call' protocol
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   UtcpClientConfigSerializer,
   CallTemplateSerializer,
@@ -196,6 +198,28 @@ export interface McpProxyOptions {
     opts: { remoteOnly: boolean },
   ) => Promise<{ manuals: readonly unknown[]; connection?: ConnectionScopeWire }>;
   /**
+   * Reads a caller's platform manual in process: the platform's own tools as
+   * `GET /api/agent/utcp` serves them (`createExternalManualReader` in
+   * `modules/tool-registry`), called as a function. Over loopback this was the
+   * discovery request behind `Bevel tool discovery failed: timeout of 10000ms
+   * exceeded`: a request the server sent itself, which a busy server failed.
+   *
+   * Handed the bearer the discovery request carried, and resolves it as the
+   * route's auth did; a bearer refused by then is refused here, by throwing.
+   *
+   * Absent, the platform manual is discovered over loopback as before.
+   */
+  readPlatformManual?: (bearer: string) => Promise<unknown>;
+  /**
+   * Reads the tools an inline `.tool` embeds, in process: what
+   * `GET /api/tools/:slug/manual` serves (`createInlineManualReader` in
+   * `modules/tool-manuals`), for the same reason and with the same bearer as
+   * {@link McpProxyOptions.readPlatformManual}. Throws where the route refuses.
+   *
+   * Absent, an inline manual is discovered over loopback as before.
+   */
+  readInlineManual?: (bearer: string, slug: string) => Promise<unknown>;
+  /**
    * How long a read this service makes in process may take: a limit a held
    * event loop cannot use up (`shared/loop-time-limit.ts`); default
    * {@link IN_PROCESS_READ_LIMIT_MS}. A read that passes it is given up on, as
@@ -293,6 +317,33 @@ const IN_PROCESS_READ_LIMIT_MS = 15_000;
 export const MCP_LOOPBACK_TOKEN_TTL_MS = 5 * 60 * 60 * 1000;
 
 const callTemplateSerializer = new CallTemplateSerializer();
+
+/**
+ * A manual this process has already read, on its way into a tool client.
+ *
+ * A client learns a manual's tools by asking the manual's communication
+ * protocol to discover them. For a platform-hosted manual that was an HTTP
+ * request to this server. Read in process, the manual is in hand before the
+ * client is asked to register it, and the `direct-call` protocol discovers it
+ * by calling ONE function, registered once for the process, which answers the
+ * manual the current registration carries here.
+ *
+ * Carried in the async context of that one registration, so concurrent
+ * registrations (every manual of a surface registers at once, and so do the
+ * surfaces of different people) each discover their own.
+ */
+const manualInHand = new AsyncLocalStorage<{ manual: unknown }>();
+const MANUAL_IN_HAND_CALLABLE = 'hexis.manual-in-hand';
+registerCallable(MANUAL_IN_HAND_CALLABLE, () => {
+  const carried = manualInHand.getStore();
+  if (!carried) throw new Error('no manual was read for this registration');
+  return carried.manual;
+});
+
+/** `${API_URL}/api/agent/utcp`: where the platform manual is discovered over HTTP. */
+const PLATFORM_MANUAL_URL = '${API_URL}/api/agent/utcp';
+/** `${API_URL}/api/tools/<slug>/manual`: where an inline `.tool`'s manual is discovered over HTTP. */
+const INLINE_MANUAL_URL = /^\$\{API_URL\}\/api\/tools\/([^/?#]+)\/manual$/;
 
 /** What one request's tool calls run against: its UTCP client and the flattened catalog. */
 interface RequestSurface {
@@ -1561,7 +1612,7 @@ export class McpService {
                 }
               : m.call_template_type === 'mcp'
                 ? await this.attachDownstream(client, m, userId, routes)
-                : await registerManual(client, m);
+                : await this.registerHostedOrRemote(client, m);
           if (!result.ok) {
             if (isKb) return { isKb, ok: false as const, error: result.error };
             // A failure the manual may recover from on its own schedule (a
@@ -1588,6 +1639,73 @@ export class McpService {
     const flattened = utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
     const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId, loadId);
     return { tools, unavailable, catalogNames, hidden, degraded };
+  }
+
+  /**
+   * Register one `http` manual: read in process when it is one this server
+   * hosts and the composition offers its reader, discovered over HTTP
+   * otherwise (a third-party `.tool`, or a composition with no reader).
+   */
+  private registerHostedOrRemote(
+    client: CodeModeUtcpClient,
+    m: CallTemplate,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const url = (m as { url?: unknown }).url;
+    const hosted = m.call_template_type === 'http' && typeof url === 'string';
+    const bearer = currentRequest()?.loopbackBearer;
+    if (hosted && bearer !== undefined) {
+      const readPlatform = this.opts.readPlatformManual;
+      if (readPlatform && m.name === EXTERNAL_KB_MANUAL_NAME && url === PLATFORM_MANUAL_URL) {
+        return this.registerInHand(client, m, () => readPlatform(bearer));
+      }
+      const readInline = this.opts.readInlineManual;
+      const slug = INLINE_MANUAL_URL.exec(url)?.[1];
+      if (readInline && slug !== undefined) {
+        return this.registerInHand(client, m, () => readInline(bearer, decodeURIComponent(slug)));
+      }
+    }
+    return registerManual(client, m);
+  }
+
+  /**
+   * Register a manual this server hosts from what `read` answers, with no
+   * request to the server: read it first, then hand it to the client through
+   * the `direct-call` protocol ({@link manualInHand}).
+   *
+   * The client keeps the tools the manual's own protocol allows, exactly as it
+   * did when it discovered the manual over that protocol. `m` itself is not
+   * registered and not changed: the template the client stores is put back to
+   * `m` once the surface is built (`SharedDefinitions.share`), so calls are
+   * judged against the manual as the catalog declares it.
+   *
+   * A read that fails or is refused is a registration that failed, worded as
+   * the HTTP discovery worded it. The read is held to the limit every read in
+   * process is, and its answer is passed through JSON as the route's was.
+   */
+  private async registerInHand(
+    client: CodeModeUtcpClient,
+    m: CallTemplate,
+    read: () => Promise<unknown>,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const name = String(m.name);
+    let manual: unknown;
+    try {
+      manual = JSON.parse(JSON.stringify((await this.inProcess(read())) ?? null)) as unknown;
+    } catch (err) {
+      const status = (err as { status?: unknown } | null)?.status;
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        error: `${typeof status === 'number' ? `HTTP ${status} ` : ''}discovering tools from '${name}': ${message}`,
+      };
+    }
+    const inHand = callTemplateSerializer.validateDict({
+      name,
+      call_template_type: 'direct-call',
+      callable_name: MANUAL_IN_HAND_CALLABLE,
+      allowed_communication_protocols: [m.call_template_type],
+    });
+    return manualInHand.run({ manual }, () => registerManual(client, inHand));
   }
 
   /**

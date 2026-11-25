@@ -102,7 +102,8 @@ import { ToolManualService } from '../modules/tool-manuals/tool-manuals.service.
 import { PendingToolsService } from '../modules/tool-manuals/pending-tools.service.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
-import { createManualListReader, type ManualListReader } from '../modules/tool-manuals/index.js';
+import { createInlineManualReader, createManualListReader, type ManualListReader } from '../modules/tool-manuals/index.js';
+import { createExternalManualReader } from '../modules/tool-registry/index.js';
 import {
   PluginIndexService,
   pluginFolderBelowRoot,
@@ -1561,6 +1562,16 @@ export async function createCoreServices(
         const caller = await resolveToolCaller(bearer);
         return readManualList({ userId: caller.userId, agentPath: caller.agentPath }, opts);
       },
+      // The tools of the manuals this server hosts, discovered the same way:
+      // the platform's own, and each inline `.tool`'s.
+      readPlatformManual: async (bearer) => {
+        const caller = await resolveToolCaller(bearer);
+        return readExternalManual({ userId: caller.userId, agentPath: caller.agentPath });
+      },
+      readInlineManual: async (bearer, slug) => {
+        const caller = await resolveToolCaller(bearer);
+        return readInlineManual({ userId: caller.userId, agentPath: caller.agentPath }, slug);
+      },
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1632,6 +1643,19 @@ export async function createCoreServices(
   // What MCP clients are told about each platform tool's effect: its write
   // declaration, or an admin's override from the Tools page.
   const readOnlyHints = new ToolReadOnlyHints(toolRegistry, settings);
+  // The two manuals this server hosts, as their routes serve them, for the MCP
+  // endpoint to read as functions (see `readPlatformManual` above).
+  const readExternalManual = createExternalManualReader(
+    toolRegistry,
+    async (userId) => (await authService.getUserById(userId))?.email,
+    readOnlyHints,
+    agentScopeService,
+  );
+  const readInlineManual = createInlineManualReader({
+    toolManuals: toolManualService,
+    resolveUserEmail: async (userId) => (await authService.getUserById(userId))?.email,
+    agentScope: agentScopeService,
+  });
   const resolveToolContext = createToolContextResolver({
     authService,
     workspaceService,

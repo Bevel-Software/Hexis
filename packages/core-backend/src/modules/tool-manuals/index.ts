@@ -5,9 +5,12 @@ export type { ToolManualService } from './tool-manuals.service.js';
 export type { PendingToolsService } from './pending-tools.service.js';
 export { registerToolManualsTools } from './tool-manuals.tools.js';
 export {
+  createInlineManualReader,
   createManualListReader,
+  InlineManualRefusedError,
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
+  type InlineManualReader,
   type ManualListAnswer,
   type ManualListCaller,
   type ManualListReader,

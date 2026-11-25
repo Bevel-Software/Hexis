@@ -14,6 +14,7 @@ import { promptsForSkills, skillPromptText, type LoadedSkill, type SkillSummary 
 import { createCoreServices, createCoreServer, stopCore, defaultKbTemplateDir, defaultStarterPacksDir, type TenantConfig } from '../../../index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, scratchDatabaseUrl, dropScratchDatabases } from '../../../__tests__/pg-scratch.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
+import { ConnectionScope, type IAgentScopeResolver } from '../../agent-scope/index.js';
 
 /**
  * A client of the public server composition, over real Streamable HTTP and a
@@ -28,7 +29,18 @@ afterEach(async () => {
 }, PG_TEST_TIMEOUT);
 afterAll(dropScratchDatabases, PG_TEST_TIMEOUT);
 
-async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}) {
+interface PlatformOptions {
+  downstream?: FakeDownstreamMcpServer;
+  inlineTool?: boolean;
+  /**
+   * Hold the event loop for this long, once, at the moment the platform's
+   * tools are first being listed for a manual: a busy server, at the point
+   * where a surface build waits on it.
+   */
+  holdLoopDuringDiscoveryMs?: number;
+}
+
+async function startPlatform(opts: PlatformOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), 'hosted-mcp-hints-'));
   stops.push(() => rm(root, { recursive: true, force: true }));
   const repository = join(root, 'repository');
@@ -44,10 +56,16 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}
     );
     if (open) await writeFile(join(repository, 'Skills', name, 'access.md'), '---\nowner:\n  - Admin\n---\nread:\n  - everyone\n');
   }
+  // An inline `.tool`: a manual this server hosts, whose one tool calls another
+  // service. Only an admin reads it (read is default-deny).
+  if (opts.inlineTool) {
+    await mkdir(join(repository, 'Plugins', 'Acme'), { recursive: true });
+    await writeFile(join(repository, 'Plugins', 'Acme', 'acme.tool'), INLINE_TOOL);
+  }
   // Requests the server receives on the routes the endpoint used to ask itself
   // for; each still answers as the production composition does. And the times
   // the manual catalog was asked for a caller's manuals, with what it was asked.
-  const hits = { manualListRoute: 0, revisionRoute: 0, skillRoutes: 0 };
+  const hits = { manualListRoute: 0, revisionRoute: 0, skillRoutes: 0, platformManualRoute: 0, inlineManualRoute: 0 };
   const manualLists: Array<{ email: string; remoteOnly: boolean; narrowed: boolean }> = [];
   const git = (args: string[]) => promisify(execFile)('git', args, { cwd: repository });
   await git(['init', '-q', '-b', 'main']);
@@ -78,8 +96,23 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}
     publicBackendUrl: baseUrl, publicFrontendUrl: baseUrl, configuredPublicFrontendUrl: baseUrl,
     settingsEnv: { KB_REPO_URL: repository, DEFAULT_BRANCH: 'main', PROTECTED_BRANCHES: 'main' },
   };
-  const core = await createCoreServices(config, { mirrorSharedBindings: false });
+  const core = await createCoreServices(config, { mirrorSharedBindings: false, agentScope: () => agentConfigurations });
   stops.push(() => stopCore(core));
+  if (opts.holdLoopDuringDiscoveryMs) {
+    const registry = core.toolRegistry;
+    const listExternal = registry.listExternal.bind(registry);
+    let held = false;
+    registry.listExternal = (ctx) => {
+      if (!held) {
+        held = true;
+        const until = performance.now() + opts.holdLoopDuringDiscoveryMs!;
+        while (performance.now() < until) {
+          /* busy */
+        }
+      }
+      return listExternal(ctx);
+    };
+  }
   // The manual catalog, watched: every caller's manual list is read from it,
   // by the route and by the endpoint alike, and a surface build reads it once.
   // A test's plugin MCP server is appended here, where a `.tool` would be: a
@@ -106,6 +139,8 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}
       app.get('/api/agent/catalog-revision', counted('revisionRoute'));
       app.post('/api/agent/tools/list_skills', counted('skillRoutes'));
       app.post('/api/agent/tools/get_skill', counted('skillRoutes'));
+      app.get('/api/agent/utcp', counted('platformManualRoute'));
+      app.get('/api/tools/:slug/manual', counted('inlineManualRoute'));
     },
   }, { boot: false });
   server.on('request', app);
@@ -126,12 +161,56 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}
   return { baseUrl, key, setHint, core, userId: user.id, hits, manualLists };
 }
 
+/** An inline `.tool` with one tool that calls another service. Nothing here calls it. */
+const INLINE_TOOL = `---
+name: acme
+type: inline
+description: The acme service.
+tools:
+  - name: ping
+    description: Ping the acme service.
+    inputs:
+      type: object
+      properties: {}
+    outputs:
+      type: object
+      properties: {}
+    tool_call_template:
+      call_template_type: http
+      http_method: GET
+      url: https://api.acme.example/ping
+---
+`;
+
 /** The two skills of the test knowledge base: one everyone reads, one only an admin does. */
 const OPEN_SKILL = 'open-skill';
 const ADMIN_SKILL = 'admin-skill';
 
-/** A path a key is recorded with. No file is there: core reads none (see the last test). */
+/** A path a key is recorded with. No configuration is there, so the connection loads nothing. */
 const AGENT_PATH = 'Agents/narrow.agent';
+
+/** A configuration that IS there: it loads two platform tools and one skill. */
+const READER_AGENT = 'Agents/reader.agent';
+const READER_TOOLS = ['list_skills', 'read_file'];
+
+/**
+ * The distribution's part: open core owns no agent configurations, a
+ * distribution supplies them (`CorePorts.agentScope`). This one knows
+ * {@link READER_AGENT} and nothing else.
+ */
+const agentConfigurations: IAgentScopeResolver = {
+  async resolve(_userEmail, agentPath) {
+    if (!agentPath) return ConnectionScope.everything();
+    if (agentPath !== READER_AGENT) return ConnectionScope.gone(agentPath);
+    return ConnectionScope.narrowed(
+      { path: READER_AGENT, name: 'reader' },
+      { skills: [`Skills/${OPEN_SKILL}`], connectors: [], platformTools: READER_TOOLS },
+      'reader-agent-v1',
+    );
+  },
+  listChoices: async () => [],
+  choosable: async () => null,
+};
 
 const revisionOverHttp = async (baseUrl: string, key: string) =>
   (await (await fetch(`${baseUrl}/api/agent/catalog-revision`, { headers: { Authorization: `Bearer ${key}` } })).json()) as {
@@ -309,7 +388,7 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the manual list an
     expect(prompts.map((p) => p.name)).toEqual(expect.arrayContaining([OPEN_SKILL, ADMIN_SKILL]));
     const prompt = await client.getPrompt({ name: OPEN_SKILL });
     expect(JSON.stringify(prompt.messages)).toContain(`Follow the ${OPEN_SKILL} steps.`);
-    expect(hits).toEqual({ manualListRoute: 0, revisionRoute: 0, skillRoutes: 0 });
+    expect(hits).toEqual({ manualListRoute: 0, revisionRoute: 0, skillRoutes: 0, platformManualRoute: 0, inlineManualRoute: 0 });
   });
 
   it('lists each caller the prompts the skill route lists them: an admin, a person in no role, and a key made as an agent', async () => {
@@ -426,4 +505,114 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the manual list an
     // All of it without a request to the list or skill routes.
     expect(hits).toEqual(routeHits);
   });
+});
+
+/**
+ * The same composition, for the last thing the endpoint asked its own server
+ * while building a surface: the tools of each manual this server hosts. The
+ * platform's own manual and an inline `.tool`'s were discovered with a
+ * request to `/api/agent/utcp` and `/api/tools/:slug/manual`. They are now
+ * read by the code those routes answer with and handed to the tool client.
+ */
+describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint discovers the tools it hosts in process', () => {
+  const toolNamesOverHttp = async (baseUrl: string, key: string) => {
+    const res = await fetch(`${baseUrl}/api/agent/utcp`, { headers: { Authorization: `Bearer ${key}` } });
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { tools: { name: string }[] }).tools.map((t) => t.name).sort();
+  };
+
+  it('lists and calls the platform tools with no discovery request to its own server', async () => {
+    const { baseUrl, key, hits } = await startPlatform();
+    const client = await connect(baseUrl, key);
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(['read_file', 'write_file', 'list_skills', 'call_tool_chain']));
+
+    // A discovered tool is callable: its own template still names its route.
+    const read = await client.callTool({ name: 'read_file', arguments: { body: { branch: 'main', path: 'access.md' } } });
+    expect(read.isError).not.toBe(true);
+    expect(JSON.stringify(read.content)).toContain('Frontmatter governs THIS FILE');
+    // And inside a chain, which calls through the same client.
+    const chained = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: "const f = await KNOWLEDGE_BASE.read_file({ body: { branch: 'main', path: 'access.md' } }); return f.path;" },
+    });
+    expect(chained.isError).not.toBe(true);
+    expect(JSON.stringify(chained.content)).toContain('knowledge-base/access.md');
+
+    expect(hits).toEqual({ manualListRoute: 0, revisionRoute: 0, skillRoutes: 0, platformManualRoute: 0, inlineManualRoute: 0 });
+  });
+
+  it('lists each caller the platform tools the manual route lists them: an admin, a person in no role, and a key made as an agent', async () => {
+    const { baseUrl, key: adminKey, core, userId } = await startPlatform();
+    const member = await core.authService.getOrCreateByEmail('member@example.com');
+    const { plaintext: memberKey } = await core.externalApiKeyService.mint(member!.id, 'member');
+    const { plaintext: agentKey } = await core.externalApiKeyService.mint(userId, 'as-an-agent', { agentPath: AGENT_PATH });
+    const { plaintext: readerKey } = await core.externalApiKeyService.mint(userId, 'as-the-reader', { agentPath: READER_AGENT });
+    const META_TOOLS = ['call_tool_chain', 'list_tools', 'tools_info'];
+    for (const [who, key] of [['admin', adminKey], ['member', memberKey], ['gone agent', agentKey], ['reader agent', readerKey]] as const) {
+      const overHttp = await toolNamesOverHttp(baseUrl, key);
+      const listed = (await (await connect(baseUrl, key)).listTools()).tools.map((t) => t.name);
+      // The platform tools on the surface are the ones the route lists, by the
+      // same names. The rest are the endpoint's own meta-tools.
+      expect(listed.filter((n) => !META_TOOLS.includes(n)).sort(), who).toEqual(overHttp);
+    }
+    // And the four callers were four different answers, not one answer four times.
+    expect(await toolNamesOverHttp(baseUrl, agentKey)).toEqual([]);
+    expect(await toolNamesOverHttp(baseUrl, readerKey)).toEqual(READER_TOOLS);
+    expect((await toolNamesOverHttp(baseUrl, adminKey)).length).toBeGreaterThan(30);
+  });
+
+  it('lists a narrowed connection the prompts of the skills its agent loads, as the skill route lists them', async () => {
+    const { baseUrl, core, userId } = await startPlatform();
+    const { plaintext: readerKey } = await core.externalApiKeyService.mint(userId, 'as-the-reader', { agentPath: READER_AGENT });
+    const answer = await fetch(`${baseUrl}/api/agent/tools/list_skills`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${readerKey}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const skills = ((await answer.json()) as { skills: SkillSummary[] }).skills;
+    expect(skills.map((s) => s.name)).toEqual([OPEN_SKILL]);
+    const client = await connect(baseUrl, readerKey);
+    expect((await client.listPrompts()).prompts).toEqual(promptsForSkills(skills, false));
+    expect(client.getInstructions()).toContain('reader');
+  });
+
+  it("discovers an inline `.tool`'s tools for the person who may read it, and not for one who may not", async () => {
+    const { baseUrl, key: adminKey, core, hits } = await startPlatform({ inlineTool: true });
+    const member = await core.authService.getOrCreateByEmail('member@example.com');
+    const { plaintext: memberKey } = await core.externalApiKeyService.mint(member!.id, 'member');
+
+    const forAdmin = (await (await connect(baseUrl, adminKey)).listTools()).tools.map((t) => t.name);
+    expect(forAdmin.filter((n) => n.includes('acme'))).toEqual(['acme_ping']);
+    const forMember = (await (await connect(baseUrl, memberKey)).listTools()).tools.map((t) => t.name);
+    expect(forMember.filter((n) => n.includes('acme'))).toEqual([]);
+    expect(forMember).toContain('read_file');
+    expect(hits.inlineManualRoute).toBe(0);
+    expect(hits.platformManualRoute).toBe(0);
+
+    // The route still serves it, to the same people.
+    const overHttp = (key: string) => fetch(`${baseUrl}/api/tools/acme/manual`, { headers: { Authorization: `Bearer ${key}` } });
+    const served = await overHttp(adminKey);
+    expect(served.status).toBe(200);
+    expect(((await served.json()) as { tools: { name: string }[] }).tools.map((t) => t.name)).toEqual(['ping']);
+    expect((await overHttp(memberKey)).status).toBe(404);
+  });
+
+  // The ticket's measure. Over loopback a surface built while the event loop
+  // was held failed on a limit of its own: the discovery request passed ten
+  // seconds and the caller was told `tool discovery failed`.
+  it(
+    'answers a tools/list sent while the event loop is held for 20 seconds, once the loop is free',
+    { timeout: 120_000 },
+    async () => {
+      // The loop is held at the moment the surface build is waiting for the
+      // platform's tools: a cold build, nothing cached, and a busy server.
+      const { baseUrl, key } = await startPlatform({ holdLoopDuringDiscoveryMs: 20_000 });
+      const client = await connect(baseUrl, key);
+      const started = performance.now();
+      const names = (await client.listTools()).tools.map((t) => t.name);
+      expect(performance.now() - started).toBeGreaterThanOrEqual(20_000);
+      expect(names).toEqual(expect.arrayContaining(['read_file', 'call_tool_chain']));
+    },
+  );
 });
