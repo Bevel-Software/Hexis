@@ -32,21 +32,31 @@ const apiMocks = vi.hoisted(() => {
   };
 });
 vi.mock('../../services/workspace.api', () => apiMocks);
-vi.mock('../../../access/api', () => ({
+// Mocked at the modules' entries, which is where the hook imports them from.
+vi.mock('../../../access', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../access')>()),
   fetchFileAccess: vi.fn(),
   fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
 }));
+/** The bus `useEventBus` answers while a test runs: each mount puts its own here. */
+const busRef = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock('../../../version-control', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../version-control')>()),
+  useEventBus: () => busRef.current,
+}));
 
 import { ConfirmProvider } from '../../../../shared/components';
-import { EventBusContext, type EventBusContextValue } from '../../../version-control/state/event-bus.context';
+import type { useEventBus } from '../../../version-control';
 import { useWorkspaceState } from '../useWorkspaceState';
 
 const TREE = { name: '.', relativePath: '.', type: 'directory' as const, children: [] };
 const WORKSPACE = { workspace: { id: 'ws-1', name: 'Workspace', absolutePath: '/tmp/ws-1', createdAt: '2026-04-20T00:00:00.000Z' }, fileTree: TREE };
 
+type EventBus = NonNullable<ReturnType<typeof useEventBus>>;
+
 function makeFakeBus() {
   const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: object): void } = {
+  const bus: EventBus & { emit(e: object): void } = {
     subscribe(kind, handler) {
       (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
@@ -68,12 +78,9 @@ const tree = (more: object = {}) => ({ kind: 'fs-tree-changed', workspaceId: 'ws
 
 async function mount() {
   const bus = makeFakeBus();
+  busRef.current = bus;
   const { result, unmount } = renderHook(() => useWorkspaceState(), {
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <EventBusContext.Provider value={bus}>
-        <ConfirmProvider>{children}</ConfirmProvider>
-      </EventBusContext.Provider>
-    ),
+    wrapper: ({ children }: { children: ReactNode }) => <ConfirmProvider>{children}</ConfirmProvider>,
   });
   await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
   apiMocks.listFiles.mockClear();

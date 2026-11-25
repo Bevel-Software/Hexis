@@ -1,12 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import type { NodeFs } from '../../kb-fs/node-fs.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
-import type { TreeWalkOptions, WalkListener, WalkResult } from '../../../shared/fs.contract.js';
+import type { ITreeWalker, TreeWalkOptions, WalkListener, WalkResult } from '../../../shared/fs.contract.js';
 import { WorkspaceService, type ReadTreeFilter } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
@@ -28,7 +27,7 @@ const KB = 'knowledge-base';
  * The real disk (from the fixture that stands in for the composition root),
  * recording which folders a walk listed, workspace-relative.
  */
-function countingDisk(base: () => string): NodeFs & { listed: string[] } {
+function countingDisk(base: () => string): ITreeWalker & { listed: string[] } {
   const disk = Object.assign(realDisk(), { listed: [] as string[] });
   const walk = disk.walk.bind(disk);
   disk.walk = (root: string, options: TreeWalkOptions, listeners: readonly WalkListener[]): Promise<WalkResult> => {

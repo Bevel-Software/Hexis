@@ -2,12 +2,13 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middleware.js';
-import { createToolContextResolver } from '../../../tool-helpers/tool-context.js';
-import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
-import { createManualRoutes } from '../../../tool-registry/manual.routes.js';
+import { ToolRegistry, createManualRoutes } from '../../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  createToolAuthMiddleware,
+  createToolContextResolver,
+  createToolHandlerFactory,
+} from '../../../../__tests__/tool-wiring.js';
 import { ToolError } from '../../../tool-helpers/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../../../workspace/index.js';
