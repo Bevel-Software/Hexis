@@ -4037,6 +4037,19 @@ export function registerWorkspaceTools(
       // taken again when `retake` asks (so its file still commits); one held
       // by anyone else is left alone.
       const acquisitions = new Map<string, string>();
+      // A refusal the lock's own gates word for the caller (write access, the
+      // change gate) carries its status and is their answer. Any other
+      // failure to take a lock is infrastructure: its cause is logged here,
+      // and the entry is skipped with text that names none.
+      const acquire = async (file: string) => {
+        try {
+          return await vcs.acquireLock(workspaceId, branch, file, ctx.user);
+        } catch (err) {
+          if (hasHttpStatus(err)) throw err;
+          log.warn(`unzip: locking ${printable(file)} on ${printable(branch)} failed: ${printable(err instanceof Error ? err.message : String(err))}`);
+          throw new ToolError('This file could not be locked for writing, so it was not extracted.', 503);
+        }
+      };
       type Hold = { held: true } | { held: false; holderName?: string };
       const holdOwn = async (file: string, retake: boolean): Promise<Hold> => {
         const renewed = await vcs.heartbeatLock(workspaceId, branch, file, ctx.user).catch(() => null);
@@ -4044,7 +4057,7 @@ export function registerWorkspaceTools(
           return renewed.acquiredAt === acquisitions.get(file) ? { held: true } : { held: false, holderName: renewed.holderName };
         }
         if (!retake) return { held: false };
-        const again = await vcs.acquireLock(workspaceId, branch, file, ctx.user);
+        const again = await acquire(file);
         if (!again.acquired) return { held: false, holderName: again.lock.holderName };
         acquisitions.set(file, again.lock.acquiredAt);
         return { held: true };
@@ -4120,7 +4133,7 @@ export function registerWorkspaceTools(
                   written.delete(wsRelPath);
                   return;
                 }
-                const acquired = await vcs.acquireLock(workspaceId, branch, wsRelPath, ctx.user);
+                const acquired = await acquire(wsRelPath);
                 if (!acquired.acquired) throw editedBy(acquired.lock.holderName);
                 acquisitions.set(wsRelPath, acquired.lock.acquiredAt);
                 locked.push(wsRelPath);

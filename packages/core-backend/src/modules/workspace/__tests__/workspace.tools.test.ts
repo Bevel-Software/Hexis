@@ -131,6 +131,8 @@ let unzipThrowAfter: number | null = null;
  * `editor` lapsed and the person's own editor took it, under this call's own user id.
  */
 let lapsedLeases = new Map<string, 'free' | 'taken' | 'editor'>();
+/** Paths whose `acquireLock` throws this error instead of answering. */
+let failingAcquires = new Map<string, Error>();
 /** The stamp of the acquisition holding each lock now, as the real lock's `acquiredAt`. */
 let acquiredAt = new Map<string, string>();
 let acquisitionCount = 0;
@@ -294,6 +296,7 @@ async function start(
   lapsedLeases = new Map();
   acquiredAt = new Map();
   acquisitionCount = 0;
+  failingAcquires = new Map();
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -367,6 +370,8 @@ async function start(
     versionControlService: {
       acquireLock: async (_ws: string, _branch: string, file: string) => {
         lockCalls.push(`acquire ${file}`);
+        const failure = failingAcquires.get(file);
+        if (failure) throw failure;
         if (lockedByOthers.has(file)) return { acquired: false, lock: { holderName: 'Ana' } };
         if (heldLocks.has(file)) return { acquired: false, lock: { holderName: 'N' } };
         heldLocks.add(file);
@@ -5483,6 +5488,26 @@ describe('agent read/write hooks', () => {
       `release ${KB_DIR}/out/one.md`,
       `hand back untouched ${KB_DIR}/out/one.md`,
     ]);
+  });
+
+  it('unzip skips an entry it could not lock with text that names no infrastructure, and keeps a gate\'s own refusal', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/infra.md`, `${KB_DIR}/out/refused.md`, `${KB_DIR}/out/ok.md`];
+    failingAcquires = new Map<string, Error>([
+      [`${KB_DIR}/out/infra.md`, new Error('connect ECONNREFUSED db-internal:5432')],
+      // A refusal the lock's gates word for the caller carries its status, and is their answer.
+      [`${KB_DIR}/out/refused.md`, Object.assign(new Error('You cannot write to this file.'), { status: 403 })],
+    ]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/ok.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/infra.md`, reason: 'This file could not be locked for writing, so it was not extracted.' },
+      { path: `${KB_DIR}/out/refused.md`, reason: 'You cannot write to this file.' },
+    ]);
+    expect(JSON.stringify(body)).not.toContain('db-internal');
   });
 
   it('unzip commits nothing for an entry the write hook refused', async () => {
