@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { promptsForSkills, skillPromptText, type LoadedSkill, type SkillSummary } from '@bevel-software/platform-mcp-core';
 import { createCoreServices, createCoreServer, stopCore, defaultKbTemplateDir, defaultStarterPacksDir, type TenantConfig } from '../../../index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, scratchDatabaseUrl, dropScratchDatabases } from '../../../__tests__/pg-scratch.js';
@@ -387,5 +388,42 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the manual list an
     }
     // Three different callers were three different questions.
     expect(new Set(callers.map((c) => c.who)).size).toBe(3);
+  });
+
+  // Over loopback every read carried the bearer and its route verified it
+  // again. In process the read resolves the bearer itself, with the same
+  // verifier, when it reads. The request here is handed to the endpoint as its
+  // route hands it over once admitted, and the key is revoked before it runs:
+  // a request admitted a moment before its key was revoked.
+  it('reads nothing for a key revoked after its request was admitted, as the routes answer that key', async () => {
+    const { baseUrl, core, userId, hits } = await startPlatform();
+    const { plaintext: key, summary } = await core.externalApiKeyService.mint(userId, 'revoked-mid-request');
+    await core.externalApiKeyService.revoke(summary.id, userId);
+
+    expect((await post(baseUrl, key, 'list_skills', {})).status).toBe(401);
+    expect((await fetch(`${baseUrl}/api/agent/all-tools`, { headers: { Authorization: `Bearer ${key}` } })).status).toBe(401);
+    const routeHits = { ...hits };
+
+    const server = await core.mcpService.createRequestServer(
+      { userId, tokenId: summary.id, connectionId: null, bearer: key },
+      { jsonrpc: '2.0', id: 1, method: 'prompts/list', params: {} },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: 'admitted-before-the-revoke', version: '0.0.0' }, { capabilities: {} });
+    await client.connect(clientTransport);
+    stops.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    // No skill is listed or served: the platform's own prompt alone.
+    expect((await client.listPrompts()).prompts.map((p) => p.name)).toEqual(['onboard']);
+    await expect(client.getPrompt({ name: OPEN_SKILL })).rejects.toThrow(`Unknown skill "${OPEN_SKILL}".`);
+    // No manual is listed, and the platform's own tools are refused the key
+    // where they are discovered, which is the answer the request gets.
+    await expect(client.listTools()).rejects.toThrow(/tool discovery failed: HTTP 401 .*Invalid or revoked connection key/);
+    // All of it without a request to the list or skill routes.
+    expect(hits).toEqual(routeHits);
   });
 });

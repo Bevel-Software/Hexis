@@ -56,7 +56,6 @@ import {
   registerPluginsTools,
 } from '../modules/plugins/index.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
-import { externalCallerAuth } from '../modules/tool-auth/index.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -544,14 +543,16 @@ export async function createCoreServer(
     committedFiles: core.gitService,
   });
   // The hosted MCP endpoint serves skills as prompts. It reads them by calling
-  // the two reads above as functions, as the caller its request authenticated,
-  // and not by sending this server a request. Set here because the reads are
-  // made here, after the endpoint's service.
+  // the two reads above as functions, and not by sending this server a
+  // request. The bearer that request carried is resolved here, by the verifier
+  // the routes' auth runs, so each read is made for whoever the bearer names
+  // when it is made. Set here because the reads are made here, after the
+  // endpoint's service.
   const listSkillsInProcess = core.inProcessTool(skillReads.listSkills);
   const getSkillInProcess = core.inProcessTool(skillReads.getSkill);
   core.mcpService.readSkillsWith({
-    list: (caller) => listSkillsInProcess(externalCallerAuth(caller)),
-    get: (caller, name) => getSkillInProcess(externalCallerAuth(caller), { name }),
+    list: async (bearer) => listSkillsInProcess(await core.resolveToolCaller(bearer)),
+    get: async (bearer, name) => getSkillInProcess(await core.resolveToolCaller(bearer), { name }),
   });
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.

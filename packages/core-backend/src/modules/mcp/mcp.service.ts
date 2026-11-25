@@ -179,15 +179,20 @@ export interface McpProxyOptions {
   /**
    * Reads a caller's manual list in process: the same computation
    * `GET /api/agent/all-tools` answers with (`createManualListReader` in
-   * `modules/tool-manuals`), called as a function, for the same reason and
-   * the same caller as {@link McpProxyOptions.readCatalogRevision}. The list
-   * is read once for every surface build.
+   * `modules/tool-manuals`), called as a function, for the same reason as
+   * {@link McpProxyOptions.readCatalogRevision}. The list is read once for
+   * every surface build.
+   *
+   * It is handed the bearer the loopback request carried, and resolves it as
+   * the route's auth did: the list is read for whoever the bearer names when
+   * it is read, and a bearer refused by then (a key revoked, an account
+   * switched off) is refused here too, by throwing.
    *
    * Absent (a test, or a composition that serves the route elsewhere), the
    * list is read over loopback as before.
    */
   readManualList?: (
-    caller: { userId: string; agentPath: string | null },
+    bearer: string,
     opts: { remoteOnly: boolean },
   ) => Promise<{ manuals: readonly unknown[]; connection?: ConnectionScopeWire }>;
   /**
@@ -235,27 +240,23 @@ export interface McpCaller {
   page?: string | null;
 }
 
-/** Who a skill read is for: the caller the request's credential resolved to. */
-export interface McpSkillCaller {
-  userId: string;
-  /** The connection key's id, or null for a caller with no key. */
-  tokenId: string | null;
-  /** The agent configuration the credential connects as, or null for Everything. */
-  agentPath: string | null;
-}
-
 /**
  * A caller's skills, read in process: the two reads the endpoint serves
  * prompts from, called as functions with what their routes
  * (`POST /api/agent/tools/list_skills` and `get_skill`) run. Each answers what
  * its route answers a successful call, and throws where its route refuses or
  * fails.
+ *
+ * Each is handed the bearer the loopback request carried, and resolves it as
+ * the route's auth did. So a read is made for whoever the bearer names when
+ * the read is made: a key revoked or an account switched off since the request
+ * was admitted is refused the skills, as it was at the route.
  */
 export interface McpSkillReads {
   /** The caller's released skills: what `list_skills` answers a call with no arguments. */
-  list(caller: McpSkillCaller): Promise<unknown>;
+  list(bearer: string): Promise<unknown>;
   /** One released skill by name: what `get_skill` answers `{ name }`. */
-  get(caller: McpSkillCaller, name: string): Promise<unknown>;
+  get(bearer: string, name: string): Promise<unknown>;
 }
 
 /**
@@ -267,11 +268,14 @@ const LOOPBACK_TIMEOUT_MS = 15_000;
 
 /**
  * Upper bound on a read made in process (the catalog revision, the manual
- * list, a skill read), as long as the loopback request it replaces was given. The loopback's limit ran on the
- * clock, so a busy server passed it on a read that needed milliseconds. This
- * one is counted in time the event loop was free to run: a busy server does
- * not use it up, and a read that waits on something that never answers still
- * ends, so the request falls back as it did before and does not hang.
+ * list, a skill read), as long as the loopback request it replaces was given.
+ * The loopback's limit ran on the
+ * clock, so a server whose loop was held passed it on a read that needed
+ * milliseconds. This one is spent only while the event loop turns: a stretch
+ * the loop is held for spends one tick of it, however long the stretch. Under
+ * steady load that lets the loop turn it runs on the clock, and the read gets
+ * every turn the limit gets. A read that waits on something that never answers
+ * still ends, so the request falls back as it did before and does not hang.
  */
 const IN_PROCESS_READ_LIMIT_MS = 15_000;
 
@@ -651,9 +655,6 @@ export class McpService {
     // surfaces behind the loopback narrow to its scope; a connection key
     // carries its own.
     const agentPath = caller.agentPath || null;
-    // Who the skill reads are for: the caller this request resolved to, which
-    // is who the loopback bearer below resolves to as well.
-    const skillCaller: McpSkillCaller = { userId, tokenId, agentPath };
     const loopbackBearer =
       tokenId == null && this.internalTokens
         ? this.internalTokens.mint(
@@ -689,7 +690,7 @@ export class McpService {
             kbManualName: EXTERNAL_KB_MANUAL_NAME,
             catalogNames: () => catalogNamesHolder.current,
             loadSkills: () =>
-              this.skillListOf(skillCaller, loopbackBearer).then((skills) =>
+              this.skillListOf(loopbackBearer).then((skills) =>
                 skills.flatMap((s) => (s.path ? [{ name: s.name, path: s.path }] : [])),
               ),
           })
@@ -988,7 +989,7 @@ export class McpService {
     // takes its name (see `promptsForSkills`).
     const offerOnboard = agentPath === null;
     server.setRequestHandler(ListPromptsRequestSchema, async () => {
-      const skills = await this.skillListOf(skillCaller, loopbackBearer);
+      const skills = await this.skillListOf(loopbackBearer);
       const prompts: Prompt[] = promptsForSkills(skills, offerOnboard);
       return { prompts };
     });
@@ -1001,7 +1002,7 @@ export class McpService {
       // `onboard` skill is then read like any other prompt, and a read that
       // fails is a failed read, not a reason to serve the platform's text.
       if (offerOnboard && request.params.name === ONBOARD_PROMPT.name) {
-        const released = await this.skillListOf(skillCaller, loopbackBearer);
+        const released = await this.skillListOf(loopbackBearer);
         if (!released.some((s) => s.name === ONBOARD_PROMPT.name)) {
           return {
             description: ONBOARD_PROMPT.description,
@@ -1010,7 +1011,7 @@ export class McpService {
         }
       }
       const started = performance.now();
-      const skill = await this.skillOf(skillCaller, loopbackBearer, request.params.name);
+      const skill = await this.skillOf(loopbackBearer, request.params.name);
       // A prompt IS a skill read — the same event `get_skill` produces.
       audit?.emit(
         { kind: 'skill', manual: skill?.path ?? null, name: request.params.name },
@@ -1055,8 +1056,7 @@ export class McpService {
       kbManualName: EXTERNAL_KB_MANUAL_NAME,
       catalogNames: () => catalogNames,
       loadSkills: () =>
-        // The person, with no key and no agent: who the token above stands for.
-        this.skillListOf({ userId, tokenId: null, agentPath: null }, loopbackBearer).then((skills) =>
+        this.skillListOf(loopbackBearer).then((skills) =>
           skills.flatMap((s) => (s.path ? [{ name: s.name, path: s.path }] : [])),
         ),
     });
@@ -1196,7 +1196,7 @@ export class McpService {
     // The list of manuals this caller gets: the KB manual + each `.tool` they
     // can read. Read as the caller by the code the `all-tools` route answers
     // with, so ACL filtering lives ONCE, there.
-    const { manuals, connection, unread } = await this.manualTemplatesOf(caller, loopbackBearer);
+    const { manuals, connection, unread } = await this.manualTemplatesOf(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(userId, manuals);
     const discovered = await this.discoverTools(client, manuals, userId);
@@ -1244,15 +1244,15 @@ export class McpService {
   }
 
   /** The caller's default-branch skill catalog (the `list_skills` tool's answer); empty when it cannot be read. */
-  private async skillListOf(caller: McpSkillCaller, bearer: string): Promise<SkillSummary[]> {
-    const res = await this.skillRead(bearer, 'list_skills', {}, (reads) => reads.list(caller));
+  private async skillListOf(bearer: string): Promise<SkillSummary[]> {
+    const res = await this.skillRead(bearer, 'list_skills', {}, (reads) => reads.list(bearer));
     const skills = (res as { skills?: SkillSummary[] } | null)?.skills;
     return Array.isArray(skills) ? skills : [];
   }
 
   /** One skill's body (the `get_skill` tool's answer); null if unavailable. */
-  private async skillOf(caller: McpSkillCaller, bearer: string, name: string): Promise<LoadedSkill | null> {
-    const res = (await this.skillRead(bearer, 'get_skill', { name }, (reads) => reads.get(caller, name))) as
+  private async skillOf(bearer: string, name: string): Promise<LoadedSkill | null> {
+    const res = (await this.skillRead(bearer, 'get_skill', { name }, (reads) => reads.get(bearer, name))) as
       | { ok?: boolean; kind?: string; skill?: LoadedSkill }
       | null;
     if (res?.ok && res.kind === 'skill' && res.skill) return res.skill;
@@ -1341,10 +1341,7 @@ export class McpService {
    * renames each template in place, and nothing the reader handed out may
    * change under the catalog every caller is served from.
    */
-  private async manualListOf(
-    caller: Pick<McpCaller, 'userId' | 'agentPath'>,
-    bearer: string,
-  ): Promise<{ manuals?: unknown; connection?: unknown } | null> {
+  private async manualListOf(bearer: string): Promise<{ manuals?: unknown; connection?: unknown } | null> {
     // This is the REMOTE proxy, so ask for remote-capable manuals only — local-only
     // `.tool`s are surfaced instead via the `list_local_tools` tool in the KB manual.
     const read = this.opts.readManualList;
@@ -1354,12 +1351,17 @@ export class McpService {
         | null;
     }
     try {
-      const answer = await this.inProcess(
-        read({ userId: caller.userId, agentPath: caller.agentPath || null }, { remoteOnly: true }),
-      );
+      const answer = await this.inProcess(read(bearer, { remoteOnly: true }));
       return JSON.parse(JSON.stringify(answer)) as { manuals?: unknown; connection?: unknown };
     } catch (err) {
-      log.error('the manual list could not be read:', { err });
+      // A bearer refused since the request was admitted is one line, as the
+      // loopback's 401 was; anything else is a failed read, with its stack.
+      const status = (err as { status?: unknown } | null)?.status;
+      if (typeof status === 'number' && err instanceof Error) {
+        log.error(`all-tools refused: HTTP ${status} ${err.message}`);
+      } else {
+        log.error('the manual list could not be read:', { err });
+      }
       return null;
     }
   }
@@ -1373,10 +1375,9 @@ export class McpService {
    * validated again here even though the code that produced it already did.
    */
   private async manualTemplatesOf(
-    caller: Pick<McpCaller, 'userId' | 'agentPath'>,
     bearer: string,
   ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire; unread: boolean }> {
-    const body = await this.manualListOf(caller, bearer);
+    const body = await this.manualListOf(bearer);
     // No answer, or one without a list: the catalog was not read. The request
     // is still served the platform manual below, and the surface built from it
     // is marked so that it is never cached (`RequestSurface.catalogUnread`).

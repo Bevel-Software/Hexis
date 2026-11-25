@@ -8,12 +8,12 @@ The manual list has one reader, `createManualListReader` in `modules/tool-manual
 
 The skills are read by the handlers the two skill routes run. `registerSkillsTools` now returns the two reads, and `createInProcessToolCaller` in `modules/tool-helpers` calls a hosted read as a function with what its route runs once its auth has passed: the caller's context, the connection's scope, then the handler. A connection the route refuses is refused in process with the same words. `createCoreServer` hands the reads to the endpoint with `McpService.readSkillsWith`.
 
-The caller is the one the request's credential resolved to. `externalCallerAuth` in `modules/tool-auth` describes it, and a test holds it to what the tool-auth verifier resolves the old loopback bearer to.
+Each read is handed the bearer the loopback request carried, and resolves it with the verifier the routes' auth runs (`createCallerResolver` in `modules/tool-auth`) at the moment of the read. So a key revoked or an account switched off after the request was admitted is refused the read, as it was at the route.
 
-Each read in process is held to 15 seconds of event-loop time (`withinLoopTime`), the limit the catalog revision read has. A busy server does not use it up. A read that never answers ends there, and the request is then served as it was when the loopback request passed its limit: the platform tools alone, not kept, or no skills.
+Each read in process is held to 15 seconds of event-loop time (`withinLoopTime`), the limit the catalog revision read has. A stretch the event loop is held for spends one tick of it, however long. A read that never answers ends there, and the request is then served as it was when the loopback request passed its limit: the platform tools alone, not kept, or no skills.
 
 The routes are unchanged for the local server and for scripts, which still call them. A composition that does not hand the endpoint a reader keeps reading over loopback. Nothing an agent can observe changes: tool names, arguments, answers, prompts and the agent guide are the same.
 
 Tool discovery (`GET /api/agent/utcp`) and tool calls still go over loopback. Discovery is the last step of hx-tool-surface-is-built-without-a-loopback-call.
 
-A minor release, not a patch: the exported `CoreServices` gains two required members, `readManualList` and `inProcessTool`. Code that builds or mocks a `CoreServices` by hand must add them. `registerSkillsTools` now returns the two skill reads where it returned nothing, and `createToolManualsAgentRoutes` takes one more optional argument; neither breaks a caller.
+A minor release, not a patch: the exported `CoreServices` gains three required members, `readManualList`, `inProcessTool` and `resolveToolCaller`. Code that builds or mocks a `CoreServices` by hand must add them. `registerSkillsTools` now returns the two skill reads where it returned nothing, and `createToolManualsAgentRoutes` takes one more optional argument; neither breaks a caller.

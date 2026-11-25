@@ -222,30 +222,36 @@ export function createTokenVerifier(
   };
 }
 
+/** A bearer the verifier refused, with the status the routes answer it. */
+export class BearerRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'BearerRefusedError';
+  }
+}
+
 /**
- * The `ToolAuth` of an external caller this process has already
- * authenticated: what the verifier above resolves the hosted MCP endpoint's
- * loopback bearer to. That bearer is the caller's own connection key (the
- * key's user, id and agent) or an `externalProxy` token minted for the user
- * and the agent their connection was made as (no key id, no connection id).
- * Kept beside the verifier so the two stay one description of that caller.
+ * Resolves a bearer to its caller, for code in this process that calls a
+ * hosted read as a function where it used to send the bearer to the read's
+ * route: the hosted MCP endpoint's manual list and skill reads.
  *
- * For code that calls a hosted read as a function and not over loopback
- * (`createInProcessToolCaller` in `modules/tool-helpers`).
+ * It runs the verifier the routes' auth runs, at the moment of the read. So
+ * the read is made for whoever the bearer names now, and a bearer refused
+ * since the request was admitted (a key revoked, an account switched off, an
+ * agent connection revoked) is refused here as it was at the route, with the
+ * route's status and words in a {@link BearerRefusedError}. A failure of the
+ * key store is thrown on as it is.
  */
-export function externalCallerAuth(caller: {
-  userId: string;
-  /** The connection key's id, or null for a caller with no key. */
-  tokenId: string | null;
-  /** The agent configuration the credential connects as, or null for Everything. */
-  agentPath: string | null;
-}): ToolAuth {
-  return {
-    source: 'external',
-    userId: caller.userId,
-    ...(caller.tokenId ? { tokenId: caller.tokenId } : {}),
-    ...(caller.agentPath ? { agentPath: caller.agentPath } : {}),
-    scope: 'write',
+export function createCallerResolver(
+  verify: (token: string | undefined) => Promise<VerifyResult>,
+): (bearer: string) => Promise<ToolAuth> {
+  return async (bearer) => {
+    const result = await verify(bearer);
+    if (!result.ok) throw new BearerRefusedError(result.message, result.status);
+    return result.auth;
   };
 }
 

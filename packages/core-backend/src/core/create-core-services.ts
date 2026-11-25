@@ -170,6 +170,7 @@ import {
 } from '../modules/tool-auth/internal-token.service.js';
 import {
   createToolAuthMiddleware,
+  createCallerResolver,
   createTokenVerifier,
   createManualAuthMiddleware,
 } from '../modules/tool-auth/tool-auth.middleware.js';
@@ -462,6 +463,12 @@ export interface CoreServices {
    * skills behind its prompts through it.
    */
   inProcessTool: ReturnType<typeof createInProcessToolCaller>;
+  /**
+   * Resolves a bearer to its caller with the verifier the tool routes' auth
+   * runs, or throws the refusal. For a read this process makes as a function
+   * where it used to send the bearer to a route.
+   */
+  resolveToolCaller: ReturnType<typeof createCallerResolver>;
   /** Whether the deployment may be changed right now — `ports.writeAccess`, or always. */
   writeAccess: IWriteAccess;
   // ── Server-time seams (enterprise overwrites after construction) ────────
@@ -1547,8 +1554,13 @@ export async function createCoreServices(
       readFileBody: async (userId, ref) => fileBodies.read(await authService.getUserById(userId), ref),
       // Asked on every request, so answered in process and not over loopback.
       readCatalogRevision,
-      // Read for every surface build, in process for the same reason.
-      readManualList,
+      // Read for every surface build, in process for the same reason. The
+      // bearer is resolved as the route's auth resolves it, when the list is
+      // read. (`resolveToolCaller` is made further down; this runs per request.)
+      readManualList: async (bearer, opts) => {
+        const caller = await resolveToolCaller(bearer);
+        return readManualList({ userId: caller.userId, agentPath: caller.agentPath }, opts);
+      },
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1643,6 +1655,8 @@ export async function createCoreServices(
   const inProcessTool = createInProcessToolCaller(resolveToolContext);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  // The same verifier, for a read this process makes as a function.
+  const resolveToolCaller = createCallerResolver(verifyToolToken);
   // Every credential kind this server issues — connection keys, internal
   // tokens and app sessions (bearer or cookie) — so a fetch carrying another
   // user's identity of ANY kind is refused the link.
@@ -1890,6 +1904,7 @@ export async function createCoreServices(
     manualAuthMiddleware,
     toolHandlerFactory,
     inProcessTool,
+    resolveToolCaller,
     writeAccess,
     // Server-time seams — defaults here; the enterprise overlay overwrites
     // (or, for the array, pushes into) these after construction.

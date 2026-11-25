@@ -6,11 +6,12 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CallTemplate } from '@utcp/sdk';
-import { McpService, type McpCaller, type McpSkillCaller } from '../mcp.service.js';
+import { McpService, type McpCaller } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/index.js';
 import { createManualRoutes, ToolRegistry } from '../../tool-registry/index.js';
 import { toolDef, ToolError } from '../../tool-helpers/index.js';
 import type { AgentEventInput } from '../../audit/index.js';
+import { BearerRefusedError } from '../../tool-auth/index.js';
 
 /**
  * The hosted MCP endpoint reads a caller's manual list and their skills by
@@ -22,7 +23,14 @@ import type { AgentEventInput } from '../../audit/index.js';
  * discovery and tool calls still use. It serves NO manual list and NO skill
  * route, and counts every request it gets for one: a read that went over
  * loopback would find nothing there, and would be counted.
+ *
+ * Each read is handed the bearer the loopback request carried: the caller's
+ * own connection key, or for a caller with no key the token the endpoint mints
+ * for them. The token here spells its claim, so a test can read who it is for.
  */
+
+/** The token the endpoint mints for a caller with no key, as this file's stand-in mints it. */
+const mintedFor = (claim: Record<string, unknown>) => `minted:${JSON.stringify(claim)}`;
 
 let httpServer: HttpServer | undefined;
 const cleanups: Array<() => Promise<void>> = [];
@@ -37,9 +45,10 @@ afterEach(async () => {
 interface HarnessOptions {
   /**
    * `'throws'`: the manual list reader fails. `'stalls'`: it never answers.
+   * `'refuses'`: it refuses the bearer, as the verifier refuses a revoked key.
    * Default: it answers the harness's manuals.
    */
-  manualList?: 'throws' | 'stalls';
+  manualList?: 'throws' | 'stalls' | 'refuses';
   /** The limit on an in-process read, in event-loop time. Absent, the service's own. */
   inProcessReadLimitMs?: number;
   /** Records the Audit log's events. */
@@ -63,10 +72,10 @@ async function harness(opts: HarnessOptions = {}) {
     /** What the manual list reader answers beside the platform manual. Handed out as it is, not copied. */
     manuals: [] as CallTemplate[],
     /** Every call the manual list reader answered. */
-    manualListReads: [] as { userId: string; agentPath: string | null; remoteOnly: boolean }[],
+    manualListReads: [] as { bearer: string; remoteOnly: boolean }[],
     /** Every call the skill reads answered. */
     skillReads: [] as ({ read: 'list' } | { read: 'get'; name: string })[],
-    skillCallers: [] as McpSkillCaller[],
+    skillBearers: [] as string[],
     /** What the two skill reads do. */
     listSkills: (async () => ({ skills: [] })) as () => Promise<unknown>,
     getSkill: (async () => ({ ok: false, error: 'not_found' })) as (name: string) => Promise<unknown>,
@@ -125,9 +134,10 @@ async function harness(opts: HarnessOptions = {}) {
       spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
       publicFrontendUrl: 'http://localhost:5173',
       readCatalogRevision: async () => ({ revision: 'rev-1' }),
-      readManualList: async (who, { remoteOnly }) => {
-        state.manualListReads.push({ ...who, remoteOnly });
+      readManualList: async (bearer, { remoteOnly }) => {
+        state.manualListReads.push({ bearer, remoteOnly });
         if (opts.manualList === 'throws') throw new Error('the manual catalog could not be read');
+        if (opts.manualList === 'refuses') throw new BearerRefusedError('Invalid or revoked connection key.', 401);
         if (opts.manualList === 'stalls') await new Promise<never>(() => {});
         return { manuals: [kbManual, ...state.manuals] };
       },
@@ -135,19 +145,20 @@ async function harness(opts: HarnessOptions = {}) {
     },
     undefined,
     undefined,
-    undefined,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    { mint: mintedFor } as any,
     undefined,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     opts.auditRecorder as any,
   );
   mcp.readSkillsWith({
-    list: (caller) => {
-      state.skillCallers.push(caller);
+    list: (bearer) => {
+      state.skillBearers.push(bearer);
       state.skillReads.push({ read: 'list' });
       return state.listSkills();
     },
-    get: (caller, name) => {
-      state.skillCallers.push(caller);
+    get: (bearer, name) => {
+      state.skillBearers.push(bearer);
       state.skillReads.push({ read: 'get', name });
       return state.getSkill(name);
     },
@@ -178,14 +189,14 @@ const lateManual = (base: string): CallTemplate =>
 const toolNames = async (client: Client) => (await client.listTools()).tools.map((t) => t.name);
 
 describe('McpService — the manual list is read in process', () => {
-  it('builds the surface from the reader, for the caller, and sends the server no request for the list', async () => {
+  it("builds the surface from the reader, handed the caller's key, and sends the server no request for the list", async () => {
     const { state, mcp } = await harness();
     state.manuals = [lateManual(state.base)];
 
     const names = await toolNames(await connect(mcp));
     expect(names).toContain('read_file');
     expect(names.some((n) => n.endsWith('late_arrival'))).toBe(true);
-    expect(state.manualListReads).toEqual([{ userId: 'user-A', agentPath: null, remoteOnly: true }]);
+    expect(state.manualListReads).toEqual([{ bearer: 'bevel_key_1', remoteOnly: true }]);
     expect(state.loopbackReads).toEqual([]);
   });
 
@@ -196,10 +207,27 @@ describe('McpService — the manual list is read in process', () => {
     expect(state.manualListReads).toHaveLength(1);
   });
 
-  it('reads the list for the agent a narrowed connection was made as', async () => {
+  it('hands the reader, for a caller with no key, the token minted for the person and the agent of their connection', async () => {
     const { state, mcp } = await harness();
-    await toolNames(await connect(mcp, { agentPath: 'Agents/narrow.agent' }));
-    expect(state.manualListReads).toEqual([{ userId: 'user-A', agentPath: 'Agents/narrow.agent', remoteOnly: true }]);
+    await toolNames(await connect(mcp, { tokenId: null, bearer: 'an-oauth-token', agentPath: 'Agents/narrow.agent' }));
+    expect(state.manualListReads).toEqual([
+      { bearer: mintedFor({ userId: 'user-A', externalProxy: true, agentPath: 'Agents/narrow.agent' }), remoteOnly: true },
+    ]);
+  });
+
+  // The reader resolves the bearer when it reads. A bearer refused by then (a
+  // key revoked since the request was admitted) is a list that was not read,
+  // as the loopback's 401 was: in one log line, and never kept.
+  it('serves the platform tools alone to a bearer the reader refuses, in one log line, and keeps nothing', async () => {
+    const { state, mcp } = await harness({ manualList: 'refuses' });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await toolNames(await connect(mcp))).toContain('read_file');
+    expect(await toolNames(await connect(mcp))).toContain('read_file');
+    expect(state.manualListReads).toHaveLength(2);
+    const lines = errors.mock.calls.map((c) => c.map(String).join(' '));
+    expect(lines.filter((l) => l.includes('all-tools refused: HTTP 401 Invalid or revoked connection key.'))).toHaveLength(2);
+    expect(lines.join('\n')).not.toContain('    at ');
   });
 
   // Discovery renames a manual in place to the name it registers under. What
@@ -269,25 +297,40 @@ describe('McpService — the skills behind the prompts are read in process', () 
   const rfi = { name: 'rfi', description: 'Answer a request for information.', path: 'Skills/rfi' };
   const loaded = { ...rfi, body: '# rfi\n\nFollow the steps.', files: ['Skills/rfi/template.md'] };
 
-  it('lists the prompts from the list read, as the caller, with no request to the server', async () => {
+  it("lists the prompts from the list read, handed the caller's key, with no request to the server", async () => {
     const { state, mcp } = await harness();
     state.listSkills = async () => ({ skills: [{ ...rfi, canWrite: true }] });
 
     const { prompts } = await (await connect(mcp)).listPrompts();
     expect(prompts.map((p) => p.name)).toEqual(['onboard', 'rfi']);
     expect(prompts[1]).toMatchObject({ name: 'rfi', description: rfi.description });
-    expect(state.skillCallers).toEqual([{ userId: 'user-A', tokenId: 'key-1', agentPath: null }]);
+    expect(state.skillBearers).toEqual(['bevel_key_1']);
     expect(state.loopbackReads).toEqual([]);
   });
 
-  it('reads as the agent a narrowed connection was made as, and as a person with no key', async () => {
+  it('hands the read, for a caller with no key, the token minted for the person and the agent of their connection', async () => {
     const { state, mcp } = await harness();
-    await (await connect(mcp, { agentPath: 'Agents/narrow.agent' })).listPrompts();
+    await (await connect(mcp, { tokenId: null, bearer: 'an-oauth-token', agentPath: 'Agents/narrow.agent' })).listPrompts();
     await (await connect(mcp, { tokenId: null, bearer: 'a-session' })).listPrompts();
-    expect(state.skillCallers).toEqual([
-      { userId: 'user-A', tokenId: 'key-1', agentPath: 'Agents/narrow.agent' },
-      { userId: 'user-A', tokenId: null, agentPath: null },
+    expect(state.skillBearers).toEqual([
+      mintedFor({ userId: 'user-A', externalProxy: true, agentPath: 'Agents/narrow.agent' }),
+      mintedFor({ userId: 'user-A', externalProxy: true }),
     ]);
+  });
+
+  // The read resolves the bearer when it reads. One refused by then is
+  // refused the skill, as the route refused it with a 401.
+  it('serves no skill to a bearer the read refuses: revoked since the request was admitted', async () => {
+    const { state, mcp } = await harness();
+    state.listSkills = async () => ({ skills: [rfi] });
+    state.getSkill = async () => {
+      throw new BearerRefusedError('Invalid or revoked connection key.', 401);
+    };
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect((await connect(mcp)).getPrompt({ name: 'rfi' })).rejects.toThrow('Unknown skill "rfi".');
+    expect(errors.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain(
+      'skill get_skill refused: HTTP 401 Invalid or revoked connection key.',
+    );
   });
 
   it('serves a prompt from the skill read and records it as a skill read', async () => {
