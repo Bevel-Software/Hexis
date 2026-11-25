@@ -9,13 +9,14 @@
  * The line ending a rewrite of `text` should use: the one MOST of its lines
  * already use.
  *
- * A consistent file (all LF, or all CRLF, which is every file git checks out)
- * gets its own ending, and a MIXED file the one it mostly already has, so the
- * fewest lines change. The rule this replaced was "CRLF if the text contains
- * one anywhere", which let a single stray CRLF (in the body, in a comment)
- * rewrite every line of a knowledge base's access rules as churn in somebody's
- * change request. Ties (and a file with no line breaks at all) go to the
- * file's FIRST ending, so the answer is always the file's own.
+ * A file whose lines all end the same way (all LF, or all CRLF) gets that
+ * ending, and a MIXED file (git can keep one as it was committed) the one it
+ * mostly already has, so the fewest lines change. The rule this replaced was
+ * "CRLF if the text contains one anywhere", which let a single stray CRLF (in
+ * the body, in a comment) rewrite every line of a knowledge base's access
+ * rules as churn in somebody's change request. A tie goes to the file's FIRST
+ * ending. A text with no line break at all has no ending of its own and gets
+ * LF.
  */
 export function dominantEol(text: string): string {
   let crlf = 0;
