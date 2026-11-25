@@ -159,7 +159,7 @@ describe('a failing tool call never quotes a substituted value', () => {
 describe('redactSubstitutedFailure', () => {
   /** A scope holding the marker as `${KEY}` had substituted it. */
   async function scopeWithSecret() {
-    const substitutor = { _getVariable: async () => SECRET };
+    const substitutor = { _getVariable: async (key: string) => (key === 'KEY' ? SECRET : '') };
     recordSubstitutions({ variableSubstitutor: substitutor } as never);
     const scope = openSubstitutionScope();
     await inSubstitutionScope(scope, () => substitutor._getVariable('KEY'));
