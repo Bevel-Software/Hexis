@@ -16,6 +16,8 @@ import {
   parseInclude,
   summarizeChangeRequest,
 } from './change-request-summary.js';
+import { APPLY_FAILURE_REASON_WITHHELD, fileIsReadable, pathsOf } from './change-request-read-shape.js';
+import { VersionControlDomainError } from '../../../shared/domain-errors.js';
 
 /** `knowledge-base/KnowledgeBase/x.md` → `KnowledgeBase/x.md`; anything else unchanged. */
 function stripKbDir(path: string, kbDirName: string): string {
@@ -697,8 +699,9 @@ export function registerVersionControlTools(
     description:
       'Apply an OPEN change request to its target branch, as you: what the app\'s Apply does, with your access ' +
       'and no more. First records your approval, at the current head, on each file you may approve; then merges. ' +
-      'Refused (naming what it waits on) while a file still needs an approval you cannot give: hand the user the ' +
-      '`url` for its approvers. `get_change_request` says beforehand whether it would pass (`viewer.mayMerge`). ' +
+      'Refused while a file still needs an approval you cannot give (unless an admin passes `bypass`): hand the ' +
+      'user the `url` for its approvers. The refusal says what it waits on only when you may read every file of ' +
+      'the request, and lists as `approved` the files this call approved. ' +
       'Returns `merged` with the merge commit, or `conflicts-need-resolution` with the conflicting paths (nothing ' +
       'is merged: sync the draft with `update_branch`, resolve, and merge again). A change to `roles.yaml` is ' +
       'never carried across. A request you may not see answers 404, as `get_change_request` does.',
@@ -730,14 +733,15 @@ export function registerVersionControlTools(
             kind: { type: 'string', enum: ['merged', 'conflicts-need-resolution'] },
             sha: { type: 'string', description: 'Present when `kind` is `merged`: the merge commit, now the tip of the target.' },
             mergedAt: { type: 'string', description: 'Present when `kind` is `merged`: ISO timestamp.' },
-            conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution`.' },
+            conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution`: the conflicting paths you may read.' },
+            withheldConflicts: { type: 'integer', description: 'Present when `kind` is `conflicts-need-resolution`: conflicting paths you may not read. Above zero, a person who can read them resolves those.' },
           },
           required: ['kind'],
         },
         approved: {
           type: 'array',
           items: { type: 'string' },
-          description: 'The files this call recorded your approval on. They stay approved when the merge is then refused.',
+          description: 'The files this call recorded your approval on. A refusal carries the same list: they stay approved.',
         },
       },
       required: ['number', 'url', 'outcome', 'approved'],
@@ -764,49 +768,80 @@ export function registerVersionControlTools(
         return detail;
       };
       let detail = await load();
-      // The app's Apply, step for step: approve what the caller may, then let
-      // the gate say whether that is enough. A refused approval is "not your
-      // file" and is the gate's to report, by name.
-      const approved: string[] = [];
-      if (detail.state === 'open') {
-        for (const a of detail.approvals) {
-          if (a.isApproved || !a.inMergeGate || !a.viewerCanApprove) continue;
-          try {
-            await ctx.versionControlService.approveFile(
-              number,
-              a.path,
-              ctx.user,
-              detail.files,
-              detail.headSha,
-              detail.base,
-              detail.authorId ?? null,
-              workspaceId,
-            );
-            approved.push(a.path);
-          } catch (err) {
-            if (!(hasHttpStatus(err) && err.status === 403)) throw err;
-          }
-        }
-        if (approved.length > 0) detail = await load();
-      }
-      const outcome = await ctx.versionControlService.mergeChangeRequest(
-        number,
-        ctx.user,
-        detail.headSha,
-        detail.approvals,
-        detail.state,
-        detail.title,
-        detail.base,
+      // The gate judges every file of the request; the ANSWER names only what
+      // the caller may read at the request's base, by the rule
+      // `get_change_request` lists files with. A refusal quotes the paths it
+      // waits on, so its words go only to a caller who may read every file:
+      // the rule the app applies to the same reason (`scopeApplyFailures`).
+      const readable = await readablePathsAt(
+        accessControl,
         workspaceId,
-        { bypass: args.bypass === true },
+        ctx.user.email,
+        detail.base,
+        detail.files.flatMap(pathsOf),
       );
+      const mayRead = (path: string) => readable.has(path);
+      const readsEveryFile = detail.files.length > 0 && detail.files.every((f) => fileIsReadable(f, mayRead));
+      const approved: string[] = [];
+      let outcome: Awaited<ReturnType<ToolContext['versionControlService']['mergeChangeRequest']>>;
+      try {
+        // The app's Apply, step for step: approve what the caller may, then
+        // let the gate say whether that is enough. A refused approval is "not
+        // your file" and is the gate's to report.
+        if (detail.state === 'open') {
+          for (const a of detail.approvals) {
+            if (a.isApproved || !a.inMergeGate || !a.viewerCanApprove) continue;
+            try {
+              await ctx.versionControlService.approveFile(
+                number,
+                a.path,
+                ctx.user,
+                detail.files,
+                detail.headSha,
+                detail.base,
+                detail.authorId ?? null,
+                workspaceId,
+              );
+              approved.push(a.path);
+            } catch (err) {
+              if (!(hasHttpStatus(err) && err.status === 403)) throw err;
+            }
+          }
+          if (approved.length > 0) detail = await load();
+        }
+        outcome = await ctx.versionControlService.mergeChangeRequest(
+          number,
+          ctx.user,
+          detail.headSha,
+          detail.approvals,
+          detail.state,
+          detail.title,
+          detail.base,
+          workspaceId,
+          { bypass: args.bypass === true },
+        );
+      } catch (err) {
+        // One answer for every refusal past the first approval: its status,
+        // its words when the caller may read them, and the approvals this
+        // call recorded, which a refused merge leaves in place.
+        if (!hasHttpStatus(err)) throw err;
+        const payload = readsEveryFile && err instanceof VersionControlDomainError ? err.payload : undefined;
+        throw new ToolError(readsEveryFile ? err.message : APPLY_FAILURE_REASON_WITHHELD, err.status, {
+          ...payload,
+          approved: approved.filter(mayRead),
+        });
+      }
       return {
         ...linkOf(detail),
         outcome:
           outcome.kind === 'merged'
             ? { kind: outcome.kind, sha: outcome.result.sha, mergedAt: outcome.result.mergedAt }
-            : outcome,
-        approved,
+            : {
+                kind: outcome.kind,
+                conflictedPaths: outcome.conflictedPaths.filter(mayRead),
+                withheldConflicts: outcome.conflictedPaths.filter((p) => !mayRead(p)).length,
+              },
+        approved: approved.filter(mayRead),
       };
     },
   });

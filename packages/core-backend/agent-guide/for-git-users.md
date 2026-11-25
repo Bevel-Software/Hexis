@@ -8,7 +8,7 @@ platform's own words. What carries over, and what does not:
 |---|---|---|
 | Branches | Anyone branches anything | The default branch, `{{defaultBranch}}`, and any other protected branch are live. Work in progress goes on a draft branch named `<you>/<topic>` (see `drafts-and-change-requests`) |
 | Commits | `git commit`, then `git push` | Every save is committed and shared as the person, moments after the call returns. No separate push |
-| Pull requests | Opened and merged on the code host | A change request: you open it (`open_change_request`), the owners of its files review and approve it in the app. `merge_change_request` applies it with the person's own approvals, and is refused while another owner's is missing |
+| Pull requests | Opened and merged on the code host | A change request: you open it (`open_change_request`), the owners and writers of its files review and approve it in the app. `merge_change_request` applies it with the person's own approvals, and is refused while another approver's is missing, unless an Admin bypasses that |
 | Who approves | Code owners, branch rules | The owners and writers of each file the request changes |
 | Permissions | The whole repository, read or write | Per folder and per file: `access.md` files say who may read, write, download or own. What you cannot read you cannot see or change, on any branch |
 | Layout | Free | Free under `{{knowledgeBaseDir}}/`; `{{skillsDir}}/` and `{{pluginsDir}}/` have a layout the platform reads |

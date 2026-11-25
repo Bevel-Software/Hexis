@@ -1604,7 +1604,7 @@ describe('VersionControlService.mergeBranch — an agent merges branches, never 
     const err = await svc.mergeBranch(makeUser(), 'alice/feat', PROTECTED).catch((e: unknown) => e);
     expect(err).toMatchObject({ status: 409, payload: { kind: 'open-change-request-blocks-merge', number: 12 } });
     expect((err as Error).message).toContain('#12');
-    expect((err as Error).message).toMatch(/Apply it with `merge_change_request` \(number 12\)/);
+    expect((err as Error).message).toMatch(/Apply #12 with `merge_change_request`, or ask the user to apply it in the app/);
     expect(merge).not.toHaveBeenCalled();
   });
 

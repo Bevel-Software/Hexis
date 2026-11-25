@@ -685,7 +685,7 @@ export class OpenChangeRequestBlocksMergeError extends VersionControlDomainError
   ) {
     super(
       `Change request #${number} proposes merging "${sourceBranch}" into "${targetBranch}" and is still open. ` +
-        `Apply it with \`merge_change_request\` (number ${number}), which holds it to its approvals.`,
+        `Apply #${number} with \`merge_change_request\`, or ask the user to apply it in the app.`,
       409,
       { kind: 'open-change-request-blocks-merge', sourceBranch, targetBranch, number },
     );

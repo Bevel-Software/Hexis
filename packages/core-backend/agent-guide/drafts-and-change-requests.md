@@ -1,7 +1,8 @@
 ## Drafts and change requests
 
-An agent drafts, proposes and syncs. Applying a request takes the approval of
-each file's owners: you can give the person's own, never anyone else's.
+An agent drafts, proposes and syncs. Applying a request takes an approval on
+each file from someone who may write it: you can give only the person's own
+approval.
 
 - **Start a draft** with `create_branch`: `name` is the new draft and `branch`
   the branch it forks from, usually `{{defaultBranch}}`:
@@ -28,7 +29,8 @@ each file's owners: you can give the person's own, never anyone else's.
   who may approve every file may so merge their own request. It is live for
   everyone at once, like a direct write to that branch. It is refused while a
   file waits on someone else: give the person the `url` for those approvers.
-  `get_change_request` says beforehand (`viewer.mayMerge`).
+  An Admin may pass `bypass: true` to merge without them, only when the person
+  asked for exactly that.
 - **Edit** an open request with `update_change_request`: `description`
   replaces the text whole, `appendDescription` adds a paragraph. Allowed for its
   author and anyone who may merge it.

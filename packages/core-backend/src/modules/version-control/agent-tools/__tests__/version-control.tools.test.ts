@@ -145,7 +145,7 @@ const versionControlService = {
       number,
       url: `https://bevel.example.com/change-requests/${number}`,
       headSha: 'head-1',
-      files: [],
+      files: mergeApprovals.map((a) => ({ path: a.path })),
       approvals: mergeApprovals.map((a) => ({ ...a, isApproved: a.isApproved || approvedPaths.has(a.path) })),
       state: 'open',
       title: 'T',
@@ -156,6 +156,7 @@ const versionControlService = {
   approveFile: async (number: number, path: string, user: { id: string }, _files: unknown, headSha: string) => {
     calls.push(['approveFile', number, path, user.id, headSha]);
     if (path === 'Raced.md') throw new ToolError("You don't have write access on this file's path", 403);
+    if (path === 'Broken.md') throw new ToolError('approval store down', 503);
     approvedPaths.add(path);
     return [];
   },
@@ -172,7 +173,7 @@ const versionControlService = {
   ) => {
     calls.push(['mergeChangeRequest', number, user.id, headSha, approvals.filter((a) => a.isApproved).map((a) => a.path), base, opts]);
     if (mergeFails) throw mergeFails;
-    if (number === 5) return { kind: 'conflicts-need-resolution', conflictedPaths: ['A.md'] };
+    if (number === 5) return { kind: 'conflicts-need-resolution', conflictedPaths: ['A.md', 'Secret/B.md'] };
     return { kind: 'merged', result: { prNumber: number, sha: 'sha-1', mergedAt: '2026-09-17T00:00:00Z' } };
   },
   mergeBranch: async (user: { id: string }, source: string, target: string) => {
@@ -525,8 +526,29 @@ describe('registerVersionControlTools', () => {
       const base = await start();
       const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
       expect(res.status).toBe(409);
-      expect(JSON.stringify(await res.json())).toContain('Waiting on approval for Theirs.md');
+      expect(await res.json()).toEqual({
+        error: 'Waiting on approval for Theirs.md',
+        mergeBlockedReasons: ['Theirs.md is not approved'],
+        approved: ['Mine.md'],
+      });
       expect(approveCalls()).toEqual(['Mine.md']);
+    });
+
+    it('merge_change_request withholds the words of a refusal from a caller who may not read every file of the request', async () => {
+      // `Secret/` is readable by nobody; the gate's refusal quotes the path it waits on.
+      mergeApprovals = [file('Mine.md'), file('Secret/Plan.md', { viewerCanApprove: false })];
+      mergeFails = new VersionControlDomainError('Waiting on approval for Secret/Plan.md from Ada', 409, {
+        mergeBlockedReasons: ['Secret/Plan.md is not approved'],
+      });
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toEqual({
+        error: 'The reason names files you do not have access to read.',
+        approved: ['Mine.md'],
+      });
+      expect(JSON.stringify(body)).not.toMatch(/Secret|Ada/);
     });
 
     it('merge_change_request passes bypass through only when asked, for the gate to judge', async () => {
@@ -535,23 +557,33 @@ describe('registerVersionControlTools', () => {
       expect(mergeCalls()[0]![6]).toEqual({ bypass: true });
     });
 
-    it('merge_change_request returns conflicts-need-resolution with the conflicting paths', async () => {
+    it('merge_change_request returns conflicts-need-resolution with the conflicting paths the caller may read, and counts the rest', async () => {
+      mergeApprovals = [file('A.md', { isApproved: true }), file('Secret/B.md', { isApproved: true })];
       const base = await start();
       const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 5 });
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({
         number: 5,
-        outcome: { kind: 'conflicts-need-resolution', conflictedPaths: ['A.md'] },
+        outcome: { kind: 'conflicts-need-resolution', conflictedPaths: ['A.md'], withheldConflicts: 1 },
       });
     });
 
-    it('merge_change_request leaves a file whose approval is refused to the gate', async () => {
+    it('merge_change_request leaves a file whose approval is refused (403) out of `approved`, and to the gate', async () => {
       // Access changed between the read and the approval.
       mergeApprovals = [file('Raced.md'), file('Mine.md')];
       const base = await start();
       const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
       expect(res.status).toBe(200);
       expect(((await res.json()) as { approved: string[] }).approved).toEqual(['Mine.md']);
+    });
+
+    it('merge_change_request does not merge when an approval fails for any other reason, and says what it had approved', async () => {
+      mergeApprovals = [file('Mine.md'), file('Broken.md')];
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'approval store down', approved: ['Mine.md'] });
+      expect(mergeCalls()).toEqual([]);
     });
 
     it('merge_change_request answers 404 for a request the caller may not see, or that does not exist, and touches nothing', async () => {
@@ -588,7 +620,7 @@ describe('registerVersionControlTools', () => {
       expect(res.status).toBe(409);
       const body = JSON.stringify(await res.json());
       expect(body).toContain('#12');
-      expect(body).toMatch(/`merge_change_request` \(number 12\)/);
+      expect(body).toMatch(/Apply #12 with `merge_change_request`/);
     });
 
     it('merge_branch requires both branches', async () => {
