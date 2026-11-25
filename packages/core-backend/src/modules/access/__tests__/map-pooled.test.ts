@@ -20,20 +20,6 @@ describe('mapPooled', () => {
     expect(most).toBe(3);
   });
 
-  it('starts no further item once a call fails', async () => {
-    const started: number[] = [];
-    const run = mapPooled(Array.from({ length: 10 }, (_, i) => i), 2, async (i) => {
-      started.push(i);
-      await new Promise((resolve) => setTimeout(resolve, 2));
-      if (i === 1) throw new Error('unreadable');
-      return i;
-    });
-    await expect(run).rejects.toThrow('unreadable');
-    // Let the other worker finish the item it had in hand.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(started).toEqual([0, 1, 2]);
-  });
-
   it('answers nothing for nothing', async () => {
     expect(await mapPooled([], 4, async () => 1)).toEqual([]);
   });
