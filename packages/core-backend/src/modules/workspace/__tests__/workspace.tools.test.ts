@@ -31,8 +31,9 @@ import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../../agent-scope/
 import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
-import { normalizeWorkspacePath } from '../../kb-fs/index.js';
+import { LockingFilesystem, normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
+import { isAbsence } from '../../../shared/fs.contract.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
 import { AccessDeniedError } from '../../access-model/index.js';
@@ -263,8 +264,7 @@ async function start(
     const current = await fs.readFile(path).then(
       (c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c), 'utf8')),
       (err: unknown) => {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        if (isAbsence(err)) return null;
         throw err;
       },
     );
@@ -514,8 +514,8 @@ describe('workspace file primitives', () => {
   /**
    * An edit is a promise about the text it replaces, so that text has to be
    * found in the file as it is when the write lands — read with the path's
-   * lock held, not at a preflight anybody may invalidate. `raceHook` is the
-   * other writer, running exactly where the real filesystem acquires the lock.
+   * lock held, never before it. `raceHook` is the other writer, running
+   * exactly where the real filesystem acquires the lock.
    */
   describe('edit_file looks for old_string in the file the write actually lands on', () => {
     const EMPTY_OWNER = '# Assignee\n\n# Log';
@@ -526,7 +526,7 @@ describe('workspace file primitives', () => {
         new_string: `# Assignee\n${who}\n\n# Log`,
       });
 
-    it('refuses when another writer replaced that text after the preflight, and keeps their write', async () => {
+    it('refuses when another writer replaced that text while the edit waited for the lock, and keeps their write', async () => {
       const base = await start();
       await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
       raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\ncoder1\n\n# Log\n- filed\n'); };
@@ -546,7 +546,7 @@ describe('workspace file primitives', () => {
       expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe('# Assignee\ncoder2\n\n# Log\n- filed\n- a line added meanwhile\n');
     });
 
-    it('refuses when the text became ambiguous after the preflight', async () => {
+    it('refuses when the text became ambiguous while the edit waited for the lock', async () => {
       const base = await start();
       await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
       raceHook = async () => { await fs.writeFile(`${KB_DIR}/ticket.md`, `${EMPTY_OWNER}\n${EMPTY_OWNER}\n`); };
@@ -556,7 +556,7 @@ describe('workspace file primitives', () => {
       expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe(`${EMPTY_OWNER}\n${EMPTY_OWNER}\n`);
     });
 
-    it('answers not found when the file was deleted after the preflight, and does not recreate it', async () => {
+    it('answers not found when the file was deleted while the edit waited for the lock, and does not recreate it', async () => {
       const base = await start();
       await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
       raceHook = async () => { await fs.deleteFile(`${KB_DIR}/ticket.md`); };
@@ -567,10 +567,10 @@ describe('workspace file primitives', () => {
 
     // Every question the tool asks of the file is asked of the bytes it is
     // about to replace. An extensionless file may hold anything, and the app's
-    // own upload can swap it for a binary between the preflight and the lock.
+    // own upload can swap it for a binary while the edit waits for the lock.
     // The binary still CONTAINS `old_string` here, so nothing but the
     // "may these bytes be edited as text" question can refuse it.
-    it('refuses when the file became binary after the preflight, and leaves those bytes alone', async () => {
+    it('refuses when the file became binary while the edit waited for the lock, and leaves those bytes alone', async () => {
       const base = await start();
       await fs.writeFile(`${KB_DIR}/TICKET`, '# Assignee\n\n# Log\n- filed\n');
       const binary = Buffer.concat([Buffer.from([0x00, 0xff, 0xfe, 0x00]), Buffer.from(`${EMPTY_OWNER}\n`, 'utf8')]);
@@ -585,6 +585,37 @@ describe('workspace file primitives', () => {
       const after = await fs.readFile(`${KB_DIR}/TICKET`);
       expect(Buffer.from(after as Buffer).equals(binary)).toBe(true);
     });
+
+    // While someone else holds the lock, the answer is the contention and
+    // nothing about the text: the real `LockingFilesystem` gives up before it
+    // reads, so a present, an absent and a repeated `old_string` all get it.
+    it('answers a contended lock the same whatever old_string is, and writes nothing', async () => {
+      const base = await start();
+      await fs.writeFile(`${KB_DIR}/ticket.md`, '# Assignee\n\n# Log\n- filed\n');
+      const contended = new LockingFilesystem(
+        { basePath: tempDir, contained: true },
+        {
+          versionControl: { acquireLock: async () => ({ acquired: false, lock: { holderName: 'Ana' } }) } as never,
+          workspaceId: 'ws',
+          branch: 'main',
+          user: { id: 'u', email: 'e@x', name: 'N' } as never,
+          kbDirName: KB_DIR,
+        },
+      );
+      (fs as unknown as Record<string, unknown>).rewriteFile = contended.rewriteFile.bind(contended);
+      const edit = (old_string: string) =>
+        post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/ticket.md`, old_string, new_string: 'x' });
+
+      // In parallel: each call waits out the real filesystem's acquire retries.
+      const [present, absent, repeated] = await Promise.all([edit(EMPTY_OWNER), edit('QA-MARKER-9999'), edit('#')]);
+      const presentText = await present.text();
+      expect(presentText).toMatch(/locked by Ana/);
+      for (const other of [absent, repeated]) {
+        expect(other.status).toBe(present.status);
+        expect(await other.text()).toBe(presentText);
+      }
+      expect(String(await fs.readFile(`${KB_DIR}/ticket.md`))).toBe('# Assignee\n\n# Log\n- filed\n');
+    }, 15_000);
 
     it('counts replace_all over the file as it is under the lock', async () => {
       const base = await start();

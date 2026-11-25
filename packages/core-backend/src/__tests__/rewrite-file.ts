@@ -1,4 +1,5 @@
 import type { LocalFilesystem } from '@mastra/core/workspace';
+import { isAbsence } from '../shared/fs.contract.js';
 
 /**
  * `LockingFilesystem.rewriteFile` on a plain `LocalFilesystem`, for suites
@@ -17,8 +18,7 @@ export function withRewriteFile<T extends LocalFilesystem>(fs: T): T {
     const current = await fs.readFile(path).then(
       (c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c), 'utf8')),
       (err: unknown) => {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        if (isAbsence(err)) return null;
         throw err;
       },
     );

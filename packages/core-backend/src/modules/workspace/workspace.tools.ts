@@ -452,10 +452,9 @@ async function assertNotBinaryOverwrite(
 }
 
 /**
- * The same refusal, over bytes the caller already holds. Split out so a tool
- * that reads the file more than once — `edit_file`, before the lock and again
- * under it — judges EVERY reading with the one rule, and the bytes it replaces
- * are always bytes this gate has seen.
+ * The same refusal, over bytes the caller already holds. Split out for a tool
+ * that reads the file itself — `edit_file`, once, under the path's lock — so
+ * the bytes it replaces are judged by the one rule the gate above applies.
  */
 function assertBytesTextEditable(readers: FileReaderRegistry, path: string, existing: Buffer): void {
   const refusal = readers.readerFor(path).editRefusalForExisting?.(existing, path) ?? null;
@@ -3269,11 +3268,9 @@ export function registerWorkspaceTools(
       const path = a.path as string;
       const oldStr = a.old_string as string;
       const newStr = a.new_string as string;
-      // Everything the tool decides about ONE reading of the file: may these
-      // bytes be edited as text at all, is `old_string` there, is it unique,
-      // and what the file becomes. One function, because the file is read
-      // twice — before the lock and under it — and a reading that skipped any
-      // of these questions would let bytes land that were never judged.
+      // Everything the tool decides about the file, asked of the one reading
+      // taken under the lock (below): may these bytes be edited as text at
+      // all, is `old_string` there, is it unique, and what the file becomes.
       // `split`/`join`, not `String.replace`, which reads `$&`, `$'`, `` $` ``
       // and `$$` in `new_string` as patterns and writes something the caller
       // never sent.
