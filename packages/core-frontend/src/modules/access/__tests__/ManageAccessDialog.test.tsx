@@ -363,11 +363,16 @@ describe('ManageAccessDialog: a file whose folder governs its access', () => {
     expect(screen.queryByRole('heading', { name: /On this file/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /People invited to Sales/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Remove/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /can edit/i })).not.toBeInTheDocument();
     // The read side is still there, read-only.
     expect(screen.getByRole('heading', { name: /Who can open it/i })).toBeInTheDocument();
     expect(screen.getByText('Alice')).toBeInTheDocument();
     expect(screen.getByText('Bo')).toBeInTheDocument();
+    // A row's verbs open only to be read: every item off, and no Deny.
+    await user.click(screen.getByRole('button', { name: /^can edit$/i }));
+    const menu = screen.getByRole('button', { name: /^can download$/i }).parentElement as HTMLElement;
+    for (const item of within(menu).getAllByRole('button')) expect(item).toBeDisabled();
+    expect(within(menu).queryByRole('button', { name: /^deny$/i })).toBeNull();
+    await user.keyboard('{Escape}');
 
     await user.click(screen.getByRole('button', { name: 'Manage access on Sales' }));
     expect(onManageAncestor).toHaveBeenCalledWith(

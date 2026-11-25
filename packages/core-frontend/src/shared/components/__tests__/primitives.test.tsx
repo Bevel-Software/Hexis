@@ -341,6 +341,20 @@ describe('Menu', () => {
     );
   });
 
+  it('a disabled MenuItem dims its label and adornment, never its description', () => {
+    render(
+      <MenuItem description="Open and read it" trailing={<span>✓</span>} disabled>
+        Can read
+      </MenuItem>,
+    );
+    const item = screen.getByRole('button');
+    // Nothing fades the whole item; the label and the adornment fade on their own.
+    expect(item.className).not.toMatch(/(^|\s)(aria-)?disabled:opacity-50/);
+    expect(within(item).getByText('Can read').className).toMatch(/group-disabled:opacity-50/);
+    expect(within(item).getByText('✓').parentElement!.className).toMatch(/group-disabled:opacity-50/);
+    expect(within(item).getByText('Open and read it').className).not.toMatch(/opacity/);
+  });
+
   it('MenuItem without a description renders exactly as before', () => {
     render(<MenuItem>Rename</MenuItem>);
     const item = screen.getByRole('button', { name: 'Rename' });

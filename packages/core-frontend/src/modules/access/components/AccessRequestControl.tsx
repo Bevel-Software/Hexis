@@ -113,28 +113,33 @@ export function AccessRequestControl({
           {`Your last request for ${LEVEL_WORDS[status.level ?? 'write']} wasn't accepted.`}
         </p>
       )}
+      {/* Each choice with what it lets someone do under it, visible without
+          hover or focus, so the two can be compared before choosing. */}
       <div
         role="radiogroup"
         aria-label={`What to ask for on this ${targetKind}`}
-        className="flex items-center gap-4"
+        className="flex flex-col gap-1.5"
       >
         {(['write', 'owner'] as const).map((option) => (
-          <label key={option} className="flex items-center gap-1.5 text-detail text-ink">
-            <input
-              type="radio"
-              name="access-request-level"
-              value={option}
-              checked={level === option}
-              disabled={sending}
-              onChange={() => setLevel(option)}
-              aria-description={VERB_HELP[option]}
-            />
-            {LEVEL_WORDS[option]}
-          </label>
+          <div key={option} className="flex flex-col">
+            <label className="flex items-center gap-1.5 text-detail text-ink">
+              <input
+                type="radio"
+                name="access-request-level"
+                value={option}
+                checked={level === option}
+                disabled={sending}
+                onChange={() => setLevel(option)}
+                aria-description={VERB_HELP[option]}
+              />
+              {LEVEL_WORDS[option]}
+            </label>
+            <span aria-hidden className="pl-5 text-meta text-ink-muted">
+              {VERB_HELP[option]}
+            </span>
+          </div>
         ))}
       </div>
-      {/* What the chosen level lets someone do, visible without hover or focus. */}
-      <p className="text-meta text-ink-muted">{`${LEVEL_WORDS[level]}: ${VERB_HELP[level]}`}</p>
       <TextAreaField
         aria-label="Why you need it (optional)"
         placeholder="Why you need it (optional)"

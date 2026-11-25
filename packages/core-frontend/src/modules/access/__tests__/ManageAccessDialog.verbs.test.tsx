@@ -7,8 +7,9 @@ import type { AccessResponse } from '../api';
 /**
  * Can read, Can edit, Can download and Owner each say what they let someone
  * do where a person meets them: a visible line under each verb in an opened
- * picker and under the request choices for the chosen level, and the
- * accessible description of every verb shown. The closed dialog shows none.
+ * picker (the add field's, each row's, and a read-only row's) and under each
+ * request choice, and the accessible description of the verbs shown, the
+ * closed verb buttons included. The closed dialog shows none of the lines.
  */
 
 const api = vi.hoisted(() => ({
@@ -53,9 +54,9 @@ const FILE: FileTreeEntry = {
 } as unknown as FileTreeEntry;
 
 const READ = 'Open and read it';
-const EDIT = 'Read, change, approve changes, manage access';
+const EDIT = 'Read, change, approve, manage access; no download';
 const DOWNLOAD = 'Read and save a copy';
-const OWNER = 'Can edit and download; be its contact';
+const OWNER = 'Can edit and download; the one people ask';
 
 /** Each verb under the name the pickers show for it. */
 const VERB_LINES: [string, string][] = [
@@ -83,6 +84,19 @@ const view = (over: Partial<AccessResponse> = {}): AccessResponse =>
     ...over,
   }) as AccessResponse;
 
+/** What a reader who cannot change the item sees: Ed owns it, Alice reads, Bo reads and downloads. */
+const READER_VIEW = view({
+  canWrite: false,
+  eligible: { roles: [], users: [ED] },
+  readers: { restricted: true, roles: [], users: [ED, ALICE, BO] },
+  owners: { roles: [], users: [ED] },
+  downloaders: { roles: [], users: [BO] },
+  sources: {
+    'u:alice@x.com': { read: [{ kind: 'direct' }] },
+    'u:bo@x.com': { download: [{ kind: 'direct' }] },
+  },
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
@@ -102,6 +116,28 @@ describe('ManageAccessDialog: what each access verb means', () => {
 
     await screen.findByText('Alice');
     for (const [, line] of VERB_LINES) expect(screen.queryByText(line)).toBeNull();
+  });
+
+  it("the closed verb buttons carry their verbs' lines as their description", async () => {
+    api.fetchFileAccess.mockResolvedValue(
+      view({
+        readers: { restricted: true, roles: [], users: [ALICE, BO] },
+        downloaders: { roles: [], users: [BO] },
+        sources: {
+          'u:alice@x.com': { read: [{ kind: 'direct' }] },
+          'u:bo@x.com': { download: [{ kind: 'direct' }] },
+        },
+      }),
+    );
+    render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
+
+    // The add field's button, and each row's.
+    expect(await screen.findByRole('button', { name: 'Can edit' })).toHaveAccessibleDescription(EDIT);
+    expect(screen.getByRole('button', { name: 'Can read' })).toHaveAccessibleDescription(READ);
+    // A row naming two verbs says which line is whose.
+    expect(screen.getByRole('button', { name: 'Can read, Can download' })).toHaveAccessibleDescription(
+      `Can read: ${READ}. Can download: ${DOWNLOAD}`,
+    );
   });
 
   it("shows each verb's line under it in the add field's opened picker", async () => {
@@ -142,44 +178,43 @@ describe('ManageAccessDialog: what each access verb means', () => {
     }
   });
 
-  it('a reader who cannot edit: the chosen level says what it means, and so does each verb the rows state', async () => {
-    const user = userEvent.setup();
-    api.fetchFileAccess.mockResolvedValue(
-      view({
-        canWrite: false,
-        eligible: { roles: [], users: [ED] },
-        readers: { restricted: true, roles: [], users: [ED, ALICE, BO] },
-        owners: { roles: [], users: [ED] },
-        downloaders: { roles: [], users: [BO] },
-        sources: {
-          'u:alice@x.com': { read: [{ kind: 'direct' }] },
-          'u:bo@x.com': { download: [{ kind: 'direct' }] },
-        },
-      }),
-    );
+  it('a reader who cannot edit sees each request choice with its line, and the note names the action as the title does', async () => {
+    api.fetchFileAccess.mockResolvedValue(READER_VIEW);
     render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
 
-    // One visible line, for the level chosen, under the choices.
-    expect(await screen.findByText(`Can edit: ${EDIT}`)).toBeVisible();
-    await user.click(screen.getByRole('radio', { name: 'Owner' }));
-    expect(screen.getByText(`Owner: ${OWNER}`)).toBeVisible();
-    expect(screen.queryByText(`Can edit: ${EDIT}`)).toBeNull();
+    // A line under EACH choice, before anything is chosen: the two can be compared.
     for (const [name, line] of [
       ['Can edit', EDIT],
       ['Owner', OWNER],
     ]) {
-      const radio = screen.getByRole('radio', { name });
+      const radio = await screen.findByRole('radio', { name });
       expect(radio).toHaveAccessibleDescription(line);
-      expect(radio.closest('label')).not.toHaveAttribute('title');
+      expect(screen.getByText(line)).toBeVisible();
     }
-    // The rows are text here: one line per verb each one names, in its order,
-    // as tooltip and description, never as visible text.
-    const readOnly = screen.getByText('Can read');
-    expect(readOnly).toHaveAttribute('title', READ);
-    expect(readOnly).toHaveAccessibleDescription(READ);
-    const readAndDownload = screen.getByText('Can read, Can download');
-    expect(readAndDownload).toHaveAttribute('title', `${READ}. ${DOWNLOAD}`);
-    expect(readAndDownload).toHaveAccessibleDescription(`${READ}. ${DOWNLOAD}`);
+    expect(screen.getByText(/^Only people with edit access can manage access here\./)).toBeInTheDocument();
+  });
+
+  it("a reader who cannot edit opens a row's verbs read-only from the keyboard: every line shown, nothing to change", async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(READER_VIEW);
+    render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
+
+    const trigger = await screen.findByRole('button', { name: 'Can read, Can download' });
     expect(screen.queryByText(READ)).toBeNull();
+    trigger.focus();
+    await user.keyboard('{Enter}');
+
+    const menu = screen.getByRole('button', { name: 'Can download' }).parentElement as HTMLElement;
+    for (const [name, line] of VERB_LINES) {
+      const item = within(menu).getByRole('button', { name });
+      expect(within(item).getByText(line)).toBeVisible();
+      expect(item).toHaveAccessibleDescription(line);
+      expect(item).toBeDisabled();
+    }
+    // No Deny, and pressing an item writes nothing.
+    expect(within(menu).queryByRole('button', { name: 'Deny' })).toBeNull();
+    await user.click(within(menu).getByRole('button', { name: 'Owner' }));
+    expect(api.grantAccess).not.toHaveBeenCalled();
+    expect(api.revokeAccess).not.toHaveBeenCalled();
   });
 });

@@ -105,7 +105,7 @@ function writeRestrictedHere(parent: string): AccessResponse {
 /** A folder name long enough that "Can edit · from <it>" measures between the floor and the cap. */
 const MID_PARENT = 'Regional-Sales-Operations/access.md';
 /** Longer again: "Can read · from <it>" outgrows every verb's line, still under the cap. */
-const LONG_PARENT = 'Regional-Sales-Operations-Team/access.md';
+const LONG_PARENT = 'Regional-Sales-Operations-Teams/access.md';
 
 /** The verb lines an item can carry under its label. */
 const VERB_LINES: readonly string[] = Object.values(VERB_HELP);

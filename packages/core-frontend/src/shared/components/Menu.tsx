@@ -52,7 +52,9 @@ export interface MenuItemProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   /**
    * A short muted line under the label saying what the item does, visible
    * without hover or focus. It stays out of the item's accessible name, and a
-   * string is the item's `aria-description` unless the caller passes one.
+   * string is the item's `aria-description` unless the caller passes one. A
+   * disabled item dims its label and adornment, never this line: it is what
+   * says what the item would do.
    */
   description?: string;
 }
@@ -68,13 +70,20 @@ export function MenuItem({
   'aria-description': ariaDescription,
   ...rest
 }: MenuItemProps) {
+  const described = description !== undefined;
+  // Disabled dims the whole item, or, with a description, everything but it.
+  const dim = described ? 'group-disabled:opacity-50 group-aria-disabled:opacity-50' : undefined;
   return (
     <button
       type={type}
       className={cn(
         'flex w-full items-center gap-2 rounded-sm px-2.5 py-2 text-left text-ui',
-        'transition-colors disabled:cursor-not-allowed disabled:opacity-50',
-        'aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-transparent',
+        described
+          ? 'group transition-colors disabled:cursor-not-allowed'
+          : 'transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        described
+          ? 'aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent'
+          : 'aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-transparent',
         tone === 'danger'
           ? 'text-danger hover:bg-danger-soft'
           // The aria-disabled text override is tone-local because the hover it
@@ -87,17 +96,17 @@ export function MenuItem({
       aria-description={ariaDescription ?? description}
       {...rest}
     >
-      {description === undefined ? (
-        <span className="min-w-0 flex-1 truncate">{children}</span>
-      ) : (
+      {described ? (
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate">{children}</span>
+          <span className={cn('truncate', dim)}>{children}</span>
           <span aria-hidden className="text-meta font-normal text-ink-muted">
             {description}
           </span>
         </span>
+      ) : (
+        <span className="min-w-0 flex-1 truncate">{children}</span>
       )}
-      {trailing && <span className="flex-none text-ink-faint">{trailing}</span>}
+      {trailing && <span className={cn('flex-none text-ink-faint', dim)}>{trailing}</span>}
     </button>
   );
 }

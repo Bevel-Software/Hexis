@@ -15,14 +15,15 @@ import type { Verb } from '@bevel-software/platform-shared';
  */
 export const VERB_HELP = {
   read: 'Open and read it',
-  write: 'Read, change, approve changes, manage access',
+  write: 'Read, change, approve, manage access; no download',
   download: 'Read and save a copy',
-  owner: 'Can edit and download; be its contact',
+  owner: 'Can edit and download; the one people ask',
 } as const satisfies Record<Verb, string>;
 
 /**
  * Owner on a plugin: the Owner line, plus deleting it, which only the
  * plugin's owners may do (`DELETE /api/plugins/:name` asks the `owner:` lists
- * alone). Kept beside `VERB_HELP` so the Owner verb reads from one place.
+ * alone). Kept beside `VERB_HELP` so the Owner verb reads from one place; its
+ * last words differ from Owner's only to stay within eight.
  */
-export const PLUGIN_OWNER_HELP = 'Can edit, download, delete it; be its contact';
+export const PLUGIN_OWNER_HELP = 'Can edit, download, delete it; people ask them';
