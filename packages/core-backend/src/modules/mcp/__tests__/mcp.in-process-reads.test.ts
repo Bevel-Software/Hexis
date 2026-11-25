@@ -49,7 +49,7 @@ interface HarnessOptions {
    * Default: it answers the harness's manuals.
    */
   manualList?: 'throws' | 'stalls' | 'refuses';
-  /** The limit on an in-process read, in event-loop time. Absent, the service's own. */
+  /** The limit on an in-process read. Absent, the service's own. */
   inProcessReadLimitMs?: number;
   /** Records the Audit log's events. */
   auditRecorder?: { record: (e: AgentEventInput) => void };
@@ -263,7 +263,7 @@ describe('McpService — the manual list is read in process', () => {
 describe('McpService — an in-process read that never answers', () => {
   // The loopback request each read replaces ended at its limit, and the
   // request was served without what it could not read. A read made in process
-  // is held to a limit too, counted in event-loop time (`shared/loop-time-limit.ts`).
+  // is held to a limit too, one a held event loop cannot use up (`shared/loop-time-limit.ts`).
   it('a manual list read ends at its limit: the platform tools are served, and nothing is kept', async () => {
     const { state, mcp } = await harness({ manualList: 'stalls', inProcessReadLimitMs: 150 });
     vi.spyOn(console, 'error').mockImplementation(() => {});

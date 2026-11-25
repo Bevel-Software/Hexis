@@ -10,7 +10,7 @@ The skills are read by the handlers the two skill routes run. `registerSkillsToo
 
 Each read is handed the bearer the loopback request carried, and resolves it with the verifier the routes' auth runs (`createCallerResolver` in `modules/tool-auth`) at the moment of the read. So a key revoked or an account switched off after the request was admitted is refused the read, as it was at the route.
 
-Each read in process is held to 15 seconds of event-loop time (`withinLoopTime`), the limit the catalog revision read has. A stretch the event loop is held for spends one tick of it, however long. A read that never answers ends there, and the request is then served as it was when the loopback request passed its limit: the platform tools alone, not kept, or no skills.
+Each read in process is held to the 15 second limit the catalog revision read has (`withinLoopTime`). A stretch the event loop is held for spends one tick of it, however long. A read that never answers ends there, and the request is then served as it was when the loopback request passed its limit: the platform tools alone, not kept, or no skills.
 
 The routes are unchanged for the local server and for scripts, which still call them. A composition that does not hand the endpoint a reader keeps reading over loopback. Nothing an agent can observe changes: tool names, arguments, answers, prompts and the agent guide are the same.
 
