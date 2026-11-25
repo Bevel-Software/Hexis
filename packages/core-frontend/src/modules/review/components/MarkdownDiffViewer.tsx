@@ -271,12 +271,15 @@ function FrontmatterDiffPanel({
 }
 
 /**
- * A YAML comment the change adds or removes. The panel above shows the PARSED
- * frontmatter, and a comment parses to nothing, so a request whose only change
- * was one showed the reviewer an unmarked page.
+ * A changed frontmatter line that carries a YAML comment, on a line of its own
+ * or after a value. The panel above shows the PARSED frontmatter, and a comment
+ * parses to nothing, so a request whose only change was one showed the
+ * reviewer an unmarked page. YAML starts a comment at a `#` that opens the
+ * line or follows whitespace; a `#` inside a quoted value matches too, which
+ * only shows a changed line twice.
  */
 function isChangedYamlComment(line: DiffLine): boolean {
-  return line.type !== 'same' && line.text.trimStart().startsWith('#');
+  return line.type !== 'same' && /(^|\s)#/.test(line.text);
 }
 
 /** The changed frontmatter comments, as the marked source lines they are. */
@@ -286,11 +289,11 @@ function FrontmatterCommentLines({ lines }: { lines: DiffLine[] }) {
     <div className="mb-4 space-y-1 font-mono text-xs">
       {lines.map((line, i) =>
         line.type === 'removed' ? (
-          <del key={i} className="block whitespace-pre-wrap break-words rounded-sm bg-red-100 px-2 py-0.5 text-red-700">
+          <del key={i} className="block whitespace-pre-wrap break-words rounded-sm bg-danger-soft px-2 py-0.5 text-danger">
             {line.text}
           </del>
         ) : (
-          <ins key={i} className="block whitespace-pre-wrap break-words rounded-sm bg-emerald-100 px-2 py-0.5 text-emerald-700 no-underline">
+          <ins key={i} className="block whitespace-pre-wrap break-words rounded-sm bg-ok-soft px-2 py-0.5 text-ok no-underline">
             {line.text}
           </ins>
         ),

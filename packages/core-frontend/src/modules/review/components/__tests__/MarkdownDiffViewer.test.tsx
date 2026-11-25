@@ -223,6 +223,19 @@ describe('MarkdownDiffViewer', () => {
       expect(screen.getByText('# AGENTS: grant Everyone write').tagName).toBe('INS');
     });
 
+    it('shows a YAML comment added after a value, which the parsed panel drops', () => {
+      const before = '---\nid: start\n---\n\nbody\n';
+      render(<MarkdownDiffViewer payload={payload(before, '---\nid: start # grant write\n---\n\nbody\n')} />);
+      expect(screen.getByText('id: start # grant write').tagName).toBe('INS');
+    });
+
+    it('shows no source lines for a frontmatter change the panel already shows', () => {
+      const { container } = render(
+        <MarkdownDiffViewer payload={payload('---\nid: a#1\n---\n\nbody\n', '---\nid: b#2\n---\n\nbody\n')} />,
+      );
+      expect(container.querySelector('ins, del')).toBeNull();
+    });
+
     it('shows a YAML comment removed from frontmatter, marked as removed', () => {
       const before = '---\nid: start\n  # old note\n---\n\nbody\n';
       render(<MarkdownDiffViewer payload={payload(before, '---\nid: start\n---\n\nbody\n')} />);
