@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { IssuerCheck, OidcCheck, OidcConfiguration } from '../oidc-check.js';
-import { OidcAuthProvider, oidcSettingsFrom } from '../../auth/oidc-auth-provider.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { AuthService } from '../../auth/index.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realOidcProvider } from '../../../__tests__/real-oidc.js';
 
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 const ISSUER = 'https://login.example.com/tenant/v2.0';
@@ -555,8 +555,7 @@ describe('the verification state', () => {
       if (url === `${ISSUER}/userinfo`) return Response.json({ email: 'carol@example.com', name: 'Carol' });
       return new Response('', { status: 404 });
     }) as typeof fetch;
-    const oidc = new OidcAuthProvider({
-      settings: () => oidcSettingsFrom(settings),
+    const oidc = realOidcProvider(settings, {
       publicBackendUrl: 'http://localhost:3001',
       publicFrontendUrl: 'http://localhost:5173',
       cookieSecure: false,

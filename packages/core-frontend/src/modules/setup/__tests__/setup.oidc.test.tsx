@@ -13,11 +13,12 @@ vi.mock('../services/setup.api', async () => {
   const actual = await vi.importActual<typeof import('../services/setup.api')>('../services/setup.api');
   return { ...actual, ...api };
 });
-vi.mock('../../settings/services/github-facade.api', () => ({
-  fetchGitHubFacade: vi.fn(),
-  rotateGitHubFacade: vi.fn(),
-  fetchMarketplaceRegistration: vi.fn(async () => false),
-  setMarketplaceRegistration: vi.fn(),
+// The settings view also shows the marketplace card, which asks the server
+// whether the deployment is registered. Answered at the shared transport, so
+// no module is reached past its entry.
+vi.mock('../../../lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../lib/api')>()),
+  authFetch: vi.fn(async () => Response.json({ registered: false })),
 }));
 
 import { SetupGate } from '../components/SetupGate';

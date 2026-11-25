@@ -28,7 +28,17 @@ import { DeploymentSettingsService } from '../modules/settings/deployment-settin
  * `real-settings.test.ts` drives each of these through the service.
  */
 export function realDeploymentSettings(env: NodeJS.ProcessEnv = {}): Settings {
-  return new DeploymentSettingsService(settingsTable(), randomBytes(32).toString('base64'), undefined, { env });
+  return realDeploymentSettingsOn(settingsTable(), env);
+}
+
+/**
+ * The same service over a database the test opened itself — a real Postgres
+ * from `pg-scratch.ts` — for a suite that needs settings and another
+ * module's rows in ONE database (removing a setting must leave the accounts
+ * beside it alone).
+ */
+export function realDeploymentSettingsOn(db: Database, env: NodeJS.ProcessEnv = {}): Settings {
+  return new DeploymentSettingsService(db, randomBytes(32).toString('base64'), undefined, { env });
 }
 
 interface Row {
