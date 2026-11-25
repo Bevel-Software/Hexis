@@ -28,34 +28,30 @@ const scopes = new AsyncLocalStorage<SubstitutionScope>();
 
 const RECORDING = Symbol.for('bevel.mcp-core.recordsSubstitutions');
 
-/**
- * Shorter than this, a substituted value is not redacted: `1` or `v2` in a
- * path is a version, not a credential, and replacing it everywhere would
- * garble the message the caller needs.
- */
-const MIN_REDACTED_LENGTH = 4;
-
 /** Data that could not be serialised cannot be checked, so it is not served. */
 const UNCHECKABLE_DATA = '[withheld: the tool failure carried data that could not be checked for secrets]';
 
 /**
  * Make `client` record every value its substitutor resolves into the current
- * call's scope. Idempotent. A client without a substitutor (a test double)
- * substitutes nothing, so there is nothing to record.
+ * call's scope. Idempotent. A client that does not substitute templates (it
+ * has no `substituteCallTemplateVariables`, as a test double may not) has
+ * nothing to record.
  *
- * Throws when the substitutor is not the one this was written against: tool
- * errors would otherwise go out unredacted without anyone noticing.
+ * Throws when the client substitutes, but not through the substitutor this
+ * was written against: tool errors would otherwise go out unredacted without
+ * anyone noticing.
  */
 export function recordSubstitutions(client: CodeModeUtcpClient): void {
-  const substitutor = (client as { variableSubstitutor?: unknown }).variableSubstitutor as
-    | Record<string | symbol, unknown>
-    | undefined;
-  if (!substitutor || substitutor[RECORDING] === true) return;
-  const getVariable = substitutor._getVariable;
-  if (typeof getVariable !== 'function') {
+  const subject = client as unknown as { substituteCallTemplateVariables?: unknown; variableSubstitutor?: unknown };
+  if (typeof subject.substituteCallTemplateVariables !== 'function') return;
+  const substitutor = subject.variableSubstitutor as Record<string | symbol, unknown> | null | undefined;
+  if (substitutor?.[RECORDING] === true) return;
+  const getVariable = substitutor?._getVariable;
+  if (!substitutor || typeof getVariable !== 'function') {
     throw new Error(
-      'The UTCP variable substitutor has no `_getVariable` to record substituted values through, ' +
-        'so tool errors could not be redacted. The @utcp/sdk version is not the one this platform supports.',
+      'The UTCP client substitutes templates without a `variableSubstitutor._getVariable` to record ' +
+        'substituted values through, so tool errors could not be redacted. ' +
+        'The @utcp/sdk version is not the one this platform supports.',
     );
   }
   substitutor._getVariable = async function recordingGetVariable(this: unknown, key: string, ...rest: unknown[]) {
@@ -78,13 +74,21 @@ export function inSubstitutionScope<T>(scope: SubstitutionScope, fn: () => T): T
   return scopes.run(scope, fn);
 }
 
+/**
+ * Run `fn` in `scope`, and redact the values substituted in `scope` from what
+ * it rejects with: the one way a guarded call runs each of its steps.
+ */
+export async function runRedacted<T>(scope: SubstitutionScope, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await inSubstitutionScope(scope, fn);
+  } catch (err) {
+    throw redactSubstitutedFailure(err, scope);
+  }
+}
+
 /** `text` with every recorded value of `scope` replaced by the `${NAME}` it was written as. */
 export function redactSubstitutedText(text: string, scope: SubstitutionScope): string {
-  let redacted = text;
-  for (const [form, marker] of replacements(scope)) {
-    if (redacted.includes(form)) redacted = redacted.replaceAll(form, marker);
-  }
-  return redacted;
+  return redactorFor(scope)(text);
 }
 
 /**
@@ -93,31 +97,41 @@ export function redactSubstitutedText(text: string, scope: SubstitutionScope): s
  * upstream's answer (`data`, `response.data`, `statusText`) and its causes.
  *
  * In place, so the error keeps its class, status and cause chain — the token
- * refresh and session recovery decide on those. When something cannot be
- * rewritten in place (a frozen error, a getter), a plain error carrying the
- * redacted message and status is returned instead: the secret never stays.
+ * refresh and session recovery decide on those. When a rewrite does not take
+ * (a frozen error, a getter), a plain error carrying the redacted message and
+ * status is returned instead: the secret never stays.
  */
 export function redactSubstitutedFailure(err: unknown, scope: SubstitutionScope): unknown {
   if (scope.values.size === 0) return err;
-  if (typeof err === 'string') return redactSubstitutedText(err, scope);
+  const redact = redactorFor(scope);
+  if (typeof err === 'string') return redact(err);
   if (err === null || typeof err !== 'object') return err;
-  const redact = (text: string) => redactSubstitutedText(text, scope);
-  rewrite(err, redact, new Set());
-  if (!stillCarries(err, redact, new Set())) return err;
+  if (rewrite(err, redact, new Set())) return err;
   const withheld = new Error(redact(messageOf(err))) as Error & { status?: unknown };
   const status = statusOf(err);
   if (status !== undefined) withheld.status = status;
   return withheld;
 }
 
-/** Every spelling a value can take once quoted — raw, percent-encoded, form-encoded, JSON-escaped — longest first. */
-function replacements(scope: SubstitutionScope): [string, string][] {
-  const pairs = new Map<string, string>();
+/**
+ * One pass over the text replacing every spelling a recorded value can take
+ * once quoted (raw, percent-encoded, form-encoded, JSON-escaped), longest
+ * first at each position. One pass, so a marker already put in is never
+ * searched again: a short value that occurs inside `${NAME}` cannot garble it.
+ */
+function redactorFor(scope: SubstitutionScope): (text: string) => string {
+  const markers = new Map<string, string>();
   for (const [value, name] of scope.values) {
-    if (value.length < MIN_REDACTED_LENGTH) continue;
-    for (const form of spellings(value)) if (!pairs.has(form)) pairs.set(form, `\${${name}}`);
+    // Every value is redacted, however short: length does not tell a secret
+    // from a version. Only '' is skipped, since it cannot be quoted and
+    // replacing it would mark every gap in the text.
+    if (value.length === 0) continue;
+    for (const form of spellings(value)) if (!markers.has(form)) markers.set(form, `\${${name}}`);
   }
-  return [...pairs].sort((a, b) => b[0].length - a[0].length);
+  if (markers.size === 0) return (text) => text;
+  const forms = [...markers.keys()].sort((a, b) => b.length - a.length);
+  const pattern = new RegExp(forms.map((form) => form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  return (text) => text.replace(pattern, (form) => markers.get(form)!);
 }
 
 function spellings(value: string): string[] {
@@ -129,7 +143,7 @@ function spellings(value: string): string[] {
       // A lone surrogate cannot be percent-encoded, so it cannot be quoted that way either.
     }
   }
-  return [...new Set(forms)].filter((form) => form.length >= MIN_REDACTED_LENGTH);
+  return [...new Set(forms)];
 }
 
 /** The fields of a failure that carry text a surface may serve. */
@@ -137,51 +151,37 @@ const TEXT_FIELDS = ['message', 'stack', 'statusText'] as const;
 /** The fields that carry a nested failure or response, rewritten in turn. */
 const NESTED_FIELDS = ['cause', 'response', 'errors'] as const;
 
-function rewrite(target: object, redact: (text: string) => string, seen: Set<object>): void {
-  if (seen.has(target)) return;
+/** Redact `target` in place; false when some rewrite did not take, so the caller must not serve it. */
+function rewrite(target: object, redact: (text: string) => string, seen: Set<object>): boolean {
+  if (seen.has(target)) return true;
   seen.add(target);
   const record = target as Record<string, unknown>;
+  let took = true;
   for (const field of TEXT_FIELDS) {
     const value = read(record, field);
-    if (typeof value === 'string') assign(record, field, redact(value), value);
+    if (typeof value === 'string') took = assign(record, field, redact(value), value) && took;
   }
   const data = read(record, 'data');
-  if (data !== undefined) assign(record, 'data', redactData(data, redact), data);
+  if (data !== undefined) took = assign(record, 'data', redactData(data, redact), data) && took;
   for (const field of NESTED_FIELDS) {
     const nested = read(record, field);
-    if (typeof nested === 'string') assign(record, field, redact(nested), nested);
-    else if (Array.isArray(nested)) nested.forEach((item) => item && typeof item === 'object' && rewrite(item, redact, seen));
-    else if (nested && typeof nested === 'object') rewrite(nested, redact, seen);
-  }
-}
-
-function stillCarries(target: object, redact: (text: string) => string, seen: Set<object>): boolean {
-  if (seen.has(target)) return false;
-  seen.add(target);
-  const record = target as Record<string, unknown>;
-  for (const field of [...TEXT_FIELDS, 'data', ...NESTED_FIELDS]) {
-    let value: unknown;
-    try {
-      value = record[field];
-    } catch {
-      continue; // A getter that throws serves nothing.
+    if (typeof nested === 'string') took = assign(record, field, redact(nested), nested) && took;
+    else if (nested && typeof nested === 'object') {
+      const items = Array.isArray(nested) ? nested : [nested];
+      for (const item of items) if (item && typeof item === 'object') took = rewrite(item, redact, seen) && took;
+      // A getter that hands out a fresh object each time was not rewritten by the above.
+      took = read(record, field) === nested && took;
     }
-    if (value === undefined || value === null) continue;
-    if (typeof value === 'string') {
-      if (redact(value) !== value) return true;
-    } else if (field === 'data') {
-      if (redactData(value, redact) !== value) return true;
-    } else if (Array.isArray(value)) {
-      if (value.some((item) => item && typeof item === 'object' && stillCarries(item, redact, seen))) return true;
-    } else if (typeof value === 'object' && stillCarries(value, redact, seen)) return true;
   }
-  return false;
+  return took;
 }
 
 /**
  * An upstream answer, redacted through its JSON text — the JSON-escaped
  * spelling of every value is one of the forms replaced, and a `${NAME}`
- * marker is JSON-safe. The SAME object when nothing in it needed redacting.
+ * marker is JSON-safe. The SAME object when nothing in it needed redacting;
+ * text that no longer parses (a value matched JSON's own punctuation) is
+ * withheld like data that cannot be serialised.
  */
 function redactData(data: unknown, redact: (text: string) => string): unknown {
   if (typeof data === 'string') return redact(data);
@@ -200,18 +200,19 @@ function read(record: Record<string, unknown>, field: string): unknown {
   try {
     return record[field];
   } catch {
-    return undefined;
+    return undefined; // A getter that throws serves nothing.
   }
 }
 
-/** Set `field` when its value changed; a refused write is caught by {@link stillCarries}. */
-function assign(record: Record<string, unknown>, field: string, next: unknown, previous: unknown): void {
-  if (next === previous) return;
+/** Set `field` when its value changed; false when the write did not take (frozen, getter-only). */
+function assign(record: Record<string, unknown>, field: string, next: unknown, previous: unknown): boolean {
+  if (next === previous) return true;
   try {
     Reflect.set(record, field, next);
   } catch {
-    // Frozen or getter-only: the caller falls back to a fresh error.
+    return false;
   }
+  return read(record, field) === next;
 }
 
 function messageOf(err: object): string {

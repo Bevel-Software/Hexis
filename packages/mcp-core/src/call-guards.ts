@@ -3,10 +3,9 @@ import { ARGUMENTS_DO_NOT_MATCH_KIND, argumentsDoNotMatchMessage, checkFor } fro
 import { NOT_JSON_KIND, pageInsteadOfJson } from './results.js';
 import { isPlatformHostedUrl } from './utcp-namespace.js';
 import {
-  inSubstitutionScope,
   openSubstitutionScope,
   recordSubstitutions,
-  redactSubstitutedFailure,
+  runRedacted,
 } from './substituted-secrets.js';
 
 /**
@@ -213,18 +212,13 @@ export function installCallGuards(client: CodeModeUtcpClient): void {
   if (hasCallTool && (client.callTool as unknown as Record<symbol, unknown>)[GUARDED] !== true) {
     const callTool = client.callTool.bind(client);
     const guarded = async function guardedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
-      const scope = openSubstitutionScope();
-      try {
-        return await inSubstitutionScope(scope, async () => {
-          const refusal = await argumentRefusal(client, toolName, toolArgs);
-          if (refusal) throw new ArgumentsDoNotMatchError(refusal);
-          const result = await callTool(toolName, toolArgs);
-          await guardResult(toolName, result);
-          return result;
-        });
-      } catch (err) {
-        throw redactSubstitutedFailure(err, scope);
-      }
+      return runRedacted(openSubstitutionScope(), async () => {
+        const refusal = await argumentRefusal(client, toolName, toolArgs);
+        if (refusal) throw new ArgumentsDoNotMatchError(refusal);
+        const result = await callTool(toolName, toolArgs);
+        await guardResult(toolName, result);
+        return result;
+      });
     };
     (guarded as unknown as Record<symbol, unknown>)[GUARDED] = true;
     client.callTool = guarded as typeof client.callTool;
@@ -236,31 +230,29 @@ export function installCallGuards(client: CodeModeUtcpClient): void {
       toolName: string,
       toolArgs: Record<string, unknown>,
     ): AsyncGenerator<unknown, void, unknown> {
-      // Every step of the stream runs in the call's scope: the template is
-      // substituted on the first step, and a later one may still fail and
-      // quote it.
+      // Every step of the stream, its cleanup included, runs in the call's
+      // scope and is redacted on the way out: the template is substituted on
+      // the first step, and any later one may still fail and quote it.
       const scope = openSubstitutionScope();
       let open: AsyncIterator<unknown> | undefined;
       try {
-        const refusal = await inSubstitutionScope(scope, () => argumentRefusal(client, toolName, toolArgs));
+        const refusal = await runRedacted(scope, () => argumentRefusal(client, toolName, toolArgs));
         if (refusal) throw new ArgumentsDoNotMatchError(refusal);
         const stream = callToolStreaming(toolName, toolArgs)[Symbol.asyncIterator]();
         open = stream;
         for (;;) {
-          const step = await inSubstitutionScope(scope, () => stream.next());
+          const step = await runRedacted(scope, () => stream.next());
           if (step.done) {
             open = undefined;
             return;
           }
-          await inSubstitutionScope(scope, () => guardResult(toolName, step.value));
+          await runRedacted(scope, () => guardResult(toolName, step.value));
           yield step.value;
         }
-      } catch (err) {
-        throw redactSubstitutedFailure(err, scope);
       } finally {
         // A consumer that stops early, or a refused chunk, ends the stream
         // underneath too, as the `for await` this replaced did.
-        await open?.return?.();
+        if (open?.return) await runRedacted(scope, async () => void (await open!.return!()));
       }
     };
     (guardedStreaming as unknown as Record<symbol, unknown>)[GUARDED] = true;

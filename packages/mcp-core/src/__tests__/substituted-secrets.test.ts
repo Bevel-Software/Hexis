@@ -4,6 +4,7 @@ import '@utcp/http';
 import { CallTemplateSerializer } from '@utcp/sdk';
 import { CodeModeUtcpClient, type CodeModeUtcpClient as Client } from '@utcp/code-mode';
 import { dispatchToolCall, registerManual } from '../dispatch.js';
+import { installCallGuards } from '../call-guards.js';
 import { runToolChain } from '../chain-runtime.js';
 import type { ProxiedTool } from '../proxied-tool.js';
 import {
@@ -160,7 +161,7 @@ describe('redactSubstitutedFailure', () => {
   /** A scope holding the marker as `${KEY}` had substituted it. */
   async function scopeWithSecret() {
     const substitutor = { _getVariable: async (key: string) => (key === 'KEY' ? SECRET : '') };
-    recordSubstitutions({ variableSubstitutor: substitutor } as never);
+    recordSubstitutions({ substituteCallTemplateVariables: () => {}, variableSubstitutor: substitutor } as never);
     const scope = openSubstitutionScope();
     await inSubstitutionScope(scope, () => substitutor._getVariable('KEY'));
     return scope;
@@ -205,5 +206,67 @@ describe('redactSubstitutedFailure', () => {
     const err = new Error(`refused ${SECRET}`);
     expect(redactSubstitutedFailure(err, openSubstitutionScope())).toBe(err);
     expect(err.message).toContain(SECRET);
+  });
+});
+
+describe('a short substituted value', () => {
+  it('is redacted all the same, and the marker it leaves is not garbled', async () => {
+    // `E` occurs in the marker `${KEY}` itself: one pass, so it is not re-marked.
+    const substitutor = { _getVariable: async (key: string) => (key === 'KEY' ? 'E' : '') };
+    recordSubstitutions({ substituteCallTemplateVariables: () => {}, variableSubstitutor: substitutor } as never);
+    const scope = openSubstitutionScope();
+    await inSubstitutionScope(scope, () => substitutor._getVariable('KEY'));
+    const err = Object.assign(new TypeError('pin E refused'), { status: 401 });
+    const out = redactSubstitutedFailure(err, scope);
+    // Rewritten in place: class and status survive, nothing fell back to a fresh error.
+    expect(out).toBe(err);
+    expect(err.message).toBe('pin ${KEY} refused');
+  });
+});
+
+describe('recordSubstitutions', () => {
+  it('refuses a client that substitutes through a substitutor it does not recognise', () => {
+    expect(() => recordSubstitutions({ substituteCallTemplateVariables: () => {} } as never)).toThrow(/could not be redacted/);
+    expect(() =>
+      recordSubstitutions({ substituteCallTemplateVariables: () => {}, variableSubstitutor: { getVariable() {} } } as never),
+    ).toThrow(/could not be redacted/);
+  });
+
+  it('leaves a client that substitutes nothing alone', () => {
+    expect(() => recordSubstitutions({} as never)).not.toThrow();
+  });
+});
+
+describe('a streamed call', () => {
+  it('redacts a failure the stream raises while it is being closed', async () => {
+    const substitutor = { _getVariable: async (key: string) => (key === 'KEY' ? SECRET : '') };
+    const double = {
+      config: { tool_repository: { getTool: async () => undefined } },
+      substituteCallTemplateVariables: () => {},
+      variableSubstitutor: substitutor,
+      async *callToolStreaming() {
+        await substitutor._getVariable('KEY');
+        try {
+          yield 'first';
+          yield 'second';
+        } finally {
+          // eslint-disable-next-line no-unsafe-finally
+          throw Object.assign(new Error(`close failed for ${SECRET}`), { data: { echoed: SECRET } });
+        }
+      },
+    };
+    installCallGuards(double as never);
+    const stream = (double as unknown as Client).callToolStreaming('NS.query', {});
+    const failure = await (async () => {
+      for await (const chunk of stream) {
+        expect(chunk).toBe('first');
+        break; // Stop early: the guard closes the stream underneath.
+      }
+    })().then(
+      () => undefined,
+      (err: unknown) => err as Error & { data?: unknown },
+    );
+    expect(failure?.message).toBe('close failed for ${KEY}');
+    expectNoSecret(`${failure?.message} ${failure?.stack} ${JSON.stringify(failure?.data)}`);
   });
 });
