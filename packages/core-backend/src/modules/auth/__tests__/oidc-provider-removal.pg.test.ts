@@ -34,7 +34,7 @@ const servers: Server[] = [];
 
 describe.skipIf(!PG_ADMIN_URL)('removing the single sign-on provider, on a real Postgres', () => {
   afterAll(async () => {
-    for (const s of servers) s.close();
+    for (const s of servers) await new Promise<void>((resolve, reject) => s.close((error) => (error ? reject(error) : resolve())));
     for (const close of closers) await close();
     await dropScratchDatabases();
   }, PG_TEST_TIMEOUT);
