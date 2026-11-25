@@ -1,8 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
-import { copyToClipboard } from '../../lib/clipboard';
-import { Button } from '../components';
-import { SnippetBlock } from './SnippetBlock';
+import { Button } from '../../../shared/components';
+import { SnippetBlock, useCopyFeedback } from '../../../shared/mcp';
 
 /**
  * "Copy prompt": one button that puts a ready-made prompt on the clipboard,
@@ -22,28 +20,18 @@ export function CopyPromptButton({
   onCopyFailed?: () => void;
   className?: string;
 }) {
-  const [copied, setCopied] = useState(false);
+  const { status, copied, copy } = useCopyFeedback();
   // A browser may refuse the clipboard (plain http, a blocked permission).
   // Then the prompt is shown, so it can be selected and copied by hand.
-  const [refused, setRefused] = useState(false);
-  const resetTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+  const refused = status === 'failed';
 
-  async function copy() {
-    const ok = await copyToClipboard(value);
-    if (!ok) onCopyFailed?.();
-    setRefused(!ok);
-    window.clearTimeout(resetTimer.current);
-    // Back to idle FIRST, so a repeat copy is a real state change and the live
-    // region announces it again (as SnippetBlock does).
-    setCopied(false);
-    window.setTimeout(() => setCopied(ok), 0);
-    resetTimer.current = window.setTimeout(() => setCopied(false), 1500);
+  async function copyPrompt() {
+    if (!(await copy(value))) onCopyFailed?.();
   }
 
   return (
     <>
-      <Button variant="primary" size="sm" onClick={() => void copy()} className={className}>
+      <Button variant="primary" size="sm" onClick={() => void copyPrompt()} className={className}>
         {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
         {copied ? 'Copied' : label}
       </Button>

@@ -5,8 +5,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { configureBranchModel } from '@bevel-software/platform-shared';
 import { AgentInstructionsCard } from '../AgentInstructionsCard';
-import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
-import { WorkspaceContext, type WorkspaceContextValue } from '../../../workspace/state/workspace.context';
+import { AdminContext, type AdminContextValue } from '../../../admin';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../../workspace';
 import type { AgentInstructions } from '../../services/agent-instructions.api';
 
 /**

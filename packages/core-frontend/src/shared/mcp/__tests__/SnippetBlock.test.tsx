@@ -5,13 +5,10 @@ import { SnippetBlock } from '../SnippetBlock';
 const { copyMock } = vi.hoisted(() => ({ copyMock: vi.fn<(text: string) => Promise<boolean>>() }));
 vi.mock('../../../lib/clipboard', () => ({ copyToClipboard: copyMock }));
 
-/** One click, then the copy's answer and the zero-delay state change it schedules. */
+/** One click, and the copy's answer. */
 async function clickCopy() {
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Copy key' }));
-  });
-  await act(async () => {
-    vi.advanceTimersByTime(0);
   });
 }
 
@@ -38,14 +35,14 @@ describe('SnippetBlock', () => {
     copyMock.mockResolvedValue(true);
     render(<SnippetBlock value="bvl_key" copyLabel="Copy key" />);
     await clickCopy();
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Copy key' }));
-    });
+    expect(screen.getByRole('status')).toHaveTextContent('Copied');
+    // The second copy is still on its way to the clipboard.
+    let land!: (ok: boolean) => void;
+    copyMock.mockReturnValueOnce(new Promise((resolve) => (land = resolve)));
+    await clickCopy();
     // Back to idle first, so the live region changes and is read again.
     expect(screen.getByRole('status')).toHaveTextContent('');
-    await act(async () => {
-      vi.advanceTimersByTime(0);
-    });
+    await act(async () => land(true));
     expect(screen.getByRole('status')).toHaveTextContent('Copied');
   });
 

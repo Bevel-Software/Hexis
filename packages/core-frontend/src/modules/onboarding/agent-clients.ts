@@ -5,7 +5,7 @@ import {
   hexisMcpJsonSnippet,
   jsonConfigSnippet,
   workspaceBaseUrl,
-} from './connect-snippets';
+} from '../../shared/mcp';
 
 /**
  * The ways an agent connects, named by PRODUCT rather than surface —

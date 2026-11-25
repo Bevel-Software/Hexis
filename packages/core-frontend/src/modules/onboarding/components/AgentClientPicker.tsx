@@ -1,12 +1,14 @@
 import { useState } from 'react';
-import { AGENT_CLIENTS, type AgentClient } from './agent-clients';
-import { ChatGptInstallLink } from './ChatGptInstallLink';
-import { ClaudeInstallLink } from './ClaudeInstallLink';
-import { canDeepLink } from './connect-snippets';
+import {
+  ChatGptInstallLink,
+  ClaudeInstallLink,
+  MoreRow,
+  SegmentedChoice,
+  SnippetBlock,
+  canDeepLink,
+} from '../../../shared/mcp';
+import { AGENT_CLIENTS, type AgentClient } from '../agent-clients';
 import { CopyPromptButton } from './CopyPromptButton';
-import { MoreRow } from './MoreRow';
-import { SegmentedChoice } from './SegmentedChoice';
-import { SnippetBlock } from './SnippetBlock';
 
 /** Instructions are read to act on, so they get the reading size and colour, not the size of a date. */
 const HINT = 'text-detail leading-normal text-ink-muted';

@@ -6,7 +6,6 @@ import { PageShell } from '../../../shared/components/PageShell';
 import { Banner, Button, TextField } from '../../../shared/components';
 import { formatRelativeTime } from '../../../lib/utils';
 import {
-  AgentClientPicker,
   MoreRow,
   SnippetBlock,
   claudeCodeCommand,
@@ -25,6 +24,7 @@ import { connectedAsLabel, listAgentChoices, useConnectAsChoice } from '../../ag
 import { ConnectAsChoice } from '../../agents/components/ConnectAsChoice';
 import { useAgentConnection } from '../../onboarding';
 import { AgentConnectionStatus } from '../../onboarding/components/AgentConnectionStatus';
+import { AgentClientPicker } from '../../onboarding/components/AgentClientPicker';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,

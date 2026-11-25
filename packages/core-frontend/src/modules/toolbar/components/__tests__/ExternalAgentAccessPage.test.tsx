@@ -20,15 +20,15 @@ import * as keysApi from '../../services/external-api-keys.api';
  * the whole app is its own origin.
  */
 
-const { listMock, createMock, instructionsMock, facadeMock, registrationMock, adminState, agentChoicesMock, agentState, copyMock } = vi.hoisted(() => ({
+const { listMock, createMock, authFetchMock, registrationMock, adminState, agentChoicesMock, agentState, copyMock } = vi.hoisted(() => ({
   // What `useAgentConnection` answers: nothing connected unless a case says so.
   agentState: { value: { connected: false, settled: true } as { connected: boolean; settled: boolean; at?: string; client?: string } },
   copyMock: vi.fn<(text: string) => Promise<boolean>>(async () => true),
   agentChoicesMock: vi.fn(),
   listMock: vi.fn(),
   createMock: vi.fn(),
-  instructionsMock: vi.fn(),
-  facadeMock: vi.fn(),
+  // Every request that reaches the network layer, recorded and answered 404.
+  authFetchMock: vi.fn(async () => new Response('{}', { status: 404 })),
   registrationMock: vi.fn(),
   // Mutable so one file can mount the page as both roles: the tutorial must
   // be identical for both, and only the "not set up" notice may differ.
@@ -37,10 +37,7 @@ const { listMock, createMock, instructionsMock, facadeMock, registrationMock, ad
 
 // The other modules this page reaches, replaced at their entries: that is
 // where the page imports them from, and the one surface a mock may stand in
-// for. Only the hook is replaced on `admin`; `AdminContext` itself stays real,
-// because the instructions card below reads the context directly rather than
-// through the hook; a whole-module mock left it undefined and every case here
-// threw.
+// for. Only the hook is replaced on `admin`; the rest of its entry stays real.
 vi.mock('../../../admin', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../admin')>()),
   useAdmin: () => ({ isAdmin: adminState.isAdmin }),
@@ -52,13 +49,11 @@ vi.mock('../../../settings', async (importOriginal) => ({
   fetchMarketplaceRegistration: registrationMock,
 }));
 
-// The admin credentials endpoint this page must never call. It is reached
-// inside the settings module, by `ClaudeConnectionCard`, which the toolbar's
-// registration steps import by file rather than through the entry, so the
-// guard sits on the file too until that import moves.
-vi.mock('../../../settings/services/github-facade.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../settings/services/github-facade.api')>()),
-  fetchGitHubFacade: facadeMock,
+// The network layer, observed rather than any module's files: the admin
+// credentials endpoint is asserted below never to be asked, by whatever path.
+vi.mock('../../../../lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../lib/api')>()),
+  authFetch: authFetchMock,
 }));
 
 // The agents a key may be minted as ("Connect as").
@@ -83,14 +78,6 @@ vi.mock('../../services/external-api-keys.api', () => ({
   deleteExternalApiKey: vi.fn(async () => {}),
 }));
 
-// The "What connected agents are told" card fetches on mount; its own cases
-// live in AgentInstructionsCard.test.tsx. Here it only has to stay out of the
-// way of the snippet assertions, which read every textbox on the page.
-vi.mock('../../services/agent-instructions.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../services/agent-instructions.api')>()),
-  fetchAgentInstructions: instructionsMock,
-}));
-
 /** A deployment configured the way a real one is: public, https, its own domain. */
 const PUBLIC_URL = 'https://kb.acme.com/api/mcp';
 /** What an unconfigured deployment actually runs with — see `.env.example`. */
@@ -98,45 +85,20 @@ const LOCALHOST_URL = 'http://localhost:3001/api/mcp';
 
 const KEY = 'bvl_live_s3cret';
 
-const FACADE = {
-  host: 'kb.acme.com',
-  appId: '12345',
-  clientId: 'Iv1.abcdef',
-  clientSecret: 'ghs_secret',
-  webhookSecret: 'whsec_0123456789012345678',
-  privateKeyPem: '-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----',
-  marketplaceUrl: 'https://kb.acme.com/git/marketplace.git',
-  createdAt: Date.now(),
-  rotatedAt: null,
-};
-
 beforeEach(() => {
   adminState.isAdmin = false;
   agentState.value = { connected: false, settled: true };
   copyMock.mockClear();
   vi.mocked(keysApi.disconnectExternalApiKey).mockClear();
   vi.mocked(keysApi.deleteExternalApiKey).mockClear();
-  // Cleared, not just re-stubbed: the count is an assertion of its own below.
-  facadeMock.mockClear();
-  facadeMock.mockResolvedValue(FACADE);
+  // Cleared: what reached the network is an assertion of its own below.
+  authFetchMock.mockClear();
   registrationMock.mockReset();
   registrationMock.mockResolvedValue(false);
   listMock.mockResolvedValue([]);
   agentChoicesMock.mockReset();
   agentChoicesMock.mockResolvedValue([]);
   createMock.mockClear();
-  instructionsMock.mockResolvedValue({
-    instructions: 'Search the knowledge base first.',
-    header: 'Search the knowledge base first.',
-    preamble: '',
-    toolPrefix: 'Search it before answering from memory.',
-    toolPrefixLine: 'Search it before answering from memory.',
-    truncated: false,
-    preambleChars: 0,
-    toolPrefixTruncated: false,
-    toolPrefixChars: 40,
-    unterminatedComment: false,
-  });
   createMock.mockResolvedValue({
     plaintext: KEY,
     summary: {
@@ -198,6 +160,22 @@ describe('the first screen: one open task, everything else a closed row', () => 
     expect(row('plugins-row').open).toBe(false);
     // What agents are told is a workspace setting: it lives on Deployment.
     expect(screen.queryByTestId('agent-instructions-section')).not.toBeInTheDocument();
+    await waitFor(() => expect(listMock).toHaveBeenCalled());
+  });
+
+  /**
+   * API keys and skills as plugins close each other the way every closed row
+   * here does: they are `<details>` of ONE `name` group, and the browser
+   * shuts the open one when another of the group opens (the HTML exclusive
+   * accordion). The test DOM does not implement that closing, so this pins
+   * what the page owns: both rows in the same group, and no other row in it.
+   */
+  it('puts API keys and skills as plugins in one group, so opening one closes the other', async () => {
+    mount(PUBLIC_URL);
+    const group = row('keys-section').getAttribute('name');
+    expect(group).toBeTruthy();
+    expect(row('plugins-row').getAttribute('name')).toBe(group);
+    expect(document.querySelectorAll(`details[name="${group}"]`)).toHaveLength(2);
     await waitFor(() => expect(listMock).toHaveBeenCalled());
   });
 
@@ -508,7 +486,8 @@ describe('skills as native plugins: optional, and never a command that cannot ru
     expect(registrationMock).not.toHaveBeenCalled();
     await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
     await waitFor(() => expect(registrationMock).toHaveBeenCalledTimes(1));
-    expect(facadeMock).not.toHaveBeenCalled();
+    const asked = authFetchMock.mock.calls.map((call) => String((call as unknown[])[0]));
+    expect(asked.filter((url) => url.startsWith('/api/admin/github-facade'))).toEqual([]);
   });
 
   it('shows a member nothing about Cowork until the deployment is registered', async () => {

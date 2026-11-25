@@ -95,6 +95,44 @@ describe('useCopyFeedback', () => {
     expect(result.current.copied).toBe(false);
   });
 
+  /** A refusal is an answer the reader must act on: it does not fade like a success. */
+  it('keeps a refusal said until the next try', async () => {
+    vi.useFakeTimers();
+    stubClipboard({ writeText: vi.fn().mockRejectedValue(new Error('denied')) });
+    const { result } = renderHook(() => useCopyFeedback());
+    let ok: boolean | undefined;
+    await act(async () => {
+      ok = await result.current.copy('hello');
+    });
+    expect(ok).toBe(false);
+    expect(result.current.status).toBe('failed');
+    act(() => vi.advanceTimersByTime(5000));
+    expect(result.current.status).toBe('failed');
+  });
+
+  /** Each copy starts from idle, so a live region reading the status changes, and says it again. */
+  it('goes back to idle while a repeat copy is on its way', async () => {
+    let land!: () => void;
+    const writeText = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(new Promise<void>((resolve) => (land = resolve)));
+    stubClipboard({ writeText });
+    const { result } = renderHook(() => useCopyFeedback());
+    await act(async () => result.current.copy('first'));
+    expect(result.current.status).toBe('copied');
+    let second!: Promise<boolean>;
+    act(() => {
+      second = result.current.copy('second');
+    });
+    expect(result.current.status).toBe('idle');
+    await act(async () => {
+      land();
+      await second;
+    });
+    expect(result.current.status).toBe('copied');
+  });
+
   it('clears the checkmark when a copy fails right after one succeeded', async () => {
     const writeText = vi
       .fn()

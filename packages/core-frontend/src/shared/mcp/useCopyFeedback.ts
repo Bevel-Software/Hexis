@@ -1,46 +1,48 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { copyToClipboard } from '../../lib/clipboard';
+
+/** What the last copy said: nothing yet (or it has faded), it landed, or the browser refused it. */
+export type CopyStatus = 'idle' | 'copied' | 'failed';
 
 /**
- * "Copied" affordance with a 1500ms auto-reset. Owns the timer + its teardown
- * (so an unmounting page can't fire a stale setState), shared by the reveal
- * modal and every CopyBlock. `copy(text)` writes to the clipboard and flags
- * copied; a rejected write (insecure context / denied permission) leaves the
- * textarea selectable for manual copy and shows no false "Copied".
+ * The one copy-feedback policy every copy button here follows: the
+ * clipboard write, the "Copied" that fades after 1500ms, the refusal that
+ * stays said until the next try, and a repeat copy that is announced again.
+ * `CopyBlock`, `SnippetBlock` and the onboarding module's "Copy prompt"
+ * button are presentations of THIS; none keeps a timer or a status of its own.
+ *
+ * - `copy(text)` resolves to whether the text landed, so a caller can add its
+ *   own answer to a refusal (select the text, show it, raise a toast).
+ * - A refusal (insecure context, denied permission, no clipboard at all) is
+ *   `failed`, never a false "Copied": `copyToClipboard` answers false for all
+ *   of them and never throws.
+ * - Each copy first goes back to `idle`, before the clipboard answers, so a
+ *   second copy is a real state change: a live region reading the status says
+ *   "Copied" again instead of staying silent, and the 1500ms window restarts
+ *   from the second copy rather than ending at the first one's deadline.
  *
  * Its own file rather than sitting beside `CopyBlock`: a module that exports
  * both a component and a plain function breaks React Fast Refresh, which
  * lints as `react-refresh/only-export-components`.
  */
-export function useCopyFeedback(): { copied: boolean; copy: (text: string) => void } {
-  // A counter, not a boolean: `setState(true)` on an already-true boolean
-  // bails out of the render, so a second copy inside the 1500ms window would
-  // never restart the timer and its checkmark would vanish almost at once.
-  // Each success bumps the counter, which re-arms the effect below.
-  const [copyCount, setCopyCount] = useState(0);
-  useEffect(() => {
-    if (copyCount === 0) return;
-    const timerId = window.setTimeout(() => setCopyCount(0), 1500);
-    return () => window.clearTimeout(timerId);
-  }, [copyCount]);
-  const copy = useCallback((text: string) => {
-    /**
-     * `navigator.clipboard` is absent in an insecure context — which this app
-     * routinely runs in, since the default deployment is plain http on
-     * localhost. Reaching for `.writeText` there throws a TypeError
-     * SYNCHRONOUSLY, before any promise exists, so `void` swallows nothing and
-     * the click errors instead of failing quietly.
-     */
-    if (!navigator.clipboard?.writeText) {
-      setCopyCount(0);
-      return;
-    }
-    void navigator.clipboard
-      .writeText(text)
-      .then(() => setCopyCount((n) => n + 1))
-      // Clear rather than ignore: a failure inside the 1500ms window of an
-      // earlier success would otherwise leave the checkmark up, reporting that
-      // this copy worked when it did not.
-      .catch(() => setCopyCount(0));
+export function useCopyFeedback(): {
+  status: CopyStatus;
+  copied: boolean;
+  copy: (text: string) => Promise<boolean>;
+} {
+  const [status, setStatus] = useState<CopyStatus>('idle');
+  // One timer, cleared before it is replaced and when the page unmounts.
+  const resetTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+
+  const copy = useCallback(async (text: string) => {
+    window.clearTimeout(resetTimer.current);
+    setStatus('idle');
+    const ok = await copyToClipboard(text);
+    setStatus(ok ? 'copied' : 'failed');
+    if (ok) resetTimer.current = window.setTimeout(() => setStatus('idle'), 1500);
+    return ok;
   }, []);
-  return { copied: copyCount > 0, copy };
+
+  return { status, copied: status === 'copied', copy };
 }

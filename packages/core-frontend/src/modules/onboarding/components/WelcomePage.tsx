@@ -4,10 +4,11 @@ import { Button } from '../../../shared/components';
 import { useAuth } from '../../auth';
 import { useLibraryToast, COPY_FAILED_TOAST, pathForLibraryFilter, displayFirstName } from '../../library';
 import { useAppRegistry } from '../../../core/registry';
-import { AgentClientPicker, mcpEndpointUrl } from '../../../shared/mcp';
+import { mcpEndpointUrl } from '../../../shared/mcp';
 import { useOnboarding } from '../state/onboarding';
 import { useAgentConnection } from '../state/agent-connection';
 import { AgentConnectionStatus } from './AgentConnectionStatus';
+import { AgentClientPicker } from './AgentClientPicker';
 
 /**
  * The welcome page: how to connect your agent.

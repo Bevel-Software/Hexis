@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef } from 'react';
 import { Check, Copy, X } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { copyToClipboard } from '../../lib/clipboard';
 import { IconButton } from '../components';
+import { useCopyFeedback } from './useCopyFeedback';
 
 /**
  * One snippet and the button that copies it: the copy rides the block it
@@ -32,28 +32,12 @@ export function SnippetBlock({
   onCopyFailed?: () => void;
   className?: string;
 }) {
-  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const { status, copy } = useCopyFeedback();
   const textRef = useRef<HTMLDivElement>(null);
 
-  // One timer, cleared before it is replaced: a second copy inside the 1.5s
-  // window would otherwise inherit the FIRST copy's expiry and blank the
-  // checkmark almost immediately.
-  const resetTimer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
-
-  async function copy() {
-    const ok = await copyToClipboard(value);
-    if (!ok) onCopyFailed?.();
-    window.clearTimeout(resetTimer.current);
-    // Back to idle FIRST, so a repeat copy is a real state change and the
-    // live region announces it again: setting 'ok' over 'ok' is a no-op that
-    // says nothing to a screen reader.
-    setCopied('idle');
-    window.setTimeout(() => setCopied(ok ? 'ok' : 'fail'), 0);
-    if (ok) {
-      resetTimer.current = window.setTimeout(() => setCopied('idle'), 1500);
-      return;
-    }
+  async function copyValue() {
+    if (await copy(value)) return;
+    onCopyFailed?.();
     // A refused copy stays said until the next try, and the text is selected,
     // so the way round (the keyboard's own copy) is one key away. A cross that
     // flashed for a second and a half looked the same as nothing happening.
@@ -85,12 +69,12 @@ export function SnippetBlock({
           size={24}
           aria-label={copyLabel}
           title={copyLabel}
-          onClick={() => void copy()}
+          onClick={() => void copyValue()}
           className="absolute right-2 top-2"
         >
-          {copied === 'ok' ? (
+          {status === 'copied' ? (
             <Check size={13} className="text-ok" />
-          ) : copied === 'fail' ? (
+          ) : status === 'failed' ? (
             <X size={13} className="text-danger" />
           ) : (
             <Copy size={13} />
@@ -98,10 +82,10 @@ export function SnippetBlock({
         </IconButton>
         {/* The icon's answer, said out loud for anyone not watching it. */}
         <span role="status" aria-live="polite" className="sr-only">
-          {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed' : ''}
+          {status === 'copied' ? 'Copied' : status === 'failed' ? 'Copy failed' : ''}
         </span>
       </div>
-      {copied === 'fail' && (
+      {status === 'failed' && (
         <p className="mt-1.5 text-meta text-danger">Your browser did not allow copying. The text is selected: press ⌘C or Ctrl+C.</p>
       )}
     </div>

@@ -2,14 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { AuthContext } from '../../auth/state/auth.context';
-import { authValue } from '../../library/__tests__/auth-harness';
-import { LibraryToastProvider } from '../../library/state/toast';
+import { AuthContext, type AuthContextValue } from '../../auth';
 import { WelcomePage } from '../components/WelcomePage';
 import { AppRegistryContext, EMPTY_REGISTRY } from '../../../core/registry';
 import { ConnectAgentPill } from '../components/ConnectAgentPill';
 import { RootLanding } from '../components/RootLanding';
-import { POST_LOGIN_REDIRECT_KEY } from '../../auth/services/sso';
 import { WELCOME_PATH } from '../paths';
 import { resetOnboardingForTests } from '../state/onboarding';
 import { configureMcpUrl } from '../../../shared/mcp';
@@ -17,8 +14,8 @@ import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
 import { AGENT_RECHECK_MS } from '../state/agent-connection';
 import type { AgentConnection } from '../services/agent-connection.api';
-import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
-import type { VersionControlEvent, VersionControlEventPayload } from '@bevel-software/platform-shared';
+import { EventBusProvider } from '../../version-control';
+import type { VersionControlEventPayload } from '@bevel-software/platform-shared';
 
 /**
  * The onboarding contract, end to end on the client:
@@ -61,6 +58,26 @@ function fetchInit(call = 0): RequestInit | undefined {
   return (authFetchMock.mock.calls[call] as unknown as [string, RequestInit] | undefined)?.[1];
 }
 
+/**
+ * Where `startSsoLogin` leaves a deep link for the far side of the SSO
+ * round-trip. A name in the browser's session storage, so the cases below
+ * stash a link the way a returning tab finds one: through the storage, not
+ * through the auth module's files.
+ */
+const POST_LOGIN_REDIRECT_KEY = 'bevel_post_login_redirect';
+
+/** The signed-in person, as the auth module's context hands them to a page. */
+function authValue(over: Partial<AuthContextValue> = {}): AuthContextValue {
+  return {
+    user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera' },
+    token: 'test-token',
+    isLoading: false,
+    login: vi.fn(),
+    logout: vi.fn(),
+    ...over,
+  };
+}
+
 /** A user the server considers NOT onboarded (the explicit false matters). */
 const newUser = () => authValue({ user: { id: 'u1', email: 'juan@bevel.software', name: 'Juan Viera', onboardingDone: false } });
 /** The same account after the server has recorded the onboarding as done. */
@@ -72,18 +89,17 @@ function LocationProbe() {
 }
 
 /**
- * Render `ui` inside the three contexts the onboarding actually reads — a
- * router at `route`, an auth context holding `auth`, and the toast provider —
- * plus the location probe every redirect assertion below looks at.
+ * Render `ui` inside the two contexts the onboarding actually reads — a
+ * router at `route` and an auth context holding `auth` — plus the location
+ * probe every redirect assertion below looks at. No toast provider: a toast
+ * outside one is dropped, and no case here reads one.
  */
 function mount(ui: React.ReactNode, auth = newUser(), route = '/') {
   return render(
     <MemoryRouter initialEntries={[route]}>
       <AuthContext.Provider value={auth}>
-        <LibraryToastProvider>
-          {ui}
-          <LocationProbe />
-        </LibraryToastProvider>
+        {ui}
+        <LocationProbe />
       </AuthContext.Provider>
     </MemoryRouter>,
   );
@@ -622,29 +638,36 @@ describe('WelcomePage', () => {
 });
 
 /**
- * A stand-in for the tab's event stream: what the server would push, pushed
- * by the test.
+ * The server's event stream, as the browser offers it. The test DOM ships no
+ * EventSource; this one keeps the listeners the real `EventBusProvider`
+ * registers and lets a test send an event down the stream, so the page is
+ * driven the way the backend drives it: by a message on the wire, through the
+ * provider the app mounts (as `GitSyncFailedBanner.test.tsx` does).
  */
-function fakeBus() {
-  const handlers = new Map<string, Set<(e: VersionControlEvent) => void>>();
-  const value: EventBusContextValue = {
-    subscribe: (kind, handler) => {
-      const set = handlers.get(kind) ?? new Set();
-      set.add(handler as (e: VersionControlEvent) => void);
-      handlers.set(kind, set);
-      return () => set.delete(handler as (e: VersionControlEvent) => void);
-    },
-    setFocus: () => {},
-    watchWorkspace: () => () => {},
-  };
-  const emit = (event: VersionControlEventPayload) => {
-    act(() => {
-      for (const h of handlers.get(event.kind) ?? []) {
-        h({ id: 1, ts: new Date().toISOString(), ...event } as VersionControlEvent);
-      }
-    });
-  };
-  return { value, emit, listening: (kind: string) => (handlers.get(kind)?.size ?? 0) > 0 };
+class FakeEventSource {
+  static latest: FakeEventSource | null = null;
+  private readonly listeners = new Map<string, ((e: Event) => void)[]>();
+  constructor() {
+    FakeEventSource.latest = this;
+  }
+  addEventListener(type: string, fn: (e: Event) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  removeEventListener(type: string, fn: (e: Event) => void) {
+    this.listeners.set(type, (this.listeners.get(type) ?? []).filter((f) => f !== fn));
+  }
+  close() {}
+  send(event: unknown) {
+    const message = new MessageEvent('message', { data: JSON.stringify(event) });
+    for (const fn of [...(this.listeners.get('message') ?? [])]) fn(message);
+  }
+}
+
+/** Sends one event down the stream the mounted provider opened. */
+function emit(event: VersionControlEventPayload) {
+  act(() => {
+    FakeEventSource.latest?.send({ id: 1, ts: new Date().toISOString(), ...event });
+  });
 }
 
 const ARRIVED: VersionControlEventPayload = {
@@ -663,17 +686,28 @@ const ARRIVED: VersionControlEventPayload = {
  * a timer.
  */
 describe('WelcomePage: is your agent connected?', () => {
-  const mountPage = (auth = newUser(), bus = fakeBus()) => {
-    const rendered = mount(
-      <EventBusContext.Provider value={bus.value}>
+  beforeEach(() => {
+    FakeEventSource.latest = null;
+    vi.stubGlobal('EventSource', FakeEventSource);
+    // The provider's focus POST, which this page has no stake in.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })));
+  });
+
+  /** The page under the provider the app mounts; `leave()` takes the page away and keeps the stream. */
+  const mountPage = (auth = newUser()) => {
+    const tree = (page: boolean) => (
+      <EventBusProvider>
         <Routes>
-          <Route path={WELCOME_PATH} element={<WelcomePage />} />
+          <Route path={WELCOME_PATH} element={page ? <WelcomePage /> : <div>elsewhere</div>} />
         </Routes>
-      </EventBusContext.Provider>,
-      auth,
-      WELCOME_PATH,
+      </EventBusProvider>
     );
-    return { ...rendered, bus };
+    const rendered = mount(tree(true), auth, WELCOME_PATH);
+    return { ...rendered, leave: () => rendered.rerender(
+      <MemoryRouter initialEntries={[WELCOME_PATH]}>
+        <AuthContext.Provider value={auth}>{tree(false)}</AuthContext.Provider>
+      </MemoryRouter>,
+    ) };
   };
 
   /** Calls to the onboarding write — the one `markDone` makes. */
@@ -695,7 +729,7 @@ describe('WelcomePage: is your agent connected?', () => {
   });
 
   it('waits quietly, turns green when the server says the agent arrived, and concludes once', async () => {
-    const { bus } = mountPage();
+    mountPage();
     await settle();
     // One live region, the same element in both states, so the change is announced.
     // Nothing is waited for until the reader has done something.
@@ -705,26 +739,25 @@ describe('WelcomePage: is your agent connected?', () => {
     expect(status).toHaveAttribute('aria-live', 'polite');
     expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
     expect(doneWrites()).toBe(0);
-    expect(bus.listening('agent-connected')).toBe(true);
 
-    bus.emit(ARRIVED);
+    emit(ARRIVED);
     expect(status).toHaveTextContent('Connected. Your agent reached this knowledge base.');
     expect(status).not.toHaveTextContent('Waiting');
     expect(doneWrites()).toBe(1);
     expect(fetchInit(0)?.body).toBe(JSON.stringify({ userId: 'u1' }));
 
     // Connected is final: nothing more is asked, and no second conclusion.
-    bus.emit(ARRIVED);
+    emit(ARRIVED);
     await settle();
     expect(fetchAgentConnectionMock).toHaveBeenCalledTimes(1);
     expect(doneWrites()).toBe(1);
   });
 
   it("stays waiting on another account's agent", async () => {
-    const { bus } = mountPage();
+    mountPage();
     await settle();
     actOnThePage();
-    bus.emit({ ...ARRIVED, forUserId: 'u2' });
+    emit({ ...ARRIVED, forUserId: 'u2' });
     expect(screen.getByText('Waiting for your agent…')).toBeInTheDocument();
     expect(doneWrites()).toBe(0);
   });
@@ -747,11 +780,13 @@ describe('WelcomePage: is your agent connected?', () => {
    */
   it('asks nothing for an account that already finished the onboarding', async () => {
     fetchAgentConnectionMock.mockResolvedValue({ connected: true, client: 'Claude' });
-    const { bus } = mountPage(doneUser());
+    mountPage(doneUser());
     await settle();
     expect(fetchAgentConnectionMock).not.toHaveBeenCalled();
-    expect(bus.listening('agent-connected')).toBe(false);
     expect(screen.queryByText('Waiting for your agent…')).not.toBeInTheDocument();
+    // Not listening: an arrival on the stream changes nothing.
+    emit(ARRIVED);
+    expect(screen.queryByText(/^Connected\./)).not.toBeInTheDocument();
     expect(doneWrites()).toBe(0);
   });
 
@@ -787,11 +822,12 @@ describe('WelcomePage: is your agent connected?', () => {
   });
 
   it('stops listening when you leave the page', async () => {
-    const { unmount, bus } = mountPage();
+    const { leave } = mountPage();
     await settle();
-    unmount();
-    expect(bus.listening('agent-connected')).toBe(false);
-    bus.emit(ARRIVED);
+    actOnThePage();
+    leave();
+    // The stream stays open; the page that listened to it is gone.
+    emit(ARRIVED);
     expect(doneWrites()).toBe(0);
   });
 });
