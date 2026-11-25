@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeViewerCanCancel } from '../pull-request.service.js';
+import { computeViewerCanCancel, writesEveryChangedPath } from '../pull-request.service.js';
 import { hashEmail } from '../../../../shared/email-identity.js';
 
 const EMAIL = 'juan@bevel.software';
@@ -141,5 +141,43 @@ describe('computeViewerCanCancel', () => {
         viewerWritesAllFiles: true,
       }),
     ).toBe(false);
+  });
+});
+
+/**
+ * The one rule the close/edit routes enforce and their hints report: write on
+ * every path a request changes, a moved file's previous path included.
+ */
+describe('writesEveryChangedPath', () => {
+  function access(writable: (path: string) => boolean | null) {
+    return {
+      canWriteBatchAtRef: async (_ws: string, _ref: string, _email: string, asked: string[]) =>
+        new Map(asked.map((p) => [p, writable(p) === true])),
+    };
+  }
+  const move = { path: 'Shared/plan.md', previousPath: 'Finance/plan.md' };
+
+  it('takes write on both ends of a move', async () => {
+    expect(await writesEveryChangedPath(access(() => true), 'ws', 'origin/main', EMAIL, [move])).toBe(true);
+    expect(
+      await writesEveryChangedPath(access((p) => p.startsWith('Shared/')), 'ws', 'origin/main', EMAIL, [move]),
+    ).toBe(false);
+    expect(
+      await writesEveryChangedPath(access((p) => p.startsWith('Finance/')), 'ws', 'origin/main', EMAIL, [move]),
+    ).toBe(false);
+  });
+
+  it('takes write on every file of an ordinary request', async () => {
+    const files = [{ path: 'Shared/a.md' }, { path: 'Finance/b.md' }];
+    expect(
+      await writesEveryChangedPath(access((p) => p.startsWith('Shared/')), 'ws', 'origin/main', EMAIL, files),
+    ).toBe(false);
+    expect(await writesEveryChangedPath(access(() => true), 'ws', 'origin/main', EMAIL, files)).toBe(true);
+  });
+
+  it('grants nothing for no files, or an access tree that cannot be read', async () => {
+    expect(await writesEveryChangedPath(access(() => true), 'ws', 'origin/main', EMAIL, [])).toBe(false);
+    const unreadable = { canWriteBatchAtRef: async () => null };
+    expect(await writesEveryChangedPath(unreadable, 'ws', 'origin/main', EMAIL, [move])).toBe(false);
   });
 });

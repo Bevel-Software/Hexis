@@ -226,7 +226,7 @@ export interface FileApprovalEntry {
  * A MOVED file (one with a `previousPath`) is gated at both ends, as an
  * addition at its path and a deletion at its previous one: its approvers are
  * both folders' owners, and it is approved only once each end that has
- * approvers has an approval from one of its own.
+ * approvers has a non-stale approval from one of its own.
  */
 export interface FileApprovalState {
   path: string;
@@ -252,8 +252,10 @@ export interface FileApprovalState {
   eligibilityResolved?: boolean;
   /**
    * True iff at least one eligible approver has submitted a non-stale
-   * approval. Always `false` when `eligibleApprovers` is empty — with no
-   * eligible set, nobody can satisfy the check.
+   * approval. For a moved file, true iff each end that has approvers (the
+   * path and the previous path) has a non-stale approval from one of that
+   * end's own eligible writers. Always `false` when `eligibleApprovers` is
+   * empty — with no eligible set, nobody can satisfy the check.
    * Whether the gate *cares* about this file is a separate concern handled
    * by the merge-gate logic: files with no eligible approvers, whatever
    * their type, are silently excluded from the gate, so `isApproved: false`
@@ -269,11 +271,11 @@ export interface FileApprovalState {
   inMergeGate: boolean;
   /**
    * Pre-computed for the requesting viewer: would `approveFile` accept their
-   * click? True iff their email resolves to `write` on this path under the
-   * access tree at `origin/<baseBranch>` — and, for a moved file, on its
-   * previous path too, or that path's side is already settled (no approvers,
-   * or one of them has approved); write on the previous path alone also
-   * qualifies, for that side. The frontend uses this to gate the
+   * click? Read under the access tree at `origin/<baseBranch>`. For a file
+   * that is not moved: true iff the viewer may write its path. For a moved
+   * file: `writesPreviousPath || (writesPath && previousPathSettled)`, where
+   * the previous path is settled when it has no approvers or one of them has
+   * approved the current head. The frontend uses this to gate the
    * Approve button — without it, the button shows for any user whenever the
    * eligible-roles list is non-empty, which is misleading because most users
    * aren't actually in those roles. Backend remains authoritative; this is a
@@ -338,9 +340,12 @@ export interface PullRequestDetail extends PullRequestSummary {
   viewerCanBypassMerge: boolean;
   /**
    * True iff the viewer is allowed to cancel this change request: the PR is
-   * open AND the viewer is either its author (hash-matched against the body
-   * marker) or an admin (write on `roles.yaml` at `origin/<base>` — same
-   * predicate `viewerCanBypassMerge` uses). The frontend renders the Cancel
+   * open AND the viewer is its author (hash-matched against the body
+   * marker), an admin (write on `roles.yaml` at `origin/<base>` — same
+   * predicate `viewerCanBypassMerge` uses), or the holder of write at
+   * `origin/<base>` on every path it changes, a moved file's previous path
+   * included. Not derived from `viewerCanApprove`, which for a moved file
+   * can hold on write at one end alone. The frontend renders the Cancel
    * button as disabled when this is false; the backend re-checks server-side
    * on `POST /pr/:n/cancel`, so this is a UX hint, not a security boundary.
    * False when no viewer was passed, the state isn't `open`, or the access
@@ -420,7 +425,8 @@ export interface PullRequestDetail extends PullRequestSummary {
   /**
    * True iff the viewer may change the request's title and description: the
    * request is open AND the viewer is its author or someone who may merge it
-   * (an admin, or the holder of write on every changed file) — exactly
+   * (an admin, or the holder of write on every changed path, a moved file's
+   * previous path included) — exactly
    * `viewerCanCancel`'s grants, since what is asked belongs to the same people
    * who may close it. A UX hint — `PATCH /api/workflow/change-requests/:number`
    * re-checks server-side.

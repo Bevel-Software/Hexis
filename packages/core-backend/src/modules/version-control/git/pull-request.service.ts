@@ -886,20 +886,33 @@ export class PullRequestService implements IPullRequestService {
       }
     }
 
+    // The close/edit routes' third grant (`changeRequestDecisionGrant`): write
+    // on every path the request changes, a moved file's previous path
+    // included. Asked through the same function the routes call, not read off
+    // `viewerCanApprove`: approving a moved file can take write on one end
+    // alone, deciding the request takes both. Best-effort: a failed read
+    // leaves the hint false, and the routes re-check.
+    let viewerWritesAllFiles = false;
+    if (workspaceId && opts.viewerEmail && summary.state === 'open' && !viewerCanBypassMerge) {
+      try {
+        viewerWritesAllFiles = await writesEveryChangedPath(
+          this.accessControl,
+          workspaceId,
+          `origin/${summary.base}`,
+          opts.viewerEmail,
+          files,
+        );
+      } catch (err) {
+        log.warn(`viewerWritesAllFiles lookup failed for #${prNumber}:`, { err });
+      }
+    }
+
     const viewerCanCancel = computeViewerCanCancel({
       state: summary.state,
       authorId: summary.authorId,
       viewerEmail: opts.viewerEmail,
       viewerCanBypassMerge,
-      // The reject route's third grant (see `rejectChangeRequest`): write on
-      // every changed file at origin/<base>. Derived from the per-file
-      // `viewerCanApprove` flags — the SAME `canWriteBatchAtRef` predicate the
-      // route enforces. For a moved file both ask about its previous path as
-      // well; they part only where `viewerCanApprove` lets one end stand in
-      // for the other (the source written alone, or the destination once the
-      // source's owners approved), and there the route, which is
-      // authoritative, refuses a Close this offers.
-      viewerWritesAllFiles: approvals.length > 0 && approvals.every((a) => a.viewerCanApprove),
+      viewerWritesAllFiles,
     });
 
     const viewerCanUpdate = computeViewerCanUpdate({
@@ -1011,11 +1024,36 @@ export class PullRequestService implements IPullRequestService {
 }
 
 /**
+ * Does `email` hold write, at `ref`, on every path a request changes: each
+ * file's path and, for a moved file, the previous path it takes the file out
+ * of? The grant to close or edit a request that its author and an admin do
+ * not need. `changeRequestDecisionGrant` enforces it and the `viewerCanCancel`
+ * / `viewerCanEdit` hints report it, both through this one function. No
+ * files, or an access tree that cannot be read, grants nothing.
+ */
+export async function writesEveryChangedPath(
+  access: Pick<IAccessControl, 'canWriteBatchAtRef'>,
+  workspaceId: string,
+  ref: string,
+  email: string,
+  files: readonly Pick<PullRequestFile, 'path' | 'previousPath'>[],
+): Promise<boolean> {
+  const paths = [
+    ...new Set(
+      files.flatMap((f) => (f.previousPath && f.previousPath !== f.path ? [f.path, f.previousPath] : [f.path])),
+    ),
+  ];
+  if (paths.length === 0) return false;
+  const writeMap = await access.canWriteBatchAtRef(workspaceId, ref, email, paths);
+  return !!writeMap && paths.every((p) => writeMap.get(p) === true);
+}
+
+/**
  * Pure predicate for the `viewerCanCancel` hint. The viewer can cancel iff
  * the PR is open AND they're the author (hash-match against the stored
  * author), an admin (`viewerCanBypassMerge` is the proxy — same
  * `canWriteAtRef('roles.yaml')` predicate), or they hold write on EVERY
- * changed file (`viewerWritesAllFiles`) — the reject route's full
+ * changed path (`viewerWritesAllFiles`, see `writesEveryChangedPath`) — the reject route's full
  * authorization set, mirrored exactly so the hint never claims less (or
  * more) than the server enforces. Fail-closed: no viewer email → false,
  * whatever the grants say.

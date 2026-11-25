@@ -318,7 +318,8 @@ function unionApprovers(
  * owners. So a person who may write the source approves it (their approval
  * counts for each side they are eligible on); a person who may write only the
  * destination approves it once the source side is settled — nobody could
- * approve the source anyway, or one of its approvers already has. Before that,
+ * approve the source anyway, or one of its approvers has approved the current
+ * head. Before that,
  * the destination writer's click would take the file out of a folder they may
  * not write with nobody's consent but their own.
  */
