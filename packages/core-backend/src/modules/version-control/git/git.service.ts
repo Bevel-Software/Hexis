@@ -4778,6 +4778,26 @@ export class GitService implements IGitService {
   }
 
   /**
+   * When `repoRelativePath` landed on HEAD as it is now (unix seconds of the
+   * LATEST commit that added it: a file deleted and added again starts over),
+   * or null when no commit on HEAD added it — a file written but not
+   * committed yet. What decides which of two personal tools keeps a secret
+   * namespace both claim: the one that was there first.
+   *
+   * Lock-free, like `pathHistory`: a read of history that a concurrent commit
+   * can only extend, and a file committed a moment after this read is the
+   * newer claimant either way, which is what null already says.
+   */
+  async addedAt(workspaceId: string, repoRelativePath: string): Promise<number | null> {
+    const cwd = await this.repoDir(workspaceId);
+    const { stdout } = await this.git(cwd, [
+      'log', '--max-count=1', '--diff-filter=A', '--format=%ct', 'HEAD', '--', repoRelativePath,
+    ]);
+    const added = stdout.trim();
+    return added === '' ? null : Number(added);
+  }
+
+  /**
    * Every file under `folder` at `ref`, repo-root-relative and in tree order.
    * A folder that does not exist at that ref lists nothing. NUL-delimited, so
    * a non-ASCII name comes back as itself rather than C-quoted, and one with

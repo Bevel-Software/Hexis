@@ -60,7 +60,9 @@ import {
   type ToolVariableScope,
   type ToolVariableOAuth,
   type LiveDeclaration,
+  type ToolManualHistorySource,
 } from './tool-manuals.contract.js';
+import { personalPluginFolderOf } from '@bevel-software/platform-shared';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -257,6 +259,7 @@ export class ToolManualService implements IToolManualService {
   private mcpAuthDiscovery?: McpAuthDiscoveryPort;
   /** Where a hidden tool's schema finding comes from; absent until wired. */
   private hiddenTools?: HiddenToolSource;
+  private history?: ToolManualHistorySource;
   /**
    * The refused set as it was last written to the log, so the warnings are
    * logged ONCE PER CHANGE rather than once per scan. A broken `.tool` sits
@@ -308,6 +311,10 @@ export class ToolManualService implements IToolManualService {
 
   setHiddenTools(source: HiddenToolSource): void {
     this.hiddenTools = source;
+  }
+
+  setHistory(history: ToolManualHistorySource): void {
+    this.history = history;
   }
 
   invalidate(): void {
@@ -1084,7 +1091,7 @@ export class ToolManualService implements IToolManualService {
     // cannot contain a hyphen, but an mcp.json server name can, so the pair is
     // reachable — and the consequence is that two manuals share one set of
     // vault keys, with either able to resolve the other's secrets.
-    const manuals = dedupeById(parsed, (m) => utcpNamespacePrefix(m.name), (m) =>
+    const manuals = dedupeById(await this.firstLandedFirst(wsId, parsed, invalid), (m) => utcpNamespacePrefix(m.name), (m) =>
       // A collision drops a manual from every surface just as surely as a parse
       // error does, so it is reported the same way rather than only reaching a
       // log that nobody browsing the catalog can see.
@@ -1095,8 +1102,8 @@ export class ToolManualService implements IToolManualService {
         // reason carries none of it (see `describeManualFault`). `path` says
         // which file, and the rule says what to look for in it.
         reason:
-          'this manual resolves to a secret-variable namespace another manual already uses. ' +
-          'Names differing only in `-` vs `_` share one namespace — rename one of them.',
+          'this manual resolves to a secret-variable namespace another manual already uses, ' +
+          'possibly one you cannot see — rename this one. Names differing only in `-` vs `_` share one namespace.',
       }),
     );
     // Sorted so the refused set is a stable VALUE: the change-detecting log
@@ -1108,6 +1115,68 @@ export class ToolManualService implements IToolManualService {
     // served catalog — it would also flap the log every time an agent saves.
     if (branch === this.kb.defaultBranch) this.logInvalidOnChange(invalid);
     return { manuals, invalid, refused };
+  }
+
+  /**
+   * `parsed`, with every namespace clash between two PEOPLE's personal
+   * folders settled by who was there first, ready for the first-wins dedup.
+   *
+   * The namespace is global — the vault keys a manual's secrets by it — so
+   * two such manuals cannot both be served: the second would resolve the
+   * secrets the first one's owner set. Path order used to pick, and a
+   * newcomer whose folder sorted first took an existing tool away from its
+   * owner. Now the manual whose file landed first keeps the namespace, and
+   * the newcomer is refused, reported at its own path only (see the dedup's
+   * reason), which names nobody. Personal manuals change places only among
+   * themselves: a clash involving a shared manual keeps its path order.
+   *
+   * When the history cannot be read, every manual of such a clash is refused
+   * for this scan: serving the wrong one would hand it the other's secrets.
+   */
+  private async firstLandedFirst(
+    wsId: string,
+    parsed: ToolManualDescriptor[],
+    invalid: InvalidToolManual[],
+  ): Promise<ToolManualDescriptor[]> {
+    const ownerOf = (m: ToolManualDescriptor) => personalPluginFolderOf(m.path, this.kb.layout);
+    const clashes = new Map<string, number[]>();
+    parsed.forEach((m, i) => {
+      if (ownerOf(m) === null) return;
+      const key = utcpNamespacePrefix(m.name);
+      clashes.set(key, [...(clashes.get(key) ?? []), i]);
+    });
+    const out: (ToolManualDescriptor | null)[] = [...parsed];
+    for (const slots of clashes.values()) {
+      const members = slots.map((i) => parsed[i]!);
+      if (new Set(members.map(ownerOf)).size < 2) continue;
+      let landed: (number | null)[];
+      try {
+        const history = this.history;
+        if (!history) throw new Error('no history source is wired');
+        landed = await Promise.all(members.map((m) => history.addedAt(wsId, m.path)));
+      } catch (err) {
+        log.warn(`a personal tool namespace clash could not be settled: ${printable((err as Error)?.message ?? String(err))}`);
+        for (const slot of slots) {
+          out[slot] = null;
+          invalid.push({
+            path: parsed[slot]!.path,
+            reason:
+              'this manual shares its secret-variable namespace with another manual, and which one keeps it ' +
+              'could not be decided just now — it is left out until it can be.',
+          });
+        }
+        continue;
+      }
+      // Not committed yet is newest; a tie keeps the path order.
+      const at = (k: number) => landed[k] ?? Number.POSITIVE_INFINITY;
+      const byLanding = members
+        .map((m, k) => ({ m, k }))
+        .sort((a, b) => (at(a.k) === at(b.k) ? a.k - b.k : at(a.k) - at(b.k)));
+      slots.forEach((slot, k) => {
+        out[slot] = byLanding[k]!.m;
+      });
+    }
+    return out.filter((m): m is ToolManualDescriptor => m !== null);
   }
 }
 

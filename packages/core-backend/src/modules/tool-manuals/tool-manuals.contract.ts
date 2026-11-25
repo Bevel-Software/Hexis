@@ -394,6 +394,17 @@ export type LiveDeclaration =
   | { manual: ToolManualSummary; variable?: ToolVariable; refused?: undefined }
   | { refused: string; manual?: undefined; variable?: undefined };
 
+/**
+ * The one question the catalog asks of git: when a file landed, as it is now, on the
+ * scanned branch (unix seconds), or null when no commit added it yet. It
+ * settles which of two people's personal tools keeps a secret namespace both
+ * claim — the one that was there first — so a later write never takes an
+ * earlier tool, or the secrets set for it, away from its owner.
+ */
+export interface ToolManualHistorySource {
+  addedAt(workspaceId: string, repoRelativePath: string): Promise<number | null>;
+}
+
 export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
@@ -448,6 +459,13 @@ export interface IToolManualService {
    * tool, which is the honest answer for a deployment with no MCP surface.
    */
   setHiddenTools(source: HiddenToolSource): void;
+
+  /**
+   * Wire the history a personal-tool namespace clash is settled from (git is
+   * constructed after this service). Without it such a clash cannot be
+   * settled, and every manual in it is refused rather than one picked by path.
+   */
+  setHistory(history: ToolManualHistorySource): void;
 
   /**
    * One line per manual the caller can read, each carrying the manual's

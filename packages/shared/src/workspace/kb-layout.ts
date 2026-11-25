@@ -694,6 +694,16 @@ export function isPersonalPluginDir(repoRelDir: string, layout: KbLayout): boole
 }
 
 /**
+ * The personal folder (`personal-<id>`) a repo-root-relative path sits in, or
+ * null for anything outside one. The folder names its one owner, so two paths
+ * with different answers belong to two different people.
+ */
+export function personalPluginFolderOf(repoRelativePath: string, layout: KbLayout): string | null {
+  const folder = pluginOfPath(repoRelativePath, layout);
+  return folder !== null && isPersonalPluginFolder(folder) ? folder : null;
+}
+
+/**
  * The plugin a repo-root-relative path belongs to, or `null` for content that
  * sits outside any plugin.
  *

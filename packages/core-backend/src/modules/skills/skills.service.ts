@@ -8,6 +8,7 @@ import { parseDocument } from 'yaml';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/index.js';
+import { personalPluginFolderOf } from '@bevel-software/platform-shared';
 import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/frontmatter-id.js';
 import type { IgnoreRules, ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
@@ -133,12 +134,15 @@ export class SkillService implements ISkillService {
   ): Promise<GetSkillResult> {
     if (!isSafeSkillName(name)) return { ok: false, error: 'not_found' };
     const { catalog, branch } = await this.catalogFor(options.branch);
-    const found = catalog.skills.find((s) => s.summary.name === name);
+    // Every skill of that name — one per owner at most (see `scanTree`) —
+    // inside the connection's skills; outside them is not there, for this
+    // connection.
+    const named = catalog.skills.filter(
+      (s) => s.summary.name === name && (!options.within || options.within(s.summary.path)),
+    );
     // A skill the branch deleted is not a skill as far as this answer goes:
     // the same `not_found` a name nobody ever used gets.
-    if (!found) return { ok: false, error: 'not_found' };
-    // Outside the connection's skills: not there, for this connection.
-    if (options.within && !options.within(found.summary.path)) return { ok: false, error: 'not_found' };
+    if (named.length === 0) return { ok: false, error: 'not_found' };
 
     // Through `readable`, not a bare `canRead`: the two gates must never
     // disagree. `canRead` reads a file's own frontmatter rules off disk on
@@ -156,8 +160,8 @@ export class SkillService implements ISkillService {
     // and the load are refreshed by one event or by neither. A branch read
     // caches no catalog of its own, so the same pair of gates still answers
     // for it — in that branch's workspace, where its own rules live.
-    const allowed = await this.readable(catalog.wsId, userEmail, [found.summary.path]);
-    if (allowed.get(`${found.summary.path}/SKILL.md`) !== true) {
+    const [found] = await this.readableSkills(catalog, userEmail, named);
+    if (!found) {
       // On the default branch: `forbidden` — the skill is released, everyone
       // knows the catalog has it, and naming the refusal is what sends the
       // caller to ask for access.
@@ -305,14 +309,25 @@ export class SkillService implements ISkillService {
     return this.accessControl.canReadBatch(wsId, userEmail, skillFolders.map((p) => `${p}/SKILL.md`));
   }
 
-  /** The skills of `catalog` this caller may read, by the gate above. */
-  private async readableSkills(catalog: Catalog, userEmail: string): Promise<ParsedSkill[]> {
-    const allowed = await this.readable(catalog.wsId, userEmail, catalog.skills.map((s) => s.summary.path));
+  /**
+   * The skills of `catalog` (or of `skills`, a slice of it) this caller may
+   * read, by the gate above — one per name. A name is unique per owner, not
+   * across owners: two people may each keep a personal skill called the same,
+   * and each reads their own. The shared copy, first in catalog order, wins
+   * over a reader's personal one, as it always has.
+   */
+  private async readableSkills(
+    catalog: Catalog,
+    userEmail: string,
+    skills: ParsedSkill[] = catalog.skills,
+  ): Promise<ParsedSkill[]> {
+    const allowed = await this.readable(catalog.wsId, userEmail, skills.map((s) => s.summary.path));
     // Fail closed: keep a skill only on an explicit `true` verdict — a missing
     // entry counts as denied, matching the KB's default-deny read model (and the
     // tool-manuals catalog). `!== false` would silently EXPOSE a skill any time
     // the checker skips a path.
-    return catalog.skills.filter((s) => allowed.get(`${s.summary.path}/SKILL.md`) === true);
+    const mine = skills.filter((s) => allowed.get(`${s.summary.path}/SKILL.md`) === true);
+    return dedupeById(mine, (s) => s.summary.name);
   }
 
   /**
@@ -397,8 +412,10 @@ export class SkillService implements ISkillService {
    * re-hashed one of them again.
    */
   private async differs(released: Catalog, branchCatalog: Catalog, skill: ParsedSkill): Promise<boolean> {
-    const mirror = released.skills.find((s) => s.summary.name === skill.summary.name);
-    if (!mirror || mirror.summary.path !== skill.summary.path) return true;
+    const mirror = released.skills.find(
+      (s) => s.summary.name === skill.summary.name && s.summary.path === skill.summary.path,
+    );
+    if (!mirror) return true;
     const [onBranch, onDefault] = await Promise.all([
       this.digestOf(branchCatalog, skill),
       this.digestOf(released, mirror),
@@ -508,7 +525,10 @@ export class SkillService implements ISkillService {
     await walkRoot(skillsDir);
     await walkRoot(pluginsDir);
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
-    // resolves it, so it must be unique. Sort by (name, root, path) for a
+    // resolves it, so it must be unique — per OWNER: a personal folder is one
+    // person's, nobody else reads it, so a name there never takes a skill away
+    // from anyone else, nor theirs from them (`readableSkills` picks one per
+    // name for each reader). Sort by (name, root, path) for a
     // deterministic winner — the shared root FIRST, since `Skills/` is a
     // skill's canonical home and a same-named inline copy is the stale one —
     // then REFUSE later duplicates via the shared dedup — the same rule tools
@@ -520,9 +540,10 @@ export class SkillService implements ISkillService {
         rootRank(a.summary.path) - rootRank(b.summary.path) ||
         a.summary.path.localeCompare(b.summary.path),
     );
-    return dedupeById(out, (s) => s.summary.name, (s, id) =>
+    const ownerOf = (s: ParsedSkill) => personalPluginFolderOf(s.summary.path, this.kb.layout) ?? '';
+    return dedupeById(out, (s) => `${ownerOf(s)}\u0000${s.summary.name}`, (s) =>
       log.warn(
-        `skipping "${s.summary.path}": id "${id}" is already used by another skill — ` +
+        `skipping "${s.summary.path}": id "${s.summary.name}" is already used by another skill — ` +
           'give it a unique `id`/`name` in its SKILL.md frontmatter.',
       ),
     );
