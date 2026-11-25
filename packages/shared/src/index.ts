@@ -22,6 +22,9 @@ export * from './workspace/access-verbs.js';
 // Hashing
 export * from './hash/sha256.js';
 
+// Secrets
+export * from './secrets/secret-value.js';
+
 // Git
 export * from './git/types.js';
 export * from './git/pr.types.js';

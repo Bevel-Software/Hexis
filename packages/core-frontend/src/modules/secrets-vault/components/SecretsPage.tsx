@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { isBlankSecret } from '@bevel-software/platform-shared';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { PageShell } from '../../../shared/components/PageShell';
 import { pathForTool, readOAuthFragment, ToolLogo } from '../../library';
@@ -276,7 +277,7 @@ function OAuthSecretForm({ onSaved, onError }: { onSaved: () => void; onError: (
           authorizationUrl: authorizationUrl.trim(),
           tokenUrl: tokenUrl.trim(),
           clientId: clientId.trim(),
-          clientSecret: clientSecret.trim() || undefined,
+          clientSecret: isBlankSecret(clientSecret) ? undefined : clientSecret.trim(),
           scopes: scopes.split(/[\s,]+/).filter(Boolean),
           pkce,
         },

@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { isBlankSecret } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('vault');
@@ -1628,12 +1629,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
 
   /**
    * A secret a person sets for a variable (a key, or a sign-in's client
-   * secret), returned exactly as sent. One that is empty or only whitespace
-   * is refused: stored, it would count the variable as set while holding
-   * nothing to send.
+   * secret), returned exactly as sent. A blank one (`isBlankSecret`, the rule
+   * the web app's forms ask too) is refused: stored, it would count the
+   * variable as set while holding nothing to send.
    */
   private requireSecretValue(value: unknown, field: string): string {
-    if (typeof value !== 'string' || !value.trim()) throw new InvalidSecretError(`${field} is required`);
+    if (typeof value !== 'string' || isBlankSecret(value)) throw new InvalidSecretError(`${field} is required`);
     return value;
   }
 
