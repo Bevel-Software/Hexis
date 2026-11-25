@@ -231,10 +231,12 @@ const LOOPBACK_TIMEOUT_MS = 15_000;
 /**
  * Upper bound on a read made in process (the catalog revision), as long as the
  * loopback request it replaces was given. The loopback's limit ran on the
- * clock, so a busy server passed it on a read that needed milliseconds. This
- * one is counted in time the event loop was free to run: a busy server does
- * not use it up, and a read that waits on something that never answers still
- * ends, so the request falls back as it did before and does not hang.
+ * clock, so a server whose loop was held passed it on a read that needed
+ * milliseconds. This one is spent only while the event loop turns: a stretch
+ * the loop is held for spends one tick of it, however long the stretch. Under
+ * steady load that lets the loop turn it runs on the clock, and the read gets
+ * every turn the limit gets. A read that waits on something that never answers
+ * still ends, so the request falls back as it did before and does not hang.
  */
 const IN_PROCESS_READ_LIMIT_MS = 15_000;
 

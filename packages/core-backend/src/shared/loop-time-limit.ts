@@ -10,7 +10,10 @@
  *
  * This limit is spent one tick at a time, and a tick is spent only when its
  * timer fires. A loop held for twenty seconds fires one late timer, so it
- * spends one tick, and the work then gets the loop like everything else. Work
+ * spends one tick, and the work then gets the loop like everything else. It
+ * is not a promise about every kind of load: while the loop keeps turning, the
+ * ticks fire on time and the limit runs on the clock. What it guarantees is
+ * that the work gets a turn of the loop for every tick the limit spends. Work
  * that never settles (a read waiting on something that will not answer) spends
  * every tick and is given up on after `limitMs` of time the loop could have
  * used to finish it.
