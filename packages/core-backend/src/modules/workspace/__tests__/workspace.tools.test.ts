@@ -5493,9 +5493,11 @@ describe('agent read/write hooks', () => {
   it('unzip skips an entry it could not lock with text that names no infrastructure, and keeps a gate\'s own refusal', async () => {
     const base = await start();
     await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
-    unzipEntries = [`${KB_DIR}/out/infra.md`, `${KB_DIR}/out/refused.md`, `${KB_DIR}/out/ok.md`];
+    unzipEntries = [`${KB_DIR}/out/infra.md`, `${KB_DIR}/out/fault.md`, `${KB_DIR}/out/refused.md`, `${KB_DIR}/out/ok.md`];
     failingAcquires = new Map<string, Error>([
       [`${KB_DIR}/out/infra.md`, new Error('connect ECONNREFUSED db-internal:5432')],
+      // A server fault carries a status too, a 5xx one: it is not the gate's answer to the caller.
+      [`${KB_DIR}/out/fault.md`, Object.assign(new Error('roles.yaml line 3: group "db-admins" is malformed'), { status: 500 })],
       // A refusal the lock's gates word for the caller carries its status, and is their answer.
       [`${KB_DIR}/out/refused.md`, Object.assign(new Error('You cannot write to this file.'), { status: 403 })],
     ]);
@@ -5505,9 +5507,11 @@ describe('agent read/write hooks', () => {
     expect(body.extracted).toEqual([`${KB_DIR}/out/ok.md`]);
     expect(body.skipped).toEqual([
       { path: `${KB_DIR}/out/infra.md`, reason: 'This file could not be locked for writing, so it was not extracted.' },
+      { path: `${KB_DIR}/out/fault.md`, reason: 'This file could not be locked for writing, so it was not extracted.' },
       { path: `${KB_DIR}/out/refused.md`, reason: 'You cannot write to this file.' },
     ]);
     expect(JSON.stringify(body)).not.toContain('db-internal');
+    expect(JSON.stringify(body)).not.toContain('db-admins');
   });
 
   it('unzip commits nothing for an entry the write hook refused', async () => {

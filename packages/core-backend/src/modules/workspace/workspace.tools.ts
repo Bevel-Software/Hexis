@@ -4038,14 +4038,15 @@ export function registerWorkspaceTools(
       // by anyone else is left alone.
       const acquisitions = new Map<string, string>();
       // A refusal the lock's own gates word for the caller (write access, the
-      // change gate) carries its status and is their answer. Any other
-      // failure to take a lock is infrastructure: its cause is logged here,
-      // and the entry is skipped with text that names none.
+      // change gate) carries a 4xx status and is their answer. Any other
+      // failure to take a lock, a server fault with a 5xx status included, is
+      // infrastructure: its cause is logged here, and the entry is skipped
+      // with text that names none.
       const acquire = async (file: string) => {
         try {
           return await vcs.acquireLock(workspaceId, branch, file, ctx.user);
         } catch (err) {
-          if (hasHttpStatus(err)) throw err;
+          if (hasHttpStatus(err) && err.status >= 400 && err.status < 500) throw err;
           log.warn(`unzip: locking ${printable(file)} on ${printable(branch)} failed: ${printable(err instanceof Error ? err.message : String(err))}`);
           throw new ToolError('This file could not be locked for writing, so it was not extracted.', 503);
         }
