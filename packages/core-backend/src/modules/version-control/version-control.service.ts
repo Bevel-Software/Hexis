@@ -3656,8 +3656,8 @@ export class VersionControlService implements IVersionControlService {
    * (`rejectChangeRequest`) or rewrite what it asks (`updateChangeRequest`):
    *   - its author (the stored author hash, never anything the caller sends),
    *   - an admin (write on `roles.yaml` at `origin/<base>`), or
-   *   - the holder of write on every file it changes at `origin/<base>`,
-   *     i.e. anyone who may merge it.
+   *   - the holder of write on every file it changes at `origin/<base>`
+   *     (a moved file's previous path included), i.e. anyone who may merge it.
    * Returns which grant the caller holds, or `null` for none.
    *
    * The grants beyond authorship are read at `origin/<base>`, never a local
@@ -3720,7 +3720,15 @@ export class VersionControlService implements IVersionControlService {
       this.kickDeletedBranchSweep();
       throw err;
     }
-    const paths = detail?.files.map((f) => f.path) ?? [];
+    // A moved file changes its previous path too — it is taken out of that
+    // folder — so deciding the request takes write there as well.
+    const paths = [
+      ...new Set(
+        (detail?.files ?? []).flatMap((f) =>
+          f.previousPath && f.previousPath !== f.path ? [f.path, f.previousPath] : [f.path],
+        ),
+      ),
+    ];
     if (paths.length > 0) {
       const writeMap = await this.accessControl.canWriteBatchAtRef(
         workspaceId,

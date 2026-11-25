@@ -85,7 +85,11 @@ export interface IChangeRequestReviewService {
 
   /**
    * Approve one file. Requires the caller to hold `write` on the path per
-   * the access tree on `origin/<baseBranch>` (403 otherwise). Idempotent —
+   * the access tree on `origin/<baseBranch>` (403 otherwise). A MOVED file
+   * is also a deletion of its `previousPath`: the caller must hold `write`
+   * there too, unless that path has no approvers or one of them has already
+   * approved — and one who holds `write` on the source alone may approve it
+   * for the source's side. Idempotent —
    * approving twice on the same headSha is a no-op. Returns the fresh
    * composite state for all files.
    */

@@ -222,6 +222,11 @@ export interface FileApprovalEntry {
  * file is approved when any non-author user holding one of those roles (or
  * directly named) submits a non-stale approval. The built-in role `everyone`
  * means any signed-in approver is eligible.
+ *
+ * A MOVED file (one with a `previousPath`) is gated at both ends, as an
+ * addition at its path and a deletion at its previous one: its approvers are
+ * both folders' owners, and it is approved only once each end that has
+ * approvers has an approval from one of its own.
  */
 export interface FileApprovalState {
   path: string;
@@ -265,7 +270,10 @@ export interface FileApprovalState {
   /**
    * Pre-computed for the requesting viewer: would `approveFile` accept their
    * click? True iff their email resolves to `write` on this path under the
-   * access tree at `origin/<baseBranch>`. The frontend uses this to gate the
+   * access tree at `origin/<baseBranch>` — and, for a moved file, on its
+   * previous path too, or that path's side is already settled (no approvers,
+   * or one of them has approved); write on the previous path alone also
+   * qualifies, for that side. The frontend uses this to gate the
    * Approve button — without it, the button shows for any user whenever the
    * eligible-roles list is non-empty, which is misleading because most users
    * aren't actually in those roles. Backend remains authoritative; this is a

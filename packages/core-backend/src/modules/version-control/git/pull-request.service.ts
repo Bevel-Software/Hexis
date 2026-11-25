@@ -894,7 +894,11 @@ export class PullRequestService implements IPullRequestService {
       // The reject route's third grant (see `rejectChangeRequest`): write on
       // every changed file at origin/<base>. Derived from the per-file
       // `viewerCanApprove` flags — the SAME `canWriteBatchAtRef` predicate the
-      // route enforces — so the hint cannot drift from the enforcement.
+      // route enforces. For a moved file both ask about its previous path as
+      // well; they part only where `viewerCanApprove` lets one end stand in
+      // for the other (the source written alone, or the destination once the
+      // source's owners approved), and there the route, which is
+      // authoritative, refuses a Close this offers.
       viewerWritesAllFiles: approvals.length > 0 && approvals.every((a) => a.viewerCanApprove),
     });
 

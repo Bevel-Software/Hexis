@@ -33,7 +33,8 @@ function harness(
     authorEmail?: string;
     isAdmin?: boolean | null;
     writes?: Record<string, boolean> | null;
-    files?: string[];
+    /** A path, or a moved file as `{ path, previousPath }`. */
+    files?: (string | { path: string; previousPath: string })[];
     body?: string;
   } = {},
 ) {
@@ -51,7 +52,7 @@ function harness(
     getPr: vi.fn(async () => summary),
     getPrDetail: vi.fn(async () => ({
       ...summary,
-      files: (opts.files ?? ['Docs/a.md', 'Docs/b.md']).map((path) => ({ path })),
+      files: (opts.files ?? ['Docs/a.md', 'Docs/b.md']).map((f) => (typeof f === 'string' ? { path: f } : f)),
     })),
     invalidateDetailCache: vi.fn(),
   } as unknown as PullRequestService;
@@ -158,6 +159,24 @@ describe('VersionControlService.updateChangeRequest — who may edit', () => {
     });
     expect(h.tx.update).not.toHaveBeenCalled();
     expect(h.emitted).toEqual([]);
+  });
+
+  it('counts a moved file’s previous path among the files it changes', async () => {
+    const moved = { path: 'Open/s2-moved.md', previousPath: 'Locked/s2.md' };
+    // Writes where it lands but not where it leaves: refused, as for a deletion there.
+    const half = harness({ files: [moved], writes: { 'Open/s2-moved.md': true } });
+    await expect(half.svc.updateChangeRequest(9, user('half@example.com'), { title: 'New' })).rejects.toMatchObject({
+      status: 403,
+    });
+    expect(half.access.canWriteBatchAtRef).toHaveBeenCalledWith('main', 'origin/main', 'half@example.com', [
+      'Open/s2-moved.md',
+      'Locked/s2.md',
+    ]);
+    expect(half.tx.update).not.toHaveBeenCalled();
+
+    const both = harness({ files: [moved], writes: { 'Open/s2-moved.md': true, 'Locked/s2.md': true } });
+    await both.svc.updateChangeRequest(9, user('owner@example.com'), { title: 'New' });
+    expect(both.written).toHaveLength(1);
   });
 
   it('refuses a stranger with the same 403', async () => {
