@@ -79,9 +79,16 @@ class ApprovalBusyError extends VersionControlDomainError {
 }
 
 class MergeBlockedError extends VersionControlDomainError {
-  constructor(reasons: string[]) {
+  /**
+   * `awaitingApprovals` marks the one refusal an approval answers: every
+   * reason is a file still waiting on one. The others (already merged,
+   * closed, nothing to approve) are refusals no approval changes, and a
+   * caller that rewords the first must not reword those.
+   */
+  constructor(reasons: string[], opts: { awaitingApprovals?: boolean } = {}) {
     super(`Merge gate rejected: ${reasons.join('; ') || 'unknown'}`, 422, {
       mergeBlockedReasons: reasons,
+      ...(opts.awaitingApprovals ? { awaitingApprovals: true } : {}),
     });
     this.name = 'MergeBlockedError';
   }
@@ -534,7 +541,7 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       throw new MergeBlockedError(gate.hardReasons);
     }
     if (gate.warnings.length > 0 && !opts.bypass) {
-      throw new MergeBlockedError(gate.warnings);
+      throw new MergeBlockedError(gate.warnings, { awaitingApprovals: true });
     }
 
     // Bypass authority: admin-only. Resolved against `origin/<baseBranch>`

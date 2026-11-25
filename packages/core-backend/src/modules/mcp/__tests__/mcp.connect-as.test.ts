@@ -7,8 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CONNECTION_META_KEY, McpService, type McpCaller } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/index.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import type { ConnectionScopeWire } from '../../agent-scope/index.js';
 
@@ -39,15 +38,23 @@ const CONNECTIONS: Record<string, ConnectionScopeWire | undefined> = {
 
 let httpServer: HttpServer | undefined;
 const cleanups: Array<() => Promise<void>> = [];
+// The one owner of the test server: harness() closes the previous one before it
+// opens another, and afterEach closes the last.
+async function closeHttpServer(): Promise<void> {
+  const open = httpServer;
+  httpServer = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+}
+
 afterEach(async () => {
   for (const c of cleanups.splice(0)) await c().catch(() => {});
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  await closeHttpServer();
   vi.restoreAllMocks();
 });
 
-async function harness() {
-  const state = { builds: 0, base: '' };
+async function harness(opts: { revisionInProcess?: boolean } = {}) {
+  await closeHttpServer();
+  const state = { builds: 0, base: '', revisionRouteHits: 0 };
   const connectionOf = (req: express.Request) => CONNECTIONS[(req.headers.authorization ?? '').replace(/^Bearer /, '')];
   const registry = new ToolRegistry();
   for (const name of ['read_file', 'edit_file']) {
@@ -58,6 +65,7 @@ async function harness() {
   const app = express();
   app.use(express.json());
   app.get('/api/agent/catalog-revision', (req, res) => {
+    state.revisionRouteHits += 1;
     const connection = connectionOf(req);
     res.json({ revision: 'rev-1', tools: 0, skills: 0, ...(connection ? { connection } : {}) });
   });
@@ -102,6 +110,17 @@ async function harness() {
     manualName: 'KNOWLEDGE_BASE',
     spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     publicFrontendUrl: 'http://localhost:5173',
+    // As the composition root wires it: the revision, and the agent the
+    // connection is narrowed to, answered by a function for the caller the
+    // request's credential resolved to.
+    ...(opts.revisionInProcess
+      ? {
+          readCatalogRevision: async (who: { userId: string; agentPath: string | null }) => {
+            const connection = [NARROW, GONE].find((c) => c.agent.path === who.agentPath);
+            return { revision: 'rev-1', ...(connection ? { connection } : {}) };
+          },
+        }
+      : {}),
   });
   return { state, mcp };
 }
@@ -164,6 +183,31 @@ describe('a narrowed connection', () => {
         'platform tools, connectors, skills and plugins that file lists, and of those only what you may read.',
     );
     expect(everything).not.toContain('connected as the agent');
+    // Both open with the line that sends the agent to the guide, which names
+    // the connection whole; the connection line stays last.
+    for (const text of [narrowed, everything]) {
+      expect(text!.split('\n')[0]).toBe(
+        'Before anything else, call `get_agent_guide` and read the guide: it says what this deployment is and what this connection loads.',
+      );
+    }
+  });
+
+  it('is told the same at the handshake when the revision is read in process, and the server is asked nothing for it', async () => {
+    const { state, mcp } = await harness({ revisionInProcess: true });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const narrowed = (await connect(mcp, { bearer: 'bevel_narrow', agentPath: 'Agents/narrow.agent' }, true)).getInstructions();
+    const gone = (await connect(mcp, { bearer: 'bevel_gone', agentPath: 'Agents/gone.agent' }, true)).getInstructions();
+    const everything = (await connect(mcp, {}, true)).getInstructions();
+
+    expect(narrowed).toBe(
+      `${everything}
+
+This connection is connected as the agent "narrow" (\`Agents/narrow.agent\`): it loads only the ` +
+        'platform tools, connectors, skills and plugins that file lists, and of those only what you may read.',
+    );
+    expect(gone?.endsWith(GONE.unavailable!)).toBe(true);
+    expect(everything).not.toContain('connected as the agent');
+    expect(state.revisionRouteHits).toBe(0);
   });
 
   it('two connections of one person made as different agents never share a built surface', async () => {

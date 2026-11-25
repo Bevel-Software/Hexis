@@ -1,71 +1,86 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { GitSyncFailedBanner } from '../components/GitSyncFailedBanner';
-import {
-  EventBusContext,
-  type EventBusContextValue,
-} from '../../version-control/state/event-bus.context';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
+import { EventBusProvider } from '../../version-control';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
 
 // The conflict rendering opens files through the file-navigation hook, which
 // needs a router and the git context. Neither belongs in this suite: the
 // banner's contract is what it says and which paths it offers, so the hook
-// is replaced with a recorder.
+// the workspace module offers is replaced with a recorder; everything else
+// the module offers stays its own.
 const { openWorkspacePath } = vi.hoisted(() => ({ openWorkspacePath: vi.fn() }));
-vi.mock('../../workspace/routing/kb-routes', () => ({
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   useFileNav: () => ({ openFile: vi.fn(), openWorkspacePath }),
 }));
 
 /**
- * A minimal stand-in for the SSE bus: keeps the handlers the component
- * registers and lets a test push events through them, so these assertions
- * drive the banner exactly the way the real backend does — by event, not by
- * poking state.
+ * The server's event stream, as the browser offers it. jsdom ships no
+ * EventSource; this one keeps the listeners the real `EventBusProvider`
+ * registers and lets a test send an event down the stream, so the banner is
+ * driven the way the backend drives it: by a message on the wire, through
+ * the provider the app mounts.
  */
-function makeBus() {
-  // Handlers are stored untyped: the test emits plain event-shaped objects and
-  // the component's own subscription types are what's under test, not the bus.
-  const handlers = new Map<string, Set<(e: unknown) => void>>();
-  const ctx = {
-    subscribe(kind: string, handler: (e: unknown) => void) {
-      const set = handlers.get(kind) ?? new Set<(e: unknown) => void>();
-      set.add(handler);
-      handlers.set(kind, set);
-      return () => set.delete(handler);
-    },
-  } as unknown as EventBusContextValue;
-  return {
-    ctx,
-    emit(event: { kind: string; workspaceId: string; branch: string; reason?: string }) {
-      act(() => {
-        for (const h of handlers.get(event.kind) ?? []) h(event);
-      });
-    },
-  };
+class FakeEventSource {
+  static latest: FakeEventSource | null = null;
+  private readonly listeners = new Map<string, ((e: Event) => void)[]>();
+  constructor() {
+    FakeEventSource.latest = this;
+  }
+  addEventListener(type: string, fn: (e: Event) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  removeEventListener(type: string, fn: (e: Event) => void) {
+    this.listeners.set(type, (this.listeners.get(type) ?? []).filter((f) => f !== fn));
+  }
+  close() {}
+  send(event: unknown) {
+    const message = new MessageEvent('message', { data: JSON.stringify(event) });
+    for (const fn of [...(this.listeners.get('message') ?? [])]) fn(message);
+  }
+}
+
+beforeEach(() => {
+  FakeEventSource.latest = null;
+  vi.stubGlobal('EventSource', FakeEventSource);
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ status: 'ok' }), { status: 200 })));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  window.sessionStorage.clear();
+});
+
+/** Sends one event down the stream the mounted provider opened. */
+function emit(event: {
+  kind: string;
+  workspaceId: string;
+  branch: string;
+  reason?: string;
+  conflictedPaths?: string[];
+  accessRefusal?: { path?: string };
+}) {
+  act(() => {
+    FakeEventSource.latest?.send(event);
+  });
+}
+
+/** The workspace the banner stands in: what it reads of it, and nothing else. */
+function workspaceValue(overrides: Partial<WorkspaceContextValue> = {}): WorkspaceContextValue {
+  return { workspaceId: 'ws-1', kbDirName: 'knowledge-base', ...overrides } as WorkspaceContextValue;
 }
 
 function renderBanner(workspace: Partial<WorkspaceContextValue> = {}) {
-  const bus = makeBus();
-  const view = render(
-    <EventBusContext.Provider value={bus.ctx}>
-      <WorkspaceContext.Provider value={makeWorkspaceFixture(workspace)}>
+  const tree = (value: Partial<WorkspaceContextValue>) => (
+    <EventBusProvider>
+      <WorkspaceContext.Provider value={workspaceValue(value)}>
         <GitSyncFailedBanner />
       </WorkspaceContext.Provider>
-    </EventBusContext.Provider>,
+    </EventBusProvider>
   );
-  const rerender = (next: Partial<WorkspaceContextValue>) =>
-    view.rerender(
-      <EventBusContext.Provider value={bus.ctx}>
-        <WorkspaceContext.Provider value={makeWorkspaceFixture(next)}>
-          <GitSyncFailedBanner />
-        </WorkspaceContext.Provider>
-      </EventBusContext.Provider>,
-    );
-  return { ...bus, rerender };
+  const view = render(tree(workspace));
+  return { emit, rerender: (next: Partial<WorkspaceContextValue>) => view.rerender(tree(next)) };
 }
 
 const FAILED = {
@@ -74,6 +89,10 @@ const FAILED = {
   branch: 'feat/x',
   reason: 'git push failed: fatal: Authentication failed',
 };
+
+/** The backend's sentence for a viewer who may not read the blocking file. */
+const UNNAMED_REFUSAL =
+  'The platform’s access check refused the push of "feat/x": an unshared commit on it changes a file you may not read.';
 
 describe('GitSyncFailedBanner', () => {
   it('renders nothing until a failure arrives — the healthy case is invisible', () => {
@@ -117,6 +136,37 @@ describe('GitSyncFailedBanner', () => {
     const bus = renderBanner();
     bus.emit({ ...FAILED, workspaceId: 'ws-2', branch: 'feat/other' });
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it("says the platform's access check refused, not the git host, when the platform refused the push", () => {
+    const bus = renderBanner();
+    const reason =
+      'The platform’s access check refused the push of "feat/x": "G/a.md" may be written by Admin; qa-b@example.com.';
+    bus.emit({ ...FAILED, reason, accessRefusal: { path: 'G/a.md' } });
+
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain('feat/x');
+    expect(text).toContain('saved here but were not shared');
+    expect(text).toContain(reason);
+    // Who refused is said once, by the detail line.
+    expect(text.match(/access check refused the push/g)).toHaveLength(1);
+    expect(text).not.toMatch(/git host|server logs/i);
+  });
+
+  it('keeps the platform headline when the file was withheld from this person', () => {
+    const bus = renderBanner();
+    bus.emit({ ...FAILED, reason: UNNAMED_REFUSAL, accessRefusal: {} });
+    const text = screen.getByRole('alert').textContent ?? '';
+    expect(text).toContain('saved here but were not shared');
+    expect(text).toContain(UNNAMED_REFUSAL);
+    expect(text).not.toMatch(/git host|server logs/i);
+  });
+
+  it('a host failure after a platform refusal goes back to the git-host headline', () => {
+    const bus = renderBanner();
+    bus.emit({ ...FAILED, reason: UNNAMED_REFUSAL, accessRefusal: {} });
+    bus.emit(FAILED);
+    expect(screen.getByRole('alert').textContent).toContain('aren’t reaching your git host');
   });
 
   it('does not let another workspace recovering clear this one’s banner', () => {
@@ -252,18 +302,17 @@ describe('GitSyncFailedBanner — a conflict that arrives before the workspace h
 
 describe('GitSyncFailedBanner — for a named workspace (the change-request view)', () => {
   function renderFor(workspaceId: string, focused: Partial<WorkspaceContextValue> | null) {
-    const bus = makeBus();
     const banner = <GitSyncFailedBanner workspaceId={workspaceId} />;
     render(
-      <EventBusContext.Provider value={bus.ctx}>
+      <EventBusProvider>
         {focused ? (
-          <WorkspaceContext.Provider value={makeWorkspaceFixture(focused)}>{banner}</WorkspaceContext.Provider>
+          <WorkspaceContext.Provider value={workspaceValue(focused)}>{banner}</WorkspaceContext.Provider>
         ) : (
           banner
         )}
-      </EventBusContext.Provider>,
+      </EventBusProvider>,
     );
-    return bus;
+    return { emit };
   }
 
   it('follows the named workspace, not the focused one', () => {

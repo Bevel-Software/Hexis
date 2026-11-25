@@ -12,7 +12,8 @@ import { sql } from 'drizzle-orm';
 import { DEFAULT_DB_SCHEMA, assertSearchPath } from '../modules/database/connection.js';
 import { DEFAULT_SECRETS_SCOPE } from '../modules/secrets-vault/secrets-variable-loader.js';
 import { KbContext } from '../shared/kb-context.js';
-import { branchForWorkspaceId } from '../shared/workspace-id.js';
+import { branchForWorkspaceId, workspaceIdForBranch } from '../shared/workspace-id.js';
+import { fileBodyReader } from '../modules/code-mode/index.js';
 import { getDb, type Database } from '../modules/database/connection.js';
 import { runCoreMigrations } from '../modules/database/migrate.js';
 import { coreMigrationsDir } from '../assets.js';
@@ -82,7 +83,11 @@ import { AccountHooks, type IAccountHooks } from '../modules/auth/account-hooks.
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
-import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
+import { AccessControlService, loadActiveGroups, type AccessModel } from '../modules/access/access-control.service.js';
+import { OwnEntriesMemo, OWN_ENTRIES_LIMITS } from '../modules/access/own-entries-memo.js';
+import { TreeIndexer } from '../modules/access/tree-index.js';
+import { HEAD_MAP_LIMITS, HeadMaps } from '../modules/access/head-access-map.js';
+import { DbHeadSeedStore } from '../modules/access/head-seed-store.js';
 import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { ChangeReadGate } from '../modules/access/change-read-gate.js';
@@ -97,6 +102,8 @@ import { ToolManualService } from '../modules/tool-manuals/tool-manuals.service.
 import { PendingToolsService } from '../modules/tool-manuals/pending-tools.service.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
+import { createInlineManualReader, createManualListReader, type ManualListReader } from '../modules/tool-manuals/index.js';
+import { createExternalManualReader } from '../modules/tool-registry/index.js';
 import {
   PluginIndexService,
   pluginFolderBelowRoot,
@@ -164,6 +171,7 @@ import {
 } from '../modules/tool-auth/internal-token.service.js';
 import {
   createToolAuthMiddleware,
+  createCallerResolver,
   createTokenVerifier,
   createManualAuthMiddleware,
 } from '../modules/tool-auth/tool-auth.middleware.js';
@@ -184,12 +192,13 @@ import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/
 import { ToolRegistry } from '../modules/tool-registry/tool-registry.js';
 import { createToolContextResolver } from '../modules/tool-helpers/tool-context.js';
 import { alwaysWritable, type IWriteAccess } from '../modules/write-access/write-access.js';
-import { createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
+import { createInProcessToolCaller, createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
 import { resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
 import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.js';
+import { createCatalogRevisionReader, type CatalogRevisionReader } from './catalog-revision.js';
 
 /**
  * Everything the CORE composition builds: the core services `createCoreServer`
@@ -420,6 +429,18 @@ export interface CoreServices {
   embedService: EmbedService;
   /** The MCP Apps this deployment serves — the `open_page` view and its sandbox metadata. */
   mcpAppService: IMcpAppService;
+  /**
+   * Reads one caller's catalog revision. The route `GET /agent/catalog-revision`
+   * answers with it and the MCP endpoint calls it directly, so the two cannot
+   * answer differently (`core/catalog-revision.ts`).
+   */
+  readCatalogRevision: CatalogRevisionReader;
+  /**
+   * Reads one caller's manual list. The route `GET /agent/all-tools` answers
+   * with it and the MCP endpoint calls it directly when it builds a caller's
+   * tool surface, so the two cannot answer differently.
+   */
+  readManualList: ManualListReader;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -437,6 +458,18 @@ export interface CoreServices {
   toolAuthMiddleware: ReturnType<typeof createToolAuthMiddleware>;
   manualAuthMiddleware: ReturnType<typeof createManualAuthMiddleware>;
   toolHandlerFactory: ReturnType<typeof createToolHandlerFactory>;
+  /**
+   * Calls a hosted discovery read as a function, with the context and the
+   * connection scope its route runs with. The hosted MCP endpoint reads the
+   * skills behind its prompts through it.
+   */
+  inProcessTool: ReturnType<typeof createInProcessToolCaller>;
+  /**
+   * Resolves a bearer to its caller with the verifier the tool routes' auth
+   * runs, or throws the refusal. For a read this process makes as a function
+   * where it used to send the bearer to a route.
+   */
+  resolveToolCaller: ReturnType<typeof createCallerResolver>;
   /** Whether the deployment may be changed right now — `ports.writeAccess`, or always. */
   writeAccess: IWriteAccess;
   // ── Server-time seams (enterprise overwrites after construction) ────────
@@ -855,6 +888,24 @@ export async function createCoreServices(
     [config.adminEmail],
     gitRunner,
     kb,
+    {},
+    // What the at-ref models keep of their commits' trees, shared across them,
+    // and the per-workspace memo of what files declare for themselves, on the
+    // deployment's bounds and the same clock as the service (`Date.now`).
+    // One of each per graph: a host that runs a graph per tenant holds them
+    // per active tenant, each within the bounds, and drops them with the graph.
+    new TreeIndexer(),
+    new OwnEntriesMemo(Date.now, OWN_ENTRIES_LIMITS),
+    // The maps a branch's reads are answered from: their own tree indexer
+    // (a map keeps its commit's whole tree), the deployment's bounds, and
+    // the row a restart begins from, read only by the release that wrote it.
+    new HeadMaps<AccessModel>(
+      gitRunner,
+      new TreeIndexer(),
+      HEAD_MAP_LIMITS,
+      new DbHeadSeedStore(db, resolveAppVersion()),
+      Date.now,
+    ),
   );
   // Creator read-grant on creation: read is default-deny and the roots grant
   // it to nobody, so every surface that starts a new folder at a root (human
@@ -944,6 +995,10 @@ export async function createCoreServices(
     workspaceMutex,
     accessControl,
     gitRunner,
+    // The protected-branch push gate asks an unpushed commit's author when
+    // the author is a live account of the deployment; the auth service says
+    // which accounts are live.
+    authService,
   );
   // `get_skill` with a `version` reads the skill out of the default branch's
   // history; the skill service is built before git exists, so git is handed
@@ -1358,7 +1413,7 @@ export async function createCoreServices(
 
   // MCP (remote agent access). ExternalApiKeyService handles connection-key
   // lifecycle. McpService is a GENERIC, STATELESS proxy: per request it
-  // discovers the caller's catalog at /api/agent/all-tools over loopback and
+  // reads the caller's catalog (what /api/agent/all-tools answers them) and
   // re-exposes every tool, dispatching calls back through the REST tool
   // surface (so agent logic + metering live there, once). No MCP session is
   // kept, so a restart is invisible to connected clients.
@@ -1444,6 +1499,35 @@ export async function createCoreServices(
   // The `ui://` view `open_page` carries, with the one origin it may frame:
   // this deployment own public origin.
   const mcpAppService = new McpAppService({ publicFrontendUrl: config.publicFrontendUrl });
+  // The file a tool call names as its body, read as the caller on the branch
+  // people read: a staged file of theirs, or a knowledge-base file their access
+  // lets them read (core's single-path read verdict, asked by their email).
+  const fileBodies = fileBodyReader({
+    workspaces: workspaceService,
+    access: accessControl,
+    workspaceId: () => workspaceIdForBranch(kb.defaultBranch),
+    kbDirName,
+  });
+  // The caller's catalog revision, computed once here and handed to both the
+  // route that serves it and the MCP endpoint that asks for it on every
+  // request. The endpoint calls it as a function: over loopback it was a
+  // request the server sent itself, which a busy server failed on its own limit.
+  const readCatalogRevision = createCatalogRevisionReader({
+    toolManuals: toolManualService,
+    skills: skillService,
+    resolveUserEmail: async (userId) => (await authService.getUserById(userId))?.email,
+    agentScope: agentScopeService,
+    // The views move the revision too: a release that changes a view and no
+    // manual would otherwise leave a running local server on the old one.
+    mcpApps: mcpAppService,
+  });
+  // The caller's manual list, shared the same way and for the same reason: the
+  // endpoint reads it when it builds a caller's tool surface.
+  const readManualList = createManualListReader({
+    toolManuals: toolManualService,
+    resolveUserEmail: async (userId) => (await authService.getUserById(userId))?.email,
+    agentScope: agentScopeService,
+  });
   const mcpService = new McpService(
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
@@ -1467,6 +1551,27 @@ export async function createCoreServices(
       secretsScope,
       // Read at listing time, by when the hints below exist.
       readOnlyOverrides: () => readOnlyHints.overrides(),
+      // A tool whose body is declared a file path sends the file's bytes.
+      readFileBody: async (userId, ref) => fileBodies.read(await authService.getUserById(userId), ref),
+      // Asked on every request, so answered in process and not over loopback.
+      readCatalogRevision,
+      // Read for every surface build, in process for the same reason. The
+      // bearer is resolved as the route's auth resolves it, when the list is
+      // read. (`resolveToolCaller` is made further down; this runs per request.)
+      readManualList: async (bearer, opts) => {
+        const caller = await resolveToolCaller(bearer);
+        return readManualList({ userId: caller.userId, agentPath: caller.agentPath }, opts);
+      },
+      // The tools of the manuals this server hosts, discovered the same way:
+      // the platform's own, and each inline `.tool`'s.
+      readPlatformManual: async (bearer) => {
+        const caller = await resolveToolCaller(bearer);
+        return readExternalManual({ userId: caller.userId, agentPath: caller.agentPath });
+      },
+      readInlineManual: async (bearer, slug) => {
+        const caller = await resolveToolCaller(bearer);
+        return readInlineManual({ userId: caller.userId, agentPath: caller.agentPath }, slug);
+      },
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1538,6 +1643,19 @@ export async function createCoreServices(
   // What MCP clients are told about each platform tool's effect: its write
   // declaration, or an admin's override from the Tools page.
   const readOnlyHints = new ToolReadOnlyHints(toolRegistry, settings);
+  // The two manuals this server hosts, as their routes serve them, for the MCP
+  // endpoint to read as functions (see `readPlatformManual` above).
+  const readExternalManual = createExternalManualReader(
+    toolRegistry,
+    async (userId) => (await authService.getUserById(userId))?.email,
+    readOnlyHints,
+    agentScopeService,
+  );
+  const readInlineManual = createInlineManualReader({
+    toolManuals: toolManualService,
+    resolveUserEmail: async (userId) => (await authService.getUserById(userId))?.email,
+    agentScope: agentScopeService,
+  });
   const resolveToolContext = createToolContextResolver({
     authService,
     workspaceService,
@@ -1556,8 +1674,13 @@ export async function createCoreServices(
     defaultBranch: () => kb.defaultBranch,
     isMissing: (branch) => workspaceService.isBranchMissing(branch),
   });
+  // The same context and connection scope, for a hosted read this process
+  // calls as a function (the MCP endpoint's skill reads).
+  const inProcessTool = createInProcessToolCaller(resolveToolContext);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  // The same verifier, for a read this process makes as a function.
+  const resolveToolCaller = createCallerResolver(verifyToolToken);
   // Every credential kind this server issues — connection keys, internal
   // tokens and app sessions (bearer or cookie) — so a fetch carrying another
   // user's identity of ANY kind is refused the link.
@@ -1792,6 +1915,8 @@ export async function createCoreServices(
     internalTokenService,
     embedService,
     mcpAppService,
+    readCatalogRevision,
+    readManualList,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,
@@ -1802,6 +1927,8 @@ export async function createCoreServices(
     toolAuthMiddleware,
     manualAuthMiddleware,
     toolHandlerFactory,
+    inProcessTool,
+    resolveToolCaller,
     writeAccess,
     // Server-time seams — defaults here; the enterprise overlay overwrites
     // (or, for the array, pushes into) these after construction.

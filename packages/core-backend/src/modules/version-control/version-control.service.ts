@@ -92,6 +92,7 @@ import {
 import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
+  ApprovalCarryPendingError,
   BranchAuthorshipError,
   BranchDeleteBlockedError,
   BranchNotFoundError,
@@ -107,16 +108,47 @@ import {
   VersionControlValidationError,
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, type IChangeReadGate } from '../access-model/index.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * What a failed push says of itself in the server log and on the error's
+ * detail fields: the error's own words, but for the push gate's refusal,
+ * which goes in its record form — its message names the people who may write
+ * the file, and log lines carry no names or email addresses.
+ */
+function pushFailureDetail(err: unknown): string {
+  if (err instanceof PushAccessRefusedError) return err.recordMessage;
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Whether a failed push is worth the cooperative pull-and-retry: the host
+ * turned it away in words that read like a moved remote. One rule for every
+ * push that recovers this way (the autosave's and `pushWithRecoveryVia`'s).
+ * The platform's own access refusal never is, whatever its file names
+ * spell: a pull cannot change who may write a file.
+ */
+function worthCooperativeRetry(err: unknown): boolean {
+  if (err instanceof PushAccessRefusedError) return false;
+  return /non-fast-forward|rejected|fetch first|updates were rejected/i.test(pushFailureDetail(err));
+}
 
 /** The partial unique index that enforces one OPEN change request per (source, target) pair. */
 const OPEN_PAIR_CONSTRAINT = 'change_requests_open_pair_unq';
 
 /** Cap on a persisted apply refusal — long enough to name the files a gate waits on. */
 const APPLY_FAILURE_MAX_LEN = 1000;
+
+/**
+ * What an update from the target says when it landed but the approvals on the
+ * files it left alone could not be carried onto the new head.
+ */
+const APPROVAL_CARRY_OWED_NOTICE =
+  'This request was brought up to date, but the approvals already given could not be carried over to the updated draft yet. ' +
+  'No file needs approving again: the next time the request is opened, the server tries once more.';
 
 /**
  * True only for a Postgres unique violation (23505) on the open-CR-per-pair
@@ -1036,6 +1068,121 @@ export class VersionControlService implements IVersionControlService {
   private readonly owedAnnouncements = new Map<string, { after: string; changedPaths: string[] }>();
 
   /**
+   * Head moves whose approval carry a change request is still OWED, per
+   * request number, oldest first.
+   *
+   * The server moves a draft's head itself in two places: an update from the
+   * target, and the roles.yaml restore Apply makes. Each time, the approvals
+   * on the files that commit left alone are copied onto the new head
+   * (`carryApprovalsAcross`). When that copy fails, the approvals stay on the
+   * old head and read as out of date, and nothing later would repair them:
+   * the head has already moved, so no later call sees a move to carry across.
+   * The move is remembered here and replayed by the next read of the request.
+   *
+   * While a request owes one, every later move of its head is appended too,
+   * carried or not: a replay of A to B lands rows on B, and they still have
+   * to travel B to C. The carry is idempotent, so replaying one that already
+   * succeeded writes nothing.
+   *
+   * In memory, like `owedAnnouncements`: a restart forgets what is owed, and
+   * the approvals concerned then need giving again.
+   */
+  private readonly owedApprovalCarries = new Map<
+    number,
+    Array<{ workspaceId: string; from: string; to: string }>
+  >();
+  /** One replay per request at a time: two reads at once must not both splice the list. */
+  private readonly settlingApprovalCarries = new Map<number, Promise<void>>();
+  /** Past this many owed moves a request's list is dropped: it is not coming back. */
+  private static readonly OWED_APPROVAL_CARRY_CAP = 20;
+
+  /**
+   * Carry the approvals of change request `number` across a commit the SERVER
+   * put on its draft: every file whose bytes are the same at `from` and `to`
+   * keeps its approval, decided by git's own diff between the two heads.
+   *
+   * Answers the paths that differ and how many approval rows were written,
+   * or `null` when the diff or the copy failed. A failure is never thrown:
+   * the commit is already published and the caller's work must go on. It is
+   * logged, and the move is remembered in `owedApprovalCarries` so the next
+   * read of the request tries again.
+   */
+  private async carryApprovalsAcross(
+    number: number,
+    workspaceId: string,
+    from: string,
+    to: string,
+    when: string,
+  ): Promise<{ changedPaths: string[]; carried: number } | null> {
+    let outcome: { changedPaths: string[]; carried: number } | null = null;
+    try {
+      const changedPaths = await this.git.pathsChangedBetween(workspaceId, from, to);
+      const carried = await this.changeRequestReview.carryApprovalsForward(number, from, to, changedPaths);
+      outcome = { changedPaths, carried };
+    } catch (err) {
+      log.warn(
+        `could not carry approvals forward on change request #${number} ${when}; the next read of the request tries again`,
+        { err },
+      );
+    }
+    // The map is read HERE, after the awaits above and with none below: two
+    // carries of one request failing at once then append to one list, where a
+    // list looked up before the awaits would be two lists and the second
+    // `set` would drop the first one's move.
+    if (outcome === null || this.owedApprovalCarries.has(number)) {
+      const list = this.owedApprovalCarries.get(number) ?? [];
+      if (!list.some((move) => move.from === from && move.to === to)) list.push({ workspaceId, from, to });
+      if (list.length > VersionControlService.OWED_APPROVAL_CARRY_CAP) {
+        log.warn(
+          `change request #${number} owes more than ${VersionControlService.OWED_APPROVAL_CARRY_CAP} approval carries; giving up on them`,
+        );
+        this.owedApprovalCarries.delete(number);
+      } else {
+        this.owedApprovalCarries.set(number, list);
+      }
+    }
+    return outcome;
+  }
+
+  /**
+   * Replay the approval carries change request `number` is owed, oldest
+   * first, stopping at the first that fails. Never throws: this runs in front
+   * of a read, and a read must not fail because of bookkeeping.
+   */
+  private settleOwedApprovalCarries(number: number): Promise<void> {
+    const running = this.settlingApprovalCarries.get(number);
+    if (running) return running;
+    const run = (async () => {
+      const owed = this.owedApprovalCarries.get(number);
+      if (!owed) return;
+      let settled = 0;
+      try {
+        // By index, and re-reading the length: a move appended while this
+        // runs is replayed by this same pass.
+        for (let i = 0; i < owed.length; i++) {
+          const move = owed[i]!;
+          const changedPaths = await this.git.pathsChangedBetween(move.workspaceId, move.from, move.to);
+          await this.changeRequestReview.carryApprovalsForward(number, move.from, move.to, changedPaths);
+          settled++;
+        }
+      } catch (err) {
+        log.warn(`change request #${number} is still owed an approval carry; the next read tries again`, { err });
+      }
+      if (settled === 0) return;
+      owed.splice(0, settled);
+      if (owed.length === 0 && this.owedApprovalCarries.get(number) === owed) {
+        this.owedApprovalCarries.delete(number);
+      }
+      this.prs.invalidateDetailCache(number);
+      log.info(`settled ${settled} owed approval carr${settled === 1 ? 'y' : 'ies'} on change request #${number}`);
+    })().finally(() => {
+      this.settlingApprovalCarries.delete(number);
+    });
+    this.settlingApprovalCarries.set(number, run);
+    return run;
+  }
+
+  /**
    * The latest RUNNING apply attempt per change-request number (see
    * `beginApplyAttempt`). Entries leave when their attempt ends, so the map
    * holds only attempts in flight, never every number anyone ever posted.
@@ -1572,8 +1719,8 @@ export class VersionControlService implements IVersionControlService {
         // surface a structured `PushNeedsAgentResolutionError` at the
         // moment the user actually closes their edit, which is when
         // the agent should step in.
-        const detail = err instanceof Error ? err.message : String(err);
-        const looksLikeNonFastForward = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(detail);
+        const detail = pushFailureDetail(err);
+        const looksLikeNonFastForward = worthCooperativeRetry(err);
         let recovered = false;
         let recoveryError: unknown = null;
         if (looksLikeNonFastForward) {
@@ -1587,7 +1734,9 @@ export class VersionControlService implements IVersionControlService {
             recoveryError = recoveryErr;
             log.warn(
               'autosave cooperative recovery (pull-rebase) failed; leaving the unpushed commit for the next save / releaseLock to surface:',
-              { err: recoveryErr },
+              // The gate's refusal goes to the log in its record form: the
+              // error itself names the people who may write the file.
+              recoveryErr instanceof PushAccessRefusedError ? { detail: recoveryErr.recordMessage } : { err: recoveryErr },
             );
           }
         }
@@ -1864,6 +2013,22 @@ export class VersionControlService implements IVersionControlService {
     // Same canonicalization as `noteGitSyncOk` — the pair must agree on keys.
     const id = branchForWorkspaceId(workspaceId);
     this.gitSyncFailing.add(id);
+    // The platform's own access check refused: the host was never asked. The
+    // event fans out to every session on the branch, not only the pusher's,
+    // so it carries the file and its writers whole, with the file marked;
+    // the events route's delivery rule then names them only to a viewer who
+    // may read that file, and tells everyone else the platform refused
+    // without them.
+    if (!conflict && err instanceof PushAccessRefusedError) {
+      this.events?.emit({
+        kind: 'git-sync-failed',
+        workspaceId: id,
+        branch,
+        reason: pushAccessRefusalSentence(branch, err.blocked),
+        accessRefusal: { path: err.blocked.path },
+      });
+      return;
+    }
     this.events?.emit({
       kind: 'git-sync-failed',
       workspaceId: id,
@@ -1931,8 +2096,8 @@ export class VersionControlService implements IVersionControlService {
       await push();
       this.noteGitSyncOk(workspaceId, branch);
     } catch (firstPushErr) {
-      const firstDetail = firstPushErr instanceof Error ? firstPushErr.message : String(firstPushErr);
-      const looksLikeNonFastForward = /non-fast-forward|rejected|fetch first|updates were rejected/i.test(firstDetail);
+      const firstDetail = pushFailureDetail(firstPushErr);
+      const looksLikeNonFastForward = worthCooperativeRetry(firstPushErr);
       let recovered = false;
       let recoveryDetail = '(cooperative path not attempted)';
       let recoveryError: unknown = null;
@@ -1951,7 +2116,7 @@ export class VersionControlService implements IVersionControlService {
           try {
             await push();
           } catch (retryErr) {
-            retryDetail = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            retryDetail = pushFailureDetail(retryErr);
             throw retryErr;
           }
           recovered = true;
@@ -1961,7 +2126,7 @@ export class VersionControlService implements IVersionControlService {
           );
         } catch (recoveryErr) {
           recoveryError = recoveryErr;
-          recoveryDetail = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr);
+          recoveryDetail = pushFailureDetail(recoveryErr);
           log.warn(
             `cooperative recovery (pull-rebase) failed for workspace=${workspaceId} user=${user.id}; handing off to agent:`,
             { detail: recoveryDetail },
@@ -1989,6 +2154,17 @@ export class VersionControlService implements IVersionControlService {
           `push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
           { detail: firstDetail },
         );
+        // The platform's own gate refused (the first push, or the retry once
+        // the pull had replayed the branch): the host was never asked, so
+        // the sentence says the platform refused and names what it named.
+        const current = recoveryError ?? firstPushErr;
+        if (current instanceof PushAccessRefusedError) {
+          throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail, 'access', {
+            told: current.reason,
+            recorded: current.recordReason,
+            shared: current.sharedReason,
+          });
+        }
         throw new PushNeedsAgentResolutionError(
           branch,
           targetPath,
@@ -2231,10 +2407,13 @@ export class VersionControlService implements IVersionControlService {
     return { number: row.number, state: row.state as ChangeRequestState };
   }
 
-  getChangeRequestDetail(
+  async getChangeRequestDetail(
     number: number,
     opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<ChangeRequestDetail | null> {
+    // A request that is owed an approval carry gets it tried again here, in
+    // front of the approvals this read reports. One map lookup otherwise.
+    if (this.owedApprovalCarries.has(number)) await this.settleOwedApprovalCarries(number);
     return this.prs.getPrDetail(number, opts);
   }
 
@@ -2739,9 +2918,10 @@ export class VersionControlService implements IVersionControlService {
     // The merge is a commit the APPROVERS did not make. Re-pin their
     // approvals onto the new head for every file whose bytes it left alone —
     // git's own two-dot diff between the two heads is the verdict on which
-    // those are. Best effort: a request that IS up to date is worth far more
-    // than the bookkeeping, so a failure here is logged and the fresh detail
-    // still goes back.
+    // those are. A request that IS up to date is worth far more than the
+    // bookkeeping, so a carry that fails does not fail the update: the fresh
+    // detail still goes back, with a sentence saying the approvals were not
+    // carried, and the carry is owed (see `owedApprovalCarries`).
     //
     // The head moving is the real gate: nothing moved, nothing moved under
     // anyone. It also covers the sha that is not a sha — a resolve that
@@ -2760,30 +2940,25 @@ export class VersionControlService implements IVersionControlService {
     // that the dialog then re-read would be the dialog discarding content the
     // server just called unchanged.
     let updatedPaths: string[] = [];
+    let approvalCarryNotice: string | undefined;
     if (headMoved) {
-      try {
-        updatedPaths = await this.git.pathsChangedBetween(
-          workspaceId,
-          headBeforeMerge,
-          headAfterMerge,
-        );
-        await this.changeRequestReview.carryApprovalsForward(
-          number,
-          headBeforeMerge,
-          headAfterMerge,
-          updatedPaths,
-        );
-      } catch (err) {
-        log.warn(
-          `could not carry approvals forward on change request #${number} after updating from target`,
-          { err },
-        );
-        // The diff is what failed, so which files moved is unknown. Say so as
-        // "every file this request had", which is every file a caller can
-        // already be showing: slow beats a dialog that goes on presenting
-        // pre-merge text as current. Anything the merge ADDED is not on the
-        // list and does not need to be — no caller has read it yet.
+      const carry = await this.carryApprovalsAcross(
+        number,
+        workspaceId,
+        headBeforeMerge,
+        headAfterMerge,
+        'after updating from target',
+      );
+      if (carry) {
+        updatedPaths = carry.changedPaths;
+      } else {
+        // Which files moved is not known for certain. Say so as "every file
+        // this request had", which is every file a caller can already be
+        // showing: slow beats a dialog that goes on presenting pre-merge text
+        // as current. Anything the merge ADDED is not on the list and does
+        // not need to be — no caller has read it yet.
         updatedPaths = (detail.files ?? []).map((f) => f.path);
+        approvalCarryNotice = APPROVAL_CARRY_OWED_NOTICE;
       }
     }
     this.prs.invalidateDetailCache(number);
@@ -2797,7 +2972,7 @@ export class VersionControlService implements IVersionControlService {
         `Refreshed change request #${number} but could not re-fetch its detail.`,
       );
     }
-    return { ...refreshed, updatedPaths };
+    return { ...refreshed, updatedPaths, ...(approvalCarryNotice ? { approvalCarryNotice } : {}) };
   }
 
   async approveFile(
@@ -4248,18 +4423,50 @@ export class VersionControlService implements IVersionControlService {
     // Fail CLOSED: if the fresh detail can't be loaded we abort rather than fall
     // back to the stale inputs — merging on outdated gate inputs after a
     // security-sensitive rewrite is exactly what this path exists to prevent.
+    //
+    // The restore commit is the SERVER's, and it touches roles.yaml alone, so
+    // the approvals given on the head it replaced are carried across it by
+    // content, exactly as an update from the target carries them. From the
+    // head the restore REPLACED, as the guard resolved it, not from the
+    // caller's `headSha`: if the author pushed in between, the approvals on
+    // the caller's head are out of date by that push and stay so. Without the
+    // carry every approval on the request went out of date here, seconds after
+    // it was given, and the gate below told the approver to approve again
+    // files nobody had changed. That happened to every draft cut before the
+    // target's roles.yaml last changed: the guard compares the draft's copy
+    // with the target's current one, so an old copy counts as a change.
     let mergeHeadSha = headSha;
     let mergeApprovals = approvals;
     if (preserved) {
-      const fresh = await this.getChangeRequestDetail(number, {
-        fresh: true,
-        workspaceId,
-        viewerEmail: user.email,
-      });
-      if (!fresh) {
-        throw new RolesYamlPreservationError(
-          `could not reload change request #${number} after roles.yaml preservation; refusing to merge on stale gate inputs`,
+      const reload = async (): Promise<ChangeRequestDetail> => {
+        const fresh = await this.getChangeRequestDetail(number, {
+          fresh: true,
+          workspaceId,
+          viewerEmail: user.email,
+        });
+        if (!fresh) {
+          throw new RolesYamlPreservationError(
+            `could not reload change request #${number} after roles.yaml preservation; refusing to merge on stale gate inputs`,
+          );
+        }
+        return fresh;
+      };
+      let fresh = await reload();
+      const replacedHead = preserved.replacedHead;
+      if (replacedHead && fresh.headSha && fresh.headSha !== replacedHead) {
+        const carry = await this.carryApprovalsAcross(
+          number,
+          workspaceId,
+          replacedHead,
+          fresh.headSha,
+          'after restoring roles.yaml',
         );
+        // The detail above was assembled before the rows existed. Read again
+        // only when rows were written; this is the restore path alone.
+        if (carry && carry.carried > 0) {
+          this.prs.invalidateDetailCache(number);
+          fresh = await reload();
+        }
       }
       mergeHeadSha = fresh.headSha;
       mergeApprovals = fresh.approvals;
@@ -4284,8 +4491,23 @@ export class VersionControlService implements IVersionControlService {
       if (err instanceof ChangeRequestConflictsError) {
         return { kind: 'conflicts-need-resolution', conflictedPaths: err.conflictedPaths };
       }
+      // The gate is waiting on approvals while a carry is still owed: its
+      // reasons would name approvals that are out of date only because the
+      // server could not copy them. Say that instead. Only that refusal: one
+      // that says the request is already merged, closed or empty carries the
+      // same `mergeBlockedReasons` and is true as worded. An approver who
+      // approves again anyway passes the gate, so this can never hold a
+      // request for good.
+      if (
+        this.owedApprovalCarries.has(number) &&
+        err instanceof VersionControlDomainError &&
+        err.payload?.awaitingApprovals === true
+      ) {
+        throw new ApprovalCarryPendingError();
+      }
       throw err;
     }
+    this.owedApprovalCarries.delete(number);
     await this.pullMergeTarget(baseBranch, user);
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-merged', number });
@@ -4756,12 +4978,15 @@ export class VersionControlService implements IVersionControlService {
    * Fail-CLOSED: any error restoring the base version throws
    * {@link RolesYamlPreservationError}, aborting the merge. We must never let a
    * roles.yaml change slip through because the neutralisation step failed.
+   *
+   * Answers `null` when nothing was restored, else the published head the
+   * restore replaced (`replacedHead`, `null` when it could not be resolved).
    */
   private async preserveBaseRolesYaml(
     number: number,
     user: AuthUser,
     baseBranch: string,
-  ): Promise<boolean> {
+  ): Promise<{ replacedHead: string | null } | null> {
     const ROLES_YAML = 'roles.yaml';
     let headBranch: string;
     try {
@@ -4777,7 +5002,7 @@ export class VersionControlService implements IVersionControlService {
       // A CR into a protected branch is the only escalation vector we're closing;
       // base is always a protected branch here, head is always a feature branch.
       // Guard against a degenerate self-targeting CR (head === base) just in case.
-      if (!headBranch || headBranch === summary.base) return false;
+      if (!headBranch || headBranch === summary.base) return null;
 
       // Work in the SOURCE branch's own per-branch workspace (already checked out
       // on that branch). Fetch so we read the CR's TRUE published roles.yaml from
@@ -4793,7 +5018,24 @@ export class VersionControlService implements IVersionControlService {
       const headRoles = await this.git.readFileAtRef(ws.id, `origin/${headBranch}`, ROLES_YAML);
 
       // Identical (incl. both-absent) → the CR doesn't change roles.yaml. Done.
-      if (baseRoles === headRoles) return false;
+      if (baseRoles === headRoles) return null;
+
+      // The published head the restore commit is about to replace: the head
+      // the approvals are carried FROM. Resolved here, from the refs the
+      // fetch above just brought, and not taken from the caller: an author
+      // may have pushed since the caller read the request, and approvals
+      // given before that push are out of date by the author's commit, which
+      // no carry may undo. Bookkeeping only, so a failure costs the carry and
+      // never the guard.
+      let replacedHead: string | null = null;
+      try {
+        replacedHead = (await this.git.resolvePrShas(ws.id, summary.base, headBranch)).headSha;
+      } catch (err) {
+        mergeLog.warn(
+          `could not resolve the published head of change request #${number} before restoring roles.yaml; its approvals will not be carried across the restore`,
+          { err },
+        );
+      }
 
       // The restore below writes roles.yaml directly to the shared per-branch
       // working tree. `LockingFilesystem` serializes every OTHER roles.yaml edit
@@ -4873,7 +5115,7 @@ export class VersionControlService implements IVersionControlService {
         }
         await this.pushWithRecovery(ws.id, headBranch, ROLES_YAML, user);
         this.accessControl.invalidate(ws.id);
-        return true;
+        return { replacedHead };
       } finally {
         // We already committed inline, so drop the lock row directly rather than
         // going through `releaseLock` (which would enqueue a duplicate commit).

@@ -103,6 +103,21 @@ export class BranchAuthorshipError extends VersionControlDomainError {
  */
 export class PushNeedsAgentResolutionError extends VersionControlDomainError {
   readonly kind = 'push-needs-resolution' as const;
+  /**
+   * The sentence for the operator's RECORD: the server log and an operator's
+   * notice. The message itself, but for an `access` refusal, where it always
+   * names the file and the people who may write it are counted instead of
+   * named: log lines carry no names or email addresses.
+   */
+  readonly recordMessage: string;
+  /**
+   * The sentence for text that is KEPT and shown to others later: the
+   * pending-commit queue's last error, which reaches whoever next merges or
+   * updates the branch. The message itself, but for an `access` refusal,
+   * where it names no file and no writer, since that reader may not read
+   * the file.
+   */
+  readonly sharedMessage: string;
   constructor(
     readonly branch: string,
     readonly path: string,
@@ -113,16 +128,20 @@ export class PushNeedsAgentResolutionError extends VersionControlDomainError {
      * cooperative rebase could not reconcile. `refused`: the host turned the
      * push away for any other reason (an outage, credentials, a dropped
      * connection) — nothing to reconcile, the next push of the branch carries
-     * the commits. The opening clause is the same either way.
+     * the commits. `access`: the platform's own access check refused the push
+     * before it left this server (an unpushed commit changes a file that
+     * neither its author nor the pusher may write); the host was never
+     * asked, so the sentence says the platform refused and carries the
+     * gate's own clause naming the file and who may write it: `told` for the
+     * person who saved, `recorded` for `recordMessage`, and `shared`, which
+     * names neither, for `sharedMessage`. The opening clause is the same
+     * every way.
      */
-    readonly cause: 'diverged' | 'refused' = 'diverged',
+    readonly cause: 'diverged' | 'refused' | 'access' = 'diverged',
+    readonly accessRefusal?: { told: string; recorded: string; shared: string },
   ) {
     super(
-      `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
-        (cause === 'refused'
-          ? `the repository host refused the push; the next save on this branch will try sharing it again.`
-          : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
-            `The agent will resolve this.`),
+      savedLocallySentence(branch, path, cause, accessRefusal?.told),
       409,
       // The two details are raw git output — stderr can quote a credentialed
       // URL, server paths, the host's own error page. They stay on the error
@@ -130,7 +149,27 @@ export class PushNeedsAgentResolutionError extends VersionControlDomainError {
       { kind: 'push-needs-resolution', branch, path },
     );
     this.name = 'PushNeedsAgentResolutionError';
+    this.recordMessage = cause === 'access' ? savedLocallySentence(branch, path, cause, accessRefusal?.recorded) : this.message;
+    this.sharedMessage = cause === 'access' ? savedLocallySentence(branch, path, cause, accessRefusal?.shared) : this.message;
   }
+}
+
+/** The one sentence `PushNeedsAgentResolutionError` says, for each cause; `accessClause` is the push gate's own. */
+function savedLocallySentence(
+  branch: string,
+  path: string,
+  cause: 'diverged' | 'refused' | 'access',
+  accessClause: string | undefined,
+): string {
+  return (
+    `Saved locally on "${branch}" but couldn't share with the team automatically — ` +
+    (cause === 'access'
+      ? `the platform's access check refused the push` + (accessClause ? `: ${accessClause}.` : '.')
+      : cause === 'refused'
+      ? `the repository host refused the push; the next save on this branch will try sharing it again.`
+      : `the remote diverged on "${path}" and the cooperative rebase couldn't reconcile. ` +
+        `The agent will resolve this.`)
+  );
 }
 
 /**
@@ -678,6 +717,29 @@ export class DuplicateChangeRequestError extends VersionControlDomainError {
       },
     );
     this.name = 'DuplicateChangeRequestError';
+  }
+}
+
+/**
+ * Apply was refused by the approval gate while this request is still owed an
+ * approval carry: the server moved the draft's head itself (the roles.yaml
+ * restore, or an update from the target) and could not copy the approvals of
+ * the files that commit left alone onto the new head. Answering with the
+ * gate's own words would tell an approver to approve again a file nobody
+ * changed, so this says what happened instead. Nothing was applied, and the
+ * carry is tried again by the next read of the request, so trying again is
+ * the whole fix. 503: the fault is the server's and it is temporary.
+ */
+export class ApprovalCarryPendingError extends VersionControlDomainError {
+  readonly kind = 'approval-carry-pending' as const;
+  constructor() {
+    super(
+      'The server updated this draft while applying it and could not carry the approvals already given over to the updated draft. ' +
+        'Nothing was applied, and no file needs approving again. Apply again to retry.',
+      503,
+      { kind: 'approval-carry-pending', retryable: true },
+    );
+    this.name = 'ApprovalCarryPendingError';
   }
 }
 

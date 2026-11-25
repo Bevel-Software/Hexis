@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
+import { useLocation } from 'react-router-dom';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { WorkspaceContextValue } from '../../modules/workspace';
 import type { GitContextValue } from '../../modules/git';
-import { makeWorkspaceFixture } from '../../modules/workspace/__tests__/testFixtures';
+import { makeShellWorkspace } from './workspaceFixture';
+import { toggleSidebar } from '../../modules/layout';
 import { CoreAppShell } from '../CoreAppShell';
 import { KnowledgeSurface } from '../KnowledgeSurface';
-import { makeRegistry, useActiveAppId, type AppDef, type FileRendererDef } from '../registry';
+import { makeRegistry, useActiveAppId, type AppDef, type FileRendererDef, type PaneDef } from '../registry';
 
 /*
  * The whole shell, mounted at a URL, with the session and the server stubbed:
@@ -94,7 +96,7 @@ const TREE = folder('', [
 /** The workspace with one file open, as the tab system would hold it. */
 function workspaceOn(path: string, content: string): WorkspaceContextValue {
   const tab = { path, content, savedContent: content, isDirty: false, pendingFileContent: null };
-  return makeWorkspaceFixture({
+  return makeShellWorkspace({
     fileTree: TREE,
     openTabs: [tab],
     activeTab: tab,
@@ -124,9 +126,46 @@ const agentsApp: AppDef = {
   ),
 };
 
-function renderShellAt(url: string, apps: AppDef[]) {
+/*
+ * The same app with screens of its own beside its folders: its navigation
+ * above them in the sidebar, and a page where the location is not a file.
+ * One element each, as the surface asks.
+ */
+const SCREENS_NAV = (
+  <nav aria-label="Agents">
+    <a href="/agents/runs">Runs</a>
+  </nav>
+);
+const SCREENS_PAGE = <h1>The workflows page</h1>;
+function AgentsScreens() {
+  const onFile = useLocation().pathname.startsWith('/workspace/');
+  return <KnowledgeSurface roots={['Agents', 'Workflows']} nav={SCREENS_NAV} page={onFile ? undefined : SCREENS_PAGE} />;
+}
+const screensApp: AppDef = {
+  ...agentsApp,
+  element: (
+    <div data-testid="agents-frame">
+      <AgentsScreens />
+    </div>
+  ),
+};
+/** The app handing the surface what React renders as nothing, for `nav`, `page` or both. */
+function appPassing(props: { nav?: ReactNode; page?: ReactNode }): AppDef {
+  return {
+    ...agentsApp,
+    element: (
+      <div data-testid="agents-frame">
+        <KnowledgeSurface roots={['Agents', 'Workflows']} {...props} />
+      </div>
+    ),
+  };
+}
+/** A pane a distribution registers beside the viewer, as the chat is. */
+const chatPane: PaneDef = { id: 'chat', order: 30, node: <div data-testid="chat-pane" />, collapsible: true };
+
+function renderShellAt(url: string, apps: AppDef[], panes: PaneDef[] = []) {
   window.history.replaceState(null, '', url);
-  return render(<CoreAppShell registry={makeRegistry({ apps, renderers: [agentRenderer] })} />);
+  return render(<CoreAppShell registry={makeRegistry({ apps, renderers: [agentRenderer], panes })} />);
 }
 
 const explorer = () => within(screen.getByTestId('file-explorer-root'));
@@ -276,5 +315,193 @@ describe('CoreAppShell: a root folder an app claims', () => {
 
     await waitFor(() => expect(screen.getByLabelText('active app')).toHaveTextContent('knowledge'));
     expect(screen.queryByTestId('agents-frame')).not.toBeInTheDocument();
+  });
+});
+
+describe('CoreAppShell: a claiming app with screens of its own', () => {
+  /** The app's navigation stands above its folders, in the one sidebar. */
+  function expectNavAboveFolders() {
+    const nav = explorer().getByRole('navigation', { name: 'Agents' });
+    // The folders have a heading of their own under the app's rows.
+    const heading = explorer().getByText('Files');
+    const folders = explorer().getByText('Workflows');
+    expect(nav.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(heading.compareDocumentPosition(folders) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The heading stands in place of the rule a tree without app rows draws
+    // over its folders (the cases passing `null` and `false` below see it drawn).
+    expect(explorer().queryByTestId('file-explorer-folders-rule')).not.toBeInTheDocument();
+    // And no second heading over nothing: nothing is pinned.
+    expect(explorer().queryByText('Company Context')).not.toBeInTheDocument();
+  }
+
+  /** The row of the file whose tab is open. */
+  const agentRow = () => screen.getByTestId('file-explorer-root').querySelector(`[data-tree-path="${AGENT}"]`);
+
+  it('shows its page beside the one sidebar, without the panes built around a file', async () => {
+    // A tab is still open behind the page, as after a visit to a file.
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt('/agents', [screensApp], [chatPane]);
+
+    expect(await screen.findByRole('heading', { name: 'The workflows page' })).toBeInTheDocument();
+    expect(screen.getByLabelText('active app')).toHaveTextContent('agents');
+    expectNavAboveFolders();
+    expect(screen.queryByTestId('agent-renderer')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-pane')).not.toBeInTheDocument();
+    // The open tab's row is not the current place while a page is on screen.
+    expect(agentRow()).toHaveAttribute('aria-current', 'false');
+  });
+
+  it('keeps that sidebar when a file is on screen, with the viewer and the panes back', async () => {
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt(`/workspace/main/${AGENT}`, [screensApp], [chatPane]);
+
+    expect(await screen.findByTestId('agent-renderer')).toHaveTextContent('role: coder');
+    expect(screen.getByLabelText('active app')).toHaveTextContent('agents');
+    expectNavAboveFolders();
+    expect(screen.queryByRole('heading', { name: 'The workflows page' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-pane')).toBeInTheDocument();
+    expect(agentRow()).toHaveAttribute('aria-current', 'true');
+  });
+
+  it('draws no "Files" heading when the folders it claims are not there yet', async () => {
+    const missing = ['Missing'];
+    function MissingScreens() {
+      return <KnowledgeSurface roots={missing} nav={SCREENS_NAV} page={SCREENS_PAGE} />;
+    }
+    const app: AppDef = { ...agentsApp, roots: missing, element: <div data-testid="agents-frame"><MissingScreens /></div> };
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt('/agents', [app]);
+
+    expect(await screen.findByRole('heading', { name: 'The workflows page' })).toBeInTheDocument();
+    expect(explorer().getByRole('navigation', { name: 'Agents' })).toBeInTheDocument();
+    expect(explorer().queryByText('Files')).not.toBeInTheDocument();
+  });
+
+  describe('with a folder pinned', () => {
+    const PINS = 'bevel-pinned-folders';
+    const WORKFLOWS = `${KB}/Workflows`;
+    afterEach(() => window.localStorage.removeItem(PINS));
+
+    it.each([
+      ['its page', '/agents', 'The workflows page'],
+      ['a hosted file', `/workspace/main/${AGENT}`, null],
+    ])('draws "Company Context" over the pins, between its navigation and "Files", at %s', async (_, url, pageHeading) => {
+      window.localStorage.setItem(PINS, JSON.stringify([WORKFLOWS]));
+      session.workspace = workspaceOn(AGENT, 'role: coder');
+      renderShellAt(url, [screensApp]);
+      if (pageHeading) await screen.findByRole('heading', { name: pageHeading });
+      else await screen.findByTestId('agent-renderer');
+
+      const nav = explorer().getByRole('navigation', { name: 'Agents' });
+      const pinsHeading = explorer().getByText('Company Context');
+      const filesHeading = explorer().getByText('Files');
+      // The pinned row, then the same folder again in the tree under "Files".
+      const [pinned, inTree] = Array.from(
+        screen.getByTestId('file-explorer-root').querySelectorAll(`[data-tree-path="${WORKFLOWS}"]`),
+      );
+      const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(follows(nav, pinsHeading)).toBe(true);
+      expect(follows(pinsHeading, pinned)).toBe(true);
+      expect(follows(pinned, filesHeading)).toBe(true);
+      expect(follows(filesHeading, inTree)).toBe(true);
+    });
+  });
+});
+
+/*
+ * `null` and `false` are how React code says "nothing here" (`cond && <Nav />`,
+ * `onFile ? null : <Page />`). Each means the prop was not given.
+ */
+describe('CoreAppShell: a claiming app passing nothing as nav or page', () => {
+  const PINS = 'bevel-pinned-folders';
+  afterEach(() => window.localStorage.removeItem(PINS));
+
+  /** The explorer's markup, mounted at a hosted file with one folder pinned. */
+  async function explorerMarkup(app: AppDef): Promise<string> {
+    window.localStorage.setItem(PINS, JSON.stringify([`${KB}/Agents`]));
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt(`/workspace/main/${AGENT}`, [app]);
+    await screen.findByTestId('agent-renderer');
+    const markup = screen.getByTestId('file-explorer-root').innerHTML;
+    cleanup();
+    return markup;
+  }
+
+  it.each([
+    ['null', null],
+    ['false', false],
+  ])('renders the explorer exactly as without nav when nav is %s', async (_, nav) => {
+    const without = await explorerMarkup(agentsApp);
+
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    window.localStorage.setItem(PINS, JSON.stringify([`${KB}/Agents`]));
+    renderShellAt(`/workspace/main/${AGENT}`, [appPassing({ nav })]);
+    await screen.findByTestId('agent-renderer');
+
+    // The headings of a tree with no app rows above it: "Company Context"
+    // over the pins, the rule over the folders, and no "Files" heading.
+    expect(explorer().getByText('Company Context')).toBeInTheDocument();
+    expect(explorer().getByTestId('file-explorer-folders-rule')).toBeInTheDocument();
+    expect(explorer().queryByText('Files')).not.toBeInTheDocument();
+    expect(screen.getByTestId('file-explorer-root').innerHTML).toBe(without);
+  });
+
+  it.each([
+    ['null', null],
+    ['false', false],
+  ])('keeps "Company Context" with nothing pinned when nav is %s', async (_, nav) => {
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt(`/workspace/main/${AGENT}`, [appPassing({ nav })]);
+    await screen.findByTestId('agent-renderer');
+
+    expect(explorer().getByText('Company Context')).toBeInTheDocument();
+    expect(explorer().getByTestId('file-explorer-folders-rule')).toBeInTheDocument();
+    expect(explorer().queryByText('Files')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['null', null],
+    ['false', false],
+  ])('shows the viewer and the panes, as at a file, when page is %s', async (_, page) => {
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt(`/workspace/main/${AGENT}`, [appPassing({ nav: SCREENS_NAV, page })], [chatPane]);
+
+    expect(await screen.findByTestId('agent-renderer')).toHaveTextContent('role: coder');
+    expect(screen.getByTestId('chat-pane')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('file-explorer-root').querySelector(`[data-tree-path="${AGENT}"]`),
+    ).toHaveAttribute('aria-current', 'true');
+  });
+});
+
+/*
+ * Last in the file: the sidebar's breakpoint is module state, so a narrow
+ * mount leaves it narrow for whatever mounts after it.
+ */
+describe('CoreAppShell: a claiming app with screens of its own, on a narrow screen', () => {
+  const setViewportWidth = (width: number) =>
+    (window as typeof window & { happyDOM: { setInnerWidth(value: number): void } }).happyDOM.setInnerWidth(width);
+  afterEach(() => setViewportWidth(1400));
+
+  it('makes the sidebar with the app’s navigation the drawer, opened by the sidebar button', async () => {
+    setViewportWidth(375);
+    session.workspace = workspaceOn(AGENT, 'role: coder');
+    renderShellAt('/agents', [screensApp], [chatPane]);
+
+    // The page has the screen: the phone layout, which gives it to the chat
+    // pane, is not chosen for a page that is not a file.
+    expect(await screen.findByRole('heading', { name: 'The workflows page' })).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-pane')).not.toBeInTheDocument();
+    const sidebar = screen.getByTestId('file-explorer-root').closest('aside')!;
+    expect(sidebar).toContainElement(screen.getByRole('navigation', { name: 'Agents', hidden: true }));
+    // Closed, and out of reach, until asked for.
+    expect(sidebar).toHaveAttribute('inert');
+
+    // What the toolbar's sidebar button calls.
+    act(() => toggleSidebar());
+    expect(sidebar).not.toHaveAttribute('inert');
+    expect(sidebar).toHaveAttribute('role', 'dialog');
+    expect(sidebar).toHaveAttribute('aria-modal', 'true');
+    expect(within(sidebar).getByRole('navigation', { name: 'Agents' })).toBeInTheDocument();
   });
 });

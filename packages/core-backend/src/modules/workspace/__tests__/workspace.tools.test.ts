@@ -27,11 +27,14 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/index.js';
+import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../../agent-scope/index.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import type { WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger } from '../../../shared/logger.contract.js';
 import { AccessDeniedError } from '../../access-model/index.js';
 import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
@@ -106,6 +109,33 @@ let unzipCalls: [string, string | undefined][] = [];
  * in `workspace.service.test.ts`.
  */
 let unzipEntries: string[] = [];
+/**
+ * Every lock call the tools made through `versionControlService`, as
+ * `acquire <path>` / `release <path>`: a lock and its release is how a file
+ * already on disk is committed and shared (`save_file`, the app's unzip route).
+ */
+let lockCalls: string[] = [];
+/** Paths whose lock someone else holds: `acquireLock` answers not acquired for them. */
+let lockedByOthers = new Set<string>();
+/** Paths whose `releaseLock` throws, as a commit that could not be queued. */
+let failingReleases = new Set<string>();
+/** Locks currently held by the caller in the stand-in lock table. */
+let heldLocks = new Set<string>();
+/** Paths whose failed release had already queued their commit (the lock drop failed after the enqueue). */
+let queuedDespiteFailure = new Set<string>();
+/** When set, the `unzipFile` stand-in throws after writing this many entries. */
+let unzipThrowAfter: number | null = null;
+/**
+ * Locks whose lease runs out before their next heartbeat, as a long archive can outlast
+ * one: `free` lapsed and nobody took it, `taken` lapsed and another person (Ana) holds it now,
+ * `editor` lapsed and the person's own editor took it, under this call's own user id.
+ */
+let lapsedLeases = new Map<string, 'free' | 'taken' | 'editor'>();
+/** Paths whose `acquireLock` throws this error instead of answering. */
+let failingAcquires = new Map<string, Error>();
+/** The stamp of the acquisition holding each lock now, as the real lock's `acquiredAt`. */
+let acquiredAt = new Map<string, string>();
+let acquisitionCount = 0;
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -153,6 +183,14 @@ let patternMatcher: RipgrepPatternMatcher | undefined;
 let docExtractor: WorkerDocumentExtractor | undefined;
 let matcherOptions: RipgrepPatternMatcherOptions = {};
 
+// The one owner of the shared harness server: start() closes the previous one
+// before it opens another, and afterEach closes the last.
+async function closeHttpServer(): Promise<void> {
+  const open = httpServer;
+  httpServer = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+}
+
 async function start(
   scope: 'read' | 'write' = 'write',
   access: IAccessControl = allowAll,
@@ -160,6 +198,7 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
+  await closeHttpServer();
   await patternMatcher?.close();
   patternMatcher = new RipgrepPatternMatcher(matcherOptions);
   await docExtractor?.close();
@@ -248,6 +287,16 @@ async function start(
   workspacePathCalls = [];
   unzipCalls = [];
   unzipEntries = [];
+  lockCalls = [];
+  lockedByOthers = new Set();
+  failingReleases = new Set();
+  heldLocks = new Set();
+  queuedDespiteFailure = new Set();
+  unzipThrowAfter = null;
+  lapsedLeases = new Map();
+  acquiredAt = new Map();
+  acquisitionCount = 0;
+  failingAcquires = new Map();
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -285,6 +334,7 @@ async function start(
         zipRel: string,
         destRel?: string,
         guardWrite?: (wsRelativePath: string) => Promise<void>,
+        onWritten?: (wsRelativePath: string) => void,
       ) => {
         // Recorded so a test can assert the PATHS the tool handed over — both
         // ends normalised into the repository.
@@ -297,17 +347,72 @@ async function start(
         const extracted: string[] = [];
         const skipped: { path: string; reason: string }[] = [];
         for (const entry of unzipEntries) {
+          // Past its guard and before its bytes land: the entry is locked and never written.
+          const failsMidEntry = unzipThrowAfter !== null && extracted.length === unzipThrowAfter;
           try {
             await guardWrite?.(entry);
+            if (failsMidEntry) throw Object.assign(new Error('disk full'), { midEntry: true });
             extracted.push(entry);
+            onWritten?.(entry);
           } catch (err) {
+            // A failure of the extraction itself is not a refused entry: it ends the archive.
+            if ((err as { midEntry?: boolean }).midEntry) throw err;
             skipped.push({ path: entry, reason: err instanceof Error ? err.message : 'refused' });
           }
         }
         return { destination: '', extracted, skipped };
       },
     } as never,
-    versionControlService: {} as never,
+    // A stateful lock table, as the real one: a held lock refuses every
+    // second acquire, its holder's included, until a release drops it. Each
+    // acquisition is stamped, as the real `acquiredAt` is, and a heartbeat
+    // answers the stamp of whichever acquisition holds the lock now.
+    versionControlService: {
+      acquireLock: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`acquire ${file}`);
+        const failure = failingAcquires.get(file);
+        if (failure) throw failure;
+        if (lockedByOthers.has(file)) return { acquired: false, lock: { holderName: 'Ana' } };
+        if (heldLocks.has(file)) return { acquired: false, lock: { holderName: 'N' } };
+        heldLocks.add(file);
+        acquiredAt.set(file, `t${++acquisitionCount}`);
+        return { acquired: true, lock: { holderName: 'N', acquiredAt: acquiredAt.get(file) } };
+      },
+      heartbeatLock: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`heartbeat ${file}`);
+        const lapse = lapsedLeases.get(file);
+        if (lapse) {
+          lapsedLeases.delete(file);
+          heldLocks.delete(file);
+          if (lapse === 'taken') lockedByOthers.add(file);
+          if (lapse === 'editor') {
+            heldLocks.add(file);
+            acquiredAt.set(file, `t${++acquisitionCount}`);
+          }
+        }
+        // As the real heartbeat: only a live lock held under the caller's user id is renewed.
+        if (!heldLocks.has(file)) throw new Error('lock not held');
+        return { holderName: 'N', acquiredAt: acquiredAt.get(file) };
+      },
+      releaseLock: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`release ${file}`);
+        // As the real release: a lock the caller no longer holds is refused, never committed.
+        if (!heldLocks.has(file)) throw new Error('lock not held');
+        // A commit that cannot be queued leaves the lock held, as the real release does.
+        // The cause carries a line break, as queue errors quoting outside text can.
+        if (failingReleases.has(file)) throw new Error('queue unavailable\n[forged] line');
+        heldLocks.delete(file);
+      },
+      releaseLockUntouched: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`hand back untouched ${file}`);
+        heldLocks.delete(file);
+      },
+      releaseLockNoCommit: async (_ws: string, _branch: string, file: string) => {
+        lockCalls.push(`discard ${file}`);
+        heldLocks.delete(file);
+      },
+      hasQueuedCommit: async (_ws: string, _branch: string, file: string) => queuedDespiteFailure.has(file),
+    } as never,
     events: {} as never,
     getFilesystem: async () => fs,
   });
@@ -360,8 +465,7 @@ beforeEach(() => {
   matcherOptions = {};
 });
 afterEach(async () => {
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  await closeHttpServer();
   await patternMatcher?.close();
   patternMatcher = undefined;
   await docExtractor?.close();
@@ -2259,6 +2363,54 @@ describe('office documents and PDFs', () => {
       expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/new.png` })).status).not.toBe(200);
     });
 
+    // A NUL in the text handed to a write would land and make the page binary: read_file would then answer with a
+    // notice, and no text tool could put it right. So the write is refused, and the page stays the text it was.
+    it('write_file, write_files and edit_file refuse text that holds a NUL, and the file stays text', async () => {
+      const base = await start();
+      (fs as unknown as { writeFiles: (writes: { path: string; content: string }[]) => Promise<void> }).writeFiles = async (writes) => {
+        for (const w of writes) await fs.writeFile(w.path, w.content);
+      };
+      const page = `${KB_DIR}/notes.md`;
+      await fs.writeFile(page, 'verdict: `supported`\n');
+      const withNul = 'verdict: \u0000no evidence found\u0000\n';
+      interface NulRefusal { error: string; kind: string; path: string; argument: string; offset: number }
+
+      const write = await post(`${base}/api/agent/tools/write_file`, { path: page, content: withNul, mode: 'overwrite' });
+      expect(write.status).toBe(400);
+      const writeBody = (await write.json()) as NulRefusal;
+      expect(writeBody).toMatchObject({ kind: 'nul_in_text', path: page, argument: 'content', offset: 9 });
+      expect(writeBody.error).toContain('`content` holds a NUL character (U+0000) at offset 9');
+
+      // A new page is refused the same way: nothing is created.
+      const created = await post(`${base}/api/agent/tools/write_file`, { path: `${KB_DIR}/new-page.md`, content: withNul });
+      expect(created.status).toBe(400);
+      expect((await post(`${base}/api/agent/tools/file_stat`, { path: `${KB_DIR}/new-page.md` })).status).not.toBe(200);
+
+      // In a batch it is that path's outcome and no more: the clean file beside it lands.
+      const batch = await post(`${base}/api/agent/tools/write_files`, {
+        files: [{ path: page, content: withNul }, { path: `${KB_DIR}/clean.md`, content: 'fine\n' }],
+        mode: 'overwrite',
+      });
+      expect(batch.status).toBe(200);
+      const batchBody = (await batch.json()) as { count: number; files: { path: string; outcome: string; error?: string; message?: string }[] };
+      expect(batchBody.count).toBe(1);
+      expect(batchBody.files[0]).toMatchObject({ path: page, outcome: 'refused', error: 'nul_in_text' });
+      expect(batchBody.files[0].message).toContain('NUL character (U+0000)');
+      expect(batchBody.files[1]).toMatchObject({ path: `${KB_DIR}/clean.md`, outcome: 'created' });
+      expect((await onDisk(`${KB_DIR}/clean.md`)).toString('utf8')).toBe('fine\n');
+
+      const edit = await post(`${base}/api/agent/tools/edit_file`, { path: page, old_string: '`supported`', new_string: '\u0000no evidence found\u0000' });
+      expect(edit.status).toBe(400);
+      expect(await edit.json()).toMatchObject({ kind: 'nul_in_text', path: page, argument: 'new_string', offset: 0 });
+
+      // Nothing landed on the page, and it is still text every tool can read and edit.
+      expect((await onDisk(page)).toString('utf8')).toBe('verdict: `supported`\n');
+      expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: page })).json()).toMatchObject({ contentMode: 'text', textEditable: true });
+      const repaired = await post(`${base}/api/agent/tools/edit_file`, { path: page, old_string: '`supported`', new_string: '`no evidence found`' });
+      expect(repaired.status).toBe(200);
+      expect((await onDisk(page)).toString('utf8')).toBe('verdict: `no evidence found`\n');
+    });
+
     it('copy_file and move_file carry every kind byte-for-byte', async () => {
       const base = await start();
       for (const f of await seed()) {
@@ -2392,6 +2544,14 @@ describe('start_session', () => {
   let sessionExtractor: WorkerDocumentExtractor | undefined;
   let created: Array<{ userId: string; startedAt: Date }> = [];
 
+  // The one owner of the harness server: a test that starts a second app
+  // closes the first here before it is replaced, and afterEach closes the last.
+  async function closeSessionServer(): Promise<void> {
+    const open = server;
+    server = undefined;
+    if (open) await new Promise<void>((r) => open.close(() => r()));
+  }
+
   async function startSessionApp(
     source: 'external' | 'internal' = 'external',
     // The default fake returns one fixed id, which is what most of these
@@ -2408,12 +2568,16 @@ describe('start_session', () => {
     starterPacks?: FirstRunStarterSource,
     // Who may read what: everything, unless a test about the note's gate says otherwise.
     access: IAccessControl = allowAll,
+    // What the connection was made as, as the context resolver hands it over.
+    connectionScope?: ConnectionScope,
   ): Promise<string> {
+    await closeSessionServer();
     created = [];
     const registry = new ToolRegistry();
     const resolve = async (auth: ToolAuth, signal: AbortSignal): Promise<ToolContext> => ({
       user: { id: 'user-42', email: 'e@x', name: 'N' },
       scope: auth.scope,
+      ...(connectionScope ? { connectionScope } : {}),
       source: auth.source,
       abortSignal: signal,
       workspaceService: (defaultWorkspaceDir
@@ -2467,10 +2631,61 @@ describe('start_session', () => {
   }
 
   afterEach(async () => {
-    if (server) await new Promise<void>((r) => server!.close(() => r()));
-    server = undefined;
+    await closeSessionServer();
     await sessionExtractor?.close();
     sessionExtractor = undefined;
+  });
+
+  describe('connectedAs: what the connection was made as', () => {
+    const SHIP_IT = { path: 'Agents/ship-it-reviewer.agent', name: 'Ship It reviewer' };
+    const startAs = async (connectionScope?: ConnectionScope) => {
+      const base = await startSessionApp('external', undefined, undefined, undefined, allowAll, connectionScope);
+      const res = await postRaw(`${base}/api/agent/tools/start_session`);
+      expect(res.status).toBe(200);
+      return (await res.json()) as { sessionId: string; connectedAs: unknown };
+    };
+
+    it('is null for a connection made as Everything', async () => {
+      expect(await startAs()).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
+      expect(await startAs(ConnectionScope.everything())).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
+    });
+
+    it('is the path and name of the agent configuration a narrowed connection was made as', async () => {
+      const scope = ConnectionScope.narrowed(SHIP_IT, { skills: [], connectors: [], platformTools: null }, 'fp');
+      expect(await startAs(scope)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: SHIP_IT });
+    });
+
+    it('is never answered to a connection whose configuration cannot be used: it is served nothing, start_session included', async () => {
+      // Connect-As-An-Agent's rule, not reopened for this field: the refusal
+      // carries why, and no session (so no `connectedAs`) is minted.
+      const unusable = ConnectionScope.unavailable(SHIP_IT, 'It cannot be read.', 'fp');
+      const base = await startSessionApp('external', undefined, undefined, undefined, allowAll, unusable);
+      const res = await postRaw(`${base}/api/agent/tools/start_session`);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'It cannot be read.', code: NOT_AVAILABLE_TO_CONNECTION });
+      expect(created).toHaveLength(0);
+    });
+
+    it('is declared in the description and the output schema', async () => {
+      const registry = new ToolRegistry();
+      const extractor = new WorkerDocumentExtractor();
+      registerWorkspaceTools(
+        registry, express.Router(), ((_req, _res, next) => next()) as express.RequestHandler, (() => () => {}) as never,
+        new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), allowAll, testKbContext({ kbDirName: KB_DIR }),
+        { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
+        new RoutineWritePolicyService(),
+        {} as never,
+      );
+      const def = await registry
+        .listExternal()
+        .then((tools) => tools.find((t) => t.name === 'start_session')!)
+        .finally(() => extractor.close());
+      expect(def.description).toContain('Returns `{ sessionId, defaultBranch, connectedAs }`');
+      const outputs = def.outputs as { properties: Record<string, { type: unknown; required?: string[] }>; required: string[] };
+      expect(outputs.required).toEqual(['sessionId', 'defaultBranch', 'connectedAs']);
+      expect(outputs.properties.connectedAs.type).toEqual(['object', 'null']);
+      expect(outputs.properties.connectedAs.required).toEqual(['path', 'name']);
+    });
   });
 
   it('returns the sink-minted id as sessionId', async () => {
@@ -2625,7 +2840,7 @@ describe('start_session', () => {
     const startSession = async () => {
       const base = await startSessionApp('external', undefined, wsDir);
       // `postRaw`: the tool takes no arguments, and `post` adds a branch.
-      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
+      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; connectedAs: unknown; firstRun?: string };
     };
 
     it('is there while the knowledge folder holds only the starter guide', async () => {
@@ -2638,6 +2853,8 @@ describe('start_session', () => {
 
       expect(res.sessionId).toBe('thread-xyz');
       expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+      // The note rides beside the connection, not instead of it.
+      expect(res.connectedAs).toBeNull();
       expect(res.firstRun).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
     });
 
@@ -2690,7 +2907,7 @@ describe('start_session', () => {
       const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
 
     it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
@@ -2723,7 +2940,7 @@ describe('start_session', () => {
       } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
 
     it('never costs the session id: a workspace it cannot read answers with the id and the default branch', async () => {
@@ -2731,7 +2948,7 @@ describe('start_session', () => {
 
       const res = await startSession();
 
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
   });
 });
@@ -4985,6 +5202,331 @@ describe('agent read/write hooks', () => {
     for (const name of ['one.md', 'two.md', 'three.md']) {
       await expect(readFile(join(tempDir, `${KB_DIR}/${name}`), 'utf8')).rejects.toThrow();
     }
+  });
+
+  it('unzip commits every extracted file through a lock and its release, as the app\'s unzip route does', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/access.md`, `${KB_DIR}/out/page.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    // Left uncommitted, a rule that came in the archive stopped applying once the access
+    // gate's wait for a reported change ran out: the gate answers from the commit.
+    // Each lock is taken before its entry is written, and released (committed) once all are.
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/access.md`,
+      `acquire ${KB_DIR}/out/page.md`,
+      `heartbeat ${KB_DIR}/out/access.md`,
+      `release ${KB_DIR}/out/access.md`,
+      `heartbeat ${KB_DIR}/out/page.md`,
+      `release ${KB_DIR}/out/page.md`,
+    ]);
+    expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
+  });
+
+  it('unzip skips a file another person is editing, so their unsaved work is not written over, and commits the rest', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/held.md`, `${KB_DIR}/out/free.md`];
+    lockedByOthers = new Set([`${KB_DIR}/out/held.md`]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[]; unsaved?: unknown };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/free.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/held.md`, reason: 'Ana is editing this file, so it was not extracted over their work.' },
+    ]);
+    expect(body.unsaved).toBeUndefined();
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/held.md`,
+      `acquire ${KB_DIR}/out/free.md`,
+      `heartbeat ${KB_DIR}/out/free.md`,
+      `release ${KB_DIR}/out/free.md`,
+    ]);
+  });
+
+  it('unzip lists a file whose commit failed under unsaved, and hands its lock back so save_file can take it', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`];
+    failingReleases = new Set([`${KB_DIR}/out/one.md`]);
+    // The message as the tool hands it to the logger, before any sink formats it.
+    const warnings: string[] = [];
+    const capture: ILogger = {
+      debug: () => {},
+      info: () => {},
+      warn: (m: string) => void warnings.push(m),
+      error: () => {},
+      child: () => capture,
+    };
+    const restore = setLogger(capture);
+    let res: Awaited<ReturnType<typeof post>>;
+    try {
+      res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    } finally {
+      setLogger(restore);
+    }
+    expect(res.status).toBe(200);
+    // The cause stays on the server, escaped, so it cannot forge a second log line.
+    const released = warnings.filter((m) => m.startsWith('unzip: releasing'));
+    expect(released).toHaveLength(1);
+    expect(released[0]).toContain('queue unavailable\\n[forged] line');
+    expect(released[0]).not.toContain('\n[forged]');
+    const body = (await res.json()) as { unsaved?: { path: string; reason: string }[] };
+    expect(body.unsaved).toEqual([
+      // The answer names no infrastructure; the cause is logged on the server.
+      { path: `${KB_DIR}/out/one.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
+    ]);
+    // Handed back UNTOUCHED: `releaseLockNoCommit` would discard the extracted bytes back to HEAD.
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/one.md`,
+      `acquire ${KB_DIR}/out/two.md`,
+      `heartbeat ${KB_DIR}/out/one.md`,
+      `release ${KB_DIR}/out/one.md`,
+      `hand back untouched ${KB_DIR}/out/one.md`,
+      `heartbeat ${KB_DIR}/out/two.md`,
+      `release ${KB_DIR}/out/two.md`,
+    ]);
+    expect(lockCalls.some((c) => c.startsWith('discard'))).toBe(false);
+    // No lock is left held, so `save_file` (an acquire and its release on the same table) can take it.
+    expect([...heldLocks]).toEqual([]);
+  });
+
+  it('unzip writes a path the archive carries twice under the one lock it already holds, renewing its lease first', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: unknown[] };
+    expect(body.skipped).toEqual([]);
+    expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`]);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `release ${KB_DIR}/out/twice.md`,
+    ]);
+  });
+
+  it('unzip does not write a path carried twice over a person who took its lock after the lease lapsed', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    // The archive outlasts the first copy's lease, and Ana takes the lock before the second copy.
+    lapsedLeases = new Map([[`${KB_DIR}/out/twice.md`, 'taken']]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      extracted: string[];
+      skipped: { path: string; reason: string }[];
+      unsaved?: { path: string; reason: string }[];
+    };
+    // The second copy is never written over her work.
+    expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/twice.md`, reason: 'Ana is editing this file, so it was not extracted over their work.' },
+    ]);
+    // The first copy is on disk under her lock now: this call neither commits it nor hands her
+    // lock back, and says so.
+    expect(body.unsaved).toEqual([
+      { path: `${KB_DIR}/out/twice.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
+    ]);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `acquire ${KB_DIR}/out/twice.md`,
+    ]);
+  });
+
+  it('unzip does not write a path carried twice over the person\'s own editor, which took the lock after the lease lapsed', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    // The editor holds the lock under this call's own user id, so a heartbeat alone renews it;
+    // only the acquisition's stamp tells it is not this call's.
+    lapsedLeases = new Map([[`${KB_DIR}/out/twice.md`, 'editor']]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      extracted: string[];
+      skipped: { path: string; reason: string }[];
+      unsaved?: { path: string; reason: string }[];
+    };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/twice.md`, reason: 'N is editing this file, so it was not extracted over their work.' },
+    ]);
+    expect(body.unsaved).toEqual([
+      { path: `${KB_DIR}/out/twice.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
+    ]);
+    // The editor's lock is neither released with a commit nor handed back.
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+    ]);
+    expect([...heldLocks]).toEqual([`${KB_DIR}/out/twice.md`]);
+  });
+
+  it('unzip takes a lapsed lock again before releasing it, so a file early in a long archive still commits', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/early.md`, `${KB_DIR}/out/late.md`];
+    // The archive outlasts the first file's lease, and nobody takes it in between.
+    lapsedLeases = new Map([[`${KB_DIR}/out/early.md`, 'free']]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/early.md`,
+      `acquire ${KB_DIR}/out/late.md`,
+      `heartbeat ${KB_DIR}/out/early.md`,
+      `acquire ${KB_DIR}/out/early.md`,
+      `release ${KB_DIR}/out/early.md`,
+      `heartbeat ${KB_DIR}/out/late.md`,
+      `release ${KB_DIR}/out/late.md`,
+    ]);
+    expect([...heldLocks]).toEqual([]);
+  });
+
+  it('unzip takes a lapsed lock again before writing a path carried twice, when nobody took it', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    lapsedLeases = new Map([[`${KB_DIR}/out/twice.md`, 'free']]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: unknown[]; unsaved?: unknown };
+    expect(body.skipped).toEqual([]);
+    expect(body.extracted).toEqual([`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`]);
+    expect(body.unsaved).toBeUndefined();
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `release ${KB_DIR}/out/twice.md`,
+    ]);
+    expect([...heldLocks]).toEqual([]);
+  });
+
+  it('unzip does not commit a path the archive carries twice when the second write fails part-way', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/twice.md`, `${KB_DIR}/out/twice.md`];
+    // The first copy is written in full; the second passes its guard and fails before its bytes
+    // are all there. What is on disk is no longer the first copy, so committing it would share
+    // a half-written file: its lock goes back untouched.
+    unzipThrowAfter = 1;
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `heartbeat ${KB_DIR}/out/twice.md`,
+      `hand back untouched ${KB_DIR}/out/twice.md`,
+    ]);
+    expect([...heldLocks]).toEqual([]);
+  });
+
+  it('unzip commits only the files it finished writing when the extraction fails part-way', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`, `${KB_DIR}/out/three.md`];
+    // `three.md` passes its guard (so it is locked) and the extraction fails before its bytes land,
+    // as a directory entry is locked and never written: its lock goes back untouched, never committed.
+    unzipThrowAfter = 2;
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/one.md`,
+      `acquire ${KB_DIR}/out/two.md`,
+      `acquire ${KB_DIR}/out/three.md`,
+      `heartbeat ${KB_DIR}/out/one.md`,
+      `release ${KB_DIR}/out/one.md`,
+      `heartbeat ${KB_DIR}/out/two.md`,
+      `release ${KB_DIR}/out/two.md`,
+      `heartbeat ${KB_DIR}/out/three.md`,
+      `hand back untouched ${KB_DIR}/out/three.md`,
+    ]);
+    expect([...heldLocks]).toEqual([]);
+  });
+
+  it('unzip lists a file it could not commit beside the error when the extraction fails part-way', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/one.md`, `${KB_DIR}/out/two.md`];
+    // `one.md` is written in full, its commit cannot be queued, and the extraction fails on `two.md`.
+    failingReleases = new Set([`${KB_DIR}/out/one.md`]);
+    unzipThrowAfter = 1;
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    // The status and message the failure answers alone; what to save rides beside them.
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: string; unsaved?: { path: string; reason: string }[] };
+    expect(body.error).toBe('disk full');
+    expect(body.unsaved).toEqual([
+      { path: `${KB_DIR}/out/one.md`, reason: 'It may not be committed; save it with save_file (saving a committed file changes nothing).' },
+    ]);
+    expect([...heldLocks]).toEqual([]);
+  });
+
+  it('unzip does not report a file unsaved when its release failed after queueing the commit', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/one.md`];
+    failingReleases = new Set([`${KB_DIR}/out/one.md`]);
+    queuedDespiteFailure = new Set([`${KB_DIR}/out/one.md`]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/one.md`,
+      `heartbeat ${KB_DIR}/out/one.md`,
+      `release ${KB_DIR}/out/one.md`,
+      `hand back untouched ${KB_DIR}/out/one.md`,
+    ]);
+  });
+
+  it('unzip skips an entry it could not lock with text that names no infrastructure, and keeps a gate\'s own refusal', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/infra.md`, `${KB_DIR}/out/fault.md`, `${KB_DIR}/out/refused.md`, `${KB_DIR}/out/ok.md`];
+    failingAcquires = new Map<string, Error>([
+      [`${KB_DIR}/out/infra.md`, new Error('connect ECONNREFUSED db-internal:5432')],
+      // A server fault carries a status too, a 5xx one: it is not the gate's answer to the caller.
+      [`${KB_DIR}/out/fault.md`, Object.assign(new Error('roles.yaml line 3: group "db-admins" is malformed'), { status: 500 })],
+      // A refusal the lock's gates word for the caller carries its status, and is their answer.
+      [`${KB_DIR}/out/refused.md`, Object.assign(new Error('You cannot write to this file.'), { status: 403 })],
+    ]);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/ok.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/infra.md`, reason: 'This file could not be locked for writing, so it was not extracted.' },
+      { path: `${KB_DIR}/out/fault.md`, reason: 'This file could not be locked for writing, so it was not extracted.' },
+      { path: `${KB_DIR}/out/refused.md`, reason: 'You cannot write to this file.' },
+    ]);
+    expect(JSON.stringify(body)).not.toContain('db-internal');
+    expect(JSON.stringify(body)).not.toContain('db-admins');
+  });
+
+  it('unzip commits nothing for an entry the write hook refused', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/keep.md`, `${KB_DIR}/out/blocked.md`];
+    refuseWrites('Not in this conversation.', `${KB_DIR}/out/blocked.md`);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect(lockCalls).toEqual([
+      `acquire ${KB_DIR}/out/keep.md`,
+      `heartbeat ${KB_DIR}/out/keep.md`,
+      `release ${KB_DIR}/out/keep.md`,
+    ]);
   });
 
   it('unzip skips the refused entry with the hook\'s message and extracts the others', async () => {
