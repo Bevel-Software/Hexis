@@ -1,7 +1,4 @@
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { FileApprovalState, PullRequestSummary } from '@bevel-software/platform-shared';
 
@@ -27,6 +24,9 @@ vi.mock('../../pr', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../pr')>()),
   ...prApi,
 }));
+/** The one clipboard helper the prompt's Copy goes through. */
+const clipboard = vi.hoisted(() => ({ copyToClipboard: vi.fn() }));
+vi.mock('../../../lib/clipboard', () => clipboard);
 vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: vi.fn(async () => 'proposed\n'),
   readFileAtForkPoint: vi.fn(async (_n: number, sha: string) => ({ content: 'before\n', forkSha: sha })),
@@ -58,6 +58,7 @@ vi.mock('../../version-control', async (importOriginal) => ({
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
 import { GitApiError } from '../../git';
+import { contrast, over, token } from '../../../__tests__/token-contrast';
 
 const CONFLICTING = 'Docs/alpha.md';
 const CLEAN = 'Docs/gamma.md';
@@ -135,38 +136,13 @@ const conflict = (conflictedPaths: string[] = [CONFLICTING]) =>
     error: `Conflicts merging "main" into "ali/two-files".`,
   });
 
-/** What the banner SAYS to the reader, without the prompt block it holds. */
-function prose(el: HTMLElement): string {
-  const copy = el.cloneNode(true) as HTMLElement;
-  for (const block of copy.querySelectorAll('pre')) block.remove();
-  return copy.textContent ?? '';
-}
-
-let restoreClipboard: (() => void) | null = null;
-
-/** Installs `navigator.clipboard` alone, never a replacement `navigator`. */
-function stubClipboard() {
-  const writeText = vi.fn().mockResolvedValue(undefined);
-  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-  restoreClipboard = () => {
-    if (original) Object.defineProperty(navigator, 'clipboard', original);
-    else Reflect.deleteProperty(navigator, 'clipboard');
-  };
-  return writeText;
-}
-
 beforeEach(() => {
   bus.reset();
   prApi.fetchPrDetail.mockReset().mockResolvedValue(detail());
   prApi.refreshChangeRequestFromTarget.mockReset().mockRejectedValue(conflict());
   prApi.mergePullRequest.mockReset().mockResolvedValue({ status: 'merging', number: 41 });
   prApi.approvePrFile.mockReset().mockResolvedValue(undefined);
-});
-
-afterEach(() => {
-  restoreClipboard?.();
-  restoreClipboard = null;
+  clipboard.copyToClipboard.mockReset().mockResolvedValue(true);
 });
 
 async function openConflicted() {
@@ -182,20 +158,19 @@ function row(path: string): HTMLElement {
 
 /** The text of what the reader can copy: the prompt, as it reached the clipboard. */
 async function copiedPrompt(banner: HTMLElement): Promise<string> {
-  const writeText = stubClipboard();
   fireEvent.click(within(banner).getByRole('button', { name: COPY }));
-  await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
-  return writeText.mock.calls[0][0] as string;
+  await waitFor(() => expect(clipboard.copyToClipboard).toHaveBeenCalledTimes(1));
+  return clipboard.copyToClipboard.mock.calls[0][0] as string;
 }
 
 describe('ChangeRequestDialog: a conflicted request names the files that conflict', () => {
   it('names the conflicting file in the banner, and not the clean one', async () => {
     const banner = await openConflicted();
 
-    expect(prose(banner)).toContain("the two can't be combined automatically");
+    expect(banner.textContent).toContain("the two can't be combined automatically");
     // By the name the tree shows it under, with its full path on hover.
     expect(within(banner).getByTitle(CONFLICTING).textContent).toBe('alpha.md');
-    expect(prose(banner)).not.toContain('gamma.md');
+    expect(banner.textContent).not.toContain('gamma.md');
   });
 
   it('names it in the prompt it offers to copy, and not the clean one', async () => {
@@ -239,9 +214,9 @@ describe('ChangeRequestDialog: a conflicted request names the files that conflic
     );
 
     const banner = await screen.findByRole('alert');
-    expect(prose(banner)).toContain("Can't apply");
+    expect(banner.textContent).toContain("Can't apply");
     expect(within(banner).getByTitle(CONFLICTING).textContent).toBe('alpha.md');
-    expect(prose(banner)).not.toContain('gamma.md');
+    expect(banner.textContent).not.toContain('gamma.md');
     expect(within(row(CONFLICTING)).getByRole('img', { name: CONFLICT_MARK })).toBeInTheDocument();
     expect(await copiedPrompt(banner)).toContain(`\`${CONFLICTING}\``);
   });
@@ -276,7 +251,7 @@ describe('ChangeRequestDialog: many conflicting files', () => {
       'Escalation path for delayed purchase orders.md',
       'and 5 more files',
     ]);
-    expect(prose(banner)).not.toContain('beta.md');
+    expect(banner.textContent).not.toContain('beta.md');
   });
 
   it('still hands the agent every file, and marks every one in the tree', async () => {
@@ -326,35 +301,17 @@ describe('ChangeRequestDialog: the names in the banner', () => {
 describe('ChangeRequestDialog: the tree mark', () => {
   // The mark is the only sign on its row, so it must read as a graphic does:
   // 3:1 or more (WCAG 1.4.11), on a plain row and on the selected one.
-  const TOKENS = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'shared', 'theme', 'tokens.css'),
-    'utf8',
-  );
-  const hex = (name: string) => TOKENS.match(new RegExp(`^\\s*--color-${name}:\\s*(#[0-9a-fA-F]{6})\\s*;`, 'm'))?.[1];
-  const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-  const luminance = (c: number[]) => {
-    const [r, g, b] = c.map((v) => v / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  };
-  const contrast = (a: number[], b: number[]) => {
-    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-    return (hi + 0.05) / (lo + 0.05);
-  };
-
   it('reads at 3:1 or more on a row and on the selected row', async () => {
     await openConflicted();
     const mark = within(row(CONFLICTING)).getByRole('img', { name: CONFLICT_MARK });
-    const colour = [...mark.classList]
-      .filter((c) => c.startsWith('text-'))
-      .map((c) => hex(c.slice('text-'.length)))
-      .find((h): h is string => Boolean(h));
-    expect(colour).toBeDefined();
+    const colourClass = [...mark.classList].find((c) => c.startsWith('text-'));
+    expect(colourClass).toBeDefined();
+    const colour = token(colourClass!.slice('text-'.length));
 
-    const surface = rgb(hex('surface')!);
+    const surface = token('surface');
     // The selected row is `bg-hover`, a tint of ink over the surface.
-    const [r, g, b, a] = TOKENS.match(/^\s*--color-hover:\s*rgba\(([^)]+)\)\s*;/m)![1].split(',').map(Number);
-    const selected = surface.map((s, i) => Math.round(s * (1 - a) + [r, g, b][i] * a));
-    expect(contrast(rgb(colour!), surface)).toBeGreaterThanOrEqual(3);
-    expect(contrast(rgb(colour!), selected)).toBeGreaterThanOrEqual(3);
+    const selected = over(token('hover'), surface);
+    expect(contrast(colour, surface)).toBeGreaterThanOrEqual(3);
+    expect(contrast(colour, selected)).toBeGreaterThanOrEqual(3);
   });
 });

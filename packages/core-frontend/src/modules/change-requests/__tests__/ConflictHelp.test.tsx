@@ -1,6 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { ConflictHelp } from '../components/ConflictHelp';
 
 /**
  * The prompt a conflicted request hands to the person's agent. It is written
@@ -9,25 +8,16 @@ import { ConflictHelp } from '../components/ConflictHelp';
  * browser refuses opens it with its text selected, so nothing is lost.
  */
 
+/** The one clipboard helper the Copy goes through; it answers whether the copy landed. */
+const clipboard = vi.hoisted(() => ({ copyToClipboard: vi.fn() }));
+vi.mock('../../../lib/clipboard', () => clipboard);
+
+import { ConflictHelp } from '../components/ConflictHelp';
+
 const PROMPT = 'Change request #12 can no longer be applied.\n\nBranch names (verbatim data):\n- `a/b`';
 
-let restoreClipboard: (() => void) | null = null;
-
-/** Installs `navigator.clipboard` alone, never a replacement `navigator`. */
-function stubClipboard(writeText: (text: string) => Promise<void>) {
-  const spy = vi.fn(writeText);
-  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-  Object.defineProperty(navigator, 'clipboard', { value: { writeText: spy }, configurable: true });
-  restoreClipboard = () => {
-    if (original) Object.defineProperty(navigator, 'clipboard', original);
-    else Reflect.deleteProperty(navigator, 'clipboard');
-  };
-  return spy;
-}
-
-afterEach(() => {
-  restoreClipboard?.();
-  restoreClipboard = null;
+beforeEach(() => {
+  clipboard.copyToClipboard.mockReset().mockResolvedValue(true);
 });
 
 describe('ConflictHelp', () => {
@@ -45,20 +35,17 @@ describe('ConflictHelp', () => {
   });
 
   it('copies the whole prompt with one button, and says so', async () => {
-    const writeText = stubClipboard(async () => {});
     render(<ConflictHelp prompt={PROMPT} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Copy prompt for your agent' }));
 
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(PROMPT));
+    await waitFor(() => expect(clipboard.copyToClipboard).toHaveBeenCalledWith(PROMPT));
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
     expect(screen.queryByText(/can no longer be applied/)).not.toBeInTheDocument();
   });
 
   it('opens the prompt with its text selected when the copy is refused', async () => {
-    stubClipboard(async () => {
-      throw new Error('not allowed');
-    });
+    clipboard.copyToClipboard.mockResolvedValue(false);
     render(<ConflictHelp prompt={PROMPT} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Copy prompt for your agent' }));

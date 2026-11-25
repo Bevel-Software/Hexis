@@ -20,41 +20,7 @@
  * (4.5:1), not large text (3:1), because these labels are text-xs/text-sm.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-// Resolved off this file rather than `process.cwd()` so the test does not
-// care which directory vitest was launched from. Deliberately NOT written as
-// `new URL('../tokens.css', import.meta.url)`: Vite rewrites that exact
-// pattern into an asset URL, and the http-scheme result fails fileURLToPath.
-const TOKENS = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), '..', 'tokens.css'),
-  'utf8',
-);
-
-/** Reads a token's literal off its declaration, ignoring hex in comments. */
-function token(name: string): string {
-  const match = TOKENS.match(
-    new RegExp(`^\\s*--color-${name}:\\s*(#[0-9a-fA-F]{6})\\s*;`, 'm'),
-  );
-  if (!match) throw new Error(`--color-${name} not found in tokens.css`);
-  return match[1];
-}
-
-/** WCAG 2.1 relative luminance. */
-function luminance(hex: string): number {
-  const channels = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
-  const [r, g, b] = channels.map((c) =>
-    c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4,
-  );
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-function contrast(a: string, b: string): number {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
+import { contrast, luminance, token } from '../../../__tests__/token-contrast';
 
 const WHITE = '#ffffff';
 const AA_NORMAL_TEXT = 4.5;

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '../../../shared/components';
+import { copyToClipboard } from '../../../lib/clipboard';
 
 /**
  * "Ask your agent" — the way out of a conflicted change request.
@@ -13,10 +14,10 @@ import { Button } from '../../../shared/components';
  *
  * The prompt is written for the agent, not the person, so it stays closed:
  * one button copies it, and "Show prompt" opens it for whoever wants to read
- * it first. The copy MUST report failure: `navigator.clipboard` rejects
- * outright on a non-secure origin, and a silent no-op is the worst possible
- * answer to "copy this". A refused copy opens the prompt with its text
- * selected, so the keyboard's copy is the manual route.
+ * it first. The copy MUST report failure (`copyToClipboard` says whether it
+ * landed; a silent no-op is the worst possible answer to "copy this"). A
+ * refused copy opens the prompt with its text selected, so the keyboard's
+ * copy is the manual route.
  */
 export function ConflictHelp({ prompt }: { prompt: string }) {
   const [copied, setCopied] = useState<null | 'ok' | 'fail'>(null);
@@ -24,10 +25,9 @@ export function ConflictHelp({ prompt }: { prompt: string }) {
   const promptRef = useRef<HTMLPreElement>(null);
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(prompt);
+    if (await copyToClipboard(prompt)) {
       setCopied('ok');
-    } catch {
+    } else {
       setCopied('fail');
       setShown(true);
     }
