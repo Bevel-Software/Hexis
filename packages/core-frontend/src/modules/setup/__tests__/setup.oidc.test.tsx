@@ -200,11 +200,11 @@ describe('SetupScreen — removing single sign-on', () => {
 
   it('leaves out a value the environment sets', async () => {
     api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS, oidcVerification: 'not-configured' });
-    const withEnvSecret = SAVED.map((s) => (s.key === 'oidcClientSecret' ? { ...s, source: 'env' as const } : s));
-    render(<SetupScreen settings={withEnvSecret} onSaved={() => {}} variant="settings" oidcVerification="verified" />);
+    const withEnvClientId = SAVED.map((s) => (s.key === 'oidcClientId' ? { ...s, source: 'env' as const } : s));
+    render(<SetupScreen settings={withEnvClientId} onSaved={() => {}} variant="settings" oidcVerification="verified" />);
     await userEvent.click(screen.getByRole('button', { name: 'Remove single sign-on' }));
     await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ oidcIssuerUrl: null, oidcClientId: null }));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ oidcIssuerUrl: null, oidcClientSecret: null }));
   });
 
   it('shows a refused removal against its field', async () => {
@@ -218,6 +218,7 @@ describe('SetupScreen — removing single sign-on', () => {
   it.each([
     ['nothing is saved', SETTINGS],
     ['the environment sets the provider address', SAVED.map((s) => (s.key === 'oidcIssuerUrl' ? { ...s, source: 'env' as const } : s))],
+    ['the environment sets the secret', SAVED.map((s) => (s.key === 'oidcClientSecret' ? { ...s, source: 'env' as const } : s))],
   ])('offers no Remove when %s', (_name, settings) => {
     render(<SetupScreen settings={settings} onSaved={() => {}} variant="settings" />);
     expect(screen.queryByRole('button', { name: 'Remove single sign-on' })).not.toBeInTheDocument();

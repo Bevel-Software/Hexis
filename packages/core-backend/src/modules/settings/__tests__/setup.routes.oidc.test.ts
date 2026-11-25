@@ -1,6 +1,8 @@
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
@@ -56,8 +58,9 @@ afterEach(() => {
 type Row = { key: string; value: string; encrypted: boolean };
 
 /**
- * An in-memory table. Conditions are not evaluated — a select answers every
- * row, which the service narrows by key itself — and deletes are only counted.
+ * An in-memory table. A select answers every row, which the service narrows
+ * by key itself; a delete removes the rows whose key the statement binds (the
+ * service deletes by key) and records those keys.
  */
 function memoryDb(rows: Row[] = [], deleted: string[][] = []) {
   const all = () => Promise.resolve(rows);
@@ -78,8 +81,10 @@ function memoryDb(rows: Row[] = [], deleted: string[][] = []) {
       }),
     }),
     delete: () => ({
-      where: () => {
-        deleted.push(rows.map((r) => r.key));
+      where: (predicate: SQL) => {
+        const keys = new PgDialect().sqlToQuery(predicate).params as string[];
+        deleted.push(keys);
+        rows.splice(0, rows.length, ...rows.filter((r) => !keys.includes(r.key)));
         return Promise.resolve();
       },
     }),
@@ -104,8 +109,9 @@ function listen(opts: {
   checkIssuer?: (issuerUrl: string) => Promise<IssuerCheck>;
   isAdmin?: boolean;
   encKey?: string;
+  db?: Database;
 }) {
-  const settings = new DeploymentSettingsService(fakeDb(), opts.encKey ?? ENC_KEY);
+  const settings = new DeploymentSettingsService(opts.db ?? fakeDb(), opts.encKey ?? ENC_KEY);
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -306,7 +312,8 @@ describe('POST /setup/settings — removing the sign-in provider', () => {
 
   it('removes the saved issuer, application id and secret, without probing, and the status reads not configured', async () => {
     const idp = provider({ outcome: 'verified' });
-    const { base, settings } = listen({ checkOidc: idp.check });
+    const db = memoryDb();
+    const { base, settings } = listen({ checkOidc: idp.check, db });
     await settings.save(FULL, null);
     await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
 
@@ -320,6 +327,10 @@ describe('POST /setup/settings — removing the sign-in provider', () => {
     for (const key of Object.keys(REMOVE)) {
       expect(status.settings.find((s: { key: string }) => s.key === key)).toMatchObject({ source: 'unset', configured: false });
     }
+    // Gone from the table, not only from this replica's cache.
+    const reloaded = new DeploymentSettingsService(db, ENC_KEY);
+    await reloaded.load();
+    expect(reloaded.resolveOidcCredentials()).toEqual({ issuerUrl: '', clientId: '', clientSecret: '' });
   });
 
   it('a blank still leaves the provider alone — only null removes it', async () => {
@@ -351,16 +362,26 @@ describe('POST /setup/settings — removing the sign-in provider', () => {
     expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
   });
 
-  it('removes the saved values beside an OIDC_CLIENT_SECRET, which the environment keeps', async () => {
+  it('removes the issuer when a new secret comes in the same save — the saved one is gone', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null, oidcClientSecret: 'secret-2' } });
+    expect(res.status).toBe(200);
+    expect(idp.asked).toEqual([]);
+    expect(settings.resolveOidcCredentials()).toEqual({ issuerUrl: '', clientId: 'app-id', clientSecret: 'secret-2' });
+  });
+
+  it("refuses to remove the issuer beside an OIDC_CLIENT_SECRET — the environment's secret would go to the next issuer saved", async () => {
     process.env.OIDC_CLIENT_SECRET = 'from-env';
     const idp = provider({ outcome: 'verified' });
     const { base, settings } = listen({ checkOidc: idp.check });
     await settings.save({ oidcIssuerUrl: ISSUER, oidcClientId: 'app-id' }, null);
     const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null, oidcClientId: null } });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.oidcIssuerUrl).toMatch(/OIDC_CLIENT_SECRET environment variable/);
     expect(idp.asked).toEqual([]);
-    expect(settings.resolve('oidcIssuerUrl')).toBe('');
-    expect((await res.json()).oidcVerification).toBe('not-configured');
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
   });
 
   it('refuses to remove a value the environment sets', async () => {

@@ -967,19 +967,21 @@ export function createSetupRoutes(
     // that first names one (beside an OIDC_CLIENT_SECRET the form cannot
     // edit) pairs them.
     //
-    // So a REMOVED provider takes its saved secret with it: left behind, it
-    // would be paired with whichever issuer is saved next, and sent there.
-    if (now.issuerUrl && !next.issuerUrl && next.clientSecret && settings.sourceOf('oidcClientSecret') !== 'env') {
-      return refuse({ oidcClientSecret: 'Remove the application secret along with the provider address.' });
-    }
+    // REMOVING the issuer is the same case: the secret left behind would be
+    // paired with whichever issuer is saved next, and sent there. So it goes
+    // with the provider, or a new one comes in the same save.
     const secretSupplied = Boolean(entries.oidcClientSecret?.trim());
-    if (now.issuerUrl && next.issuerUrl && next.issuerUrl !== now.issuerUrl && next.clientSecret && !secretSupplied) {
+    if (now.issuerUrl && next.issuerUrl !== now.issuerUrl && next.clientSecret && !secretSupplied) {
       return settings.sourceOf('oidcClientSecret') === 'env'
         ? refuse({
             oidcIssuerUrl:
               'The application secret is set by the OIDC_CLIENT_SECRET environment variable and is only sent to the provider it was set for — change both there.',
           })
-        : refuse({ oidcClientSecret: SECRET_FOR_THAT_PROVIDER });
+        : refuse({
+            oidcClientSecret: next.issuerUrl
+              ? SECRET_FOR_THAT_PROVIDER
+              : 'Remove the application secret along with the provider address.',
+          });
     }
 
     // Nothing to prove until all three are there; the save that completes

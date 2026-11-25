@@ -541,10 +541,12 @@ export function SetupScreen({
   /**
    * The provider values Remove takes away: the saved ones. None while the
    * environment sets the provider address, since removing the rest would not
-   * take the provider away.
+   * take the provider away, or the secret, which stays paired with the saved
+   * address and is changed only there, so the server refuses the removal.
    */
+  const sourceOf = (key: string) => settings.find((s) => s.key === key)?.source;
   const removableOidc =
-    settings.find((s) => s.key === 'oidcIssuerUrl')?.source === 'stored'
+    sourceOf('oidcIssuerUrl') === 'stored' && sourceOf('oidcClientSecret') !== 'env'
       ? settings.filter((s) => OIDC_KEYS.includes(s.key) && s.source === 'stored').map((s) => s.key)
       : [];
 
