@@ -254,8 +254,9 @@ describe.skipIf(!PG_ADMIN_URL)('an approval survives a commit the server puts on
     expect(refused.lastApplyFailure?.reason).toMatch(/could not yet carry the approvals/);
     expect(refused.lastApplyFailure?.reason).toMatch(/Apply again to retry/);
     expect(refused.lastApplyFailure?.reason).not.toMatch(/no file needs approving/i);
-    // The gate's own reason is kept beside it: the file it waits on is named.
-    expect(refused.lastApplyFailure?.reason).toMatch(/KnowledgeBase\/Note\.md/);
+    // The file the gate waits on is named, by path alone: no approver's name or address.
+    expect(refused.lastApplyFailure?.reason).toMatch(/Approval is still awaited on KnowledgeBase\/Note\.md;/);
+    expect(refused.lastApplyFailure?.reason).not.toMatch(/@|re-approve/);
     // The read above already tried the carry again, and it worked.
     expect(p.approvalOf(refused, 'KnowledgeBase/Note.md')).toEqual({ approved: true, entries: ['out of date', 'current'] });
 

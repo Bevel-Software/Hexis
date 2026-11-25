@@ -1236,9 +1236,11 @@ export function createVersionControlRoutes(
         // about the request itself — it goes to the clicker alone.
         const aboutTheCaller = status === 401 || status === 403 || status === 404;
         // The gate's refusal carries the reasons it still waits on; an approval
-        // can answer it. Anything else (a push, the roles.yaml guard, an internal
-        // error) an approval does not touch.
-        const gateRefusal = Array.isArray(errBody.mergeBlockedReasons);
+        // can answer it. So can one a carry still owed reworded: it names the
+        // files the gate waits on, and once an approval lands (or Apply runs
+        // again) it no longer describes the request. Anything else (a push, the
+        // roles.yaml guard, an internal error) an approval does not touch.
+        const gateRefusal = Array.isArray(errBody.mergeBlockedReasons) || errBody.kind === 'approval-carry-pending';
         await reportFailure(
           typeof errBody.error === 'string' ? errBody.error : 'Merge failed',
           gateRefusal ? 'gate' : 'error',

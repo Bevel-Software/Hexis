@@ -12,7 +12,7 @@ The restore commit now carries the approvals across it the way an update from th
 
 A carry that fails is no longer only logged. It is remembered and tried again by the next read of the request, for the restore and for an update from the target alike. Until it succeeds:
 
-- Apply answers that the server could not yet carry the approvals already given over to the updated draft, so nothing was applied, and that applying again carries over the approvals of files the update left alone. The gate's own reasons follow (also as `gateReasons`), since a file the update changed still needs approving. It never says that no file needs approving.
+- Apply answers that the server could not yet carry the approvals already given over to the updated draft, so nothing was applied, and that applying again carries over the approvals of files the update left alone. It names the files the gate still waits on, by path (also as `waitingPaths`), since any of them the update changed needs approving again. It never says that no file needs approving. The refusal is kept as a gate refusal, so an approval clears it.
 - An update from the target answers its detail with `approvalCarryNotice`, a sentence the request dialog shows: the approvals of files the update left alone are carried over the next time the request is opened, and a file the update changed needs approving again.
 
 What is owed is held in memory. A restart before the retry forgets it, and those approvals then need giving again.

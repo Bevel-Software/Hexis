@@ -669,7 +669,11 @@ describe('merge gate — every file type', () => {
 
         await expect(
           svc.mergePr(1, AUTHOR, HEAD, approvals, 'open', 'Update', BASE, 'ws-1'),
-        ).rejects.toMatchObject({ name: 'MergeBlockedError' });
+        ).rejects.toMatchObject({
+          name: 'MergeBlockedError',
+          // The files the refusal waits on, by path alone, for a caller that rewords it.
+          payload: { awaitingApprovals: true, waitingPaths: files.map((f) => f.path) },
+        });
         expect(mergeChangeRequestMock).not.toHaveBeenCalled();
       });
 

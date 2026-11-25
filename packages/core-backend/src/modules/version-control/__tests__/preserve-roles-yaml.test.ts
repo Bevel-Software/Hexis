@@ -436,6 +436,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       new VersionControlDomainError('Merge gate rejected: Admin need to re-approve Sales/Deal.md after the latest push.', 422, {
         mergeBlockedReasons: ['Admin need to re-approve Sales/Deal.md after the latest push.'],
         awaitingApprovals: true,
+        waitingPaths: ['Sales/Deal.md'],
       });
     const mocked = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
 
@@ -511,7 +512,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       expect(h.changeRequestReview.carryApprovalsForward).not.toHaveBeenCalled();
     });
 
-    it('a carry that fails says so beside the gate\'s reasons, never that no file needs approving', async () => {
+    it('a carry that fails says so and names the files the gate waits on, never that no file needs approving', async () => {
       const h = await restoring();
       h.carry.mockRejectedValueOnce(new Error('approval lock timed out'));
       h.mergePr.mockRejectedValue(gateRefusal());
@@ -522,12 +523,21 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       expect((err as Error).message).toMatch(/could not yet carry the approvals/);
       expect((err as Error).message).toMatch(/so nothing was applied/);
       expect((err as Error).message).not.toMatch(/no file needs approving/i);
-      expect((err as Error).message).toMatch(/Sales\/Deal\.md/);
-      expect((err as ApprovalCarryPendingError).payload).toMatchObject({
-        gateReasons: ['Admin need to re-approve Sales/Deal.md after the latest push.'],
-      });
-      // Not a gate refusal to the route: an approval does not answer the copy.
+      expect((err as Error).message).toMatch(/Approval is still awaited on Sales\/Deal\.md;/);
+      // By path alone: the gate's reasons name the approvers, and this text is kept as the last refusal.
+      expect((err as Error).message).not.toMatch(/Admin|re-approve/);
+      expect((err as ApprovalCarryPendingError).payload).toMatchObject({ waitingPaths: ['Sales/Deal.md'] });
       expect((err as ApprovalCarryPendingError).payload).not.toHaveProperty('mergeBlockedReasons');
+    });
+
+    it('a long list of waiting files is cut with a count, so the whole refusal fits the stored one', () => {
+      const paths = Array.from({ length: 40 }, (_, i) => `Sales/Deals/${'very-long-folder-name-'.repeat(3)}${i}.md`);
+      const message = new ApprovalCarryPendingError(paths).message;
+      expect(message.length).toBeLessThanOrEqual(1000);
+      expect(message).toMatch(/and \d+ more; any of those the update changed needs approving again\.$/);
+      expect(message).toContain(paths[0]);
+      // A single path longer than the room left is counted, not cut.
+      expect(new ApprovalCarryPendingError(['x'.repeat(2000)]).message).toMatch(/awaited on 1 file;/);
     });
 
     it('a carry that fails keeps every file the gate waits on, the one the update changed with the one it left alone', async () => {
@@ -543,15 +553,15 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
         new VersionControlDomainError(`Merge gate rejected: ${reasons.join('; ')}`, 422, {
           mergeBlockedReasons: reasons,
           awaitingApprovals: true,
+          waitingPaths: ['Sales/Deal.md', 'Sales/Terms.md'],
         }),
       );
 
       const err = await merge(h.svc).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ApprovalCarryPendingError);
-      expect((err as Error).message).toMatch(/Sales\/Deal\.md/);
-      expect((err as Error).message).toMatch(/Sales\/Terms\.md/);
-      expect((err as Error).message).toMatch(/Any of those files the update changed still needs approving/);
-      expect((err as ApprovalCarryPendingError).payload).toMatchObject({ gateReasons: reasons });
+      expect((err as Error).message).toMatch(/Approval is still awaited on Sales\/Deal\.md, Sales\/Terms\.md;/);
+      expect((err as Error).message).toMatch(/any of those the update changed needs approving again/);
+      expect((err as ApprovalCarryPendingError).payload).toMatchObject({ waitingPaths: ['Sales/Deal.md', 'Sales/Terms.md'] });
     });
 
     it('the next read tries the failed carry again, and the Apply after it goes through', async () => {

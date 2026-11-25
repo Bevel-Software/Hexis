@@ -4495,7 +4495,7 @@ export class VersionControlService implements IVersionControlService {
       // The gate is waiting on approvals while a carry is still owed: some of
       // its reasons may name approvals that are out of date only because the
       // server could not copy them, others a file the head move really
-      // changed. Say what happened, and keep the gate's reasons beside it.
+      // changed. Say what happened, and name the files the gate waits on.
       // Only that refusal: one that says the request is already merged,
       // closed or empty carries the same `mergeBlockedReasons` and is true as
       // worded. An approver who approves again anyway passes the gate, so
@@ -4505,8 +4505,8 @@ export class VersionControlService implements IVersionControlService {
         err instanceof VersionControlDomainError &&
         err.payload?.awaitingApprovals === true
       ) {
-        const reasons = err.payload.mergeBlockedReasons;
-        throw new ApprovalCarryPendingError(Array.isArray(reasons) ? reasons.filter((r): r is string => typeof r === 'string') : []);
+        const paths = err.payload.waitingPaths;
+        throw new ApprovalCarryPendingError(Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : []);
       }
       throw err;
     }
