@@ -24,7 +24,8 @@ import { changeRequests } from '../../database/index.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { VersionControlService } from '../version-control.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createVersionControlRoutes } from '../version-control.routes.js';
-import { ApprovalCarryPendingError, VersionControlDomainError, VersionControlValidationError } from '../../../shared/domain-errors.js';
+import { VersionControlDomainError, VersionControlValidationError } from '../../../shared/domain-errors.js';
+import { ApprovalCarryPendingError } from '../approval-carry-pending-error.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**

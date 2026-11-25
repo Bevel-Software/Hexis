@@ -92,7 +92,6 @@ import {
 import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
-  ApprovalCarryPendingError,
   BranchAuthorshipError,
   BranchDeleteBlockedError,
   BranchNotFoundError,
@@ -107,6 +106,7 @@ import {
   VersionControlDomainError,
   VersionControlValidationError,
 } from '../../shared/domain-errors.js';
+import { ApprovalCarryPendingError } from './approval-carry-pending-error.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';

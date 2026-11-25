@@ -14,13 +14,13 @@ import { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlService } from '../version-control.service.js';
 import type { Database } from '../../database/index.js';
 import {
-  ApprovalCarryPendingError,
   PushNeedsAgentResolutionError,
   RolesYamlPreservationError,
   VersionControlDomainError,
 } from '../../../shared/domain-errors.js';
 import type { VersionControlEventBus } from '../event-bus.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import { ApprovalCarryPendingError } from '../approval-carry-pending-error.js';
 
 /**
  * Focused tests for the roles.yaml-preservation guard inside
