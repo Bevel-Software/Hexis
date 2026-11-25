@@ -148,7 +148,7 @@ const APPLY_FAILURE_MAX_LEN = 1000;
  */
 const APPROVAL_CARRY_OWED_NOTICE =
   'This request was brought up to date, but the approvals already given could not be carried over to the updated draft yet. ' +
-  'The approvals of files the update left alone are carried over the next time the request is opened; ' +
+  'The server tries again to carry over the approvals of files the update left alone the next time the request is opened; ' +
   'a file the update changed needs approving again, as after any update.';
 
 /**

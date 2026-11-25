@@ -252,7 +252,7 @@ describe.skipIf(!PG_ADMIN_URL)('an approval survives a commit the server puts on
     const refused = await p.apply(number);
     expect(refused.state).toBe('open');
     expect(refused.lastApplyFailure?.reason).toMatch(/could not yet carry the approvals/);
-    expect(refused.lastApplyFailure?.reason).toMatch(/Apply again to retry/);
+    expect(refused.lastApplyFailure?.reason).toMatch(/Applying again tries once more to carry over/);
     expect(refused.lastApplyFailure?.reason).not.toMatch(/no file needs approving/i);
     // The file the gate waits on is named, by path alone: no approver's name or address.
     expect(refused.lastApplyFailure?.reason).toMatch(/Approval is still awaited on KnowledgeBase\/Note\.md;/);

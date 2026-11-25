@@ -397,7 +397,8 @@ describe('VersionControlService.updateFromTarget: the approvals the merge did no
 
   describe('when the carry cannot be done', () => {
     // Never "no file needs approving": a file the update changed does, and the notice cannot tell which.
-    const NOTICE = /could not be carried over.*left alone are carried over.*a file the update changed needs approving again/;
+    // Nor a promise that the next open succeeds: it tries again, and can fail again.
+    const NOTICE = /could not be carried over.*The server tries again to carry over.*a file the update changed needs approving again/;
 
     it('says so in words on the answer, and says nothing when the carry worked', async () => {
       const failed = harness({ changedPathsError: new Error('git exploded') });
