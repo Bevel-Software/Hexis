@@ -1005,7 +1005,7 @@ export async function createCoreServices(
   // to it here.
   skillService.setHistory(gitService);
   // Two people's personal tools claiming one secret namespace: the one that
-  // landed first keeps it, which only git's history can say.
+  // declared it first keeps it, which only git's history can say.
   toolManualService.setHistory(gitService);
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.

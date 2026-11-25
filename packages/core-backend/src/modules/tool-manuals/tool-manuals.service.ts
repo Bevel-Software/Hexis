@@ -1119,16 +1119,18 @@ export class ToolManualService implements IToolManualService {
 
   /**
    * `parsed`, with every namespace clash between two PEOPLE's personal
-   * folders settled by who was there first, ready for the first-wins dedup.
+   * folders settled by who claimed it first, ready for the first-wins dedup.
    *
    * The namespace is global — the vault keys a manual's secrets by it — so
    * two such manuals cannot both be served: the second would resolve the
    * secrets the first one's owner set. Path order used to pick, and a
    * newcomer whose folder sorted first took an existing tool away from its
-   * owner. Now the manual whose file landed first keeps the namespace, and
-   * the newcomer is refused, reported at its own path only (see the dedup's
-   * reason), which names nobody. Personal manuals change places only among
-   * themselves: a clash involving a shared manual keeps its path order.
+   * owner. Now the manual whose file has declared the namespace longest keeps
+   * it, and the newcomer is refused, reported at its own path only (see the
+   * dedup's reason), which names nobody. The claim is dated, not the file: a
+   * server added to an old `mcp.json`, or an id edited into an old `.tool`,
+   * is a newcomer from that commit on. Personal manuals change places only
+   * among themselves: a clash involving a shared manual keeps its path order.
    *
    * When the history cannot be read, every manual of such a clash is refused
    * for this scan: serving the wrong one would hand it the other's secrets.
@@ -1146,14 +1148,18 @@ export class ToolManualService implements IToolManualService {
       clashes.set(key, [...(clashes.get(key) ?? []), i]);
     });
     const out: (ToolManualDescriptor | null)[] = [...parsed];
-    for (const slots of clashes.values()) {
+    for (const [namespace, slots] of clashes) {
       const members = slots.map((i) => parsed[i]!);
       if (new Set(members.map(ownerOf)).size < 2) continue;
       let landed: (number | null)[];
       try {
         const history = this.history;
         if (!history) throw new Error('no history source is wired');
-        landed = await Promise.all(members.map((m) => history.addedPosition(wsId, m.path)));
+        landed = await Promise.all(
+          members.map((m) =>
+            history.heldSince(wsId, m.path, (content) => namespacesDeclaredBy(m.path, content).includes(namespace)),
+          ),
+        );
       } catch (err) {
         log.warn(`a personal tool namespace clash could not be settled: ${printable((err as Error)?.message ?? String(err))}`);
         for (const slot of slots) {
@@ -1167,7 +1173,7 @@ export class ToolManualService implements IToolManualService {
         }
         continue;
       }
-      // Not committed yet is newest; a tie (one commit added both) keeps the
+      // Not committed yet is newest; a tie (one commit claimed it for both) keeps the
       // path order.
       const at = (k: number) => landed[k] ?? Number.POSITIVE_INFINITY;
       const byLanding = members
@@ -1334,6 +1340,26 @@ function refusedToolManualName(provisionalSlug: string, content: string): string
     return toolManualName(toolFileObject(content), provisionalSlug);
   } catch {
     return null;
+  }
+}
+
+/**
+ * The secret namespaces one version of a manual's file declares: a `.tool`'s
+ * id, or every server name of an `mcp.json`. A version that does not parse
+ * declares none. What a personal-tool clash dates: the claim, not the file.
+ */
+function namespacesDeclaredBy(repoPath: string, content: string): string[] {
+  if (repoPath.toLowerCase().endsWith('.tool')) {
+    const name = refusedToolManualName(baseName(repoPath), content);
+    return name === null ? [] : [utcpNamespacePrefix(name)];
+  }
+  try {
+    const servers = (JSON.parse(content) as { mcpServers?: unknown } | null)?.mcpServers;
+    return servers && typeof servers === 'object' && !Array.isArray(servers)
+      ? Object.keys(servers).map(utcpNamespacePrefix)
+      : [];
+  } catch {
+    return [];
   }
 }
 

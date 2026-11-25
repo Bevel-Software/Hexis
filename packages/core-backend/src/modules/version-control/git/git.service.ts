@@ -4778,35 +4778,45 @@ export class GitService implements IGitService {
   }
 
   /**
-   * Where `repoRelativePath` landed on HEAD as it is now: the position, on
-   * HEAD's first-parent chain, of the LATEST commit that added it (a file
-   * deleted and added again starts over), or null when no commit on HEAD
-   * added it — a file written but not committed yet. What decides which of
-   * two personal tools keeps a secret namespace both claim: the one that was
-   * there first. A position, not a commit date: two commits made in the same
-   * second, or under a clock that went back, keep their order; two files
-   * added by one commit share one position.
+   * Since where on HEAD's first-parent chain `repoRelativePath` has held what
+   * `holds` asks of its content, without a break: the position (lower is
+   * earlier) of the oldest commit in the unbroken run of the file's committed
+   * versions, newest back, that satisfy `holds`. Null when the version on HEAD
+   * does not: absent, deleted, or not committed yet. What decides which of two
+   * people's personal tools keeps a secret namespace both claim: the one whose
+   * file has DECLARED it longest, so a server added to an old `mcp.json`, or an
+   * id edited into an old `.tool`, counts from that commit, not from the
+   * file's. A version that stopped holding starts the run over, and so does a
+   * move: renames are not followed, as in `pathHistory`. A position,
+   * not a commit date: two commits in the same second, or under a clock that
+   * went back, keep their order; one commit is one position.
    *
-   * First-parent: a file added on a draft reached HEAD when the draft was
+   * First-parent: a change made on a draft reached HEAD when the draft was
    * merged (merges are `--no-ff`), not when the draft's own commit was made.
    * The path is literal (`git()` sets `GIT_LITERAL_PATHSPECS`), never a glob.
    *
    * Lock-free, like `pathHistory`: a read of history that a concurrent commit
-   * can only extend, and a file committed a moment after this read is the
-   * newer claimant either way, which is what null already says.
+   * can only extend, and a change committed a moment after this read is the
+   * newer claim either way, which is what null already says.
    */
-  async addedPosition(workspaceId: string, repoRelativePath: string): Promise<number | null> {
+  async heldSince(
+    workspaceId: string,
+    repoRelativePath: string,
+    holds: (content: string) => boolean,
+  ): Promise<number | null> {
     const cwd = await this.repoDir(workspaceId);
-    const { stdout } = await this.git(cwd, [
-      'log', '--first-parent', '--diff-filter=A', '--format=%H', 'HEAD', '--', repoRelativePath,
-    ]);
-    // Newest first; no `--max-count`, which git applies BEFORE `--diff-filter`
-    // and would answer null for a file edited since it was added.
-    const added = stdout.split('\n')[0]?.trim() ?? '';
-    if (added === '') return null;
+    const { stdout } = await this.git(cwd, ['log', '--first-parent', '--format=%H', 'HEAD', '--', repoRelativePath]);
+    let since: string | null = null;
+    // Newest first: the newest commit that touched the file holds HEAD's version.
+    for (const sha of stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '')) {
+      const content = await this.readFileAtRef(workspaceId, sha, repoRelativePath);
+      if (content === null || !holds(content)) break;
+      since = sha;
+    }
+    if (since === null) return null;
     // That commit is on HEAD's first-parent chain, so its own first-parent
     // depth is its position on the chain.
-    const { stdout: depth } = await this.git(cwd, ['rev-list', '--first-parent', '--count', added]);
+    const { stdout: depth } = await this.git(cwd, ['rev-list', '--first-parent', '--count', since]);
     return Number(depth.trim());
   }
 

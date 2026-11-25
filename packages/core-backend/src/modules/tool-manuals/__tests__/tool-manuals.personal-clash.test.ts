@@ -21,11 +21,11 @@ import type { IAccessControl } from '../../access/index.js';
  * so two people's personal tools with one id cannot both be served. Which one
  * is served used to follow folder-path order: a newcomer whose personal folder
  * sorted first took an existing tool — and the secrets set for it — away from
- * its owner. The one that landed first keeps it; the newcomer is told, at its
+ * its owner. The one that declared it first keeps it; the newcomer is told, at its
  * own path, without being told whose it collided with.
  *
  * Against a real git repository and the real GitService, because the
- * deciding fact (when a file first landed) is git's answer, not ours.
+ * deciding fact (since when a file has declared the id) is git's answer, not ours.
  */
 
 const execFileAsync = promisify(execFile);
@@ -36,8 +36,15 @@ const AAA = 'Plugins/personal-aaa/software.bevel.hexis/tools/qa_zen.tool';
 const ZZZ = 'Plugins/personal-zzz/software.bevel.hexis/tools/qa_zen.tool';
 const OWNER = { [AAA]: 'aaa@x.eu', [ZZZ]: 'zzz@x.eu' } as const;
 
-const tool = (host: string) =>
-  `---\nid: qa_zen\ntype: http\nurl: https://${host}.example/utcp\nheaders:\n  Authorization: "Bearer \${API_KEY}"\n---\n`;
+const tool = (host: string, id = 'qa_zen') =>
+  `---\nid: ${id}\ntype: http\nurl: https://${host}.example/utcp\nheaders:\n  Authorization: "Bearer \${API_KEY}"\n---\n`;
+
+/** A personal plugin's mcp.json declaring these servers. */
+const MCP = { [AAA]: 'Plugins/personal-aaa/mcp.json', [ZZZ]: 'Plugins/personal-zzz/mcp.json' } as const;
+const mcpJson = (...servers: string[]) =>
+  JSON.stringify({
+    mcpServers: Object.fromEntries(servers.map((n) => [n, { type: 'streamable-http', url: `https://${n}.example/mcp` }])),
+  });
 
 /** Each person reads their own personal folder and nothing of the other's. */
 const ownFolderOnly: IAccessControl = {
@@ -104,7 +111,7 @@ describe('two people, one tool id, each in their own personal plugin', () => {
       realVersionControlHooks(),
       testKbContext({ kbDirName: KB_DIR }),
     );
-    return { addedPosition: g.addedPosition.bind(g) };
+    return { heldSince: g.heldSince.bind(g) };
   };
   const servedTo = async (svc: ToolManualService, email: string) => (await svc.listAccessibleCatalog(email)).tools;
   const reportedTo = async (svc: ToolManualService, email: string) => (await svc.listAccessibleCatalog(email)).invalid;
@@ -161,11 +168,56 @@ describe('two people, one tool id, each in their own personal plugin', () => {
     });
   });
 
+  // The CLAIM is dated, not the file: an mcp.json server and a .tool claim one
+  // namespace alike, and a server added to an mcp.json that is older than the
+  // incumbent, or an id edited into an older .tool, is the newcomer.
+  describe.each([
+    { incumbent: AAA, newcomer: ZZZ },
+    { incumbent: ZZZ, newcomer: AAA },
+  ])('$incumbent declared it before $newcomer did', ({ incumbent, newcomer }) => {
+    const folderOf = (p: string) => p.split('/').slice(0, 2).join('/');
+    const plugin = (p: string) => `${folderOf(p)}/plugin.json`;
+
+    test('a server added to an older mcp.json does not take the incumbent .tool away', async () => {
+      await land(plugin(newcomer), JSON.stringify({ name: folderOf(newcomer).split('/')[1] }));
+      await land(MCP[newcomer], mcpJson('other'));
+      await land(incumbent, tool('incumbent'));
+      await land(MCP[newcomer], mcpJson('other', 'qa_zen'));
+      const svc = catalog(realGit());
+
+      expect((await servedTo(svc, OWNER[incumbent])).map((t) => [t.name, t.path])).toEqual([['qa_zen', incumbent]]);
+      expect((await servedTo(svc, OWNER[newcomer])).map((t) => t.name)).toEqual(['other']);
+      expect((await reportedTo(svc, OWNER[newcomer])).map((i) => i.path)).toEqual([MCP[newcomer]]);
+    });
+
+    test('an incumbent mcp.json server keeps it against a later .tool', async () => {
+      await land(plugin(incumbent), JSON.stringify({ name: folderOf(incumbent).split('/')[1] }));
+      await land(MCP[incumbent], mcpJson('qa_zen'));
+      await land(newcomer, tool('newcomer'));
+      const svc = catalog(realGit());
+
+      expect((await servedTo(svc, OWNER[incumbent])).map((t) => [t.name, t.path])).toEqual([['qa_zen', MCP[incumbent]]]);
+      expect(await servedTo(svc, OWNER[newcomer])).toEqual([]);
+      expect((await reportedTo(svc, OWNER[newcomer])).map((i) => i.path)).toEqual([newcomer]);
+    });
+
+    test('an id edited into an older .tool does not take the incumbent .tool away', async () => {
+      await land(newcomer, tool('newcomer', 'qa_other'));
+      await land(incumbent, tool('incumbent'));
+      await land(newcomer, tool('newcomer'));
+      const svc = catalog(realGit());
+
+      expect((await servedTo(svc, OWNER[incumbent])).map((t) => t.path)).toEqual([incumbent]);
+      expect(await servedTo(svc, OWNER[newcomer])).toEqual([]);
+      expect((await reportedTo(svc, OWNER[newcomer])).map((i) => i.path)).toEqual([newcomer]);
+    });
+  });
+
   test('when history cannot be read, neither is served rather than the wrong one', async () => {
     await land(AAA, tool('a'));
     await land(ZZZ, tool('z'));
     const svc = catalog({
-      addedPosition: async () => {
+      heldSince: async () => {
         throw new Error('git is unavailable');
       },
     });

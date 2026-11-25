@@ -395,15 +395,16 @@ export type LiveDeclaration =
   | { refused: string; manual?: undefined; variable?: undefined };
 
 /**
- * The one question the catalog asks of git: where a file landed, as it is now, on the
- * scanned branch (its add commit's position on the first-parent chain, lower
- * is earlier), or null when no commit added it yet. It
- * settles which of two people's personal tools keeps a secret namespace both
- * claim — the one that was there first — so a later write never takes an
- * earlier tool, or the secrets set for it, away from its owner.
+ * The one question the catalog asks of git: since where, on the scanned
+ * branch's first-parent chain (lower is earlier), a file's committed versions
+ * have all held what `holds` asks of their content, or null when the version
+ * on the branch does not. It settles which of two people's personal tools
+ * keeps a secret namespace both claim: the one whose file has declared that
+ * namespace longest, so a later write never takes an earlier tool, or the
+ * secrets set for it, away from its owner.
  */
 export interface ToolManualHistorySource {
-  addedPosition(workspaceId: string, repoRelativePath: string): Promise<number | null>;
+  heldSince(workspaceId: string, repoRelativePath: string, holds: (content: string) => boolean): Promise<number | null>;
 }
 
 export interface IToolManualService {
