@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -23,16 +24,18 @@ import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 const KB = 'knowledge-base';
 
-/** A disk that records which folders a walk listed, workspace-relative. */
-class CountingFs extends NodeFs {
-  listed: string[] = [];
-  constructor(private readonly base: () => string) {
-    super();
-  }
-  override walk(root: string, options: TreeWalkOptions, listeners: readonly WalkListener[]): Promise<WalkResult> {
-    const rel = (dir: string) => path.relative(this.base(), path.join(root, dir)).replace(/\\/g, '/');
-    return super.walk(root, options, [...listeners, { onDir: (dir) => void this.listed.push(rel(dir)) }]);
-  }
+/**
+ * The real disk (from the fixture that stands in for the composition root),
+ * recording which folders a walk listed, workspace-relative.
+ */
+function countingDisk(base: () => string): NodeFs & { listed: string[] } {
+  const disk = Object.assign(realDisk(), { listed: [] as string[] });
+  const walk = disk.walk.bind(disk);
+  disk.walk = (root: string, options: TreeWalkOptions, listeners: readonly WalkListener[]): Promise<WalkResult> => {
+    const rel = (dir: string) => path.relative(base(), path.join(root, dir)).replace(/\\/g, '/');
+    return walk(root, options, [...listeners, { onDir: (dir) => void disk.listed.push(rel(dir)) }]);
+  };
+  return disk;
 }
 
 async function mkFile(dir: string, rel: string, body = 'x'): Promise<void> {
@@ -55,7 +58,7 @@ function paths(entry: FileTreeEntry): string[] {
 describe('WorkspaceService — listings of part of the tree', () => {
   let root: string;
   let svc: WorkspaceService;
-  let disk: CountingFs;
+  let disk: ReturnType<typeof countingDisk>;
   let workspaceDir: string;
   let workspaceId: string;
 
@@ -81,7 +84,7 @@ describe('WorkspaceService — listings of part of the tree', () => {
     await mkFile(workspaceDir, `${KB}/Data/Sales/scratch.md`);
     await mkFile(workspaceDir, `${KB}/Data/Archive/old.md`);
     await mkFile(workspaceDir, `${KB}/Data/Archive/Deep/older.md`);
-    disk = new CountingFs(() => workspaceDir);
+    disk = countingDisk(() => workspaceDir);
     svc = newWorkspaceService(root, 'https://example.invalid/repo.git', testKbContext({ kbDirName: KB }), disk);
     await svc.getWorkspacePath(workspaceId);
   });

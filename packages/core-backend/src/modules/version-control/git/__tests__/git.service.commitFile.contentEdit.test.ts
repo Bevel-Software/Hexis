@@ -71,13 +71,21 @@ describe('GitService.commitFile — what kind of change it was', () => {
     expect((await commit('plain.md'))?.contentEdit).toEqual({ frontmatterChanged: false });
   });
 
-  it('an edit of a file whose kind carries no frontmatter is one, without the old bytes being read', async () => {
+  it('an edit of a file whose kind carries no access entries is one, whatever its first lines look like', async () => {
     await fs.writeFile(path.join(repo, 'data.csv'), '---\nread: [Everyone]\n---\na,b\n');
     expect((await commit('data.csv'))?.contentEdit).toEqual({ frontmatterChanged: false });
   });
 
   it('a changed access entry in the frontmatter is reported', async () => {
     await fs.writeFile(path.join(repo, 'page.md'), PAGE.replace('[Sales]', '[Sales, Finance]'));
+    expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('a changed entry behind a fence padded with spaces is reported', async () => {
+    const padded = '--- \nread: [Sales]\n--- \n\n# Name\nA page\n';
+    await fs.writeFile(path.join(repo, 'page.md'), padded);
+    await commit('page.md');
+    await fs.writeFile(path.join(repo, 'page.md'), padded.replace('[Sales]', '[Finance]'));
     expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: true });
   });
 

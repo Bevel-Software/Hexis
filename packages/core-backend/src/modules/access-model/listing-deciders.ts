@@ -18,6 +18,7 @@
  */
 import { PLUGIN_MANIFEST_FILE } from '@bevel-software/platform-shared';
 import { isAccessMdPath } from './access-grammar.js';
+import { scanFrontmatter } from './frontmatter-lines.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML } from './group-files.js';
 
 const AT_THE_ROOT = new Set(['roles.yaml', GROUPS_YAML, SYNCED_GROUPS_YAML]);
@@ -32,15 +33,17 @@ export function decidesListing(repoRelativePath: string, pluginsDir: string): bo
 /**
  * The leading `---` fenced block of `text` with line ends made alike, or `''`
  * when the text does not open with one: where a file's own access entries
- * are. A block that is never closed is the whole text: a file that is one
- * fenced document (a `.tool`) then counts every edit as a change of its head,
- * which is the safe reading.
+ * are. The fences are found by the platform's one rule (`scanFrontmatter`,
+ * the scan the access grammar itself reads a file with), so two texts with
+ * equal heads declare the same access. A block that is never closed is the
+ * whole text: a file that is one fenced document (a `.tool`) then counts
+ * every edit as a change of its head, which is the safe reading.
  */
 export function fencedHead(text: string): string {
-  const unix = text.replace(/\r\n/g, '\n');
-  if (!unix.startsWith('---\n')) return '';
-  const end = unix.indexOf('\n---', 3);
-  return end < 0 ? unix : unix.slice(0, end);
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return '';
+  if (scan.kind === 'unterminated') return text.replace(/\r\n/g, '\n');
+  return ['---', ...scan.fm].join('\n');
 }
 
 /**

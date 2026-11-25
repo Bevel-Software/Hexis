@@ -959,8 +959,8 @@ export class VersionControlService implements IVersionControlService {
   // `discardWorkingChanges` removed: under save=share there's nothing dirty
   // to discard.
 
-  shareCurrentBranch(workspaceId: string, user: AuthUser): Promise<void> {
-    return this.pushWithRecovery(workspaceId, branchForWorkspaceId(workspaceId), '(share)', user);
+  async shareCurrentBranch(workspaceId: string, user: AuthUser): Promise<void> {
+    await this.pushWithRecovery(workspaceId, branchForWorkspaceId(workspaceId), '(share)', user);
   }
 
   refreshRemotes(workspaceId: string): Promise<void> {
@@ -1700,6 +1700,8 @@ export class VersionControlService implements IVersionControlService {
       );
     }
     const change = await this.git.commitFile(workspaceId, user, targetPath, summary);
+    // Set when the push below had to pull first: see `pushWithRecovery`.
+    let pulled = false;
     // Push the autosave commit so other users on the branch see it
     // without waiting for the eventual lock release. Best-effort, same
     // semantics as the push in `releaseLock`.
@@ -1726,6 +1728,7 @@ export class VersionControlService implements IVersionControlService {
         if (looksLikeNonFastForward) {
           try {
             // Same as `pushWithRecovery`: keep a stranded merge a merge.
+            pulled = true;
             await this.pullWorkspace(workspaceId, { preserveMerges: true });
             await this.git.push(workspaceId, user);
             recovered = true;
@@ -1766,7 +1769,7 @@ export class VersionControlService implements IVersionControlService {
         newSha: change.sha,
         byUserId: user.id,
         byUserName: user.name,
-        ...this.listingMark(change, targetPath),
+        ...(pulled ? {} : this.listingMark(change, targetPath)),
       });
     }
     return change;
@@ -1929,7 +1932,7 @@ export class VersionControlService implements IVersionControlService {
       // retry this row is), and this row made none.
       return;
     }
-    await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
+    const { pulled } = await this.pushWithRecovery(workspaceId, branch, targetPath, user, opts);
     this.events?.emit({
       kind: 'file-changed',
       workspaceId,
@@ -1938,7 +1941,9 @@ export class VersionControlService implements IVersionControlService {
       newSha: change.sha,
       byUserId: user.id,
       byUserName: user.name,
-      ...this.listingMark(change, targetPath),
+      // A push that had to pull first brought other people's commits into
+      // the checkout: the listing may differ whatever this commit did.
+      ...(pulled ? {} : this.listingMark(change, targetPath)),
     });
   }
 
@@ -2075,19 +2080,27 @@ export class VersionControlService implements IVersionControlService {
     targetPath: string,
     user: AuthUser,
     opts?: { systemAuthorized?: boolean },
-  ): Promise<void> {
+  ): Promise<{ pulled: boolean }> {
+    // Whether the recovery pulled: other people's commits then arrived in the
+    // checkout with this push, and what the caller announces must not claim
+    // the tree is as it was.
+    let pulled = false;
     // No explicit `undefined` third argument when there are no options: the
     // call shape stays the bare `push(workspaceId, user)` every caller made.
-    return this.pushWithRecoveryVia(
+    await this.pushWithRecoveryVia(
       {
         push: () => (opts ? this.git.push(workspaceId, user, opts) : this.git.push(workspaceId, user)),
-        pull: () => this.pullWorkspace(workspaceId, { preserveMerges: true }),
+        pull: () => {
+          pulled = true;
+          return this.pullWorkspace(workspaceId, { preserveMerges: true });
+        },
       },
       workspaceId,
       branch,
       targetPath,
       user,
     );
+    return { pulled };
   }
 
   /**

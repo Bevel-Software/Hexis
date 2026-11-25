@@ -49,6 +49,16 @@ describe('the leading fenced block of a text', () => {
   it('is the same for either kind of line end', () => {
     expect(fencedHead('---\r\nread: [A]\r\n---\r\nbody')).toBe(fencedHead('---\nread: [A]\n---\nbody'));
   });
+  // The fence rule is the platform's, the one the access grammar reads a file
+  // by: a fence padded with spaces opens a block too, so an entry changed in
+  // such a block must show as a changed head.
+  it.each(['--- \nread: [X]\n--- \nbody', '---\t\nread: [X]\n---\nbody', '---\r\nread: [X]\r\n---  \r\nbody'])(
+    'sees a changed entry behind a padded fence: %j',
+    (text) => {
+      expect(fencedHead(text.replace('[X]', '[A]'))).not.toBe(fencedHead(text.replace('[X]', '[B]')));
+      expect(fencedHead(text.replace('[X]', '[A]'))).not.toBe('');
+    },
+  );
   it('is empty for a text that does not open with one', () => {
     expect(fencedHead('# Name\n---\nread: [A]\n---\n')).toBe('');
   });

@@ -52,6 +52,13 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
         await fs.mkdir(path.dirname(path.join(root, p)), { recursive: true });
         await fs.writeFile(path.join(root, p), content);
       },
+      // An archive of two files, one of them already there: both are written
+      // before the route locks either, as the real extraction does.
+      unzipFile: async () => {
+        await fs.writeFile(path.join(root, KB, 'Data', 'page.md'), `${PAGE}\nFrom the archive.\n`);
+        await fs.writeFile(path.join(root, KB, 'Data', 'unpacked.md'), '# Name\nUnpacked\n');
+        return { extracted: [`${KB}/Data/page.md`, `${KB}/Data/unpacked.md`], skipped: [] };
+      },
     } as unknown as WorkspaceService;
     const versionControlService = {
       getLock: vi.fn(async () => (heldBy ? { holderUserId: heldBy } : null)),
@@ -99,6 +106,24 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
     expect(res.status).toBe(200);
   }
   const treeEvents = () => emitted.filter((e) => e.kind === 'fs-tree-changed');
+  /** The one tree event of a save, when it says nothing about the listing. */
+  const expectOneUnmarked = () => {
+    expect(treeEvents()).toHaveLength(1);
+    expect(treeEvents()[0]).not.toHaveProperty('listingUnchanged');
+  };
+
+  it('an unzip, whose files are on disk before their locks, says nothing: the tree is asked for', async () => {
+    // The archive's entries replace nothing here, yet by the time each file
+    // meets its lock it is on disk, so "the same before and after" would hold.
+    const res = await fetch(`${baseUrl}/api/workspace/${WS}/unzip`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: `${KB}/Data/pack.zip` }),
+    });
+    expect(res.status).toBe(200);
+    expect(treeEvents().length).toBeGreaterThan(0);
+    for (const event of treeEvents()) expect(event).not.toHaveProperty('listingUnchanged');
+  });
 
   it('a save of the body of an existing page says the listing is unchanged', async () => {
     await save('Data/page.md', `${PAGE}\nMore.\n`);
@@ -112,18 +137,24 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
 
   it('a new file says nothing, so the tree is asked for', async () => {
     await save('Data/new.md', '# Name\nNew\n');
-    expect(treeEvents()).toHaveLength(1);
-    expect(treeEvents()[0]!.listingUnchanged).toBeUndefined();
+    expectOneUnmarked();
   });
 
   it('a save that changed the page\'s own access entries says nothing', async () => {
     await save('Data/page.md', PAGE.replace('[Sales]', '[Sales, Finance]'));
-    expect(treeEvents()[0]!.listingUnchanged).toBeUndefined();
+    expectOneUnmarked();
+  });
+
+  it('a save that changed an entry behind a padded fence says nothing', async () => {
+    const padded = '--- \nread: [Sales]\n--- \n\n# Name\nA page\n';
+    await fs.writeFile(path.join(root, KB, 'Data', 'page.md'), padded);
+    await save('Data/page.md', padded.replace('[Sales]', '[Finance]'));
+    expectOneUnmarked();
   });
 
   it('a save of an access.md says nothing', async () => {
     await save('Data/access.md', 'read: [Finance]\n');
-    expect(treeEvents()[0]!.listingUnchanged).toBeUndefined();
+    expectOneUnmarked();
   });
 
   it('an editor that holds the lock saves to disk: both events carry the same answer', async () => {

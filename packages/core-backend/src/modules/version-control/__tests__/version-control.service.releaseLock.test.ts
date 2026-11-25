@@ -442,11 +442,22 @@ describe('VersionControlService.runPendingCommit — worker entry point', () => 
 
   // What the event says about the tree: an open file explorer asks for the
   // whole tree after an event unless the event rules a change of it out.
-  const announced = async (file: string, commit: Partial<typeof CHANGE> & { contentEdit?: { frontmatterChanged: boolean } }) => {
-    const svc = makeFacade(makeGit({ commitFile: { ...CHANGE, ...commit } }), makeFileLocks(USER.id), makePending(), events);
+  const announced = async (
+    file: string,
+    commit: Partial<typeof CHANGE> & { contentEdit?: { frontmatterChanged: boolean } },
+    git: Partial<GitBehavior> = {},
+  ) => {
+    const svc = makeFacade(makeGit({ commitFile: { ...CHANGE, ...commit }, ...git }), makeFileLocks(USER.id), makePending(), events);
     await svc.runPendingCommit('ws-1', 'feat/x', file, USER);
-    return emitSpy.mock.calls[0][0] as { kind: string; listingUnchanged?: true };
+    const changed = emitSpy.mock.calls.map((c) => c[0] as { kind: string; listingUnchanged?: true }).filter((e) => e.kind === 'file-changed');
+    expect(changed).toHaveLength(1);
+    return changed[0]!;
   };
+
+  it('does not mark an edit whose push had to pull first: other people\'s commits came in with it', async () => {
+    const event = await announced('knowledge-base/Data/Customer.md', { contentEdit: { frontmatterChanged: false } }, { pushBehavior: 'nff' });
+    expect(event.listingUnchanged).toBeUndefined();
+  });
 
   it('marks the event of an edit of an existing page as leaving the listing alone', async () => {
     const event = await announced('knowledge-base/Data/Customer.md', { contentEdit: { frontmatterChanged: false } });

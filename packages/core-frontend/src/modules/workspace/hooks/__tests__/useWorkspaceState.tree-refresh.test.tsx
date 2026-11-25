@@ -68,7 +68,7 @@ const tree = (more: object = {}) => ({ kind: 'fs-tree-changed', workspaceId: 'ws
 
 async function mount() {
   const bus = makeFakeBus();
-  const { result } = renderHook(() => useWorkspaceState(), {
+  const { result, unmount } = renderHook(() => useWorkspaceState(), {
     wrapper: ({ children }: { children: ReactNode }) => (
       <EventBusContext.Provider value={bus}>
         <ConfirmProvider>{children}</ConfirmProvider>
@@ -77,7 +77,7 @@ async function mount() {
   });
   await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
   apiMocks.listFiles.mockClear();
-  return { bus, result };
+  return { bus, result, unmount };
 }
 
 describe('the file tree is asked for again only when it may have changed', () => {
@@ -123,7 +123,7 @@ describe('the file tree is asked for again only when it may have changed', () =>
     await waitFor(() => expect(apiMocks.listFiles).toHaveBeenCalledTimes(1));
   });
 
-  it('a burst of unmarked changes shares two requests: the one under way and one after it', async () => {
+  it('a burst of unmarked changes within one request shares two: the one under way and one after it', async () => {
     const { bus } = await mount();
     const answers: (() => void)[] = [];
     apiMocks.listFiles.mockImplementation(() => new Promise((resolve) => answers.push(() => resolve(TREE))));
@@ -153,6 +153,60 @@ describe('the file tree is asked for again only when it may have changed', () =>
       bus.emit(tree());
     });
     await waitFor(() => expect(apiMocks.listFiles).toHaveBeenCalledTimes(2));
+  });
+
+  it('a burst that outlasts a request costs one request after another, never two at once', async () => {
+    const { bus } = await mount();
+    const answers: (() => void)[] = [];
+    apiMocks.listFiles.mockImplementation(() => new Promise((resolve) => answers.push(() => resolve(TREE))));
+    for (let round = 0; round < 3; round++) {
+      await act(async () => {
+        for (let i = 0; i < 20; i++) bus.emit(tree());
+      });
+      // One request under way, whatever arrived; the rest wait for its end.
+      expect(apiMocks.listFiles).toHaveBeenCalledTimes(round + 1);
+      await act(async () => answers[round]!());
+    }
+    await waitFor(() => expect(apiMocks.listFiles).toHaveBeenCalledTimes(4));
+  });
+
+  it('a request queued when the workspace closes is not made', async () => {
+    const { bus, unmount } = await mount();
+    const answers: (() => void)[] = [];
+    apiMocks.listFiles.mockImplementation(() => new Promise((resolve) => answers.push(() => resolve(TREE))));
+    await act(async () => {
+      bus.emit(tree());
+      bus.emit(tree());
+    });
+    expect(apiMocks.listFiles).toHaveBeenCalledTimes(1);
+    unmount();
+    await act(async () => answers[0]!());
+    await act(async () => {});
+    expect(apiMocks.listFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it('a tree request that never answers stops holding the next one back after a minute', async () => {
+    const { bus } = await mount();
+    vi.useFakeTimers();
+    try {
+      apiMocks.listFiles.mockImplementation(() => new Promise(() => {}));
+      await act(async () => {
+        bus.emit(tree());
+        bus.emit(tree());
+      });
+      expect(apiMocks.listFiles).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(59_000);
+      });
+      expect(apiMocks.listFiles).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      // The queued request is made, and a later change is answered too.
+      expect(apiMocks.listFiles).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a tree request that fails does not stop the next one', async () => {

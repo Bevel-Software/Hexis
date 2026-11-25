@@ -1652,7 +1652,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // The tree is asked for again only when the event does not rule a change
     // of it out (`listingUnchanged`: an existing file's content changed and
     // nobody's access with it), and a burst of events shares its requests.
-    const refreshTree = mergedRunner(refreshFileTree);
+    // Stopped with the subscription, so a request queued for this workspace
+    // is not made once another one is open.
+    const tree = mergedRunner(refreshFileTree);
+    const refreshTree = tree.request;
     const offFileChanged = bus.subscribe('file-changed', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
       if (!event.listingUnchanged) refreshTree();
@@ -1759,6 +1762,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         });
     });
     return () => {
+      tree.stop();
       offFileChanged();
       offFsTreeChanged();
       offLockReleased();
