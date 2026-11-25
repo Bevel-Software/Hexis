@@ -440,6 +440,46 @@ describe('VersionControlService.runPendingCommit — worker entry point', () => 
     });
   });
 
+  // What the event says about the tree: an open file explorer asks for the
+  // whole tree after an event unless the event rules a change of it out.
+  const announced = async (
+    file: string,
+    commit: Partial<typeof CHANGE> & { contentEdit?: { frontmatterChanged: boolean } },
+    git: Partial<GitBehavior> = {},
+  ) => {
+    const svc = makeFacade(makeGit({ commitFile: { ...CHANGE, ...commit }, ...git }), makeFileLocks(USER.id), makePending(), events);
+    await svc.runPendingCommit('ws-1', 'feat/x', file, USER);
+    const changed = emitSpy.mock.calls.map((c) => c[0] as { kind: string; listingUnchanged?: true }).filter((e) => e.kind === 'file-changed');
+    expect(changed).toHaveLength(1);
+    return changed[0]!;
+  };
+
+  it('does not mark an edit whose push had to pull first: other people\'s commits came in with it', async () => {
+    const event = await announced('knowledge-base/Data/Customer.md', { contentEdit: { frontmatterChanged: false } }, { pushBehavior: 'nff' });
+    expect(event.listingUnchanged).toBeUndefined();
+  });
+
+  it('marks the event of an edit of an existing page as leaving the listing alone', async () => {
+    const event = await announced('knowledge-base/Data/Customer.md', { contentEdit: { frontmatterChanged: false } });
+    expect(event).toMatchObject({ kind: 'file-changed', listingUnchanged: true });
+  });
+
+  it('does not mark a commit that added or removed the file', async () => {
+    expect((await announced('knowledge-base/Data/Customer.md', {})).listingUnchanged).toBeUndefined();
+  });
+
+  it('does not mark an edit that changed the page\'s own access entries', async () => {
+    const event = await announced('knowledge-base/Data/Customer.md', { contentEdit: { frontmatterChanged: true } });
+    expect(event.listingUnchanged).toBeUndefined();
+  });
+
+  it.each(['knowledge-base/Data/access.md', 'knowledge-base/roles.yaml', 'knowledge-base/groups.yaml', 'knowledge-base/Data/.bevelignore', 'knowledge-base/Plugins/sales/plugin.json'])(
+    'does not mark an edit of %s, which decides what others see',
+    async (file) => {
+      expect((await announced(file, { contentEdit: { frontmatterChanged: false } })).listingUnchanged).toBeUndefined();
+    },
+  );
+
   it('skips push + file-changed on a no-op commit with nothing unpushed (double-enqueue, identical bytes)', async () => {
     // The worker treats a no-op commit as success and drops the row.
     // No push, no SSE event — there's no new sha for clients to see.

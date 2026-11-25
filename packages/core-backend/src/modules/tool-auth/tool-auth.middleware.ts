@@ -222,6 +222,39 @@ export function createTokenVerifier(
   };
 }
 
+/** A bearer the verifier refused, with the status the routes answer it. */
+export class BearerRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'BearerRefusedError';
+  }
+}
+
+/**
+ * Resolves a bearer to its caller, for code in this process that calls a
+ * hosted read as a function where it used to send the bearer to the read's
+ * route: the hosted MCP endpoint's manual list and skill reads.
+ *
+ * It runs the verifier the routes' auth runs, at the moment of the read. So
+ * the read is made for whoever the bearer names now, and a bearer refused
+ * since the request was admitted (a key revoked, an account switched off, an
+ * agent connection revoked) is refused here as it was at the route, with the
+ * route's status and words in a {@link BearerRefusedError}. A failure of the
+ * key store is thrown on as it is.
+ */
+export function createCallerResolver(
+  verify: (token: string | undefined) => Promise<VerifyResult>,
+): (bearer: string) => Promise<ToolAuth> {
+  return async (bearer) => {
+    const result = await verify(bearer);
+    if (!result.ok) throw new BearerRefusedError(result.message, result.status);
+    return result.auth;
+  };
+}
+
 /**
  * The one auth gate every tool endpoint applies — a THIN Express adapter over
  * `createTokenVerifier`: parse the bearer header, run the shared verify core,

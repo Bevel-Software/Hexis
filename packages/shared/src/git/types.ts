@@ -61,6 +61,16 @@ export interface CommitAttribution {
   sha: string;
   subject: string;
   committedAt: string;
+  /**
+   * Set when the commit changed the content of ONE file that was already
+   * there, and added, removed and renamed nothing: the listing of the branch
+   * holds the same paths after it as before. `frontmatterChanged` says
+   * whether the file's leading `---` block differs from the one it replaced
+   * (also `true` when that could not be told). Absent on every other commit,
+   * and on a commit whose kind could not be told: a reader treats absence as
+   * "anything may have changed".
+   */
+  contentEdit?: { frontmatterChanged: boolean };
 }
 
 export interface ShareChangesRequest {

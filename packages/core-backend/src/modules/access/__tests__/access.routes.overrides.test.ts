@@ -76,7 +76,13 @@ async function makeHarness(opts: {
   const accessControl = { canRead, canReadBatch } as unknown as IAccessControl;
 
   const workspaceService = {
-    listFiles: vi.fn(async () => buildTree(Object.keys(files))),
+    // The entry at the path, as the service's own folder listing answers it.
+    listFilesUnder: vi.fn(async (_id: string, wsPath: string) =>
+      wsPath
+        .split('/')
+        .filter(Boolean)
+        .reduce<FileTreeEntry | null>((node, segment) => node?.children?.find((c) => c.name === segment) ?? null, buildTree(Object.keys(files))),
+    ),
     readFile: vi.fn(async (_id: string, wsRel: string) => {
       const text = files[wsRel];
       if (text === undefined) throw new Error(`ENOENT ${wsRel}`);

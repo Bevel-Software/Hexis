@@ -44,7 +44,12 @@ function buildTree(files: Record<string, string>): FileTreeEntry {
 
 function makeWorkspace(files: Record<string, string>): IWorkspaceService {
   return {
-    listFiles: async () => buildTree(files),
+    // The entry at the path, as the service's own folder listing answers it.
+    listFilesUnder: async (_id: string, wsPath: string) =>
+      wsPath
+        .split('/')
+        .filter(Boolean)
+        .reduce<FileTreeEntry | null>((node, segment) => node?.children?.find((c) => c.name === segment) ?? null, buildTree(files)),
     readFile: async (_id: string, relativePath: string) => {
       const text = files[relativePath];
       if (text === undefined) throw new Error(`ENOENT ${relativePath}`);

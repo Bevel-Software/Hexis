@@ -27,7 +27,7 @@ import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { AuthService } from '../auth/index.js';
 import type { IAccessControl } from '../access/index.js';
-import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable } from '../access-model/index.js';
+import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable, decidesListing, fencedHead, hasAccessFrontmatterExtension } from '../access-model/index.js';
 import type { ICreatorAccess, IChangeReadGate } from '../access-model/index.js';
 import type { VersionControlEventBus } from '../version-control/index.js';
 import { PathTraversalError, VersionControlDomainError } from '../../shared/domain-errors.js';
@@ -257,6 +257,13 @@ export function createWorkspaceRoutes(
     options?: {
       skipFsTreeEvent?: boolean;
       /**
+       * The op writes nothing itself: the bytes were put on disk before this
+       * call (an unzip's extracted files), and the lock only carries them to a
+       * commit. The events then say nothing about the listing, since what was
+       * there before is no longer known here.
+       */
+      alreadyOnDisk?: boolean;
+      /**
        * This acquire is the destination side of an admin putting a misplaced
        * platform file back, coming from `source`. Passed straight to
        * `acquireLock`, which VERIFIES both halves — that the move is a restore
@@ -277,9 +284,21 @@ export function createWorkspaceRoutes(
     // run the op without touching the lock and let the caller release
     // it on their own schedule (which is what fuses commit + push into
     // one atomic step the user explicitly triggered).
+    // What a listing depends on at this path, before the op and after it: an
+    // op that only edited a file that was already there leaves every open
+    // file explorer's tree right, and the events below say so.
+    const before = await listingProbe(workspaceId, targetPath);
+    const mark = async (): Promise<{ listingUnchanged?: true }> => {
+      // Bytes that were on disk before this call cannot be compared with what
+      // they replaced: nothing is said, so the tree is asked for.
+      if (options?.alreadyOnDisk) return {};
+      if (before === null || decidesListing(toKbRelative(targetPath, kbDirName) ?? targetPath, kb.layout.pluginsDir)) return {};
+      return (await listingProbe(workspaceId, targetPath)) === before ? { listingUnchanged: true } : {};
+    };
     const existing = await versionControlService.getLock(workspaceId, branch, targetPath);
     if (existing && existing.holderUserId === user.id) {
       const result = await op();
+      const listing = await mark();
       // Disk write landed but no commit yet (caller will release later,
       // at which point releaseLock fires its own `file-changed` with a
       // real `newSha`). Emit a null-sha file-changed now so any other
@@ -293,11 +312,12 @@ export function createWorkspaceRoutes(
         newSha: null,
         byUserId: user.id,
         byUserName: user.name,
+        ...listing,
       });
       // Also signal "the file tree may have changed" — covers create /
       // delete / rename through this same path so sidebars refresh even
       // when no specific open tab matches the path.
-      eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch, ...listing });
       return result;
     }
     const acquired = await versionControlService.acquireLock(workspaceId, branch, targetPath, user, {
@@ -361,6 +381,8 @@ export function createWorkspaceRoutes(
       // explicit branch makes the intent obvious to readers.
       throw new Error('unreachable: opSucceeded false after try');
     }
+    // Read before the release: after it another writer may hold the path.
+    const listing = await mark();
     await versionControlService.releaseLock(workspaceId, branch, targetPath, user);
     // Signal sidebar / explorer to refresh even when no open tab matched
     // the changed path (e.g. someone else just created a new file).
@@ -372,9 +394,27 @@ export function createWorkspaceRoutes(
     // single `fs-tree-changed` after the loop, cutting ~30 redundant tree
     // refreshes down to 1 for a 30-file folder delete.
     if (!options?.skipFsTreeEvent) {
-      eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch, ...listing });
     }
     return result;
+  }
+
+  /**
+   * What a listing depends on at `targetPath` as it is on disk now: `null`
+   * when there is no file there (nothing, a folder, a link, a path outside
+   * the repository), otherwise the file's leading `---` block when its kind
+   * can carry access entries, and `''` when it cannot. Two equal answers
+   * around a write mean the write added and removed nothing and changed
+   * nobody's access through this file's own entries.
+   */
+  async function listingProbe(workspaceId: string, targetPath: string): Promise<string | null> {
+    try {
+      const absolute = await absoluteInRepo(workspaceId, targetPath);
+      if (!(await fs.lstat(absolute)).isFile()) return null;
+      return hasAccessFrontmatterExtension(targetPath) ? fencedHead(await fs.readFile(absolute, 'utf-8')) : '';
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1529,7 +1569,7 @@ export function createWorkspaceRoutes(
       for (const relFile of result.extracted) {
         // The file is already on disk from the unzip; the release commits +
         // pushes it.
-        await withLock(id, user, relFile, async () => undefined);
+        await withLock(id, user, relFile, async () => undefined, { alreadyOnDisk: true });
       }
       res.json(result);
     } catch (err) {

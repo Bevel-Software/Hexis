@@ -305,6 +305,16 @@
       "body.target (required)"
     ]
   },
+  "merge_change_request": {
+    "servedTo": [
+      "MCP",
+      "in-app agent"
+    ],
+    "arguments": [
+      "body.bypass",
+      "body.number (required)"
+    ]
+  },
   "mkdir": {
     "servedTo": [
       "MCP",

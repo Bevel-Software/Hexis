@@ -72,8 +72,8 @@ export interface ProposeDraftPromptInput {
 /**
  * Seed text the chat composer receives when applying a change request hits
  * conflicts. The agent reads it as a user request to resolve the
- * disagreement, then hand the apply back to the user — an agent proposes and
- * syncs, a person merges. Phrased in the workspace's plain-language
+ * disagreement, then hand the apply back to the user, who was the one
+ * applying it. Phrased in the workspace's plain-language
  * vocabulary; the agent's system prompt already knows the underlying git
  * mechanics (which branches, which paths, `commit_change` + `merge_branch`).
  */

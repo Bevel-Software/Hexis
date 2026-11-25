@@ -25,7 +25,7 @@ import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
 import type { IAccessControl } from '../../access/index.js';
-import { AccessDeniedError, PushAccessRefusedError } from '../../access-model/index.js';
+import { AccessDeniedError, PushAccessRefusedError, fencedHead, hasAccessFrontmatterExtension } from '../../access-model/index.js';
 import { canonicalEmail } from '../../../shared/email-identity.js';
 import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
@@ -1305,6 +1305,8 @@ export class GitService implements IGitService {
         await this.assertNoBytesBesideRepo(workspaceId, cwd, relativePath, repoRelativePath);
         return null;
       }
+      // Read now, while HEAD still holds the bytes this commit replaces.
+      const contentEdit = await this.contentEditOf(cwd, scoped, repoRelativePath);
 
       // **No access check at commit time.** Per the "disk is the source of
       // truth" rule, by the time content is on disk it must not be rejected.
@@ -1367,7 +1369,42 @@ export class GitService implements IGitService {
         authorEmail: authorEmail ?? '',
         subject: subj ?? subject,
         committedAt: committedAt?.trim() ?? new Date().toISOString(),
+        ...(contentEdit ? { contentEdit } : {}),
       };
+    }
+  }
+
+  /**
+   * Whether the one-path change `git status` just reported (`porcelain`, its
+   * `--porcelain=v1` answer for the path) is an edit of a file that was
+   * already there: the fact `CommitAttribution.contentEdit` carries. Told
+   * from the status code alone, so it costs no process: a tracked file
+   * modified, with nothing added (`A`, `??`), removed (`D`), renamed (`R`) or
+   * turned into another kind of entry (`T`). Anything else, or more than one
+   * line, answers `undefined`.
+   *
+   * For a file whose own frontmatter can carry access entries, the leading
+   * `---` block on disk is compared with the one at HEAD, which costs one
+   * read of the old bytes; a comparison that fails counts as changed.
+   */
+  private async contentEditOf(
+    cwd: string,
+    porcelain: string,
+    repoRelativePath: string,
+  ): Promise<{ frontmatterChanged: boolean } | undefined> {
+    const lines = porcelain.split('\n').filter((l) => l.trim());
+    if (lines.length !== 1) return undefined;
+    const code = lines[0]!.slice(0, 2);
+    if (!/^(?: M|M |MM)$/.test(code)) return undefined;
+    if (!hasAccessFrontmatterExtension(repoRelativePath)) return { frontmatterChanged: false };
+    try {
+      const [{ stdout: before }, after] = await Promise.all([
+        this.git(cwd, ['show', `HEAD:${repoRelativePath}`]),
+        fs.readFile(path.join(cwd, repoRelativePath), 'utf-8'),
+      ]);
+      return { frontmatterChanged: fencedHead(before) !== fencedHead(after) };
+    } catch {
+      return { frontmatterChanged: true };
     }
   }
 

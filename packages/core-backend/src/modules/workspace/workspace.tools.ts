@@ -3958,7 +3958,8 @@ export function registerWorkspaceTools(
     name: 'unzip',
     gated: true,
     description:
-      'Extract a .zip already in the workspace (defaults to the zip\'s parent). Returns extracted files + skipped entries. Existing files are overwritten.',
+      'Extract a .zip already in the workspace (defaults to the zip\'s parent). Returns extracted files + skipped entries. Existing files are overwritten. ' +
+      'Each extracted file is committed and shared moments later, like any write; a file someone is editing is skipped, and `unsaved` lists any that may not be committed (save them with `save_file`; saving a committed file changes nothing).',
     inputs: {
       type: 'object',
       properties: {
@@ -3984,6 +3985,15 @@ export function registerWorkspaceTools(
             required: ['path', 'reason'],
           },
         },
+        unsaved: {
+          type: 'array',
+          description: 'Present only when some extracted files may not be committed (also beside `error` when the extraction stopped part-way): each is on disk; save it with `save_file` (saving a committed file changes nothing).',
+          items: {
+            type: 'object',
+            properties: { path: str('Workspace-relative path of the extracted file.'), reason: str('What to do about it.') },
+            required: ['path', 'reason'],
+          },
+        },
       },
       required: ['destination', 'extracted', 'skipped'],
     },
@@ -3998,34 +4008,164 @@ export function registerWorkspaceTools(
       // into the same 404 every other file tool answers. Only that declared
       // answer maps — a failure part-way through an extraction is not the
       // archive going missing.
-      return orDeclaredNotFound(
-        () =>
-          ctx.workspaceService.unzipFile(
-            workspaceIdForBranch(a.branch as string),
-            zipPath,
-            typeof a.destination === 'string' ? a.destination : undefined,
-            // Each extracted file is a write of its own: an entry the write
-            // hook refuses is skipped (not extracted), so an archive can't be
-            // a way around it — the extension policy applies per entry too, so
-            // a restricted run can't unzip a `.md` into the graph.
-            (wsRelPath) => {
-              // An entry that would land beside the repository is skipped with the
-              // corrected-path reason, like any other refused entry.
-              assertInsideRepo(wsRelPath, kbDirName);
-              // Extraction writes straight to disk, past the filesystem's roles.yaml
-              // gate — so an archive may not carry one at all.
-              if (isRolesYamlPath(wsRelPath, kbDirName)) {
-                throw new ToolError(
-                  'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
-                  422,
-                );
-              }
-              writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
-              return assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, wsRelPath);
-            },
-          ),
-        'Nothing to extract',
-      );
+      const branch = a.branch as string;
+      const workspaceId = workspaceIdForBranch(branch);
+      const vcs = ctx.versionControlService;
+      // Every entry is written under its lock, and the lock's release commits
+      // and shares it as the person, as the app's own unzip route does. Left
+      // uncommitted, a file stayed outside every commit until someone saved
+      // it, and the access gate answers from the commit a checkout stands on:
+      // an `access.md` or a page's own restriction that came in an archive
+      // stopped applying once the gate's wait for a reported change ran out.
+      // Taking the lock BEFORE the write means an entry another person is
+      // editing is skipped, never written over their unsaved work.
+      const locked: string[] = [];
+      // The files whose bytes are on disk, as the extraction reports them:
+      // the only paths a release may commit. A directory entry is guarded
+      // (so locked) and then created, not written; committing its lock
+      // would stage everything under it, checked or not.
+      const written = new Set<string>();
+      const unsaved: { path: string; reason: string }[] = [];
+      const mayNotBeCommitted = 'It may not be committed; save it with save_file (saving a committed file changes nothing).';
+      // When this call took each lock. A lock is held from its entry's write
+      // to the end of the extraction, and a long archive can outlast its
+      // lease (60 s). A lapsed lock may be someone else's by then, the
+      // person's own editor's included, under this call's own user id, which
+      // a heartbeat or a release cannot tell apart. So before a lock is used
+      // again or handed back, its lease is renewed and checked to be the
+      // acquisition this call took. One that lapsed with nobody taking it is
+      // taken again when `retake` asks (so its file still commits); one held
+      // by anyone else is left alone.
+      const acquisitions = new Map<string, string>();
+      // A refusal the lock's own gates word for the caller (write access, the
+      // change gate) carries a 4xx status and is their answer. Any other
+      // failure to take a lock, a server fault with a 5xx status included, is
+      // infrastructure: its cause is logged here, and the entry is skipped
+      // with text that names none.
+      const acquire = async (file: string) => {
+        try {
+          return await vcs.acquireLock(workspaceId, branch, file, ctx.user);
+        } catch (err) {
+          if (hasHttpStatus(err) && err.status >= 400 && err.status < 500) throw err;
+          log.warn(`unzip: locking ${printable(file)} on ${printable(branch)} failed: ${printable(err instanceof Error ? err.message : String(err))}`);
+          throw new ToolError('This file could not be locked for writing, so it was not extracted.', 503);
+        }
+      };
+      type Hold = { held: true } | { held: false; holderName?: string };
+      const holdOwn = async (file: string, retake: boolean): Promise<Hold> => {
+        const renewed = await vcs.heartbeatLock(workspaceId, branch, file, ctx.user).catch(() => null);
+        if (renewed) {
+          return renewed.acquiredAt === acquisitions.get(file) ? { held: true } : { held: false, holderName: renewed.holderName };
+        }
+        if (!retake) return { held: false };
+        const again = await acquire(file);
+        if (!again.acquired) return { held: false, holderName: again.lock.holderName };
+        acquisitions.set(file, again.lock.acquiredAt);
+        return { held: true };
+      };
+      // `releaseLockUntouched` (never `releaseLockNoCommit`, which discards
+      // the path back to HEAD) wherever no commit is queued: the bytes on
+      // disk stay, whether this archive wrote them or a prior save did.
+      const release = async (file: string, commit: boolean): Promise<void> => {
+        const hold = await holdOwn(file, commit).catch((): Hold => ({ held: false }));
+        if (!hold.held) {
+          // Not this call's lock any more: it is neither committed nor handed
+          // back, and a file this call wrote under it is reported.
+          if (commit) unsaved.push({ path: file, reason: mayNotBeCommitted });
+          return;
+        }
+        if (!commit) {
+          await vcs.releaseLockUntouched(workspaceId, branch, file, ctx.user).catch(() => undefined);
+          return;
+        }
+        try {
+          await vcs.releaseLock(workspaceId, branch, file, ctx.user);
+        } catch (err) {
+          // The diagnostics stay here; the answer names no infrastructure.
+          log.warn(`unzip: releasing ${printable(file)} on ${printable(branch)} failed: ${printable(err instanceof Error ? err.message : String(err))}`);
+          // Hand the lock back with the extracted bytes kept, so `save_file` can take it and commit them.
+          await vcs.releaseLockUntouched(workspaceId, branch, file, ctx.user).catch(() => undefined);
+          // A release can fail AFTER it queued the commit (the lock row's drop
+          // is the step after the enqueue), so ask the queue. It can also have
+          // drained that commit already, so "nothing queued" is a maybe, and
+          // the answer says so: saving a committed file again changes nothing.
+          const queued = await vcs.hasQueuedCommit(workspaceId, branch, file).catch(() => false);
+          if (!queued) unsaved.push({ path: file, reason: mayNotBeCommitted });
+        }
+      };
+      let result: Awaited<ReturnType<typeof ctx.workspaceService.unzipFile>>;
+      try {
+        result = await orDeclaredNotFound(
+          () =>
+            ctx.workspaceService.unzipFile(
+              workspaceId,
+              zipPath,
+              typeof a.destination === 'string' ? a.destination : undefined,
+              // Each extracted file is a write of its own: an entry the write
+              // hook refuses is skipped (not extracted), so an archive can't be
+              // a way around it — the extension policy applies per entry too, so
+              // a restricted run can't unzip a `.md` into the graph.
+              async (wsRelPath) => {
+                // An entry that would land beside the repository is skipped with the
+                // corrected-path reason, like any other refused entry.
+                assertInsideRepo(wsRelPath, kbDirName);
+                // Extraction writes straight to disk, past the filesystem's roles.yaml
+                // gate — so an archive may not carry one at all.
+                if (isRolesYamlPath(wsRelPath, kbDirName)) {
+                  throw new ToolError(
+                    'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
+                    422,
+                  );
+                }
+                writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
+                await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsRelPath);
+                const editedBy = (holderName?: string): ToolError =>
+                  new ToolError(`${holderName ?? 'Another person'} is editing this file, so it was not extracted over their work.`, 409);
+                // An archive may carry the same path twice: the later entry
+                // overwrites the earlier under the lock this call took for it,
+                // once that lock is checked to be still this call's (see
+                // `holdOwn`); one someone else holds now skips the entry.
+                // The earlier write no longer stands for what is on disk: only
+                // this rewrite, once complete, marks the path written again, so
+                // a rewrite that fails part-way is never committed.
+                if (locked.includes(wsRelPath)) {
+                  const hold = await holdOwn(wsRelPath, true);
+                  if (!hold.held) throw editedBy(hold.holderName);
+                  written.delete(wsRelPath);
+                  return;
+                }
+                const acquired = await acquire(wsRelPath);
+                if (!acquired.acquired) throw editedBy(acquired.lock.holderName);
+                acquisitions.set(wsRelPath, acquired.lock.acquiredAt);
+                locked.push(wsRelPath);
+              },
+              (wsRelPath) => written.add(wsRelPath),
+            ),
+          'Nothing to extract',
+        );
+      } catch (err) {
+        // A failure part-way through an archive: the files already written
+        // are committed rather than left on disk outside every commit; every
+        // other lock (a directory, the entry the failure stopped) goes back
+        // untouched.
+        for (const file of locked) await release(file, written.has(file));
+        // A file one of those releases could not commit is reported here too,
+        // beside the error, with the status and message the error would have
+        // answered alone: `unsaved` lists what to save whether or not the
+        // extraction finished.
+        if (unsaved.length > 0) {
+          throw new ToolError(err instanceof Error ? err.message : String(err), hasHttpStatus(err) ? err.status : 500, {
+            ...(err instanceof ToolError ? err.details : undefined),
+            unsaved,
+          });
+        }
+        throw err;
+      }
+      // A locked entry the extraction did not write as a file (a directory
+      // entry, which is guarded and then only created): its lock goes back
+      // untouched.
+      for (const file of locked) await release(file, written.has(file));
+      return unsaved.length > 0 ? { ...result, unsaved } : result;
     },
   });
 

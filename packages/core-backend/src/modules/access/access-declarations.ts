@@ -89,18 +89,6 @@ function isNodeCandidate(name: string): boolean {
   return hasAccessFrontmatterExtension(name);
 }
 
-/** Walk a workspace-relative path down the file tree; null when absent. */
-function findNode(root: FileTreeEntry, wsRelPath: string): FileTreeEntry | null {
-  if (wsRelPath === '') return root;
-  let node: FileTreeEntry = root;
-  for (const segment of wsRelPath.split('/').filter(Boolean)) {
-    const next = node.children?.find((c) => c.name === segment);
-    if (!next) return null;
-    node = next;
-  }
-  return node;
-}
-
 interface Candidate {
   /** Repo-relative path of the declaring file. */
   repoRel: string;
@@ -180,11 +168,12 @@ export async function listAccessDeclarationsUnder(
   kbDirName: string,
   folderRepoRel: string,
 ): Promise<{ overrides: AccessDeclaration[]; truncated: boolean }> {
-  const tree = await workspaceService.listFiles(workspaceId);
   const kbPrefix = `${kbDirName}/`;
   const wsFolderPath = folderRepoRel ? `${kbPrefix}${folderRepoRel}` : kbDirName;
 
-  const node = findNode(tree, wsFolderPath);
+  // The folder it reports on, and nothing else: the whole tree of a large
+  // knowledge base is thousands of folders this never reads.
+  const node = await workspaceService.listFilesUnder(workspaceId, wsFolderPath);
   if (!node) return { overrides: [], truncated: false };
   if (node.type !== 'directory') {
     throw new AccessDeclarationsError('path must be a folder');

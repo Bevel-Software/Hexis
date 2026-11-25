@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FILE_PATH_FORMAT, FileBodyError, fileBodyField, fileBodyReader, installFileBodies } from '../file-bodies.js';
+import { FILE_PATH_FORMAT, FileBodyError, fileBodyPlan, fileBodyReader, installFileBodies } from '../file-bodies.js';
 import { PathNotFoundError } from '../../../shared/domain-errors.js';
 
 /**
@@ -24,6 +24,41 @@ const plain = {
   inputs: { type: 'object', properties: { body: { type: 'object' } } },
   tool_call_template: { call_template_type: 'http', http_method: 'POST', url: 'https://api.example/tickets', content_type: 'application/json' },
 };
+/** An API that takes the file as one part of a form, beside a JSON part that describes it. */
+const form = {
+  name: 'board.add_document',
+  inputs: {
+    type: 'object',
+    properties: {
+      board_id: { type: 'string' },
+      body: {
+        type: 'object',
+        properties: { resource: { type: 'string', format: FILE_PATH_FORMAT }, data: { type: 'object' }, note: { type: 'string' }, pages: { type: 'integer' } },
+        required: ['resource'],
+      },
+    },
+    required: ['board_id', 'body'],
+  },
+  tool_call_template: { call_template_type: 'http', http_method: 'POST', url: 'https://api.example/boards/{board_id}/documents', content_type: 'multipart/form-data' },
+};
+/** A form that takes two files, the document and its cover. */
+const twoFiles = {
+  ...form,
+  name: 'board.add_with_cover',
+  inputs: {
+    type: 'object',
+    properties: {
+      board_id: { type: 'string' },
+      body: {
+        type: 'object',
+        properties: { resource: { type: 'string', format: FILE_PATH_FORMAT }, title: { type: 'string' }, cover: { type: 'string', format: FILE_PATH_FORMAT } },
+      },
+    },
+  },
+};
+/** A form with no file part, and a JSON call whose body happens to hold a path: neither sends a file. */
+const formWithoutFile = { ...form, name: 'board.add_note', inputs: { type: 'object', properties: { body: { type: 'object', properties: { note: { type: 'string' } } } } } };
+const jsonWithPath = { ...form, name: 'board.link', tool_call_template: { ...form.tool_call_template, content_type: 'application/json' } };
 const mcp = { name: 'notion.search', inputs: { type: 'object', properties: { body: { type: 'string', format: FILE_PATH_FORMAT } } }, tool_call_template: { call_template_type: 'mcp' } };
 
 type FakeTool = { name: string; inputs?: unknown; tool_call_template?: unknown };
@@ -45,16 +80,27 @@ function fakeClient(tools: FakeTool[], read: (ref: string) => Promise<Uint8Array
   return { client, calls };
 }
 
-describe('fileBodyField', () => {
+describe('fileBodyPlan', () => {
   it('is the body field of an http tool whose body property is declared a file path, under its own name or the default', () => {
-    expect(fileBodyField(upload)).toBe('body');
-    expect(fileBodyField(namedField)).toBe('file');
+    expect(fileBodyPlan(upload)).toEqual({ field: 'body', kind: 'bytes' });
+    expect(fileBodyPlan(namedField)).toEqual({ field: 'file', kind: 'bytes' });
   });
 
-  it('is null for a tool that sends JSON, a tool of another protocol, or no tool', () => {
-    expect(fileBodyField(plain)).toBeNull();
-    expect(fileBodyField(mcp)).toBeNull();
-    expect(fileBodyField(null)).toBeNull();
+  it('is a form, with its file parts, for an http tool that says multipart/form-data and declares a file path inside its body object', () => {
+    expect(fileBodyPlan(form)).toEqual({ field: 'body', kind: 'form', fileParts: ['resource'] });
+    const spelled = { ...form, tool_call_template: { ...form.tool_call_template, content_type: ' Multipart/Form-Data; charset=utf-8' } };
+    expect(fileBodyPlan(spelled)).toEqual({ field: 'body', kind: 'form', fileParts: ['resource'] });
+  });
+
+  it('is null for a tool that sends JSON, a form with no file part, a tool of another protocol, or no tool', () => {
+    expect(fileBodyPlan(plain)).toBeNull();
+    expect(fileBodyPlan(jsonWithPath)).toBeNull();
+    expect(fileBodyPlan(formWithoutFile)).toBeNull();
+    // Only the media type itself makes a form: a longer name that starts the same way is another type.
+    expect(fileBodyPlan({ ...form, tool_call_template: { ...form.tool_call_template, content_type: 'multipart/form-data-like' } })).toBeNull();
+    expect(fileBodyPlan({ ...form, tool_call_template: { ...form.tool_call_template, content_type: 'multipart/mixed' } })).toBeNull();
+    expect(fileBodyPlan(mcp)).toBeNull();
+    expect(fileBodyPlan(null)).toBeNull();
   });
 });
 
@@ -111,6 +157,98 @@ describe('installFileBodies', () => {
     expect((refusal as Error).message).toBe('"__tmp__/x" could not be read as the file to send. Try again, or send another file.');
     expect(calls).toEqual([]);
     expect(otherCalls).toEqual([]);
+  });
+
+  it('sends a form: the file part as the file under its own name and type, text as written, anything else as JSON', async () => {
+    const reads: string[] = [];
+    const { client, calls } = fakeClient([form], async (ref) => {
+      reads.push(ref);
+      return new TextEncoder().encode(`bytes of ${ref}`);
+    });
+    const body = { resource: ' Reports/Q3 review.pdf ', data: { title: 'Q3', position: { x: 0, y: 0 } }, note: 'for Felix', pages: 4, skipped: null };
+    expect(await client.callTool('board.add_document', { board_id: 'b1', body })).toBe('ok');
+    expect(reads).toEqual(['Reports/Q3 review.pdf']);
+    expect(calls[0]!.args.board_id).toBe('b1');
+    const sent = calls[0]!.args.body as FormData;
+    expect(sent).toBeInstanceOf(FormData);
+    expect([...sent.keys()]).toEqual(['resource', 'data', 'note', 'pages']);
+    const file = sent.get('resource') as File;
+    expect(file.name).toBe('Q3 review.pdf');
+    expect(file.type).toBe('application/pdf');
+    expect(await file.text()).toBe('bytes of Reports/Q3 review.pdf');
+    expect(sent.get('data')).toBe('{"title":"Q3","position":{"x":0,"y":0}}');
+    expect(sent.get('note')).toBe('for Felix');
+    expect(sent.get('pages')).toBe('4');
+    // The call the agent made is not changed under it.
+    expect(body.resource).toBe(' Reports/Q3 review.pdf ');
+  });
+
+  it('sends a form without its file part when the call leaves that part out or null, and leaves a body that is no object alone', async () => {
+    let reads = 0;
+    const { client, calls } = fakeClient([form], async () => {
+      reads += 1;
+      return new Uint8Array();
+    });
+    await client.callTool('board.add_document', { board_id: 'b1', body: { note: 'later' } });
+    await client.callTool('board.add_document', { board_id: 'b1', body: { resource: null, note: 'later' } });
+    await client.callTool('board.add_document', { board_id: 'b1', body: 'Reports/q3.pdf' });
+    await client.callTool('board.add_document', { board_id: 'b1' });
+    expect(reads).toBe(0);
+    expect([...(calls[0]!.args.body as FormData).entries()]).toEqual([['note', 'later']]);
+    expect([...(calls[1]!.args.body as FormData).entries()]).toEqual([['note', 'later']]);
+    expect(calls.slice(2).map((c) => c.args)).toEqual([{ board_id: 'b1', body: 'Reports/q3.pdf' }, { board_id: 'b1' }]);
+  });
+
+  it('refuses a form whose file part is there but names no file, wherever it stands among the parts, and sends nothing', async () => {
+    let reads = 0;
+    const { client, calls } = fakeClient([form], async () => {
+      reads += 1;
+      return new Uint8Array();
+    });
+    for (const resource of ['', '   ', ['Reports/q3.pdf'], 7, { path: 'Reports/q3.pdf' }, false]) {
+      await expect(client.callTool('board.add_document', { board_id: 'b1', body: { note: 'first', resource, data: { title: 'x' } } })).rejects.toMatchObject({
+        status: 400,
+        kind: 'file-body',
+        data: { error: 'The form\'s "resource" part takes the path of one file to send, and the call gave it none. Give it a path, or leave "resource" out to send no file.' },
+      });
+    }
+    expect(reads).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  it('judges every file part before it reads any: a good file named before a bad part is not read', async () => {
+    const reads: string[] = [];
+    const { client, calls } = fakeClient([twoFiles], async (ref) => {
+      reads.push(ref);
+      return new TextEncoder().encode(`bytes of ${ref}`);
+    });
+    expect(fileBodyPlan(twoFiles)).toEqual({ field: 'body', kind: 'form', fileParts: ['resource', 'cover'] });
+    await expect(client.callTool('board.add_with_cover', { board_id: 'b1', body: { resource: 'Reports/q3.pdf', title: 'Q3', cover: '  ' } })).rejects.toMatchObject({
+      status: 400,
+      kind: 'file-body',
+      data: { error: 'The form\'s "cover" part takes the path of one file to send, and the call gave it none. Give it a path, or leave "cover" out to send no file.' },
+    });
+    expect(reads).toEqual([]);
+    expect(calls).toEqual([]);
+    // Both parts good: each file is read once, and the parts keep the order the call gave them.
+    await client.callTool('board.add_with_cover', { board_id: 'b1', body: { resource: 'Reports/q3.pdf', title: 'Q3', cover: 'Reports/cover.png' } });
+    expect(reads).toEqual(['Reports/q3.pdf', 'Reports/cover.png']);
+    const sent = calls[0]!.args.body as FormData;
+    expect([...sent.keys()]).toEqual(['resource', 'title', 'cover']);
+    expect((sent.get('cover') as File).name).toBe('cover.png');
+    expect((sent.get('cover') as File).type).toBe('image/png');
+  });
+
+  it('refuses a form whose file cannot be read, and sends nothing', async () => {
+    const { client, calls } = fakeClient([form], async (ref) => {
+      throw new FileBodyError(`"${ref}" is not a file you can read, so it cannot be sent`);
+    });
+    await expect(client.callTool('board.add_document', { board_id: 'b1', body: { resource: 'Finance/Payroll.xlsx', note: 'x' } })).rejects.toMatchObject({
+      status: 400,
+      kind: 'file-body',
+      data: { error: '"Finance/Payroll.xlsx" is not a file you can read, so it cannot be sent' },
+    });
+    expect(calls).toEqual([]);
   });
 
   it('installs once', async () => {
