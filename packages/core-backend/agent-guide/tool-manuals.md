@@ -4,14 +4,14 @@ A `.tool` file is a **tool manual**: it lets agents call a service's HTTP API.
 It lives in a plugin's `software.bevel.hexis/tools/` folder, beside the skills
 that use it. `.tool` files are for `http` and `inline` manuals only: an MCP
 server belongs in the plugin's `mcp.json` (see `directory-structure`). Who may
-use and who manages a tool is in `tools`.
+use or manage a tool: see `tools`.
 
 **The tool is the frontmatter.** A `.tool` is one `---` YAML block holding
 everything: its `id`, its access verbs (`read`/`write`/`owner`/`download`,
 which override the folder's `access.md` for this file) and its config
 (`type`, `url`, `variables`, …). Anything after the closing `---` is notes the
-parser ignores. A file without the fence is the older form: the whole file is
-the object, so a bare JSON `.tool` still works.
+parser ignores. A file without the fence is read whole as the object, so a
+bare JSON `.tool` still works.
 
 ```yaml
 ---
@@ -25,26 +25,25 @@ url: https://api.example.com/utcp
 
 `type` decides how the tools are found: **`inline`** embeds them in the file,
 **`http`** points `url` at an endpoint that returns a UTCP manual.
-(`type: mcp` is an older way to declare an MCP server; startup moves such files
-into `mcp.json` where it can. Do not write new ones.)
+(Startup moves an older `type: mcp` file into `mcp.json` where it can; write
+no new ones.)
 
 **`id` is the manual's identity**: the namespace its secrets bind to and its
 address. Use lowercase `snake_case`. Without an `id`, the `name`, then the file
 name, is used. It must be unique among all `.tool` files and `mcp.json` server
 names, and names differing only in `-` and `_` collide. One is refused, not
-renamed, and `list_tool_setup` names it under `invalid`: an `mcp.json` server
-beats a `.tool`, except between two people's personal tools, where the one that
-reached the branch first wins whatever its kind; while that order cannot be
-read, both are left out until it can (no rename needed). The same service in
-two plugins needs two ids, each with its own secrets and access.
+renamed, and `list_tool_setup` names it under `invalid`. An `mcp.json` server
+beats a `.tool`; between two people's personal tools, the first to reach the
+branch wins, whatever its kind (while that order cannot be read, both are left
+out). The same service in two plugins needs two ids, each with its own secrets
+and access.
 
 ### Secrets: `${VAR}` and `variables`
 
 Wherever a manual needs a credential, write a placeholder such as
 `${API_KEY}`. At call time it is filled from the platform's Secrets Vault,
 under a key made from the manual's id and the variable's name, so a secret
-belongs to one manual. The app's Secrets page shows the exact key; do not spell
-it by hand.
+belongs to one manual. Take the exact key from the app's Secrets page.
 
 Declare who provides each variable in an optional `variables` list of
 `{ name, scope, label? }`:
@@ -56,7 +55,7 @@ Declare who provides each variable in an optional `variables` list of
 `name` matches `[A-Za-z0-9_]+`. A `${VAR}` you do not declare is `admin` and
 still shows in the app, so the list is needed only for `user` scope, a label,
 or a sign-in. Values are entered in the app, never in the file. A malformed
-entry makes the whole file fail to load (it then shows under `invalid`).
+entry fails the whole file, which then shows under `invalid`.
 
 ### Sign-ins: the `oauth` block
 
