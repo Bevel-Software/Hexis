@@ -375,8 +375,9 @@ describe('PullRequestService.getPrDetail — close and edit hints on a move', ()
     const access = { canWriteAtRef: async () => false, canWriteBatchAtRef } as unknown as IAccessControl;
     const svc = new PullRequestService(makeDb(), workspace, access, git);
     svc.setDetailEnricher({
-      // The source's owners have approved, so the destination writer may
-      // approve the file: the case where approving and deciding part.
+      // The enricher is stubbed: the approval state is fixed, not computed,
+      // and this suite tests only the close and edit hints. It is fixed at
+      // `viewerCanApprove: true` so the hints are seen not to follow it.
       getApprovalStates: async () => [
         {
           path: MOVE.path,

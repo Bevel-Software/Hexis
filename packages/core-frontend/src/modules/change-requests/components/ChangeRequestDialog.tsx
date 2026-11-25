@@ -674,9 +674,9 @@ export function ChangeRequestDialog({
 
   /**
    * The old CR system's rule, restored: Apply exists only when every file is
-   * either already approved or approvable BY THIS VIEWER (they hold write on
-   * it, so their click completes the gate). Anything less and Apply was a
-   * button that walked into "Waiting on approval for …" — offering a verdict
+   * either already approved or approvable BY THIS VIEWER (`viewerCanApprove`,
+   * the backend's own approve rule, so their click completes the gate).
+   * Anything less and Apply was a button that walked into "Waiting on approval for …" — offering a verdict
    * the viewer cannot actually deliver. Only files the merge gate binds can
    * hold it up; the rest neither warn nor block on the server, but the viewer
    * still has to hold at least one file of the request to be offered Apply.
