@@ -1,0 +1,26 @@
+import { describe, it, expect } from 'vitest';
+import { mapPooled } from '../map-pooled.js';
+
+describe('mapPooled', () => {
+  it('answers in input order, even when later calls finish first', async () => {
+    const delays = [30, 5, 20, 1, 10];
+    const out = await mapPooled(delays, 2, (ms) => new Promise<number>((resolve) => setTimeout(() => resolve(ms * 10), ms)));
+    expect(out).toEqual([300, 50, 200, 10, 100]);
+  });
+
+  it('never has more than `limit` calls in flight', async () => {
+    let inFlight = 0;
+    let most = 0;
+    await mapPooled(Array.from({ length: 20 }, (_, i) => i), 3, async () => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      inFlight -= 1;
+    });
+    expect(most).toBe(3);
+  });
+
+  it('answers nothing for nothing', async () => {
+    expect(await mapPooled([], 4, async () => 1)).toEqual([]);
+  });
+});
