@@ -296,6 +296,64 @@ describe('overlapping substituted values', () => {
     redactSubstitutedFailure(err, scope);
     expect(err.message).toBe('refused ${KEY}, then ${OTHER}');
   });
+
+  it('are covered exactly as a list of every occurrence would cover them', async () => {
+    // Reference: collect every occurrence, sort by start (longest first), and
+    // replace each run of covered characters whole — the cover the sweep must
+    // produce without holding a list the size of the text.
+    function reference(text: string, values: [string, string][]): string {
+      const hits: { start: number; end: number; marker: string }[] = [];
+      for (const [value, name] of values) {
+        for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + 1)) {
+          hits.push({ start: at, end: at + value.length, marker: `\${${name}}` });
+        }
+      }
+      hits.sort((a, b) => a.start - b.start || b.end - a.end);
+      let out = '';
+      let copied = 0;
+      for (let i = 0; i < hits.length; ) {
+        const start = hits[i].start;
+        let end = hits[i].end;
+        let replacement = hits[i].marker;
+        for (i++; i < hits.length && hits[i].start < end; i++) {
+          if (hits[i].end > end) {
+            end = hits[i].end;
+            if (!replacement.endsWith(hits[i].marker)) replacement += hits[i].marker;
+          }
+        }
+        out += text.slice(copied, start) + replacement;
+        copied = end;
+      }
+      return out + text.slice(copied);
+    }
+    let seed = 0x5eed;
+    const random = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      return seed % n;
+    };
+    const word = (length: number) => Array.from({ length }, () => 'ab'[random(2)]).join('');
+    for (let round = 0; round < 300; round++) {
+      const values = new Map<string, string>();
+      for (let k = 0; k < 1 + random(3); k++) {
+        const value = word(1 + random(3));
+        if (!values.has(value)) values.set(value, `K${k}`);
+      }
+      const text = word(random(40));
+      const scope = await scopeWith(Object.fromEntries([...values].map(([value, name]) => [name, value])));
+      const err = new Error(text);
+      redactSubstitutedFailure(err, scope);
+      expect(err.message, `${JSON.stringify([...values])} in ${text}`).toBe(reference(text, [...values]));
+    }
+  });
+
+  it('cover a short value however often a large answer repeats it', async () => {
+    // One pointer per spelling, not one record per occurrence: a million
+    // occurrences of a one-character value are swept like any other text.
+    const scope = await scopeWith({ PIN: 'a' });
+    const err = new Error('xa'.repeat(1_000_000));
+    redactSubstitutedFailure(err, scope);
+    expect(err.message).toBe('x${PIN}'.repeat(1_000_000));
+  });
 });
 
 describe('a streamed call that fails as it opens', () => {

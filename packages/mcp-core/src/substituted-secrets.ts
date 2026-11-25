@@ -156,33 +156,48 @@ function redactorFor(scope: SubstitutionScope): (text: string) => string {
     if (value.length === 0) continue;
     for (const form of spellings(value)) if (!markers.has(form)) markers.set(form, `\${${name}}`);
   }
+  const forms = [...markers];
+  // One left-to-right sweep holding a single pointer per spelling — its next
+  // occurrence — so the extra memory is bounded by the number of spellings,
+  // never by how often a (short) value occurs in a large upstream answer.
   return (text) => {
-    const hits: { start: number; end: number; marker: string }[] = [];
-    for (const [form, marker] of markers) {
-      for (let at = text.indexOf(form); at !== -1; at = text.indexOf(form, at + 1)) {
-        hits.push({ start: at, end: at + form.length, marker });
+    const next = forms.map(([form]) => text.indexOf(form));
+    /** The first position at or after `from` where some spelling occurs, or -1. */
+    const nextHit = (from: number): number => {
+      let first = -1;
+      for (let k = 0; k < forms.length; k++) {
+        if (next[k] !== -1 && next[k] < from) next[k] = text.indexOf(forms[k][0], from);
+        if (next[k] !== -1 && (first === -1 || next[k] < first)) first = next[k];
       }
-    }
-    if (hits.length === 0) return text;
-    hits.sort((a, b) => a.start - b.start || b.end - a.end);
+      return first;
+    };
+    /** The longest spelling occurring at `at`, the position `nextHit` just answered. */
+    const longestAt = (at: number): [string, string] => {
+      let best = -1;
+      for (let k = 0; k < forms.length; k++) {
+        if (next[k] === at && (best === -1 || forms[k][0].length > forms[best][0].length)) best = k;
+      }
+      return forms[best];
+    };
     let out = '';
     let copied = 0;
-    for (let i = 0; i < hits.length; ) {
-      const start = hits[i].start;
-      let end = hits[i].end;
-      let replacement = hits[i].marker;
-      // Every hit that starts inside the run joins it; one that reaches past
-      // its end extends it and adds its own marker, one inside it adds nothing.
-      for (i++; i < hits.length && hits[i].start < end; i++) {
-        if (hits[i].end > end) {
-          end = hits[i].end;
-          if (!replacement.endsWith(hits[i].marker)) replacement += hits[i].marker;
+    for (let start = nextHit(0); start !== -1; start = nextHit(copied)) {
+      const [form, marker] = longestAt(start);
+      let end = start + form.length;
+      let replacement = marker;
+      // Every occurrence that starts inside the run joins it; one that reaches
+      // past its end extends it and adds its own marker, one inside it adds nothing.
+      for (let at = nextHit(start + 1); at !== -1 && at < end; at = nextHit(at + 1)) {
+        const [inner, innerMarker] = longestAt(at);
+        if (at + inner.length > end) {
+          end = at + inner.length;
+          if (!replacement.endsWith(innerMarker)) replacement += innerMarker;
         }
       }
       out += text.slice(copied, start) + replacement;
       copied = end;
     }
-    return out + text.slice(copied);
+    return copied === 0 ? text : out + text.slice(copied);
   };
 }
 
