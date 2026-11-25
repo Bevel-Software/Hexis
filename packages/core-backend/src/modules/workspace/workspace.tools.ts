@@ -3300,22 +3300,19 @@ export function registerWorkspaceTools(
       //   before the lock, two callers replacing the same text — two runners
       //   claiming a work item by filling its empty owner field — were BOTH
       //   told their edit landed, and the second overwrote the first.
-      // A filesystem without the method has no lock and no gate to run first.
+      // No path reads without the lock: the method is called unconditionally,
+      // as `write_file` and `write_files` call theirs, so a filesystem without
+      // it fails before anything is read.
       const locking = fs as unknown as {
-        rewriteFile?(path: string, rewrite: (current: Buffer | null) => string): Promise<void>;
+        rewriteFile(path: string, rewrite: (current: Buffer | null) => string): Promise<void>;
       };
-      // Assigned on every path that reaches the return: inside the rewrite, or by the fallback.
+      // Assigned inside the rewrite, which runs before it returns.
       let result!: { updated: string; replaced: number };
-      if (typeof locking.rewriteFile === 'function') {
-        await locking.rewriteFile(path, (current) => {
-          if (current === null) throw notFound(path);
-          result = edit(current);
-          return result.updated;
-        });
-      } else {
-        result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
-        await fs.writeFile(path, result.updated);
-      }
+      await locking.rewriteFile(path, (current) => {
+        if (current === null) throw notFound(path);
+        result = edit(current);
+        return result.updated;
+      });
       return { path, replaced: result.replaced, ...(await saveWarnings(ctx, path, result.updated)) };
     },
   });

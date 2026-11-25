@@ -21,6 +21,7 @@ import { registerSkillsTools } from '../skills.tools.js';
 import type { ISkillService } from '../skills.contract.js';
 import { AllowedToolsChecker } from '../allowed-tools-check.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { withRewriteFile } from '../../../__tests__/rewrite-file.js';
 
 /**
  * The agent surfaces end to end: a SKILL.md written through the file tools
@@ -74,7 +75,7 @@ let tempDir = '';
 
 async function start(): Promise<string> {
   tempDir = await mkdtemp(join(tmpdir(), 'allowed-tools-'));
-  const fs = new LocalFilesystem({ basePath: tempDir, contained: true });
+  const fs = withRewriteFile(new LocalFilesystem({ basePath: tempDir, contained: true }));
   // `write_files` lands its batch through the locking filesystem's `writeFiles`
   // (re-judge every path under the lock, then write what is kept). This plain
   // filesystem has none, so the same contract is honoured by hand.
