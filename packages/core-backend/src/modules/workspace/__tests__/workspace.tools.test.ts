@@ -4633,6 +4633,31 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(forDraft).toEqual([]);
   });
 
+  // The refusal must not depend on the file: matched before the gate, a
+  // present `old_string` answered `write-denied` and an absent one `not
+  // found` — a yes/no oracle on a file the caller may neither write nor read.
+  it.each([
+    ['a reader', true],
+    ['a caller who cannot read the file', false],
+  ] as const)('edit_file answers %s the same refusal whether old_string is in the file or not', async (_who, readable) => {
+    const base = await start('write', readVerdict(readable).ac);
+    await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
+    await fs.writeFile(DENIED, 'old text QA-MARKER-7731\n');
+    denyWrites();
+
+    const present = await call(base, 'edit_file', { branch: TARGET, path: DENIED, old_string: 'QA-MARKER-7731', new_string: 'x' });
+    const absent = await call(base, 'edit_file', { branch: TARGET, path: DENIED, old_string: 'QA-MARKER-9999', new_string: 'x' });
+    const repeated = await call(base, 'edit_file', { branch: TARGET, path: DENIED, old_string: 't', new_string: 'x' });
+
+    expect(present.status).toBe(403);
+    expect(present.json).toMatchObject({ kind: 'write-denied', path: DENIED, canPropose: readable });
+    for (const other of [absent, repeated]) {
+      expect(other.status).toBe(present.status);
+      expect(other.text).toBe(present.text);
+    }
+    expect(await readFile(join(tempDir, DENIED), 'utf8')).toBe('old text QA-MARKER-7731\n');
+  });
+
   it('the suggested draft is a branch the caller owns, for an address the convention rewrites', async () => {
     // `john.doe@` is the common corporate shape, and the one that catches a
     // prefix derived by a second spelling of the rule: the platform judges

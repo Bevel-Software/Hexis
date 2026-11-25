@@ -3288,20 +3288,24 @@ export function registerWorkspaceTools(
         }
         return { updated: pieces.join(newStr), replaced: count };
       };
-      // A first verdict before any lock is taken, so an ordinary refusal costs
-      // no lock cycle. It is a verdict about a file anyone may still change.
-      let result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
-      // The one the answer carries is taken again with the path's lock HELD,
-      // over the bytes read there (`write: true` guarantees the locking
-      // filesystem): read, verdict and write are one step nobody can get
-      // between. Taken before the lock only, two callers replacing the same
-      // text — two runners claiming a work item by filling its empty owner
-      // field — were BOTH told their edit landed, and the second silently
-      // overwrote the first. A filesystem without the method has no lock to
-      // read under, so the first verdict stands.
+      // The verdict is taken ONLY with the path's lock HELD, over the bytes
+      // read there (`write: true` guarantees the locking filesystem). Two
+      // reasons, one per thing the lock does first:
+      // - Acquiring it is the access gate — write on a protected branch, read
+      //   on every branch. Matching `old_string` before it answered "present"
+      //   with the write refusal and "absent" with `not found`: a yes/no
+      //   oracle on a file the caller may neither write nor read. Under the
+      //   lock, a caller it refuses gets the one refusal whatever they sent.
+      // - Read, verdict and write are one step nobody can get between. Taken
+      //   before the lock, two callers replacing the same text — two runners
+      //   claiming a work item by filling its empty owner field — were BOTH
+      //   told their edit landed, and the second overwrote the first.
+      // A filesystem without the method has no lock and no gate to run first.
       const locking = fs as unknown as {
         rewriteFile?(path: string, rewrite: (current: Buffer | null) => string): Promise<void>;
       };
+      // Assigned on every path that reaches the return: inside the rewrite, or by the fallback.
+      let result!: { updated: string; replaced: number };
       if (typeof locking.rewriteFile === 'function') {
         await locking.rewriteFile(path, (current) => {
           if (current === null) throw notFound(path);
@@ -3309,6 +3313,7 @@ export function registerWorkspaceTools(
           return result.updated;
         });
       } else {
+        result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
         await fs.writeFile(path, result.updated);
       }
       return { path, replaced: result.replaced, ...(await saveWarnings(ctx, path, result.updated)) };
