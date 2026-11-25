@@ -133,13 +133,6 @@ export { installCallGuards, argumentRefusal, ArgumentsDoNotMatchError } from './
 export { installGetHasNoBody, withoutBodyOnGet, NO_BODY_FIELD } from './get-has-no-body.js';
 
 export {
-  RETIRED_TOOL_MESSAGES,
-  RETIRED_TOOL_NAMES,
-  retiredToolMessage,
-  retiredToolInFailure,
-} from './retired-tools.js';
-
-export {
   isSessionLoss,
   installSessionRecovery,
   noteManualReregistered,

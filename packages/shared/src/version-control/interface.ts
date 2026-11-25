@@ -705,7 +705,7 @@ export interface IVersionControlService {
    *
    *   - refused (`OpenChangeRequestBlocksMergeError`, naming the request) when
    *     a change request from `sourceBranch` into `targetBranch` is open; a
-   *     person merges that one in the app. The reverse direction — the target
+   *     request lands through its own merge gate. The reverse direction — the target
    *     into the source, the sync that keeps a draft current — is allowed.
    *   - refused (`VersionControlDomainError`, `kind: 'protected-merge-target'`,
    *     status 403, listing the denied paths) when `targetBranch` is protected

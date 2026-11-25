@@ -10,7 +10,6 @@ import { readablePathsAt, readableAtCommits, assertReadableAtCommits } from '../
 import type { KbContext } from '../../../shared/kb-context.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/index.js';
-import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
 import {
   CHANGE_REQUEST_INCLUDES,
   CHANGE_REQUEST_PATH_LIMIT,
@@ -447,7 +446,7 @@ export function registerVersionControlTools(
       `change (\`added\` / \`changed\` / \`deleted\` / \`moved\`), cut to ${CHANGE_REQUEST_PATH_LIMIT} of \`totalFiles\`. ` +
       'No patches and no file content: ask for the diffs with `include: ["patches"]` and for every path ' +
       'with `include: ["all-paths"]`. ' +
-      'An agent proposes; a person reviews and merges the request in the app — hand the user its `url`.',
+      'Hand the user its `url`. `merge_change_request` applies it once its approvals allow.',
     inputs: {
       type: 'object',
       properties: {
@@ -551,9 +550,9 @@ export function registerVersionControlTools(
   mount({
     name: 'merge_branch',
     description:
-      'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
-      'a person merges: this never lands a change request. It refuses while a change request from `source` ' +
-      'into `target` is open (naming it): ask the user to review it in the app. It refuses ' +
+      'Merge branch `source` into branch `target` as you, and publish `target`. This never lands a change ' +
+      'request: it refuses while one from `source` into `target` is open (naming it), and ' +
+      '`merge_change_request` applies that one, under its approvals. It refuses ' +
       'when `target` is a protected branch unless you could commit every changed file directly to it (never ' +
       'for a change to `roles.yaml`). ' +
       'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
@@ -693,11 +692,123 @@ export function registerVersionControlTools(
     },
   });
 
-  // `merge_change_request` is retired: a change request is merged by a person
-  // in the app. It is in no catalog, but a caller holding an old manual still
-  // posts to its path — answer with who merges now, not a bare 404.
-  router.post('/agent/tools/merge_change_request', toolAuth, (_req, res) => {
-    res.status(410).json({ error: RETIRED_TOOL_MESSAGES.merge_change_request });
+  mount({
+    name: 'merge_change_request',
+    description:
+      'Apply an OPEN change request to its target branch, as you: what the app\'s Apply does, with your access ' +
+      'and no more. First records your approval, at the current head, on each file you may approve; then merges. ' +
+      'Refused (naming what it waits on) while a file still needs an approval you cannot give: hand the user the ' +
+      '`url` for its approvers. `get_change_request` says beforehand whether it would pass (`viewer.mayMerge`). ' +
+      'Returns `merged` with the merge commit, or `conflicts-need-resolution` with the conflicting paths (nothing ' +
+      'is merged: sync the draft with `update_branch`, resolve, and merge again). A change to `roles.yaml` is ' +
+      'never carried across. A request you may not see answers 404, as `get_change_request` does.',
+    // Keyed by change-request number; the merge runs in the target's workspace.
+    skipBranch: true,
+    inputs: {
+      type: 'object',
+      properties: {
+        number: { type: 'integer', minimum: 1, description: 'Change request number.' },
+        bypass: {
+          type: 'boolean',
+          description:
+            'Merge despite approvals still missing. Accepted from an admin only, and only when the person asked for it in so many words.',
+        },
+      },
+      required: ['number'],
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        number: { type: 'integer' },
+        url: changeRequestUrlSchema,
+        urlNote: changeRequestUrlNoteSchema,
+        outcome: {
+          type: 'object',
+          description: 'A completed merge, or a signal that conflicts must be resolved first.',
+          properties: {
+            kind: { type: 'string', enum: ['merged', 'conflicts-need-resolution'] },
+            sha: { type: 'string', description: 'Present when `kind` is `merged`: the merge commit, now the tip of the target.' },
+            mergedAt: { type: 'string', description: 'Present when `kind` is `merged`: ISO timestamp.' },
+            conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution`.' },
+          },
+          required: ['kind'],
+        },
+        approved: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'The files this call recorded your approval on. They stay approved when the merge is then refused.',
+        },
+      },
+      required: ['number', 'url', 'outcome', 'approved'],
+    },
+    write: true,
+    handler: async (args, ctx: ToolContext) => {
+      const number = args.number as number;
+      // A request the caller may not read is not found, before anything is
+      // approved or its state is read (as `update_change_request`).
+      if (!(await maySeeChangeRequest(ctx, number))) {
+        throw new ToolError(`Change request #${number} not found.`, 404);
+      }
+      const workspaceId = await repoGlobalWorkspaceId(ctx);
+      // Fresh, because an approval pins to the current head and the gate reads
+      // the approvals handed to it: neither may come from a cached detail.
+      const load = async () => {
+        const detail = await ctx.versionControlService.getChangeRequestDetail(number, {
+          fresh: true,
+          workspaceId,
+          viewerEmail: ctx.user.email,
+          patches: false,
+        });
+        if (!detail) throw new ToolError(`Change request #${number} not found.`, 404);
+        return detail;
+      };
+      let detail = await load();
+      // The app's Apply, step for step: approve what the caller may, then let
+      // the gate say whether that is enough. A refused approval is "not your
+      // file" and is the gate's to report, by name.
+      const approved: string[] = [];
+      if (detail.state === 'open') {
+        for (const a of detail.approvals) {
+          if (a.isApproved || !a.inMergeGate || !a.viewerCanApprove) continue;
+          try {
+            await ctx.versionControlService.approveFile(
+              number,
+              a.path,
+              ctx.user,
+              detail.files,
+              detail.headSha,
+              detail.base,
+              detail.authorId ?? null,
+              workspaceId,
+            );
+            approved.push(a.path);
+          } catch (err) {
+            if (!(hasHttpStatus(err) && err.status === 403)) throw err;
+          }
+        }
+        if (approved.length > 0) detail = await load();
+      }
+      const outcome = await ctx.versionControlService.mergeChangeRequest(
+        number,
+        ctx.user,
+        detail.headSha,
+        detail.approvals,
+        detail.state,
+        detail.title,
+        detail.base,
+        workspaceId,
+        { bypass: args.bypass === true },
+      );
+      return {
+        ...linkOf(detail),
+        outcome:
+          outcome.kind === 'merged'
+            ? { kind: outcome.kind, sha: outcome.result.sha, mergedAt: outcome.result.mergedAt }
+            : outcome,
+        approved,
+      };
+    },
   });
 
   mount({

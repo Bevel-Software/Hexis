@@ -41,7 +41,6 @@ import {
   toListedTool,
   withReadOnlyOverride,
   toolError,
-  retiredToolMessage,
   needsAuthorizationResult,
   skillPromptText,
   ONBOARD_PROMPT,
@@ -1012,10 +1011,7 @@ export class McpService {
         // may well exist, for this person, on another connection.
         return (
           answer ??
-          toolError(
-            retiredToolMessage(toolName) ??
-              (connection ? connectionRefusal(toolName, connection) : `Unknown tool "${toolName}".`),
-          )
+          toolError(connection ? connectionRefusal(toolName, connection) : `Unknown tool "${toolName}".`)
         );
       }
       const needsAuth = await needsAuthorization(proxied.manualName);

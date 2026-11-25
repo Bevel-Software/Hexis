@@ -673,8 +673,8 @@ export class ChangeRequestConflictsError extends VersionControlDomainError {
 
 /**
  * A direct branch merge was asked to do what an open change request is
- * waiting for a person to do: merge `sourceBranch` into `targetBranch`.
- * Carries the request's number so the caller can point the person at it.
+ * there to do under its approvals: merge `sourceBranch` into `targetBranch`.
+ * Carries the request's number so the caller can apply that instead.
  */
 export class OpenChangeRequestBlocksMergeError extends VersionControlDomainError {
   readonly kind = 'open-change-request-blocks-merge' as const;
@@ -685,7 +685,7 @@ export class OpenChangeRequestBlocksMergeError extends VersionControlDomainError
   ) {
     super(
       `Change request #${number} proposes merging "${sourceBranch}" into "${targetBranch}" and is still open. ` +
-        `A change request is merged by a person: ask the user to review #${number} in the app.`,
+        `Apply it with \`merge_change_request\` (number ${number}), which holds it to its approvals.`,
       409,
       { kind: 'open-change-request-blocks-merge', sourceBranch, targetBranch, number },
     );
