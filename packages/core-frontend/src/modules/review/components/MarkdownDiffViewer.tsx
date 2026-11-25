@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import Markdown from 'react-markdown';
+import { Parser } from 'yaml';
 import { isFrontmatterFence, type FileDiffPayload } from '@bevel-software/platform-shared';
 import { computeDiff, type DiffLine, parseFrontmatter, labelFor, type FrontmatterData } from '../../workspace';
 import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
@@ -113,14 +114,18 @@ export function MarkdownDiffViewer({
     const lines = computeDiff(baseline, current);
     const oldFmEnd = frontmatterLineCount(baseline);
     const newFmEnd = frontmatterLineCount(current);
-    const split = splitDiffByFrontmatter(lines, oldFmEnd, newFmEnd);
+    const split = splitDiffByFrontmatter(
+      lines,
+      { end: oldFmEnd, commentLines: yamlCommentLines(baseline, oldFmEnd) },
+      { end: newFmEnd, commentLines: yamlCommentLines(current, newFmEnd) },
+    );
     return {
       tooLarge: false as const,
       rawLineCount,
       lines,
       bodyBlocks: groupDiffBlocks(split.body),
       frontmatterChanged: split.frontmatter.some((l) => l.type !== 'same'),
-      frontmatterComments: split.frontmatter.filter(isChangedYamlComment),
+      frontmatterComments: split.changedComments,
       oldFrontmatter: parseFrontmatter(baseline).data,
       newFrontmatter: parseFrontmatter(current).data,
     };
@@ -185,23 +190,57 @@ function frontmatterLineCount(content: string): number {
 }
 
 /**
+ * The lines of `content` (indices into `content.split('\n')`) on which its
+ * frontmatter carries a YAML comment, on a line of its own or after a value.
+ * The YAML parser decides what is a comment, so a `#` inside a quoted value or
+ * a block scalar is not one. `fmEnd` is {@link frontmatterLineCount}'s answer.
+ */
+function yamlCommentLines(content: string, fmEnd: number): Set<number> {
+  const found = new Set<number>();
+  if (fmEnd === 0) return found;
+  // The YAML between the fences; its line 0 is line 1 of `content`.
+  const yaml = content.split('\n').slice(1, fmEnd - 1).join('\n');
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+    } else if (node && typeof node === 'object') {
+      const token = node as { type?: unknown; offset?: unknown };
+      if (token.type === 'comment' && typeof token.offset === 'number') {
+        found.add(1 + countNewlines(yaml.slice(0, token.offset)));
+      }
+      Object.values(node).forEach(visit);
+    }
+  };
+  for (const token of new Parser().parse(yaml)) visit(token);
+  return found;
+}
+
+/** One side of the diff: its frontmatter's length and its comment lines. */
+interface FrontmatterSide {
+  /** Exclusive upper bound: the number of frontmatter lines on this side. */
+  end: number;
+  commentLines: Set<number>;
+}
+
+/**
  * Walk the diff lines, tracking old- and new-line cursors, and split them
  * into the lines that fall inside the frontmatter region and the lines
- * that fall inside the body. `oldFmEnd` / `newFmEnd` are exclusive upper
- * bounds (i.e. the number of frontmatter lines on each side).
+ * that fall inside the body. `changedComments` are the removed and added
+ * frontmatter lines that carry a YAML comment on their own side.
  */
 function splitDiffByFrontmatter(
   lines: DiffLine[],
-  oldFmEnd: number,
-  newFmEnd: number,
-): { frontmatter: DiffLine[]; body: DiffLine[] } {
+  oldFm: FrontmatterSide,
+  newFm: FrontmatterSide,
+): { frontmatter: DiffLine[]; body: DiffLine[]; changedComments: DiffLine[] } {
   const frontmatter: DiffLine[] = [];
   const body: DiffLine[] = [];
+  const changedComments: DiffLine[] = [];
   let oldIdx = 0;
   let newIdx = 0;
   for (const line of lines) {
-    const inOldFm = oldIdx < oldFmEnd;
-    const inNewFm = newIdx < newFmEnd;
+    const inOldFm = oldIdx < oldFm.end;
+    const inNewFm = newIdx < newFm.end;
     if (line.type === 'same') {
       if (inOldFm && inNewFm) frontmatter.push(line);
       else body.push(line);
@@ -210,14 +249,16 @@ function splitDiffByFrontmatter(
     } else if (line.type === 'removed') {
       if (inOldFm) frontmatter.push(line);
       else body.push(line);
+      if (inOldFm && oldFm.commentLines.has(oldIdx)) changedComments.push(line);
       oldIdx++;
     } else {
       if (inNewFm) frontmatter.push(line);
       else body.push(line);
+      if (inNewFm && newFm.commentLines.has(newIdx)) changedComments.push(line);
       newIdx++;
     }
   }
-  return { frontmatter, body };
+  return { frontmatter, body, changedComments };
 }
 
 function FrontmatterDiffPanel({
@@ -271,18 +312,11 @@ function FrontmatterDiffPanel({
 }
 
 /**
- * A changed frontmatter line that carries a YAML comment, on a line of its own
- * or after a value. The panel above shows the PARSED frontmatter, and a comment
- * parses to nothing, so a request whose only change was one showed the
- * reviewer an unmarked page. YAML starts a comment at a `#` that opens the
- * line or follows whitespace; a `#` inside a quoted value matches too, which
- * only shows a changed line twice.
+ * The changed frontmatter lines that carry a YAML comment, as the marked
+ * source lines they are. The panel above shows the PARSED frontmatter, and a
+ * comment parses to nothing, so a request whose only change was one showed the
+ * reviewer an unmarked page.
  */
-function isChangedYamlComment(line: DiffLine): boolean {
-  return line.type !== 'same' && /(^|\s)#/.test(line.text);
-}
-
-/** The changed frontmatter comments, as the marked source lines they are. */
 function FrontmatterCommentLines({ lines }: { lines: DiffLine[] }) {
   if (lines.length === 0) return null;
   return (

@@ -236,6 +236,22 @@ describe('MarkdownDiffViewer', () => {
       expect(container.querySelector('ins, del')).toBeNull();
     });
 
+    it('shows no source line for a `#` the YAML parser reads as text', () => {
+      // A quoted value, a multi-line quoted value and a block scalar: each
+      // `#` here follows whitespace, and none of them starts a comment.
+      const fm = (v: string) =>
+        `---\ntitle: "${v} # tag"\nnote: '${v} # x'\nlong: "${v}\n  # still quoted"\nbody: |\n  ${v}\n  # block text\n---\n\nbody\n`;
+      const { container } = render(<MarkdownDiffViewer payload={payload(fm('old'), fm('new'))} />);
+      expect(container.querySelector('ins, del')).toBeNull();
+    });
+
+    it('shows a real comment that follows a block scalar, and only that line', () => {
+      const before = '---\nbody: |\n  # block text\nid: a\n---\n\nbody\n';
+      const after = '---\nbody: |\n  # block text\n  more\nid: a\n# real note\n---\n\nbody\n';
+      const { container } = render(<MarkdownDiffViewer payload={payload(before, after)} />);
+      expect([...container.querySelectorAll('ins, del')].map((el) => el.textContent)).toEqual(['# real note']);
+    });
+
     it('shows a YAML comment removed from frontmatter, marked as removed', () => {
       const before = '---\nid: start\n  # old note\n---\n\nbody\n';
       render(<MarkdownDiffViewer payload={payload(before, '---\nid: start\n---\n\nbody\n')} />);
