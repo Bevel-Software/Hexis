@@ -158,6 +158,7 @@ import { OPEN_COMPARISON_EVENT } from '../../../../core/events';
 import { AppRegistryContext, makeRegistry, type FileRendererDef } from '../../../../core/registry';
 import { Dialog } from '../../../../shared/components';
 import type { FileRendererProps } from '../renderers';
+import type { WriteFileResult } from '../../services/workspace.api';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
 
@@ -237,6 +238,7 @@ function ViewerHarness({
   routePath,
   workspaceBranch = 'main',
   onSaveFile,
+  saveAnswer = {},
   routeSearch,
   renderers,
 }: {
@@ -279,6 +281,8 @@ function ViewerHarness({
   workspaceBranch?: string | null;
   /** Observes every write the viewer asks the workspace to make. */
   onSaveFile?: (relativePath: string, content: string) => void;
+  /** What the server answers each write with (its `warnings`). */
+  saveAnswer?: WriteFileResult;
   /** The query the entry opens with, e.g. `?fullscreen=1`. */
   routeSearch?: string;
   /** Renderers a deployment registers, as the enterprise overlay's `.html` one. */
@@ -351,6 +355,7 @@ function ViewerHarness({
       onSaveFile?.(relativePath, content);
       setOpenFileContent(content);
       setSavedContent(content);
+      return saveAnswer;
     },
     reloadTabFromDisk: async () => {},
     setPendingContent: (content: string) => {
@@ -936,6 +941,45 @@ describe('FileViewer', () => {
     // bar's clock, the same handoff the header's pressed clock makes, rather
     // than falling to `document`.
     expect(screen.getByRole('button', { name: 'Version history' })).toHaveFocus();
+  });
+
+  /**
+   * A save whose answer names entries that will not work says so where the
+   * person saved, in the slot a failed save uses, instead of returning to the
+   * read view as if nothing needed them (a plugin.json entry linking nothing
+   * used to surface only later, on the plugin page).
+   */
+  it('names the entries the save answered about, after Done, where a failed save would be named', async () => {
+    const user = userEvent.setup();
+    const message = '"./Skills/QALink/beta" is not a folder path, so it is ignored. Write it like "Skills/Engineering/deploy".';
+    render(
+      <ViewerHarness
+        filePath="knowledge-base/Plugins/Field Notes/plugin.json"
+        initialContent='{"name":"field-notes"}'
+        captureTyped
+        saveAnswer={{ warnings: [{ entry: '"./Skills/QALink/beta"', message }] }}
+      />,
+    );
+    expect(screen.queryByText(/Saved\. Some entries/)).not.toBeInTheDocument();
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    await user.type(await screen.findByRole('textbox'), ' ');
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+
+    const banner = (await screen.findByText("Saved. Some entries in this file won't work")).closest('[role="status"]');
+    expect(banner).not.toBeNull();
+    expect(within(banner as HTMLElement).getByText(message)).toBeInTheDocument();
+  });
+
+  it('says nothing more after a save whose answer has no warnings', async () => {
+    const user = userEvent.setup();
+    const saved: string[] = [];
+    render(<ViewerHarness initialContent="plain" captureTyped onSaveFile={(_p, c) => saved.push(c)} />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    await user.type(await screen.findByRole('textbox'), ' more');
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(saved.length).toBeGreaterThan(0));
+    expect(screen.queryByText(/Saved\. Some entries/)).not.toBeInTheDocument();
   });
 
   /**

@@ -225,6 +225,8 @@ export function PluginPage() {
     brokenLinks > 0 && (!canRepairLinks || repairFailed) && unrepairedLinks.length === 0;
   const integrationsNeedingSetup = attention - brokenLinks - warningCount;
   const definitionWarnings = summary?.warnings ?? [];
+  /** Which skill links link nothing for this reader, one sentence per kind of fault, as the server words them. */
+  const linkWarnings = summary?.linkWarnings ?? [];
   // What the Skills band actually renders. The filter is a VIEW over the band,
   // not a different query — flipping it back must show exactly what was there.
   const shownSkills = filterOn ? skillItems.filter((i) => i.status.state !== 'ok') : skillItems;
@@ -467,6 +469,19 @@ export function PluginPage() {
           } from the skill page${brokenLinks === 1 ? '' : 's'}.`}
         </Banner>
       )}
+      {/* The skill links that link nothing, under a title that says so.
+          Each line already names its entries and what to do, so the banner
+          adds nothing but the outcome. */}
+      {linkWarnings.length > 0 && (
+        <Banner role="status" tone="wait" className="mt-4">
+          <span className="font-semibold">Some skill links don&apos;t work</span>
+          <ul className="mt-1 list-disc break-words pl-5">
+            {linkWarnings.map((w, i) => (
+              <li key={`${i}:${w}`}>{w}</li>
+            ))}
+          </ul>
+        </Banner>
+      )}
       {/* What the platform could not keep of the plugin's definition — a
           server its profile selects that the registry rejected, a skill root
           that is not a folder. Said HERE, in words, because the people who
@@ -561,6 +576,10 @@ export function PluginPage() {
         emptySkills={
           filterOn ? (
             'Nothing in this band needs you right now.'
+          ) : summary && primaryFolder && linkWarnings.length > 0 ? (
+            // The banner above already says why nothing is here; offering to
+            // add a skill would point at a different fix than the one it names.
+            'No skills linked. Fix the entries above.'
           ) : summary && primaryFolder ? (
             // A truly empty plugin is the one moment the page has to teach
             // where "add" lives — the button opens the same dialog the title

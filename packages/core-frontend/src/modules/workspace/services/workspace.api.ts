@@ -111,8 +111,10 @@ export async function readFile(workspaceId: string, relativePath: string): Promi
 }
 
 /**
- * An `allowed-tools` entry in a saved SKILL.md that looks like a platform tool
- * but names none the saver can see. Advisory: the save already happened.
+ * What a save says about the saved file: an `allowed-tools` entry in a
+ * SKILL.md that looks like a platform tool but names none the saver can see,
+ * or `skills` entries of a plugin.json that link nothing. Advisory: the save
+ * already happened.
  */
 export interface SkillToolWarning {
   entry: string;
@@ -122,7 +124,7 @@ export interface SkillToolWarning {
 }
 
 export interface WriteFileResult {
-  /** Present only for a skill file whose `allowed-tools` names unknown platform tools. */
+  /** Present only for a SKILL.md naming unknown platform tools, or a plugin.json linking nothing. */
   warnings?: SkillToolWarning[];
 }
 

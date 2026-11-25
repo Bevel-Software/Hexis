@@ -1,6 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../discovery/kb-plugin-source.js';
+import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,10 +7,10 @@ import { DEFAULT_BRANCH, HEXIS_EXTENSION_NS, HEXIS_LINKED_SKILLS_KEY } from '@be
 import { PluginIndexService } from '../plugins.service.js';
 import type { PluginLinkIndex } from '../plugin-links.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ISkillService, SkillSummary } from '../../skills/skills.contract.js';
-import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ISkillService, SkillSummary } from '../../skills/index.js';
+import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const KB_DIR = 'knowledge-base';
@@ -73,7 +72,7 @@ describe('PluginIndexService', () => {
       skillService(opts.skills),
       toolService(opts.tools),
       kbContext,
-      new KbPluginSource(new NodeFs(), kbContext),
+      realPluginSource(realDisk(), kbContext),
       Date.now,
       opts.links,
     );
@@ -264,7 +263,7 @@ describe('PluginIndexService', () => {
       skillService(skills('Skills/Eng/deploy', 'Skills/Eng/rollback', 'Plugins/Product/roadmap')),
       toolService(),
       kbContext,
-      new KbPluginSource(new NodeFs(), kbContext),
+      realPluginSource(realDisk(), kbContext),
       Date.now,
       links,
     ).catalog();
@@ -313,10 +312,10 @@ describe('PluginIndexService', () => {
     );
     const catalog = await svc().catalog();
     const ado = catalog.find((g) => g.name === 'ado')!;
-    expect(ado.warnings).toEqual([
-      'sourceSkillRoots entry "../escape" is not a folder path — ignored',
-      'mcpProfile "global" named but no registry could be read',
-    ]);
+    expect(ado.warnings).toEqual(['mcpProfile "global" named but no registry could be read']);
+    // A root that is no folder path is carried as such, for the listing to
+    // say in the same words it uses for a plugin.json.
+    expect(ado.droppedRoots).toEqual([{ position: 1, entry: '../escape' }]);
     // Nothing of that is GTM's.
     expect(catalog.find((g) => g.name === 'gtm')!.warnings).toEqual([]);
   });

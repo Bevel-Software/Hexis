@@ -22,6 +22,7 @@ interface ScannedPlugin {
   folders: string[];
   /** The roots it links skills from — see `PluginSummary.linkedRoots`. */
   linkedRoots: string[];
+  droppedRoots: PluginCatalogEntry['droppedRoots'];
   linksAreManaged: boolean;
   displayName: string;
   warnings: string[];
@@ -143,6 +144,7 @@ export class PluginIndexService implements IPluginIndexService {
           displayName: scanned.get(name)?.displayName ?? name,
           folders: pluginFolders,
           linkedRoots: scanned.get(name)?.linkedRoots ?? [],
+          droppedRoots: scanned.get(name)?.droppedRoots ?? [],
           linksAreManaged: scanned.get(name)?.linksAreManaged ?? false,
           skillCount: skillCounts.get(name) ?? 0,
           toolCount: toolCounts.get(name) ?? 0,
@@ -178,6 +180,7 @@ export class PluginIndexService implements IPluginIndexService {
       byName.set(plugin.name, {
         folders: [plugin.folder],
         linkedRoots: plugin.linkedRoots,
+        droppedRoots: plugin.droppedRoots,
         linksAreManaged: plugin.linksAreManaged,
         displayName: plugin.displayName,
         // Discovery prefixes what it says about one plugin with that

@@ -1,3 +1,4 @@
+import type { DroppedSkillEntry } from '@bevel-software/platform-shared';
 import type { WalkListener } from '../../../shared/fs.contract.js';
 
 /**
@@ -51,6 +52,8 @@ export interface DiscoveredPlugin {
   manifestText: string | null;
   /** Repo-relative roots the plugin LINKS skills from — a skill folder or a folder of skills. */
   linkedRoots: string[];
+  /** The entries of that list that are no folder path, so link nothing: what the plugin page names. */
+  droppedRoots: DroppedSkillEntry[];
   /** The `mcpServers` map of the plugin's `mcp.json`, parsed; null when it has none. */
   mcpServers: Record<string, unknown> | null;
   /** The raw `mcp.json` text, when it exists on disk (native only). */

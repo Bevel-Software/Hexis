@@ -122,6 +122,12 @@ describe('membership by link', () => {
       brokenLinks: 2,
       warnings: 1,
     });
+    // So does each sentence about skill links that link nothing.
+    expect(
+      attentionOf(items, 'GTM', [
+        { name: 'GTM', brokenLinks: 0, warnings: ['server "docs" left out'], linkWarnings: ['"./x" is not a folder path.'] },
+      ]),
+    ).toEqual({ total: 2, brokenLinks: 0, warnings: 2 });
     // An older server sends no count: the catalog is the fallback.
     expect(brokenLinksOf(items, 'Ops', [{ name: 'Ops' }])).toBe(1);
     expect(brokenLinksOf(items, 'Ops', [])).toBe(1);

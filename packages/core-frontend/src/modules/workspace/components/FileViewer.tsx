@@ -47,6 +47,7 @@ import { PageToolsContext, getRendererLayout, isViewOnlyFile, pickFileRenderer }
 import { READ_PANE } from './renderers/readPane';
 import { CanDownloadContext } from './renderers/DownloadFileButton';
 import type { RendererSaveState } from './renderers';
+import type { SkillToolWarning } from '../services/workspace.api';
 import { KbDocumentShell } from './KbDocumentShell';
 import { FilePaneCard } from './FilePaneCard';
 import {
@@ -137,9 +138,15 @@ export function FileViewer() {
   // whether the user switched files mid-await.
   const openFilePathRef = useRef<string | null>(openFilePath);
   useEffect(() => { openFilePathRef.current = openFilePath; }, [openFilePath]);
+  // What the last save of the open file said about it (a plugin.json entry
+  // that links nothing, a SKILL.md tool nobody can use): shown where a failed
+  // save is named, until the next save or another file.
+  const [saveWarnings, setSaveWarnings] = useState<SkillToolWarning[]>([]);
   const persistToDisk = useCallback(async (content: string) => {
     if (!openFilePath) return;
-    await saveFile(openFilePath, content);
+    const { warnings = [] } = await saveFile(openFilePath, content);
+    // The answer belongs to the file that was saved, not to one opened since.
+    if (openFilePathRef.current === openFilePath) setSaveWarnings(warnings);
   }, [openFilePath, saveFile]);
   const auth = useAuth();
   const fileLock = useFileLock({
@@ -255,6 +262,7 @@ export function FileViewer() {
     setIsManualDirty(false);
     setManualSaveState('idle');
     setSaveError(null);
+    setSaveWarnings([]);
     setPendingDeferred(false);
     setHadPending(false);
     setComparisonOverride(null);
@@ -1742,6 +1750,21 @@ export function FileViewer() {
                   )}
                 </ul>
               )}
+            </Banner>
+          )}
+
+          {/* The save landed, and its answer names entries that will not
+              work. In the failed save's slot, the way the skill page shows
+              a SKILL.md's save warnings: the person learns it where they
+              saved, not later on another page. */}
+          {saveWarnings.length > 0 && !saveError && (
+            <Banner role="status" tone="wait" className="mb-4 flex-none">
+              <p className="font-semibold">Saved. Some entries in this file won&apos;t work</p>
+              <ul className="mt-1 list-disc break-words pl-5">
+                {saveWarnings.map((w, i) => (
+                  <li key={`${i}:${w.entry}`}>{w.message}</li>
+                ))}
+              </ul>
             </Banner>
           )}
 

@@ -38,6 +38,7 @@ import {
   deleteWorkspace as deleteWorkspaceApi,
   unzipFile as unzipFileApi,
   WorkspaceApiError,
+  type WriteFileResult,
 } from '../services/workspace.api';
 import { contentChanged } from '../utils/diff';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
@@ -1358,9 +1359,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     }
   }, [workspaceId]);
 
-  const saveFile = useCallback(async (relativePath: string, content: string) => {
-    if (!workspaceId) return;
-    await writeFile(workspaceId, relativePath, content);
+  const saveFile = useCallback(async (relativePath: string, content: string): Promise<WriteFileResult> => {
+    if (!workspaceId) return {};
+    const result = await writeFile(workspaceId, relativePath, content);
     // Update the matching tab — both the cached current value and the on-disk
     // baseline now equal `content`; clear dirty.
     setOpenTabs((prev) => {
@@ -1371,6 +1372,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return next;
     });
     bumpFs();
+    return result;
   }, [workspaceId, bumpFs]);
 
   const moveEntry = useCallback(async (oldPath: string, newPath: string) => {

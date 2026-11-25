@@ -229,8 +229,8 @@ export function createPluginsRoutes(
   /** Optional: a host without it has no rename route. */
   rename?: PluginRenameService,
   /**
-   * Optional: says, per caller, which linked roots hold no skill they can
-   * read. A host without it lists no such warning.
+   * Optional: says, per caller, which entries of a plugin's skill list link
+   * nothing for them. A host without it serves no `linkWarnings`.
    */
   skillLinks?: ISkillLinkCheck,
 ): express.Router {
@@ -452,9 +452,12 @@ export function createPluginsRoutes(
       // that hold nothing are judged per caller, against the skills THEY may
       // read, so the answer says nothing about a skill they cannot.
       const members = catalog.map((g) => any(readable, g, memberProbe));
-      const emptyRoots = skillLinks
-        ? await skillLinks.emptyRootWarnings(email, catalog.map((g, i) => (members[i] ? g.linkedRoots : [])))
-        : catalog.map(() => []);
+      const linkWarnings = skillLinks
+        ? await skillLinks.linkWarnings(
+            email,
+            catalog.map((g, i) => (members[i] ? { roots: g.linkedRoots, dropped: g.droppedRoots } : { roots: [], dropped: [] })),
+          )
+        : null;
 
       const plugins: PluginSummary[] = [];
       for (const [i, g] of catalog.entries()) {
@@ -497,7 +500,8 @@ export function createPluginsRoutes(
           writers: g.writers,
           readers: g.readers,
           isPrivate: g.isPrivate,
-          warnings: member ? [...g.warnings, ...(emptyRoots[i] ?? []).map((w) => w.message)] : [],
+          warnings: member ? g.warnings : [],
+          ...(linkWarnings ? { linkWarnings: member ? (linkWarnings[i] ?? []).map((w) => w.message) : [] } : {}),
           hasRequested: requested,
           requestNumber: requested ? (record?.changeRequestNumber ?? joinCr?.number ?? null) : null,
           requestFailure: requested

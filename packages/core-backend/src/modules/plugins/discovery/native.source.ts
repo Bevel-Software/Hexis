@@ -11,7 +11,6 @@ import {
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type IFsProbe } from '../../../shared/fs.contract.js';
-import { droppedSkillEntryWarning } from '../skill-link-warnings.js';
 import type { DiscoveredPlugin } from './plugin-source.js';
 
 /**
@@ -78,12 +77,7 @@ export async function readNativePlugin(
       `${folder}/${PLUGIN_MANIFEST_FILE} names ${spelled}, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "${name}"`,
     );
   }
-  // A `skills` entry that is no folder path links nothing: said here, like
-  // the bundle dialect's `sourceSkillRoots`, so the plugin page shows it.
-  const { roots: linkedRoots, dropped } = linkedSkillEntries(manifest);
-  for (const entry of dropped) {
-    warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} ${droppedSkillEntryWarning(entry, layout.skillsDir)}`);
-  }
+  const { roots: linkedRoots, dropped: droppedRoots } = linkedSkillEntries(manifest);
   const mcp = parseObject(mcpJsonText);
   const mcpServers =
     mcp && typeof mcp.mcpServers === 'object' && mcp.mcpServers !== null && !Array.isArray(mcp.mcpServers)
@@ -112,6 +106,7 @@ export async function readNativePlugin(
     manifest,
     manifestText,
     linkedRoots,
+    droppedRoots,
     mcpServers,
     mcpJsonText,
     linksAreManaged: true,

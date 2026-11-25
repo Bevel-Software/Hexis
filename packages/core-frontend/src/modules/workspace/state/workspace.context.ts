@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import type { WriteFileResult } from '../services/workspace.api';
 
 /**
  * Which tree a drop landed in, so its banners can be shown THERE and only
@@ -334,7 +335,8 @@ export interface WorkspaceContextValue {
    */
   deleteEntry: (relativePath: string) => Promise<void | false>;
   moveEntry: (oldPath: string, newPath: string) => Promise<void>;
-  saveFile: (relativePath: string, content: string) => Promise<void>;
+  /** Resolves with what the server said about the saved file (its `warnings`), once it is written. */
+  saveFile: (relativePath: string, content: string) => Promise<WriteFileResult>;
   /**
    * Re-read the matching tab's bytes from the server and replace the tab's
    * `content` + `savedContent` with them, clearing dirty + any pending agent
