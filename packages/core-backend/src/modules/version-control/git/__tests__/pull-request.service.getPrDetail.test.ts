@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { PullRequestService } from '../pull-request.service.js';
-import type { Database } from '../../../database/connection.js';
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import type { Database } from '../../../database/index.js';
+import type { WorkspaceService } from '../../../workspace/index.js';
 import type { GitService } from '../git.service.js';
-import type { IAccessControl } from '../../../access/access-control.interface.js';
+import type { IAccessControl } from '../../../access/index.js';
 
 const ROW = {
   id: 'cr-7',

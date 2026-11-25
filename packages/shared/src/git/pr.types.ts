@@ -224,18 +224,19 @@ export interface FileApprovalEntry {
  * means any signed-in approver is eligible.
  *
  * A MOVED file (one with a `previousPath`) is gated at both ends, as an
- * addition at its path and a deletion at its previous one: its approvers are
- * both folders' owners, and it is approved only once each end that has
- * approvers has a non-stale approval from one of its own.
+ * addition at its path and a deletion at its previous one: it is approved
+ * only once each end that has approvers has a non-stale approval from one of
+ * its own. Its `eligibleApprovers` name both folders' owners to a viewer who
+ * may read the previous path, and the path's owners alone to anyone else.
  */
 export interface FileApprovalState {
   path: string;
   /**
-   * Roles + direct user grants that confer write access on this file as of
-   * the PR head. `roles` may include the built-in role `everyone`. Empty roles
-   * + empty users means the file is outside the access-controlled surface (no
-   * rule grants write); the merge gate silently excludes such entries instead
-   * of blocking on them.
+   * Roles + direct user grants that confer write access on this file under
+   * the access tree at `origin/<baseBranch>`. `roles` may include the
+   * built-in role `everyone`. For a moved file, the previous path's are
+   * included only when the viewer may read that path. Whether the merge gate
+   * binds the file is `inMergeGate`, not the emptiness of this list.
    */
   eligibleApprovers: {
     roles: string[];
@@ -254,19 +255,19 @@ export interface FileApprovalState {
    * True iff at least one eligible approver has submitted a non-stale
    * approval. For a moved file, true iff each end that has approvers (the
    * path and the previous path) has a non-stale approval from one of that
-   * end's own eligible writers. Always `false` when `eligibleApprovers` is
-   * empty — with no eligible set, nobody can satisfy the check.
-   * Whether the gate *cares* about this file is a separate concern handled
-   * by the merge-gate logic: files with no eligible approvers, whatever
-   * their type, are silently excluded from the gate, so `isApproved: false`
+   * end's own eligible writers. Always `false` when no end has approvers —
+   * with no eligible set, nobody can satisfy the check.
+   * Whether the gate *cares* about this file is `inMergeGate`: a file no end
+   * of which has approvers is excluded from the gate, so `isApproved: false`
    * on one of them does not block merge.
    */
   isApproved: boolean;
   /**
    * Whether the merge gate binds this file at all — the backend's one
    * relevance rule, stamped per file so clients read the verdict instead of
-   * re-deriving it. False files neither warn nor block a merge, so no surface
-   * should count them as pending or name anyone to wait on.
+   * re-deriving it: true iff some end of the file has approvers. False files
+   * neither warn nor block a merge, so no surface should count them as
+   * pending or name anyone to wait on.
    */
   inMergeGate: boolean;
   /**
@@ -275,13 +276,39 @@ export interface FileApprovalState {
    * that is not moved: true iff the viewer may write its path. For a moved
    * file: `writesPreviousPath || (writesPath && previousPathSettled)`, where
    * the previous path is settled when it has no approvers or one of them has
-   * approved the current head. The frontend uses this to gate the
+   * approved the current head, and counts as settled only for a viewer who
+   * may read it. Approving is not always completing: see
+   * `viewerApprovalLeavesWaiting`. The frontend uses this to gate the
    * Approve button — without it, the button shows for any user whenever the
    * eligible-roles list is non-empty, which is misleading because most users
    * aren't actually in those roles. Backend remains authoritative; this is a
    * UX hint, not a security boundary.
    */
   viewerCanApprove: boolean;
+  /**
+   * Present, and true, when the requesting viewer may approve the file
+   * (`viewerCanApprove`) but their approval would still leave it unapproved:
+   * some end with approvers is neither approved yet nor one they may write.
+   * Only a moved file can be in that state — a viewer who writes its previous
+   * path but not its path, while the path's owners have not approved: their
+   * approval is the source's consent, and the path's owners still have to
+   * give theirs. Absent otherwise, so `isApproved || (viewerCanApprove &&
+   * !viewerApprovalLeavesWaiting)` is whether the viewer's click finishes
+   * the file, which is what offering Apply asks.
+   */
+  viewerApprovalLeavesWaiting?: true;
+}
+
+/**
+ * Is this file approved once the requesting viewer has approved it — already
+ * approved, or theirs to approve with nothing else left waiting? The one
+ * reading every "may this viewer apply" answer takes: the app's Apply and the
+ * backend's `viewerCanUpdate`.
+ */
+export function viewerFinishesApproval(
+  a: Pick<FileApprovalState, 'isApproved' | 'viewerCanApprove' | 'viewerApprovalLeavesWaiting'>,
+): boolean {
+  return a.isApproved || (a.viewerCanApprove && !a.viewerApprovalLeavesWaiting);
 }
 
 /**

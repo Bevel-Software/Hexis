@@ -172,7 +172,8 @@ export function createVersionControlRoutes(
    * A saved apply refusal is git's or the gate's own text, and it names files
    * ("Waiting on approval for Plugins/x/SKILL.md …"). Every viewer still learns
    * THAT the apply failed, who tried and when; the reason itself only reaches a
-   * viewer who can read every file the request touches. Anyone else — an
+   * viewer who can read every file the request touches, by both names of a
+   * moved one (`namesTouched`). Anyone else — an
    * unauthenticated read, or a reader of the folder's `access.md` but not its
    * content — gets a withheld line instead. Fails closed: an access lookup that
    * errors withholds, and so does a request with NO resolved touched paths,
@@ -191,7 +192,7 @@ export function createVersionControlRoutes(
       const user = knownUser ?? (req.userId ? await authService.getUserById(req.userId) : null);
       if (user) {
         const workspace = await workspaceService.getOrCreateForUser(user);
-        const paths = [...new Set(failing.flatMap((c) => c.touchedNodePaths))];
+        const paths = [...new Set(failing.flatMap(namesTouched))];
         readable = paths.length > 0 ? await accessControl.canReadBatch(workspace.id, user.email, paths) : new Map();
       }
     } catch (err) {
@@ -201,9 +202,19 @@ export function createVersionControlRoutes(
     return items.map((c) => {
       const failure = c.lastApplyFailure;
       if (!failure) return c;
-      const mayRead = readable !== null && readsEveryPath(readable, c.touchedNodePaths);
+      const mayRead = readable !== null && readsEveryPath(readable, namesTouched(c));
       return mayRead ? c : { ...c, lastApplyFailure: { ...failure, reason: APPLY_FAILURE_REASON_WITHHELD } };
     });
+  }
+
+  /**
+   * Every name a request's files go by: each path, and each moved file's
+   * previous path, which a refusal can name too — the gate's names that
+   * path's owners to a reader of it. So a reason reaches only a reader of
+   * where each file came from as well as where it goes.
+   */
+  function namesTouched(c: Pick<ChangeRequest, 'touchedNodePaths' | 'touchedNodeFiles'>): string[] {
+    return [...c.touchedNodePaths, ...(c.touchedNodeFiles ?? []).flatMap((f) => f.previousPath ?? [])];
   }
 
   /**
@@ -1213,7 +1224,7 @@ export function createVersionControlRoutes(
           });
           return;
         }
-        readScope = { workspaceId: workspace.id, paths: detail.touchedNodePaths };
+        readScope = { workspaceId: workspace.id, paths: namesTouched(detail) };
         const outcome = await versionControl.mergeChangeRequest(
           num,
           user,

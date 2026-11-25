@@ -6,10 +6,9 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, FileApprovalState, IVersionControlService, VersionControlEvent } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { Database } from '../../database/connection.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import { PullRequestService as RealPullRequestService } from '../git/pull-request.service.js';
@@ -20,7 +19,7 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { changeRequests } from '../../database/schema.js';
+import { changeRequests, type Database } from '../../database/index.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { VersionControlService } from '../version-control.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createVersionControlRoutes } from '../version-control.routes.js';
@@ -57,6 +56,7 @@ async function routeHarness(
   merge: () => Promise<unknown>,
   opts: {
     touchedNodePaths?: string[];
+    touchedNodeFiles?: { path: string; previousPath?: string }[];
     canReadBatch?: (paths: string[]) => Promise<Map<string, boolean>>;
   } = {},
 ): Promise<RouteHarness> {
@@ -70,6 +70,7 @@ async function routeHarness(
       title: 'Upload into Plugins/x',
       base: 'main',
       touchedNodePaths: opts.touchedNodePaths ?? ['Plugins/x/SKILL.md'],
+      touchedNodeFiles: opts.touchedNodeFiles,
     })),
     mergeChangeRequest: vi.fn(merge),
     beginApplyAttempt: vi.fn(() => 1),
@@ -168,6 +169,27 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
       ADMIN,
       1,
     );
+  });
+
+  it("a moved file's previous path counts too: a clicker who cannot read where it came from gets no reason", async () => {
+    // The gate names a moved file's source owners to a reader of the source;
+    // a reader of the new path alone must not get those words back.
+    h = await routeHarness(
+      async () => {
+        throw new VersionControlValidationError('Waiting on approval for Open/s2.md from Locked Owner');
+      },
+      {
+        touchedNodePaths: ['Open/s2.md'],
+        touchedNodeFiles: [{ path: 'Open/s2.md', previousPath: 'Locked/s2.md' }],
+        canReadBatch: async (paths) => new Map(paths.map((p) => [p, p !== 'Locked/s2.md'])),
+      },
+    );
+    await post(h.baseUrl);
+    await vi.waitFor(() =>
+      expect(h!.emitted).toContainEqual(expect.objectContaining({ kind: 'change-request-merge-failed' })),
+    );
+    const answer = h.emitted.find((e) => e.kind === 'change-request-merge-failed') as { reason: string };
+    expect(answer.reason).toBe(APPLY_FAILURE_REASON_WITHHELD);
   });
 
   it("a request with no resolved touched paths withholds the clicker's reason too", async () => {

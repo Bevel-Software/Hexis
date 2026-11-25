@@ -20,14 +20,17 @@ const EMPTY_ELIGIBLE = {
 
 // Spread-after-defaults so explicit empty eligibility (e.g. ownerless legacy
 // file) passes through instead of being overwritten by the default.
+// `inMergeGate` follows the approvers, as `getApprovalStates` stamps it for a
+// file that is not moved, unless a case sets it.
 function approval(overrides: Partial<FileApprovalState>): FileApprovalState {
+  const eligibleApprovers = overrides.eligibleApprovers ?? ADMIN_ELIGIBLE;
   return {
     path: 'Knowledge/Foo.md',
-    eligibleApprovers: ADMIN_ELIGIBLE,
+    eligibleApprovers,
     approvedBy: [],
     isApproved: false,
     viewerCanApprove: false,
-    inMergeGate: true,
+    inMergeGate: eligibleApprovers.roles.length > 0 || eligibleApprovers.users.length > 0,
     ...overrides,
   };
 }

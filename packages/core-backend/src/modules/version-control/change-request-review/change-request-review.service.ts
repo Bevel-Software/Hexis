@@ -172,22 +172,6 @@ function assertValidPrNumber(n: number): void {
   }
 }
 
-/**
- * Approval enforcement binds every touched file that has someone eligible to
- * approve it per the access tree — Markdown notes, the access-config files
- * (`roles.yaml`, `access.md`), extensionless and binary files alike. The
- * extension plays no part: a `report.pdf` or a `Makefile` in an owned folder
- * is as much its owners' decision as a note beside it, and an extension check
- * let a request touching only such files merge with no approval at all. Files
- * with no eligible approvers are outside the gate — nobody could approve them,
- * so counting them would deadlock the request. Shared between the gate and
- * any call-site that needs the "does this participate in approvals" question
- * answered consistently.
- */
-function isGateRelevant(a: Pick<FileApprovalState, 'eligibleApprovers'>): boolean {
-  return a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
-}
-
 /** Human-friendly label for the eligible-approver set, used in gate warnings. */
 function eligibleLabel(a: FileApprovalState): string {
   const parts: string[] = [];
@@ -226,11 +210,14 @@ function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warn
   }
 
   // Ownership enforcement binds every file with an eligible approver,
-  // whatever its extension; files nobody can approve are silent. For the
-  // gate-relevant files, "owner hasn't approved the current head" is a
+  // whatever its extension; files nobody can approve are silent. Which files
+  // those are is `inMergeGate`, decided by `getApprovalStates` from every
+  // end's eligibility — not re-derived here from `eligibleApprovers`, which
+  // shows a moved file's source owners only to a reader of the source. For
+  // the gate-relevant files, "owner hasn't approved the current head" is a
   // missing approval — it blocks, and only an admin bypass merges past it.
   for (const a of input.approvals) {
-    if (!isGateRelevant(a)) continue;
+    if (!a.inMergeGate) continue;
     if (a.isApproved) continue;
 
     const hasStale = a.approvedBy.some((e) => e.isStale);
@@ -319,7 +306,8 @@ function unionApprovers(
  * counts for each side they are eligible on); a person who may write only the
  * destination approves it once the source side is settled — nobody could
  * approve the source anyway, or one of its approvers has approved the current
- * head. Before that,
+ * head — and only if they may read the source, since otherwise the answer
+ * would tell them which. Before that,
  * the destination writer's click would take the file out of a folder they may
  * not write with nobody's consent but their own.
  */
@@ -386,6 +374,9 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
     // the caller is unauthenticated. The frontend can still surface the
     // eligible roles/users list; it just won't render an Approve button.
     let viewerCanApproveByPath: Map<string, boolean> = new Map();
+    // Which moved files' previous paths the viewer may read: none, unless
+    // proven. Read only for those paths.
+    let viewerReadsByPath: Map<string, boolean> = new Map();
     let eligibilityResolved = false;
     if (workspaceId) {
       await this.workspaceService.ensureRemotesFetched(workspaceId).catch(() => undefined);
@@ -415,10 +406,15 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
             paths,
           );
           if (batch) viewerCanApproveByPath = batch;
+          const sources = files.flatMap((f) => sourceOf(f) ?? []);
+          if (sources.length > 0) {
+            const reads = await this.accessControl.canReadBatchAtRef(workspaceId, baseRef, viewerEmail, sources);
+            if (reads) viewerReadsByPath = reads;
+          }
         } catch (err) {
           if (err instanceof AccessUnreadableError) throw err;
           // The viewer is not named: log lines carry no email addresses.
-          log.warn(`canWriteBatchAtRef failed for PR #${prNumber} (for the viewer):`, { err });
+          log.warn(`viewer access lookup failed for PR #${prNumber}:`, { err });
         }
       }
     }
@@ -449,33 +445,42 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       // `origin/<baseBranch>`) has an approval of the current head. A file
       // that is not moved has one side. A moved file has two, the destination
       // and the source it is taken out of, whose owners must have approved as
-      // surely as for a deletion of it. Files nobody can approve are silently
-      // excluded from the merge gate by `isGateRelevant`.
-      const sides = source ? [destination, source] : [destination];
-      const isApproved =
-        sides.some(hasApprovers) &&
-        sides.every((side) => !hasApprovers(side) || approvedByEligible(side, pathRows, headSha));
+      // surely as for a deletion of it. Files nobody can approve at any end
+      // are outside the merge gate (`inMergeGate`).
+      const writes = (p: string) => viewerCanApproveByPath.get(p) === true;
+      const ends: { side: PathEligibility; viewerWrites: boolean }[] = [
+        { side: destination, viewerWrites: writes(file.path) },
+        ...(source && sourcePath ? [{ side: source, viewerWrites: writes(sourcePath) }] : []),
+      ];
+      const settled = (side: PathEligibility) => !hasApprovers(side) || approvedByEligible(side, pathRows, headSha);
+      const isApproved = ends.some((e) => hasApprovers(e.side)) && ends.every((e) => settled(e.side));
 
-      const state = {
+      // Who may write the source, and whether they have approved, is told
+      // only to a reader of the source: a viewer who may not read it sees the
+      // destination's approvers alone, and is not offered the approval its
+      // owners' consent would open to them (`approveFile` refuses it the same
+      // way). The gate still binds on every end: `inMergeGate` and
+      // `isApproved` come from both.
+      const shownSource = source && sourcePath && viewerReadsByPath.get(sourcePath) === true ? source : null;
+      const viewerCanApprove = mayApproveFile({
+        writesDestination: writes(file.path),
+        source: sourcePath ? { writes: writes(sourcePath), settled: shownSource !== null && settled(shownSource) } : null,
+      });
+      // An approval counts for each end its giver may write, so it finishes
+      // the file only when every other end is already settled.
+      const leavesWaiting = !isApproved && viewerCanApprove && !ends.every((e) => e.viewerWrites || settled(e.side));
+      return {
         path: file.path,
-        eligibleApprovers: source
-          ? unionApprovers(destination, source)
+        eligibleApprovers: shownSource
+          ? unionApprovers(destination, shownSource)
           : { roles: destination.roles, users: destination.users },
         approvedBy,
         eligibilityResolved,
         isApproved,
-        viewerCanApprove: mayApproveFile({
-          writesDestination: viewerCanApproveByPath.get(file.path) === true,
-          source:
-            source && sourcePath
-              ? {
-                  writes: viewerCanApproveByPath.get(sourcePath) === true,
-                  settled: !hasApprovers(source) || approvedByEligible(source, pathRows, headSha),
-                }
-              : null,
-        }),
+        inMergeGate: ends.some((e) => hasApprovers(e.side)),
+        viewerCanApprove,
+        ...(leavesWaiting ? { viewerApprovalLeavesWaiting: true as const } : {}),
       };
-      return { ...state, inMergeGate: isGateRelevant(state) };
     });
   }
 
@@ -521,9 +526,13 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
             // may not write the source — and before the insert, not under its
             // lock. Safely so: the gate re-derives each side from the rows when
             // it is read, so a source approval withdrawn in between leaves this
-            // one counting for the destination alone.
+            // one counting for the destination alone. Asked only for a caller
+            // who may read the source: anyone else gets the same 403 whether
+            // its owners have approved or not.
             settled:
-              canApprove === true && canApproveSource !== true
+              canApprove === true &&
+              canApproveSource !== true &&
+              (await this.accessControl.canReadAtRef(workspaceId, baseRef, user.email, sourcePath)) === true
                 ? await this.sourceSettled(prNumber, path, sourcePath, headSha, workspaceId, baseRef)
                 : false,
           }

@@ -3,9 +3,9 @@ import type { AuthUser, VersionControlEventPayload } from '@bevel-software/platf
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import { hashEmail } from '../../../shared/email-identity.js';
-import type { Database } from '../../database/connection.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { Database } from '../../database/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';

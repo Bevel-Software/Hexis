@@ -91,8 +91,10 @@ export interface IChangeRequestReviewService {
    * For a file that is not moved, the caller qualifies iff they hold `write`
    * on its path. A MOVED file is also a deletion of its `previousPath`, and
    * the caller qualifies iff they write the previous path, or they write the
-   * new path and the previous path is settled: it has no approvers, or one of
-   * them has approved the current head. Idempotent — approving twice on the same headSha is a no-op.
+   * new path, may read the previous path, and it is settled: it has no
+   * approvers, or one of them has approved the current head. A caller who
+   * may not read it gets the same 403 whether it is settled or not.
+   * Idempotent — approving twice on the same headSha is a no-op.
    * Returns the fresh composite state for all files.
    */
   approveFile(

@@ -13,7 +13,7 @@ import type {
   PullRequestSummary,
   IGitService,
 } from '@bevel-software/platform-shared';
-import { isFolderPlaceholder } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder, viewerFinishesApproval } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/index.js';
 import { changeRequests } from '../../database/index.js';
 import type { WorkspaceService } from '../../workspace/index.js';
@@ -1075,8 +1075,8 @@ export function computeViewerCanCancel(input: {
  * Pure predicate for `viewerCanUpdate` — who may merge a request's target
  * into it. The request's author (it is their proposal to bring up to date)
  * and anyone who may apply it, by the merge gate's own reading: every file
- * the gate binds (`isGateRelevant`) already approved or approvable by this
- * viewer — files outside the gate (`inMergeGate: false`) need nobody's
+ * the gate binds (`inMergeGate`) already approved or finished by this
+ * viewer's approval (`viewerFinishesApproval`) — files outside the gate (`inMergeGate: false`) need nobody's
  * approval to apply, so they cannot withhold Update either — or an admin, who
  * may apply over missing approvals. That exemption holds only for a file whose
  * approvers were actually resolved (`eligibilityResolved`): when the access
@@ -1097,7 +1097,7 @@ export function computeViewerCanUpdate(input: {
   const viewerMayApply =
     input.approvals.length > 0 &&
     input.approvals.every(
-      (a) => (a.eligibilityResolved === true && !a.inMergeGate) || a.isApproved || a.viewerCanApprove,
+      (a) => (a.eligibilityResolved === true && !a.inMergeGate) || viewerFinishesApproval(a),
     );
   return viewerIsAuthor || input.viewerCanBypassMerge || viewerMayApply;
 }

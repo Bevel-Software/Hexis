@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { PullRequestFile } from '@bevel-software/platform-shared';
+import { viewerFinishesApproval, type PullRequestFile } from '@bevel-software/platform-shared';
 
 // mergePr merges locally through GitService now (no `gh`), so we stub the git
 // seam and spy on it. `mergeChangeRequestMock` stands in for the real
@@ -870,8 +870,11 @@ describe('a move out of a folder the person may not write', () => {
     },
   };
 
-  /** The service over `rows`, with the viewer batch answering as the single lookup does. */
-  function makeMoveService(rows: ApprovalRow[]) {
+  /**
+   * The service over `rows`, with the viewer batch answering as the single
+   * lookup does. Everyone reads everything unless `reads` says otherwise.
+   */
+  function makeMoveService(rows: ApprovalRow[], reads: (email: string, path: string) => boolean = () => true) {
     const base = makeAccessControl(byPath);
     const access: IAccessControl = {
       ...base,
@@ -880,6 +883,8 @@ describe('a move out of a folder the person may not write', () => {
         for (const p of paths) out.set(p, (await base.canWriteAtRef(ws, ref, email, p)) === true);
         return out;
       },
+      canReadAtRef: async (_ws, _ref, email, path) => reads(email, path),
+      canReadBatchAtRef: async (_ws, _ref, email, paths) => new Map(paths.map((p) => [p, reads(email, p)])),
     };
     const workspace = {
       ensureRemotesFetched: vi.fn(async () => undefined),
@@ -989,6 +994,63 @@ describe('a move out of a folder the person may not write', () => {
     expect(approvals[0].isApproved).toBe(true);
     await svc.mergePr(1, USER, HEAD, approvals, 'open', 'Rename a', BASE, 'ws-1');
     expect(mergeChangeRequestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the source owner their approval leaves the move waiting on the destination', async () => {
+    const svc = makeMoveService([]);
+    const [owner] = await states(svc, OWNER.email);
+    // Theirs to approve, as the source's consent — but not theirs to finish,
+    // so the app offers them Approve and not Apply.
+    expect(owner.viewerCanApprove).toBe(true);
+    expect(owner.viewerApprovalLeavesWaiting).toBe(true);
+    expect(viewerFinishesApproval(owner)).toBe(false);
+    // An admin writes both ends: their approval finishes it.
+    const [admin] = await states(svc, ADMIN.email);
+    expect(admin.viewerApprovalLeavesWaiting).toBeUndefined();
+    expect(viewerFinishesApproval(admin)).toBe(true);
+    // Once the owner has approved, the Business user's approval finishes it.
+    await approve(svc, OWNER);
+    const [user] = await states(svc, USER.email);
+    expect(user.viewerApprovalLeavesWaiting).toBeUndefined();
+    expect(viewerFinishesApproval(user)).toBe(true);
+  });
+
+  it('lets the source owner finish a move into a folder nobody can approve', async () => {
+    const files = [file({ path: 'Ungoverned/s2.md', previousPath: LOCKED, status: 'renamed' })];
+    const [owner] = await states(makeMoveService([]), OWNER.email, files);
+    expect(owner.viewerCanApprove).toBe(true);
+    expect(viewerFinishesApproval(owner)).toBe(true);
+  });
+
+  describe('a viewer who may not read the source', () => {
+    const notLocked = (email: string, path: string) => !(email === USER.email && path === LOCKED);
+
+    it('is shown the destination’s approvers alone, and the gate still binds the file', async () => {
+      const svc = makeMoveService([], notLocked);
+      const [state] = await states(svc, USER.email);
+      expect(state.eligibleApprovers.users.map((u) => u.email)).toEqual([USER.email]);
+      expect(state.inMergeGate).toBe(true);
+      // Into a folder nobody can approve: nothing is shown, and the gate
+      // still waits on the source's owners.
+      const files = [file({ path: 'Ungoverned/s2.md', previousPath: LOCKED, status: 'renamed' })];
+      const approvals = await states(svc, USER.email, files);
+      expect(approvals[0].eligibleApprovers).toEqual({ roles: [], users: [] });
+      expect(approvals[0].inMergeGate).toBe(true);
+      expect(svc.evaluateMergeGate({ prNumber: 1, state: 'open', approvals }).mergeable).toBe(false);
+    });
+
+    it('gets the same answer before and after the source owner approves (app and REST)', async () => {
+      const rows: ApprovalRow[] = [];
+      const svc = makeMoveService(rows, notLocked);
+      expect((await states(svc, USER.email))[0].viewerCanApprove).toBe(false);
+      await expect(approve(svc, USER)).rejects.toMatchObject({ name: 'ApprovalAuthError', status: 403 });
+
+      await approve(svc, OWNER);
+      // The owner's consent is not told to them: still not theirs to approve.
+      expect((await states(svc, USER.email))[0].viewerCanApprove).toBe(false);
+      await expect(approve(svc, USER)).rejects.toMatchObject({ name: 'ApprovalAuthError', status: 403 });
+      expect(rows.map((r) => r.approverEmail)).toEqual([OWNER.email]);
+    });
   });
 
   it('treats a move out of a folder nobody can approve as the destination alone', async () => {
