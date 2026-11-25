@@ -195,6 +195,7 @@ import { UpdateCheckService } from '../modules/update-check/update-check.service
 import { resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
 import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.js';
+import { createCatalogRevisionReader, type CatalogRevisionReader } from './catalog-revision.js';
 
 /**
  * Everything the CORE composition builds: the core services `createCoreServer`
@@ -425,6 +426,12 @@ export interface CoreServices {
   embedService: EmbedService;
   /** The MCP Apps this deployment serves — the `open_page` view and its sandbox metadata. */
   mcpAppService: IMcpAppService;
+  /**
+   * Reads one caller's catalog revision. The route `GET /agent/catalog-revision`
+   * answers with it and the MCP endpoint calls it directly, so the two cannot
+   * answer differently (`core/catalog-revision.ts`).
+   */
+  readCatalogRevision: CatalogRevisionReader;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -1480,6 +1487,19 @@ export async function createCoreServices(
     workspaceId: () => workspaceIdForBranch(kb.defaultBranch),
     kbDirName,
   });
+  // The caller's catalog revision, computed once here and handed to both the
+  // route that serves it and the MCP endpoint that asks for it on every
+  // request. The endpoint calls it as a function: over loopback it was a
+  // request the server sent itself, which a busy server failed on its own limit.
+  const readCatalogRevision = createCatalogRevisionReader({
+    toolManuals: toolManualService,
+    skills: skillService,
+    resolveUserEmail: async (userId) => (await authService.getUserById(userId))?.email,
+    agentScope: agentScopeService,
+    // The views move the revision too: a release that changes a view and no
+    // manual would otherwise leave a running local server on the old one.
+    mcpApps: mcpAppService,
+  });
   const mcpService = new McpService(
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
@@ -1505,6 +1525,8 @@ export async function createCoreServices(
       readOnlyOverrides: () => readOnlyHints.overrides(),
       // A tool whose body is declared a file path sends the file's bytes.
       readFileBody: async (userId, ref) => fileBodies.read(await authService.getUserById(userId), ref),
+      // Asked on every request, so answered in process and not over loopback.
+      readCatalogRevision,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1830,6 +1852,7 @@ export async function createCoreServices(
     internalTokenService,
     embedService,
     mcpAppService,
+    readCatalogRevision,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,

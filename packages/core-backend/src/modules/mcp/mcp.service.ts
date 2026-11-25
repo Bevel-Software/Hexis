@@ -70,6 +70,7 @@ import { SurfaceCache, type SurfaceCacheOptions } from './surface-cache.js';
 import { SharedDefinitions } from './shared-definitions.js';
 import { currentRequest, runInRequest, type McpRequestContext } from './request-context.js';
 import { printable } from '../../shared/printable.js';
+import { withinLoopTime } from '../../shared/loop-time-limit.js';
 import {
   composeAgentInstructions,
   prefixToolDescription,
@@ -158,6 +159,30 @@ export interface McpProxyOptions {
    * the agent wrote it.
    */
   readFileBody?: (userId: string, ref: string) => Promise<Uint8Array>;
+  /**
+   * Reads a caller's catalog revision in process: the same computation
+   * `GET /api/agent/catalog-revision` answers with (`core/catalog-revision.ts`),
+   * called as a function. The revision is asked for on EVERY request, to pick
+   * the caller's cached surface, so over loopback it was a request the server
+   * sent itself on every request: it waited on the event loop it was already
+   * running on, behind `LOOPBACK_TIMEOUT_MS`, and a busy server failed its own
+   * callers. The caller is the one the request's credential resolved to, which
+   * is what the route's auth resolves the loopback bearer to.
+   *
+   * Absent (a test, or a composition that serves the route elsewhere), the
+   * revision is read over loopback as before.
+   */
+  readCatalogRevision?: (caller: {
+    userId: string;
+    agentPath: string | null;
+  }) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
+  /**
+   * How long a read this service makes in process may take: a limit a held
+   * event loop cannot use up (`shared/loop-time-limit.ts`); default
+   * {@link IN_PROCESS_READ_LIMIT_MS}. A read that passes it is given up on, as
+   * a loopback request that passed its limit was. Set by tests.
+   */
+  inProcessReadLimitMs?: number;
 }
 
 /** Who a request is from — everything the proxy needs, resolved from that request's own bearer. */
@@ -202,6 +227,18 @@ export interface McpCaller {
  * milliseconds; only a wedged process ever comes near it.
  */
 const LOOPBACK_TIMEOUT_MS = 15_000;
+
+/**
+ * Upper bound on a read made in process (the catalog revision), as long as the
+ * loopback request it replaces was given. The loopback's limit ran on the
+ * clock, so a server whose loop was held passed it on a read that needed
+ * milliseconds. This one is spent only while the event loop turns: a stretch
+ * the loop is held for spends one tick of it, however long the stretch. Under
+ * steady load that lets the loop turn it runs on the clock, and the read gets
+ * every turn the limit gets. A read that waits on something that never answers
+ * still ends, so the request falls back as it did before and does not hang.
+ */
+const IN_PROCESS_READ_LIMIT_MS = 15_000;
 
 /**
  * Lifetime of the internal token minted as an OAuth/JWT request's loopback
@@ -260,6 +297,16 @@ interface RequestSurface {
    * build, at the latest after an hour unused.
    */
   degraded: boolean;
+  /**
+   * The caller's manual list could not be read (the `all-tools` loopback
+   * failed, or answered nothing usable), so this surface carries the platform
+   * manual alone. It answers the request that built it and is never kept:
+   * served from the cache it would hide every `.tool` of the caller until
+   * their catalog revision moved, a secret of theirs changed, or the process
+   * restarted. A failed read says nothing about the catalog, so the next
+   * request reads it again.
+   */
+  catalogUnread: boolean;
   /**
    * The agent the catalog was narrowed to, as `all-tools` reported it —
    * absent for Everything. A call to a tool not on a narrowed surface is
@@ -565,7 +612,7 @@ export class McpService {
     // revision (cheap), not the surface (a full discovery). Everything is
     // told nothing new, so its handshake is exactly what it was.
     const connectionLine = async (): Promise<string | null> =>
-      agentPath ? describeConnection((await this.fetchCatalogRevision(loopbackBearer)).connection) : null;
+      agentPath ? describeConnection((await this.catalogRevisionOf(caller, loopbackBearer)).connection) : null;
     // The Audit log's view of this request — only when the request can be
     // attributed to a key, an agent connection or a page. The catalog names
     // it classifies pooled tools by are the surface's, which is looked up
@@ -976,7 +1023,7 @@ export class McpService {
    * through OAuth or their session — the latter two reach the same loopback
    * identity; an HTML page the person is viewing is the person), the
    * credential's scope, and the catalog revision. The revision
-   * is asked for on every request, with the request's own bearer, so it is
+   * is asked for on every request, for the request's own caller, so it is
    * the caller's CURRENT catalog that picks the surface: a manual released,
    * edited or put out of their reach moves it, and the request builds anew.
    *
@@ -986,7 +1033,7 @@ export class McpService {
    */
   private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
     const { userId, tokenId } = caller;
-    const { revision } = await this.fetchCatalogRevision(loopbackBearer);
+    const { revision } = await this.catalogRevisionOf(caller, loopbackBearer);
     if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached');
     // The agent the connection was made as is part of the key: two
     // connections of one person made as different agents are two surfaces.
@@ -1003,9 +1050,41 @@ export class McpService {
     const { value } = await this.surfaces.get(
       key,
       () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss'),
-      (built) => (built.degraded ? DEGRADED_SURFACE_MAX_AGE_MS : undefined),
+      // A surface whose catalog could not be read is not kept at all (its
+      // entry ends as it is made); one missing a manual that failed is kept
+      // for the refresh window; any other for as long as it is used.
+      (built) => (built.catalogUnread ? 0 : built.degraded ? DEGRADED_SURFACE_MAX_AGE_MS : undefined),
     );
     return value;
+  }
+
+  /**
+   * The caller's catalog revision, and the agent their connection is narrowed
+   * to: read in process when the composition offers a reader
+   * (`McpProxyOptions.readCatalogRevision`), over loopback otherwise. Null
+   * when it cannot be read, either way — the request then builds a surface of
+   * its own and keeps it to itself.
+   */
+  private async catalogRevisionOf(
+    caller: Pick<McpCaller, 'userId' | 'agentPath'>,
+    loopbackBearer: string,
+  ): Promise<{ revision: string | null; connection?: ConnectionScopeWire }> {
+    const read = this.opts.readCatalogRevision;
+    if (!read) return this.fetchCatalogRevision(loopbackBearer);
+    try {
+      const { revision, connection } = await this.inProcess(
+        read({ userId: caller.userId, agentPath: caller.agentPath || null }),
+      );
+      return { revision: revision || null, ...(connection ? { connection } : {}) };
+    } catch (err) {
+      log.warn("the catalog revision could not be read; building this request's surface uncached:", { err });
+      return { revision: null };
+    }
+  }
+
+  /** A read made in process, held to {@link IN_PROCESS_READ_LIMIT_MS} (a limit a held event loop cannot use up). */
+  private inProcess<T>(read: Promise<T>): Promise<T> {
+    return withinLoopTime(read, this.opts.inProcessReadLimitMs ?? IN_PROCESS_READ_LIMIT_MS);
   }
 
   /**
@@ -1059,7 +1138,7 @@ export class McpService {
     // The list of manuals this caller gets: the KB manual + each `.tool` they
     // can read. Fetched over loopback with the caller's key, so ACL filtering
     // lives ONCE behind the REST surface.
-    const { manuals, connection } = await this.fetchManualTemplates(loopbackBearer);
+    const { manuals, connection, unread } = await this.fetchManualTemplates(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(userId, manuals);
     const discovered = await this.discoverTools(client, manuals, userId);
@@ -1084,7 +1163,7 @@ export class McpService {
           (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
       );
     }
-    return { ...discovered, client, tools, ...(connection ? { connection } : {}) };
+    return { ...discovered, client, tools, catalogUnread: unread, ...(connection ? { connection } : {}) };
   }
 
   /**
@@ -1166,12 +1245,16 @@ export class McpService {
    */
   private async fetchManualTemplates(
     bearer: string,
-  ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire }> {
+  ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire; unread: boolean }> {
     // This is the REMOTE proxy, so ask for remote-capable manuals only — local-only
     // `.tool`s are surfaced instead via the `list_local_tools` tool in the KB manual.
     const body = (await this.loopbackJson(bearer, '/api/agent/all-tools?remote=true', 'all-tools')) as
       | { manuals?: unknown; connection?: unknown }
       | null;
+    // No answer, or one without a list: the catalog was not read. The request
+    // is still served the platform manual below, and the surface built from it
+    // is marked so that it is never cached (`RequestSurface.catalogUnread`).
+    const unread = !Array.isArray(body?.manuals);
     const rawManuals: unknown[] = Array.isArray(body?.manuals) ? body.manuals : [];
 
     const out: CallTemplate[] = [];
@@ -1189,7 +1272,7 @@ export class McpService {
     }
     // Always include the KB manual, even if `all-tools` was unavailable/regressed.
     if (!hasKb) out.unshift(this.kbManualTemplate());
-    return { manuals: out, ...connectionOf(body) };
+    return { manuals: out, unread, ...connectionOf(body) };
   }
 
   /** The KB manual's discovery template — the fallback if `all-tools` is unavailable. */
