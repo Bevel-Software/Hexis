@@ -56,6 +56,16 @@ export interface InternalTokenClaim {
    * Everything. Carried, never decided, like `connectionId`.
    */
   agentPath?: string;
+  /**
+   * True only on the token `/api/mcp/local-token` mints: the LOCAL MCP
+   * server's browser sign-in, exchanged. It is the one credential the
+   * local-tools variables route releases secret values to, because the
+   * person's browser consent minted it for the runtime process and no agent
+   * is handed it: a connection key is pasted into agent configs, a hosted
+   * loopback token stands in for the hosted agent, and the in-process agent
+   * holds its own. Carried, never decided, like `connectionId`.
+   */
+  localRuntime?: boolean;
 }
 
 interface SignedPayload extends InternalTokenClaim {
@@ -158,6 +168,7 @@ export class InternalTokenService {
       ...(payload.externalProxy === true ? { externalProxy: true } : {}),
       ...(typeof payload.connectionId === 'string' ? { connectionId: payload.connectionId } : {}),
       ...(typeof payload.agentPath === 'string' && payload.agentPath ? { agentPath: payload.agentPath } : {}),
+      ...(payload.localRuntime === true ? { localRuntime: true } : {}),
     };
   }
 

@@ -8,6 +8,7 @@ import type { ISecretsVaultService } from '../secrets-vault/index.js';
 import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 
 type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
+type MayWriteTool = (email: string, toolPath: string) => Promise<boolean>;
 
 /**
  * The ONLY core route that returns secret VALUES.
@@ -25,15 +26,28 @@ type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
  * The knowledge base is the allowlist, it is reviewable as a diff, and no
  * caller — however privileged its connection key — can widen it.
  *
- * Three further constraints hold here:
+ * Five further constraints hold here:
  *
- * 1. **Read access is required.** A caller that cannot read the declaring file
+ * 1. **Only the local runtime's own sign-in is answered.** The credential must
+ *    be the token `/api/mcp/local-token` mints for the local server's browser
+ *    sign-in (`ToolAuth.localRuntime`). A connection key is the credential an
+ *    AGENT holds (pasted into its config, handed to pipelines), so it is
+ *    refused, as are an in-process agent's token, a hosted loopback token and
+ *    a browser session. The refusal comes before the manual is looked up, so
+ *    it says nothing about which tools exist. A local server run with `--key`
+ *    takes its tools' values from its own environment instead.
+ * 2. **A shared value is released only to who may set it.** An `admin`-scope
+ *    variable is one workspace value every reader's calls use; it is handed
+ *    out only to a writer of the `.tool` (the people the Secrets page lets
+ *    set it) and reported as `withheld` to anyone else. A `user`-scope value
+ *    is the caller's own.
+ * 3. **Read access is required.** A caller that cannot read the declaring file
  *    gets a 404, not an empty object: whether a manual exists is itself
  *    information.
- * 2. **Only local manuals.** A remote-capable `.tool`'s credentials are used
+ * 4. **Only local manuals.** A remote-capable `.tool`'s credentials are used
  *    server-side; handing them to a local caller would egress a secret that had
  *    no reason to leave.
- * 3. **Values are never logged, only names.** Every resolve emits one audit
+ * 5. **Values are never logged, only names.** Every resolve emits one audit
  *    line naming the caller, the file and the variable names — enough to
  *    reconstruct who was handed what, and never the what itself.
  *
@@ -50,6 +64,12 @@ export function createDeclaredVariableRoutes(
   manualAuth: RequestHandler,
   resolveUserEmail: ResolveUserEmail,
   /**
+   * Whether this person may write the `.tool` at this path on the released
+   * branch: the verdict that lets them set its shared values on the Secrets
+   * page, and so the one that lets them be handed those values here.
+   */
+  mayWriteTool: MayWriteTool,
+  /**
    * Resolves the scope of a connection made as an agent configuration: such a
    * connection is handed only the variables of a connector the file loads.
    * Absent, a narrowed connection is handed none.
@@ -59,29 +79,19 @@ export function createDeclaredVariableRoutes(
   const router = express.Router();
 
   /**
-   * Who is asking — and only if it is a MACHINE.
+   * Whether the credential is the local runtime's own sign-in, and nothing
+   * else (constraint 1).
    *
-   * `manualAuth` also accepts a browser session JWT, which is right for the
-   * rest of the agent surface: manual discovery is a read-only listing a
-   * signed-in user may legitimately fetch. It is wrong here. This route hands
-   * back secret VALUES, and the Secrets page is deliberately write-only —
-   * a field starts empty even when a value exists, and saving replaces rather
-   * than reveals. A session token that could read values back would undo that,
-   * and would do it for anyone who can merely READ a `.tool`.
-   *
-   * The caller that needs this is the local MCP server, which authenticates
-   * with a connection key or an internal token. A browser has no reason to ask
-   * at all, so a session is refused rather than scoped.
+   * `manualAuth` admits more than that, which is right for the rest of the
+   * agent surface: a connection key, every internal token and a browser
+   * session may all list manuals. None of them may read values. A connection
+   * key and an agent's internal token are what an agent holds, and the
+   * Secrets page is deliberately write-only for a browser: a field starts
+   * empty even when a value exists, and saving replaces rather than reveals.
    */
-  async function machineCaller(req: Request): Promise<{ userId: string; email: string } | null> {
+  function isLocalRuntime(req: Request): req is Request & { toolAuth: { userId: string } } {
     const auth = req.toolAuth;
-    if (!auth?.userId || auth.source === 'session') return null;
-    try {
-      const email = await resolveUserEmail(auth.userId);
-      return email ? { userId: auth.userId, email } : null;
-    } catch {
-      return null;
-    }
+    return Boolean(auth?.userId) && auth?.source === 'external' && auth.localRuntime === true;
   }
 
   /**
@@ -119,23 +129,26 @@ export function createDeclaredVariableRoutes(
    * sends nothing but the slug.
    */
   router.post('/agent/local-tools/:slug/variables', manualAuth, async (req, res) => {
-    const who = await machineCaller(req);
-    if (!who) {
+    if (!isLocalRuntime(req)) {
       return void res.status(403).json({
         error:
-          'This endpoint releases secret values to a local runtime and is not reachable with a browser session. ' +
-          'Use a connection key.',
+          'Secret values are released only to the local MCP server signed in through your browser ' +
+          '(hexis-mcp started without --key). A connection key, a browser session and an agent never receive them. ' +
+          'To run a local tool with a connection key, set its variables in the MCP client config that starts hexis-mcp.',
       });
     }
+    const userId = req.toolAuth.userId;
     const slug = String(req.params.slug);
     try {
+      const email = await resolveUserEmail(userId);
+      if (!email) return void res.status(404).json({ error: 'Not found' });
       // `listAccessible` already applies the per-file read verdict, so an
       // unreadable manual is simply absent — same fail-closed read model the
       // catalog uses.
-      const found = (await toolManualService.listAccessible(who.email)).find((m) => m.slug === slug);
+      const found = (await toolManualService.listAccessible(email)).find((m) => m.slug === slug);
       // A connection made as an agent configuration is handed only the variables of
       // a connector it loads; another is as absent as an unreadable one.
-      const scope = found ? await resolveConnectionScope(agentScope, who.email, req.toolAuth?.agentPath) : null;
+      const scope = found ? await resolveConnectionScope(agentScope, email, req.toolAuth.agentPath) : null;
       const manual = found && scope?.allowsConnector(found.path) ? found : undefined;
       if (!manual) return void res.status(404).json({ error: 'Not found' });
       if (manual.remote !== false) {
@@ -145,16 +158,20 @@ export function createDeclaredVariableRoutes(
             'Only a `remote: false` tool resolves its variables locally.',
         });
       }
-      const entries = (manual.variables ?? []).map((v) => ({
-        name: v.name,
-        key: utcpNamespacedKey(manual.name, v.name),
-      }));
-      const { values, missing } = await resolveAll(who.userId, entries);
+      const declared = manual.variables ?? [];
+      // Asked only when there is a shared value to release: the verdict
+      // decides which names are resolved at all (constraint 2).
+      const releasesShared = declared.some((v) => v.scope !== 'user') && (await mayWriteTool(email, manual.path));
+      const withheld = declared.filter((v) => v.scope !== 'user' && !releasesShared).map((v) => v.name);
+      const entries = declared
+        .filter((v) => v.scope === 'user' || releasesShared)
+        .map((v) => ({ name: v.name, key: utcpNamespacedKey(manual.name, v.name) }));
+      const { values, missing } = await resolveAll(userId, entries);
       log.info(
-        `local tool "${manual.path}" resolved for user=${who.userId}: ` +
-          `provided=[${Object.keys(values).join(',')}] missing=[${missing.join(',')}]`,
+        `local tool "${manual.path}" resolved for user=${userId}: ` +
+          `provided=[${Object.keys(values).join(',')}] missing=[${missing.join(',')}] withheld=[${withheld.join(',')}]`,
       );
-      res.set('Cache-Control', 'no-store').json({ name: manual.name, variables: values, missing });
+      res.set('Cache-Control', 'no-store').json({ name: manual.name, variables: values, missing, withheld });
     } catch (err) {
       log.error('local tool resolve failed:', { err });
       res.status(500).json({ error: 'Failed to resolve variables' });

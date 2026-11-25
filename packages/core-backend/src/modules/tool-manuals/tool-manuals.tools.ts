@@ -401,9 +401,10 @@ async function buildListLocalToolsDef(svc: IToolManualService, userEmail?: strin
       '(e.g. a self-hosted MCP server on localhost) and therefore cannot be called through this ' +
       'remote endpoint. To CALL them, run the workspace as a local MCP server instead of this one: ' +
       '`npx @bevel-software/hexis-mcp --url <workspace-url> --key <connection-key>` serves every tool ' +
-      'you have here plus these, because it runs where they exist — and it resolves each tool\'s ' +
-      'declared variables from this workspace\'s secrets, so nothing has to be hand-placed on that ' +
-      'machine. Otherwise each entry gives the tool’s name and its `.tool` file ' +
+      'you have here plus these, because it runs where they exist. Run with a connection key, it takes ' +
+      'their variables from its own environment (the `env` block of the MCP client config): secret ' +
+      'values are never released to a key. Started without `--key`, signed in through the person\'s ' +
+      'browser, it resolves them from this workspace\'s secrets. Otherwise each entry gives the tool’s name and its `.tool` file ' +
       'path in the knowledge base — read that file with `read_file` and wire the tool into your local ' +
       'setup by hand. ' +
       (await localToolsLine(svc, userEmail, within)),

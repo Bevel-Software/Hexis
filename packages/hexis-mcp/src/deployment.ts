@@ -524,6 +524,10 @@ export async function fetchLocalToolVariables(
   config: HexisMcpConfig,
   slug: string,
 ): Promise<LocalToolVariables> {
+  // Values are released only to a browser sign-in, never to a connection key:
+  // the key is what an agent holds. Key mode resolves from `process.env` alone,
+  // and asking would only fetch a refusal. Answered (`ok`), so it is cached.
+  if (!config.renewConnectionKey) return { ok: true, values: {} };
   try {
     const body = (await getJson(
       `${config.baseUrl}/api/agent/local-tools/${encodeURIComponent(slug)}/variables`,
@@ -537,7 +541,7 @@ export async function fetchLocalToolVariables(
         body: '{}',
         renew: renewer(config),
       },
-    )) as { variables?: unknown; missing?: unknown };
+    )) as { variables?: unknown; missing?: unknown; withheld?: unknown };
     const vars = body?.variables;
     if (!vars || typeof vars !== 'object' || Array.isArray(vars)) {
       // A 200 whose shape we do not recognise is protocol drift, not an unset
@@ -553,6 +557,12 @@ export async function fetchLocalToolVariables(
       console.error(
         `[hexis-mcp] local tool "${slug}" has unset variables: ${body.missing.join(', ')} — ` +
           'set them on the deployment (Secrets), or the tool will run without them.',
+      );
+    }
+    if (Array.isArray(body.withheld) && body.withheld.length > 0) {
+      console.error(
+        `[hexis-mcp] local tool "${slug}" uses shared values only its writers receive: ${body.withheld.join(', ')} — ` +
+          'set them in the MCP client config that starts hexis-mcp, or the tool will run without them.',
       );
     }
     // Null-prototype, so a variable named `__proto__` or `constructor` is an

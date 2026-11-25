@@ -94,6 +94,7 @@ describe('POST /mcp/local-token', () => {
     expect(internalTokens.verify(body.token)).toEqual({
       userId: 'user-5',
       externalProxy: true,
+      localRuntime: true,
       connectionId: 'conn-9',
     });
     // …and the tool-auth verifier resolves it to source 'external', exactly
@@ -106,7 +107,7 @@ describe('POST /mcp/local-token', () => {
     // the local server's direct tool calls to.
     await expect(verify(body.token)).resolves.toEqual({
       ok: true,
-      auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', scope: 'write' },
+      auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', localRuntime: true, scope: 'write' },
     });
     expect((oauth as any).verifyAccessToken).toHaveBeenCalledWith('bevel-mcp_valid123');
   });
@@ -120,7 +121,7 @@ describe('POST /mcp/local-token', () => {
     const res = await exchange(baseUrl, 'Bearer bevel-mcp_valid123');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { token: string };
-    expect(internalTokens.verify(body.token)).toEqual({ userId: 'user-5', externalProxy: true });
+    expect(internalTokens.verify(body.token)).toEqual({ userId: 'user-5', externalProxy: true, localRuntime: true });
   });
 
   /**
@@ -146,7 +147,7 @@ describe('POST /mcp/local-token', () => {
     // seconds-granularity of expiresAt and the time the request takes.)
     expect(body.expiresInMs).toBeLessThanOrEqual(remainingSeconds * 1000);
     expect(body.expiresInMs).toBeGreaterThan((remainingSeconds - 10) * 1000);
-    expect(internalTokens.verify(body.token)).toEqual({ userId: 'user-5', externalProxy: true });
+    expect(internalTokens.verify(body.token)).toEqual({ userId: 'user-5', externalProxy: true, localRuntime: true });
   });
 
   /**

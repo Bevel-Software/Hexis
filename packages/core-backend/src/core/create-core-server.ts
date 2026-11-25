@@ -633,12 +633,14 @@ export async function createCoreServer(
   // variables, for the local MCP server that will execute it. It re-reads the
   // declaring knowledge-base file server-side, so the file is the allowlist and
   // the caller cannot widen it. Same `manualAuth` as the rest of the agent
-  // surface.
+  // surface, narrowed inside to the local server's own sign-in: a connection
+  // key never receives a value.
   toolsRouter.use(createDeclaredVariableRoutes(
     core.toolManualService,
     core.secretsVaultService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
+    (email, toolPath) => core.accessControl.canWrite(core.kb.defaultWorkspaceId(), email, toolPath),
     core.agentScopeService,
   ));
   app.use('/api', toolsRouter);

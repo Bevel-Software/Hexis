@@ -8,8 +8,10 @@ import { ConnectionScope, type IAgentScopeResolver } from '../../agent-scope/ind
 
 /**
  * The one core route that releases secret VALUES. What is worth pinning here is
- * not the happy path but the shape of the boundary: the caller names a FILE,
- * the server decides the variables, unreadable means 404, and a
+ * not the happy path but the shape of the boundary: only the local server's
+ * browser sign-in is answered (never a connection key, the agent's credential),
+ * the caller names a FILE, the server decides the variables, a shared value
+ * goes only to a writer of the tool, unreadable means 404, and a
  * platform-executed tool never releases anything.
  */
 
@@ -39,12 +41,24 @@ let httpServer: HttpServer | undefined;
 interface Harness {
   base: string;
   resolve: ReturnType<typeof vi.fn>;
+  listAccessible: ReturnType<typeof vi.fn>;
+  mayWriteTool: ReturnType<typeof vi.fn>;
 }
 
 async function mount(opts: {
   userId?: string;
-  /** How the caller authenticated. `session` is a browser; anything else is a machine. */
+  /** How the caller authenticated. `session` is a browser. */
   source?: 'session' | 'external' | 'internal';
+  /**
+   * Whether the credential is the local server's exchanged browser sign-in.
+   * Defaults to true unless `tokenId` is set: a connection key is
+   * `source: external` with a `tokenId` and without the flag.
+   */
+  localRuntime?: boolean;
+  /** A connection key's id: set, the caller is a key. */
+  tokenId?: string;
+  /** Whether the caller may write the tool (and so be handed its shared values). Default true. */
+  mayWrite?: boolean;
   manuals?: ToolManualSummary[];
   secrets?: Record<string, string>;
   /** The `.agent` file the caller's connection was made as; absent is Everything. */
@@ -57,8 +71,9 @@ async function mount(opts: {
   const resolve = vi.fn(async (_u: string, key: string) => secrets[key] ?? null);
 
   const toolManualService = {
-    listAccessible: async () => opts.manuals ?? [],
+    listAccessible: vi.fn(async () => opts.manuals ?? []),
   } as unknown as IToolManualService;
+  const mayWriteTool = vi.fn(async () => opts.mayWrite ?? true);
   const secretsVault = { resolve } as unknown as ISecretsVaultService;
 
   const app = express();
@@ -73,12 +88,15 @@ async function mount(opts: {
             userId,
             source,
             scope: 'write',
+            ...((opts.localRuntime ?? !opts.tokenId) ? { localRuntime: true } : {}),
+            ...(opts.tokenId ? { tokenId: opts.tokenId } : {}),
             ...(opts.agentPath ? { agentPath: opts.agentPath } : {}),
           } as typeof req.toolAuth;
         }
         next();
       },
       async () => 'runner@x.eu',
+      mayWriteTool,
       opts.agentScope,
     ),
   );
@@ -86,7 +104,12 @@ async function mount(opts: {
     const s = app.listen(0, () => r(s));
   });
   const port = (httpServer.address() as { port: number }).port;
-  return { base: `http://127.0.0.1:${port}`, resolve };
+  return {
+    base: `http://127.0.0.1:${port}`,
+    resolve,
+    listAccessible: toolManualService.listAccessible as unknown as ReturnType<typeof vi.fn>,
+    mayWriteTool,
+  };
 }
 
 afterEach(async () => {
@@ -107,6 +130,7 @@ describe('POST /agent/local-tools/:slug/variables', () => {
       name: 'git',
       variables: { GITHUB_TOKEN: 'ghp_secret' },
       missing: ['OPTIONAL_TOKEN'],
+      withheld: [],
     });
     // The keys asked of the vault come from the FILE, namespaced per manual.
     expect(resolve.mock.calls.map((c) => c[1])).toEqual(['git_GITHUB_TOKEN', 'git_OPTIONAL_TOKEN']);
@@ -198,12 +222,110 @@ describe('POST /agent/local-tools/:slug/variables', () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it('allows the machine callers that need it', async () => {
-    for (const source of ['external', 'internal'] as const) {
-      const { base } = await mount({ source, manuals: [GIT_TOOL], secrets: { git_GITHUB_TOKEN: 'x' } });
-      expect((await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(200);
-      if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
+  it("refuses a read-only Business user's connection key on a shared local tool, with no value", async () => {
+    // The QA reproduction (v0.35.0, bug B2): an admin-scope secret on a
+    // `remote: false` tool in a plugin everyone reads, asked for with a
+    // reader's connection key. The key is the credential an agent holds.
+    const { base, resolve, listAccessible } = await mount({
+      source: 'external',
+      tokenId: 'key-business',
+      mayWrite: false,
+      manuals: [GIT_TOOL],
+      secrets: { git_GITHUB_TOKEN: 'ghp_shared_admin_marker' },
+    });
+    const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+    expect(res.status).toBe(403);
+    const text = await res.text();
+    expect(text).not.toContain('ghp_shared_admin_marker');
+    expect(text).not.toContain('GITHUB_TOKEN');
+    expect(resolve).not.toHaveBeenCalled();
+    // Refused before the manual is looked up: the answer says nothing about which tools exist.
+    expect(listAccessible).not.toHaveBeenCalled();
+  });
+
+  it("refuses a writer's connection key too: no key receives a value", async () => {
+    const { base, resolve } = await mount({
+      source: 'external',
+      tokenId: 'key-admin',
+      mayWrite: true,
+      manuals: [GIT_TOOL],
+      secrets: { git_GITHUB_TOKEN: 'ghp_shared_admin_marker' },
+    });
+    const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('ghp_shared_admin_marker');
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('refuses every credential but the local sign-in: an agent token, a hosted loopback token', async () => {
+    for (const source of ['internal', 'external'] as const) {
+      const { base, resolve } = await mount({
+        source,
+        localRuntime: false,
+        manuals: [GIT_TOOL],
+        secrets: { git_GITHUB_TOKEN: 'ghp_secret' },
+      });
+      const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+      expect(res.status).toBe(403);
+      expect(await res.text()).not.toContain('ghp_secret');
+      expect(resolve).not.toHaveBeenCalled();
+      await new Promise<void>((r) => httpServer!.close(() => r()));
       httpServer = undefined;
     }
+  });
+
+  it('does not take a local-runtime flag on an internal token as the local sign-in', async () => {
+    // Only the verifier's external-proxy branch sets the flag; a token that
+    // somehow carried it with another source is still refused.
+    const { base, resolve } = await mount({ source: 'internal', localRuntime: true, manuals: [GIT_TOOL] });
+    expect((await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' })).status).toBe(403);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('withholds a shared value from a reader of the tool, and still hands them their own', async () => {
+    const mixed: ToolManualSummary = {
+      ...GIT_TOOL,
+      variables: [
+        { name: 'GITHUB_TOKEN', scope: 'admin' },
+        { name: 'MY_TOKEN', scope: 'user' },
+      ],
+    };
+    const { base, resolve, mayWriteTool } = await mount({
+      mayWrite: false,
+      manuals: [mixed],
+      secrets: { git_GITHUB_TOKEN: 'ghp_shared_admin_marker', git_MY_TOKEN: 'mine' },
+    });
+    const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain('ghp_shared_admin_marker');
+    expect(JSON.parse(text)).toEqual({ name: 'git', variables: { MY_TOKEN: 'mine' }, missing: [], withheld: ['GITHUB_TOKEN'] });
+    // The shared value is never even resolved for them.
+    expect(resolve.mock.calls.map((c) => c[1])).toEqual(['git_MY_TOKEN']);
+    expect(mayWriteTool).toHaveBeenCalledWith('runner@x.eu', GIT_TOOL.path);
+  });
+
+  it("releases a shared value to the local sign-in of the tool's writer", async () => {
+    const { base } = await mount({ mayWrite: true, manuals: [GIT_TOOL], secrets: { git_GITHUB_TOKEN: 'ghp_secret' } });
+    const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { variables: Record<string, string> }).variables).toEqual({ GITHUB_TOKEN: 'ghp_secret' });
+  });
+
+  it('does not ask for the write verdict when a tool declares only personal values', async () => {
+    const personal: ToolManualSummary = { ...GIT_TOOL, variables: [{ name: 'MY_TOKEN', scope: 'user' }] };
+    const { base, mayWriteTool } = await mount({ manuals: [personal], secrets: { git_MY_TOKEN: 'mine' } });
+    const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(mayWriteTool).not.toHaveBeenCalled();
+  });
+
+  it('answers 500, never a value or a refusal that blames the caller, when the write verdict fails', async () => {
+    const { base, resolve, mayWriteTool } = await mount({ manuals: [GIT_TOOL], secrets: { git_GITHUB_TOKEN: 'ghp_secret' } });
+    mayWriteTool.mockRejectedValueOnce(new Error('access tree unreadable'));
+    const res = await fetch(`${base}/agent/local-tools/git/variables`, { method: 'POST' });
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain('ghp_secret');
+    expect(resolve).not.toHaveBeenCalled();
   });
 });

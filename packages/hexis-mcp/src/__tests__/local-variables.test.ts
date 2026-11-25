@@ -8,20 +8,33 @@ import {
   resetLocalVariableResolver,
 } from '../local-variables.js';
 import {
-  ConnectionKeyRejectedError,
   fetchLocalOnlyManuals,
   fetchLocalToolVariables,
   type LocalManualInfo,
 } from '../deployment.js';
-import type { HexisMcpConfig } from '../config.js';
+import { SignInRefusedError, type HexisMcpConfig } from '../config.js';
 
-const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' } as HexisMcpConfig;
+/** Signed in through the browser: the one mode the variable route answers. */
+const config: HexisMcpConfig = {
+  baseUrl: 'https://x.example',
+  connectionKey: 'bevel-int_signed_in',
+  renewConnectionKey: async () => ({ token: 'bevel-int_renewed' }),
+};
+
+/** A signed-in config whose sign-in the workspace has ended for good. Fresh per test: renewal state is per config. */
+const endedSignIn = (): HexisMcpConfig => ({
+  baseUrl: 'https://x.example',
+  connectionKey: 'bevel-int_signed_in',
+  renewConnectionKey: async () => {
+    throw new SignInRefusedError('Your sign-in has ended. Restart hexis-mcp to sign in again.');
+  },
+});
 
 const local = (entries: Record<string, LocalManualInfo>): Map<string, LocalManualInfo> =>
   new Map(Object.entries(entries));
 
 /** A fetch stub that answers the variable route and counts the calls it saw. */
-function stubVariables(bySlug: Record<string, { variables?: unknown; missing?: string[] }>) {
+function stubVariables(bySlug: Record<string, { variables?: unknown; missing?: string[]; withheld?: string[] }>) {
   const calls: string[] = [];
   vi.stubGlobal(
     'fetch',
@@ -91,9 +104,25 @@ describe('fetchLocalToolVariables', () => {
     expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: false, values: {} });
   });
 
-  it('lets a rejected key through instead of degrading it to unset secrets', async () => {
+  it('never asks with a connection key: a key receives no value, so the tool runs on its environment', async () => {
+    const calls = stubVariables({ git: { variables: { GITHUB_TOKEN: 'ghp_x' } } });
+    const keyMode = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' } as HexisMcpConfig;
+    expect(await fetchLocalToolVariables(keyMode, 'git')).toEqual({ ok: true, values: {} });
+    expect(calls).toEqual([]);
+  });
+
+  it('names the shared values the workspace withheld, apart from the unset ones', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {});
+    stubVariables({ git: { variables: {}, missing: [], withheld: ['GITHUB_TOKEN'] } });
+    expect(await fetchLocalToolVariables(config, 'git')).toEqual({ ok: true, values: {} });
+    const lines = said.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => l.includes('only its writers receive: GITHUB_TOKEN'))).toBe(true);
+    expect(lines.some((l) => l.includes('unset variables'))).toBe(false);
+  });
+
+  it('lets a refused sign-in through instead of degrading it to unset secrets', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
-    await expect(fetchLocalToolVariables(config, 'git')).rejects.toBeInstanceOf(ConnectionKeyRejectedError);
+    await expect(fetchLocalToolVariables(endedSignIn(), 'git')).rejects.toBeInstanceOf(SignInRefusedError);
   });
 
   it('reports a malformed response as a failure rather than as an unset secret', async () => {
@@ -122,14 +151,13 @@ describe('HexisLocalVariableLoader', () => {
     expect(await loader.get('git_GITHUB_TOKEN')).toBe('ghp_x');
   });
 
-  it('fails the lookup with the plain sentence when the key was revoked mid-run', async () => {
+  it('fails the lookup with the plain sentence when the sign-in ended mid-run', async () => {
     // Falling through to process.env would run the tool without its secrets
-    // and hide why; the call fails in the rejected key's own words instead.
+    // and hide why; the call fails in the refusal's own words instead.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
-    const loader = bind(local({ git: { slug: 'git', path: 'p' } }));
-    await expect(loader.get('git_GITHUB_TOKEN')).rejects.toThrow(
-      'The connection key was rejected by https://x.example. Mint a new one in External agent access.',
-    );
+    const loader = new HexisLocalVariableLoader(bindLocalVariableResolver(endedSignIn(), local({ git: { slug: 'git', path: 'p' } })));
+    await expect(loader.get('git_GITHUB_TOKEN')).rejects.toThrow('Your sign-in has ended. Restart hexis-mcp to sign in again.');
   });
 
   it('answers null for anything that is not a local manual', async () => {

@@ -54,6 +54,13 @@ export interface ToolAuth {
    * surface resolves it to the connection's scope (`modules/agent-scope`).
    */
   agentPath?: string;
+  /**
+   * Set only for the local MCP server's exchanged browser sign-in
+   * (`InternalTokenClaim.localRuntime`): the one caller the local-tools
+   * variables route releases secret values to. Never set for a connection
+   * key, a hosted loopback token, an in-process agent's token or a session.
+   */
+  localRuntime?: true;
   /** Always `'write'` now (the middleware sets it for both internal + external — neither credential carries scope). The read path is dormant until consumer agents are removed. */
   scope: 'read' | 'write';
 }
@@ -190,6 +197,7 @@ export function createTokenVerifier(
               userId: claim.userId,
               ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
               ...(agentPath ? { agentPath } : {}),
+              ...(claim.localRuntime ? { localRuntime: true as const } : {}),
               scope: 'write',
             },
           }

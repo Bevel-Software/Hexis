@@ -131,7 +131,7 @@ describe('the local server’s exchanged grant', () => {
     });
     const res = await fetch(`${base}/api/mcp/local-token`, { method: 'POST', headers: { Authorization: 'Bearer bevel-mcp_g' } });
     const { token } = (await res.json()) as { token: string };
-    expect(internalTokens.verify(token)).toEqual({ userId: 'user-5', externalProxy: true, connectionId: 'conn-9' });
+    expect(internalTokens.verify(token)).toEqual({ userId: 'user-5', externalProxy: true, localRuntime: true, connectionId: 'conn-9' });
   });
 
   it("a direct tool call reads the connection's CURRENT choice: a re-consent reaches a token minted before it", async () => {

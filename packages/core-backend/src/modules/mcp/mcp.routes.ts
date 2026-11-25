@@ -374,8 +374,11 @@ export function createMcpRoutes(
    * the tool-auth verifier, admitted to the external surface, refused from
    * internal-only tools) and carries the same TTL — CAPPED to the presented
    * access token's remaining lifetime, so the exchange can never mint a
-   * credential that outlives its grant. Nothing becomes reachable that the
-   * grant did not already reach — only the credential's spelling changes.
+   * credential that outlives its grant. One thing becomes reachable that the
+   * hosted endpoint does not offer: the minted token carries `localRuntime`,
+   * so the local-tools variables route releases a `remote: false` tool's
+   * values to it, the values that tool needs to run on this person's machine.
+   * Only this exchange mints it, so a connection key never receives them.
    *
    * Auth semantics mirror McpAuthMiddleware's OAuth branch: an
    * invalid/expired/revoked token is a 401 re-challenging with
@@ -464,8 +467,16 @@ export function createMcpRoutes(
       // So does the agent the connection was made as: the local server's
       // calls see the same narrowed surface as the hosted endpoint's.
       const agentPath = typeof info.extra?.agentPath === 'string' && info.extra.agentPath ? info.extra.agentPath : undefined;
+      // And this exchange is the local server's own sign-in: the one credential
+      // the local-tools variables route releases secret values to.
       const minted = internalTokens.mint(
-        { userId, externalProxy: true, ...(connectionId ? { connectionId } : {}), ...(agentPath ? { agentPath } : {}) },
+        {
+          userId,
+          externalProxy: true,
+          localRuntime: true,
+          ...(connectionId ? { connectionId } : {}),
+          ...(agentPath ? { agentPath } : {}),
+        },
         ttlMs,
       );
       // The ACTUAL lifetime, not the constant — the caller schedules its
