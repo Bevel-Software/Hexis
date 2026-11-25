@@ -60,15 +60,28 @@ type Row = { key: string; value: string; encrypted: boolean };
 /**
  * An in-memory table. A select answers every row, which the service narrows
  * by key itself; a delete removes the rows whose key the statement binds (the
- * service deletes by key) and records those keys.
+ * service deletes by key) and records those keys. A transaction runs its
+ * statements on the same rows and, as Postgres does, puts them all back when
+ * it fails. `failingWrite` names a key whose write fails, as a database
+ * connection lost part-way through a save would.
  */
-function memoryDb(rows: Row[] = [], deleted: string[][] = []) {
+function memoryDb(rows: Row[] = [], deleted: string[][] = [], failingWrite?: string) {
   const all = () => Promise.resolve(rows);
   return {
     select: () => ({ from: () => Object.assign(all(), { where: all }) }),
+    async transaction(run: (tx: unknown) => Promise<unknown>) {
+      const before = rows.map((row) => ({ ...row }));
+      try {
+        return await run(this);
+      } catch (error) {
+        rows.splice(0, rows.length, ...before);
+        throw error;
+      }
+    },
     insert: () => ({
       values: (row: Row) => ({
         onConflictDoUpdate: (conflict: { set: Pick<Row, 'value' | 'encrypted'> }) => {
+          if (row.key === failingWrite) return Promise.reject(new Error('connection lost'));
           const existing = rows.find((r) => r.key === row.key);
           if (existing) Object.assign(existing, { value: conflict.set.value, encrypted: conflict.set.encrypted });
           else rows.push({ ...row });
@@ -370,6 +383,23 @@ describe('POST /setup/settings — removing the sign-in provider', () => {
     expect(res.status).toBe(200);
     expect(idp.asked).toEqual([]);
     expect(settings.resolveOidcCredentials()).toEqual({ issuerUrl: '', clientId: 'app-id', clientSecret: 'secret-2' });
+  });
+
+  it('a removal that fails part-way removes nothing — the saved secret never outlives its issuer', async () => {
+    const table: Row[] = [];
+    await new DeploymentSettingsService(memoryDb(table), ENC_KEY).save(FULL, null);
+    const db = memoryDb(table, [], 'oidcClientSecret');
+    const { base, settings } = listen({ checkOidc: provider({ outcome: 'verified' }).check, db });
+    await settings.load();
+
+    // The issuer's row goes first; the new secret's write then fails.
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null, oidcClientSecret: 'secret-2' } });
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    const saved = { issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'secret-1' };
+    expect(settings.resolveOidcCredentials()).toEqual(saved);
+    const reloaded = new DeploymentSettingsService(db, ENC_KEY);
+    await reloaded.load();
+    expect(reloaded.resolveOidcCredentials()).toEqual(saved);
   });
 
   it("refuses to remove the issuer beside an OIDC_CLIENT_SECRET — the environment's secret would go to the next issuer saved", async () => {

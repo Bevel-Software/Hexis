@@ -3,16 +3,14 @@ import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { Database } from '../../database/connection.js';
-import { DeploymentSettingsService, SettingsValidationError } from '../../settings/deployment-settings.service.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import { realDeploymentSettingsWithRows } from '../../../__tests__/real-settings.js';
 import { GitHubAppClient, GitHubAppError, appJwt, normalizePrivateKey } from '../github-app.client.js';
 import { GitHubAppConnection } from '../github-app.connection.js';
 import { createGitHubAppRoutes, githubAppManifest } from '../github-app.routes.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger, LogFields } from '../../../shared/logger.contract.js';
 
-const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 const { privateKey: PEM, publicKey: PUBLIC } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
   publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -115,26 +113,14 @@ function github(
   return { client: new GitHubAppClient(impl, Date.now, 150), calls, tokensIssued: () => issued };
 }
 
+/** Settings as the composition root builds them, and a look at how each value was stored. */
 function settingsWith(env: Record<string, string> = {}) {
-  const rows = new Map<string, { value: string; encrypted: boolean }>();
-  const db = {
-    select: () => ({ from: () => Promise.resolve([]) }),
-    insert: () => ({
-      values: (row: { key: string; value: string; encrypted: boolean }) => ({
-        onConflictDoUpdate: () => {
-          rows.set(row.key, { value: row.value, encrypted: row.encrypted });
-          return Promise.resolve();
-        },
-      }),
-    }),
-    delete: () => ({ where: () => Promise.resolve() }),
-  } as unknown as Database;
-  return { settings: new DeploymentSettingsService(db, ENC_KEY, undefined, { env }), rows };
+  return realDeploymentSettingsWithRows(env);
 }
 
 /** A deployment's GitHub routes, and a browser that keeps its cookies and does not follow redirects. */
 function deployment(opts: { env?: Record<string, string>; world?: Parameters<typeof github>[0]; admin?: boolean; complete?: boolean } = {}) {
-  const { settings, rows } = settingsWith(opts.env);
+  const { settings, row } = settingsWith(opts.env);
   const hub = github(opts.world);
   const connection = new GitHubAppConnection({
     read: (key) => settings.resolve(key),
@@ -181,7 +167,7 @@ function deployment(opts: { env?: Record<string, string>; world?: Parameters<typ
     return res;
   };
   const stateOf = (location: string | null) => new URL(location!).searchParams.get('state')!;
-  return { go, settings, rows, connection, hub, stateOf, jar };
+  return { go, settings, row, connection, hub, stateOf, jar };
 }
 
 describe('the JWT an app presents as itself', () => {
@@ -223,8 +209,8 @@ describe('what the settings keep for the deployment itself', () => {
     const { settings } = settingsWith();
     for (const key of ['githubInstallationId', 'githubAppId', 'githubAppPrivateKey', 'githubAppStateTag']) {
       const err = await settings.save({ [key]: '42' }, 'user-1').catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(SettingsValidationError);
-      expect((err as SettingsValidationError).problems).toEqual({ [key]: 'Unknown setting.' });
+      // Refused the way the setup screen is told: the problem on its field.
+      expect((err as { problems?: unknown }).problems).toEqual({ [key]: 'Unknown setting.' });
       expect(settings.resolve(key)).toBe('');
     }
   });
@@ -237,10 +223,10 @@ describe('what the settings keep for the deployment itself', () => {
   });
 
   it('stores the key it was issued encrypted', async () => {
-    const { settings, rows } = settingsWith();
+    const { settings, row } = settingsWith();
     await settings.record({ githubAppPrivateKey: PEM, githubAppId: '4242' }, null);
-    expect(rows.get('githubAppPrivateKey')).toMatchObject({ encrypted: true });
-    expect(rows.get('githubAppPrivateKey')!.value).not.toContain('PRIVATE KEY');
+    expect(row('githubAppPrivateKey')).toMatchObject({ encrypted: true });
+    expect(row('githubAppPrivateKey')!.value).not.toContain('PRIVATE KEY');
     expect(settings.resolve('githubAppPrivateKey')).toBe(PEM.trim());
   });
 });
@@ -558,15 +544,15 @@ describe('registering a deployment its own GitHub App', () => {
   });
 
   it('keeps what GitHub issued and goes straight on to installing the app', async () => {
-    const { go, stateOf, settings, connection, rows } = deployment();
+    const { go, stateOf, settings, connection, row } = deployment();
     const { action } = (await (await go('/api/setup/github-app/manifest', { method: 'POST', body: '{}' })).json()) as { action: string };
     const back = await go(`/api/setup/github-app/registered?code=good-code&state=${encodeURIComponent(stateOf(action))}`);
     expect(back.status).toBe(302);
     expect(back.headers.get('location')).toMatch(/^https:\/\/github\.com\/apps\/hexis-acme\/installations\/new\?state=/);
     expect(connection.credentials()).toMatchObject({ appId: '4242', slug: 'hexis-acme', clientId: 'Iv1.abc' });
     expect(connection.registeredBy()).toBe('setup');
-    expect(rows.get('githubAppPrivateKey')?.encrypted).toBe(true);
-    expect(rows.get('githubAppClientSecret')?.encrypted).toBe(true);
+    expect(row('githubAppPrivateKey')?.encrypted).toBe(true);
+    expect(row('githubAppClientSecret')?.encrypted).toBe(true);
     expect(settings.resolve('githubAppSlug')).toBe('hexis-acme');
   });
 

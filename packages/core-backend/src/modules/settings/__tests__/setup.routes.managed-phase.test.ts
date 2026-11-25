@@ -12,14 +12,12 @@ import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import { ManagedRepository } from '../managed-repository.js';
 import { RepositorySource } from '../repository-source.js';
-import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
-import { TemplateFilesStep } from '../../workspace/startup/steps/template-files.step.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { NodeGitRunner } from '../../version-control/index.js';
 import { defaultKbTemplateDir } from '../../../assets.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import type { KbContext } from '../../../shared/kb-context.js';
-import { newKbStartupRunner } from '../../../__tests__/workspace-service.js';
+import { newKbStartupRunner, templateFilesStep } from '../../../__tests__/workspace-service.js';
 
 /**
  * A repository the deployment keeps, and the REAL startup phase, wired the
@@ -76,6 +74,9 @@ function boot(kb: KbContext) {
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
     delete: () => ({ where: () => Promise.resolve() }),
+    transaction(run: (tx: unknown) => unknown) {
+      return run(this);
+    },
   } as unknown as Database;
   const settings = new DeploymentSettingsService(db, ENC_KEY);
   const managed = new ManagedRepository(path.join(root, 'backups', 'managed-repository'));
@@ -100,7 +101,7 @@ function boot(kb: KbContext) {
     protectedBranches: () => [...kb.protectedBranches],
     seedAdminEmails: ['admin@example.com'],
     // A step that works on every branch, so the phase makes each its working copy.
-    steps: [new TemplateFilesStep(new NodeFs(), kb)],
+    steps: [templateFilesStep(kb)],
     buildSeedTree: async (dir) => {
       await fs.writeFile(path.join(dir, 'WELCOME.md'), 'seeded\n', 'utf8');
       return ['WELCOME.md'];

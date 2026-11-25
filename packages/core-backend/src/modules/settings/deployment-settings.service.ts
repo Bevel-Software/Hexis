@@ -763,7 +763,9 @@ export class DeploymentSettingsService {
   /**
    * Validate and persist. Rejects the whole batch if any field fails, so a
    * half-applied configuration is never written — a KB URL saved without the
-   * token that reads it is a deployment that fails at first clone.
+   * token that reads it is a deployment that fails at first clone. A valid
+   * batch is written in one transaction, so a database failure part-way
+   * through writes none of it either.
    *
    * A setting whose environment variable is set is REFUSED rather than silently
    * stored, because storing it would write a row that can never take effect and
@@ -785,9 +787,6 @@ export class DeploymentSettingsService {
 
     /** The settings this save changed that a running server cannot pick up. */
     const restartKeys: string[] = [];
-    // A blanked blank-means-default setting: its row goes, and its readers
-    // are back on the default from the next read.
-    for (const key of toClear) await this.clear(key);
     for (const { key, value, def } of toWrite) {
       // Compared against the EFFECTIVE value: a setting that was unset was
       // already running on whatever its readers make of "unset" — the layout
@@ -795,17 +794,29 @@ export class DeploymentSettingsService {
       // answer changes nothing a restart would pick up.
       const effective = this.resolve(key) || def.unsetMeans || '';
       if (def.restartToApply && effective !== value) restartKeys.push(key);
-      const encrypted = def.secret === true;
-      const stored = encrypted ? this.crypto!.encrypt(value) : value;
-      await this.db
-        .insert(deploymentSettings)
-        .values({ key, value: stored, encrypted, updatedBy })
-        .onConflictDoUpdate({
-          target: deploymentSettings.key,
-          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
-        });
-      this.stored.set(key, value);
     }
+    // Every row of the batch lands in ONE transaction, and the cache follows
+    // only once it has committed: a batch that fails part-way leaves the
+    // rows and the cache as they were. So a save that removes the single
+    // sign-on issuer cannot fail with its saved secret left behind.
+    await this.db.transaction(async (tx) => {
+      // A cleared row goes (a removed setting, a blanked blank-means-default
+      // one), and its readers are back on unset from the next read.
+      if (toClear.length > 0) await tx.delete(deploymentSettings).where(inArray(deploymentSettings.key, toClear));
+      for (const { key, value, def } of toWrite) {
+        const encrypted = def.secret === true;
+        const stored = encrypted ? this.crypto!.encrypt(value) : value;
+        await tx
+          .insert(deploymentSettings)
+          .values({ key, value: stored, encrypted, updatedBy })
+          .onConflictDoUpdate({
+            target: deploymentSettings.key,
+            set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
+          });
+      }
+    });
+    for (const key of toClear) this.stored.delete(key);
+    for (const { key, value } of toWrite) this.stored.set(key, value);
 
     // A token saved here is in effect at once: the git runner's credentials
     // read `resolve('gitToken')` on every call, so nothing is published to

@@ -8,8 +8,8 @@ import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import { ManagedRepository } from '../managed-repository.js';
 import { RepositorySource } from '../repository-source.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import type { ConnectionCheck, RepositoryConnection } from '../connection-check.js';
 
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
@@ -56,6 +56,9 @@ function listen(
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
     delete: () => ({ where: () => Promise.resolve() }),
+    transaction(run: (tx: unknown) => unknown) {
+      return run(this);
+    },
   } as unknown as Database;
   const settings = new DeploymentSettingsService(db, ENC_KEY);
   const kb = opts.kb ?? testKbContext({ branchModel: null });
@@ -368,6 +371,9 @@ describe('a mount without the choice', () => {
       select: () => ({ from: () => Promise.resolve([]) }),
       insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
       delete: () => ({ where: () => Promise.resolve() }),
+      transaction(run: (tx: unknown) => unknown) {
+        return run(this);
+      },
     } as unknown as Database;
     const settings = new DeploymentSettingsService(db, ENC_KEY);
     const app = express();

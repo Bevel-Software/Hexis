@@ -4,8 +4,8 @@ import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -58,6 +58,9 @@ function listen(runner: { runAll(): Promise<void>; lastFailure(): string | null 
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
     delete: () => ({ where: () => Promise.resolve() }),
+    transaction(run: (tx: unknown) => unknown) {
+      return run(this);
+    },
   } as unknown as Database;
   const settings = new DeploymentSettingsService(db, ENC_KEY);
   const app = express();

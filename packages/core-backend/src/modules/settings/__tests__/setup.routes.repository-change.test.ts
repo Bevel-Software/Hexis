@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { createSetupRoutes, type RepositoryChangeRequests } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import type { ConnectionCheck, RepositoryConnection } from '../connection-check.js';
 
 /**
@@ -63,6 +63,9 @@ function listen(openChangeRequests: number) {
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
     delete: () => ({ where: () => Promise.resolve() }),
+    transaction(run: (tx: unknown) => unknown) {
+      return run(this);
+    },
   } as unknown as Database;
   const settings = new DeploymentSettingsService(db, ENC_KEY);
   /** Every run of the KB startup phase — the thing that replaces the clones. */

@@ -8,6 +8,8 @@ import type { IKbRepository } from '../modules/workspace/kb-repository.contract.
 import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { KbStartupRunner, type KbStartupRunnerOptions } from '../modules/workspace/startup/kb-startup-runner.js';
 import { recordTestRepositoryRoot } from './test-repositories.js';
+import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
+import { realDisk } from './real-disk.js';
 
 /**
  * The repository a suite's services share when it builds them by hand: one
@@ -66,4 +68,14 @@ export function newKbStartupRunner(
     ...opts,
     repository: opts.repository ?? testKbRepository(opts.workspacesRoot, opts.kbDirName, opts.kbRepoUrl, opts.gitRunner),
   });
+}
+
+/**
+ * The startup step that writes the template's files into the knowledge base,
+ * over the real disk, as the composition root builds it
+ * (`core/create-core-services.ts`). A suite outside the workspace module that
+ * runs the real initialization phase takes it from here.
+ */
+export function templateFilesStep(kb: KbContext): TemplateFilesStep {
+  return new TemplateFilesStep(realDisk(), kb);
 }
