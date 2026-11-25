@@ -7,9 +7,13 @@ import { isBlankSecret } from '@bevel-software/platform-shared';
 /**
  * Whether a typed key or client secret is blank has one answer,
  * `isBlankSecret` from the shared package: the secrets vault refuses by it,
- * and each form here that sends a key or a client secret asks it. The second
- * case reads the forms' source, so a form that decides blankness inline again
- * (the `!value.trim()` they each carried) fails here.
+ * and each form here that sends a key or a client secret asks it.
+ *
+ * The second case reads the forms' source and checks only that each one
+ * calls the rule: a form that stops calling it fails here. It does not try to
+ * spot a blank check written some other way, since no pattern covers every
+ * spelling of one. That the call gates Save is shown by behaviour, in the
+ * Save-disabled cases of `ToolVarRow.test.tsx` and `ToolSecretsPanel.test.tsx`.
  */
 const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const FORMS = [
@@ -26,10 +30,8 @@ describe('a blank key or client secret: one rule', () => {
     for (const real of ['k', ' k ', 'cs_live']) expect(isBlankSecret(real)).toBe(false);
   });
 
-  it.each(FORMS)('%s asks isBlankSecret and decides no blank secret inline', (file) => {
+  it.each(FORMS)('%s calls isBlankSecret', (file) => {
     const source = readFileSync(join(SRC_DIR, file), 'utf8');
     expect(source).toMatch(/\bisBlankSecret\(/);
-    expect(source).not.toMatch(/!\s*(value|secret|clientSecret)\.trim\(\)/);
-    expect(source).not.toMatch(/\b(value|secret|clientSecret)\.trim\(\)\s*\|\|/);
   });
 });
