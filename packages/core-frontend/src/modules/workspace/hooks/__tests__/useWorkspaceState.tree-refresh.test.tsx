@@ -209,6 +209,33 @@ describe('the file tree is asked for again only when it may have changed', () =>
     }
   });
 
+  it('an answer that arrives after a later request\'s does not replace the newer tree', async () => {
+    const { bus, result } = await mount();
+    const OLD = { ...TREE, children: [{ name: 'old.md', relativePath: 'old.md', type: 'file' as const }] };
+    const NEW = { ...TREE, children: [{ name: 'new.md', relativePath: 'new.md', type: 'file' as const }] };
+    const answers: ((tree: typeof OLD) => void)[] = [];
+    vi.useFakeTimers();
+    try {
+      apiMocks.listFiles.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));
+      await act(async () => {
+        bus.emit(tree());
+        bus.emit(tree());
+      });
+      // The first request outlasts its minute; the queued one is made.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(61_000);
+      });
+      expect(apiMocks.listFiles).toHaveBeenCalledTimes(2);
+      await act(async () => answers[1]!(NEW));
+      expect(result.current.fileTree?.children?.map((c) => c.name)).toEqual(['new.md']);
+      // The first one answers at last, with what the tree was when it was asked.
+      await act(async () => answers[0]!(OLD));
+      expect(result.current.fileTree?.children?.map((c) => c.name)).toEqual(['new.md']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a tree request that fails does not stop the next one', async () => {
     const { bus } = await mount();
     vi.spyOn(console, 'error').mockImplementation(() => {});

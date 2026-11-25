@@ -384,10 +384,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setBootstrapAttempt((n) => n + 1);
   }, []);
 
-  const refreshFileTree = useCallback(async () => {
+  /**
+   * `stillWanted` lets a caller whose request was overtaken drop its answer:
+   * a tree that arrives after a later request's must not replace it.
+   */
+  const refreshFileTree = useCallback(async (stillWanted?: () => boolean) => {
     if (!workspaceId) return null;
     try {
       let tree = await listFiles(workspaceId);
+      if (stillWanted && !stillWanted()) return null;
       // Reconcile with in-flight optimistic deletes — see the ref's
       // JSDoc for the disappear/reappear/disappear bug this avoids.
       for (const pending of pendingDeletePathsRef.current) {
@@ -1654,7 +1659,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // nobody's access with it), and a burst of events shares its requests.
     // Stopped with the subscription, so a request queued for this workspace
     // is not made once another one is open.
-    const tree = mergedRunner(refreshFileTree);
+    const tree = mergedRunner((isLatest) => refreshFileTree(isLatest));
     const refreshTree = tree.request;
     const offFileChanged = bus.subscribe('file-changed', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;

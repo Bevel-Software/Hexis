@@ -9,9 +9,11 @@
  * another for as long as it lasts, not one per request.
  *
  * A run that fails counts as ended. So does one that has not ended after
- * `giveUpAfterMs`: its answer may still arrive and is the caller's to take or
- * drop, but it no longer holds the next run back, so one request that never
- * settles cannot stop every later one.
+ * `giveUpAfterMs`: it no longer holds the next run back, so one request that
+ * never settles cannot stop every later one. Its answer may still arrive,
+ * after a later run's: `run` is handed `isLatest`, which is false once a later
+ * run has started or the runner was stopped, and a run that applies what it
+ * fetched asks it first, so an old answer never replaces a newer one.
  *
  * `stop()` ends it: no run starts after it, the queued one included. For the
  * caller whose subject changed (another workspace) while a run was under way.
@@ -25,12 +27,14 @@ export interface MergedRunner {
   stop(): void;
 }
 
-export function mergedRunner(run: () => Promise<unknown>, giveUpAfterMs = 60_000): MergedRunner {
+export function mergedRunner(run: (isLatest: () => boolean) => Promise<unknown>, giveUpAfterMs = 60_000): MergedRunner {
   let underWay = false;
   let again = false;
   let stopped = false;
+  let latest = 0;
   const start = (): void => {
     underWay = true;
+    const mine = ++latest;
     let ended = false;
     const end = (): void => {
       if (ended) return;
@@ -43,7 +47,7 @@ export function mergedRunner(run: () => Promise<unknown>, giveUpAfterMs = 60_000
       }
     };
     const limit = setTimeout(end, giveUpAfterMs);
-    void run()
+    void run(() => !stopped && mine === latest)
       .catch(() => undefined)
       .then(end);
   };
