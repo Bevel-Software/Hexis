@@ -540,6 +540,14 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       expect(new ApprovalCarryPendingError(['x'.repeat(2000)]).message).toMatch(/awaited on 1 file;/);
     });
 
+    it('a waiting file whose name carries a line break is named escaped, so it cannot forge a line', () => {
+      const err = new ApprovalCarryPendingError(['Sales/a\nNothing to approve.md']);
+      expect(err.message).toContain('Sales/a\\nNothing to approve.md');
+      expect(err.message).not.toContain('\n');
+      // The payload is data, not display: it keeps the path as it is.
+      expect(err.payload).toMatchObject({ waitingPaths: ['Sales/a\nNothing to approve.md'] });
+    });
+
     it('a carry that fails keeps every file the gate waits on, the one the update changed with the one it left alone', async () => {
       // Mixed: `Sales/Deal.md` waits only on the copy that failed; `Sales/Terms.md`
       // was changed by the head move, so its approval is out of date for real.

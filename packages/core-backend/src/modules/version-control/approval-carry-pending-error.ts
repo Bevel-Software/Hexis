@@ -1,4 +1,5 @@
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { sanitizedPath } from '../../shared/printable.js';
 
 /**
  * Apply was refused by the approval gate while this request is still owed an
@@ -11,7 +12,8 @@ import { VersionControlDomainError } from '../../shared/domain-errors.js';
  * and names the files the gate waits on (`waitingPaths`), never that no file
  * needs approving. By path alone: the gate's own reasons name the approvers,
  * and this text is kept as the request's last refusal. The list in the text is
- * bounded, so the whole sentence fits in the stored refusal. Nothing was
+ * bounded, so the whole sentence fits in the stored refusal, and each path
+ * is escaped (`sanitizedPath`), so a name cannot break the line. Nothing was
  * applied. 503: the copy is the server's fault and temporary. Not
  * `mergeBlockedReasons`: that is the gate's own refusal shape.
  */
@@ -24,7 +26,7 @@ export class ApprovalCarryPendingError extends VersionControlDomainError {
       'The server updated this draft while applying it and could not yet carry the approvals already given over to the updated draft, so nothing was applied. ' +
         'Applying again tries once more to carry over the approvals of files the update left alone. ' +
         (waitingPaths.length > 0
-          ? `Approval is still awaited on ${listedPaths(waitingPaths, ApprovalCarryPendingError.LISTED_PATHS_MAX_CHARS)}; any of those the update changed needs approving again.`
+          ? `Approval is still awaited on ${listedPaths(waitingPaths.map(sanitizedPath), ApprovalCarryPendingError.LISTED_PATHS_MAX_CHARS)}; any of those the update changed needs approving again.`
           : 'A file the update changed needs approving again.'),
       503,
       { kind: 'approval-carry-pending', retryable: true, ...(waitingPaths.length > 0 ? { waitingPaths: [...waitingPaths] } : {}) },
