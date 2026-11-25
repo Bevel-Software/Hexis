@@ -26,7 +26,13 @@ import { GitApiError, friendlyGitError, friendlyGitMessage } from '../../git';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { WorkspaceApiError, displayFileName } from '../../workspace';
+import {
+  WorkspaceApiError,
+  displayFileName,
+  hasFileViewer,
+  isBinaryFile,
+  rendersAsText,
+} from '../../workspace';
 import { describeReadFailure } from '../services/denied-file.api';
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
@@ -35,7 +41,6 @@ import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { useForkPointFileRead } from '../hooks/useForkPointFile';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace/components/renderers';
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
