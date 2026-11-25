@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
@@ -9,15 +9,18 @@ import { join } from 'node:path';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { promptsForSkills, skillPromptText, type LoadedSkill, type SkillSummary } from '@bevel-software/platform-mcp-core';
 import { createCoreServices, createCoreServer, stopCore, defaultKbTemplateDir, defaultStarterPacksDir, type TenantConfig } from '../../../index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, scratchDatabaseUrl, dropScratchDatabases } from '../../../__tests__/pg-scratch.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
 
 /**
  * A client of the public server composition, over real Streamable HTTP and a
- * scratch Postgres. The catalog source is supplied through its public overlay
- * hook; tool registration, manuals, hints, authentication and MCP routing are
- * the production composition. Admin edits go through the public HTTP API too.
+ * scratch Postgres. Tool registration, manuals, skills, hints, authentication
+ * and MCP routing are the production composition. Admin edits go through the
+ * public HTTP API too. The one thing a test adds is a plugin MCP server's
+ * manual, appended to what the manual catalog answers (see `startPlatform`).
  */
 const stops: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -31,9 +34,21 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}
   const repository = join(root, 'repository');
   await cp(defaultKbTemplateDir(), repository, { recursive: true });
   await writeFile(join(repository, 'roles.yaml'), 'roles:\n  Admin:\n    - admin@example.com\n');
-  // Requests the server receives on the two routes the endpoint used to ask
-  // itself for. Both still answer as the production composition does.
-  const hits = { allTools: 0, revisionRoute: 0 };
+  // Two skills. Read is default-deny, so an admin reads both and anyone else
+  // reads only the one whose folder is opened to everyone.
+  for (const [name, open] of [[OPEN_SKILL, true], [ADMIN_SKILL, false]] as const) {
+    await mkdir(join(repository, 'Skills', name), { recursive: true });
+    await writeFile(
+      join(repository, 'Skills', name, 'SKILL.md'),
+      `---\nname: ${name}\ndescription: The ${name} skill of the test knowledge base.\n---\n\n# ${name}\n\nFollow the ${name} steps.\n`,
+    );
+    if (open) await writeFile(join(repository, 'Skills', name, 'access.md'), '---\nowner:\n  - Admin\n---\nread:\n  - everyone\n');
+  }
+  // Requests the server receives on the routes the endpoint used to ask itself
+  // for; each still answers as the production composition does. And the times
+  // the manual catalog was asked for a caller's manuals, with what it was asked.
+  const hits = { manualListRoute: 0, revisionRoute: 0, skillRoutes: 0 };
+  const manualLists: Array<{ email: string; remoteOnly: boolean; narrowed: boolean }> = [];
   const git = (args: string[]) => promisify(execFile)('git', args, { cwd: repository });
   await git(['init', '-q', '-b', 'main']);
   await git(['add', '.']);
@@ -65,24 +80,32 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}
   };
   const core = await createCoreServices(config, { mirrorSharedBindings: false });
   stops.push(() => stopCore(core));
+  // The manual catalog, watched: every caller's manual list is read from it,
+  // by the route and by the endpoint alike, and a surface build reads it once.
+  // A test's plugin MCP server is appended here, where a `.tool` would be: a
+  // manual on a loopback address cannot be released into a knowledge base.
+  const catalog = core.toolManualService;
+  const listManuals = catalog.toManualCallTemplates.bind(catalog);
+  catalog.toManualCallTemplates = async (email, listOpts) => {
+    manualLists.push({ email, remoteOnly: listOpts?.remoteOnly === true, narrowed: listOpts?.within !== undefined });
+    const manuals = await listManuals(email, listOpts);
+    if (!opts.downstream) return manuals;
+    const downstream = { name: 'notion', call_template_type: 'mcp',
+      config: { mcpServers: { srv: { transport: 'http', url: opts.downstream.url } } } };
+    return [...manuals, downstream as unknown as (typeof manuals)[number]];
+  };
   const app = await createCoreServer(core, {
     preAuth(app) {
-      app.get('/api/agent/all-tools', core.manualAuthMiddleware, (_req, res) => {
-        hits.allTools += 1;
-        res.json({ manuals: [
-          { name: 'KNOWLEDGE_BASE', call_template_type: 'http', http_method: 'GET',
-            url: '${API_URL}/api/agent/utcp', content_type: 'application/json',
-            headers: { Authorization: 'Bearer ${CONNECTION_KEY}' } },
-          ...(opts.downstream ? [{ name: 'notion', call_template_type: 'mcp',
-            config: { mcpServers: { srv: { transport: 'http', url: opts.downstream.url } } } }] : []),
-        ] });
-      });
-      // Counted and passed on: the production route answers. The endpoint
-      // reads the revision in process, so only an HTTP caller lands here.
-      app.get('/api/agent/catalog-revision', (_req, _res, next) => {
-        hits.revisionRoute += 1;
+      // Counted and passed on: the production routes answer. The endpoint
+      // reads all of these in process, so only an HTTP caller lands here.
+      const counted = (hit: keyof typeof hits) => (_req: unknown, _res: unknown, next: () => void) => {
+        hits[hit] += 1;
         next();
-      });
+      };
+      app.get('/api/agent/all-tools', counted('manualListRoute'));
+      app.get('/api/agent/catalog-revision', counted('revisionRoute'));
+      app.post('/api/agent/tools/list_skills', counted('skillRoutes'));
+      app.post('/api/agent/tools/get_skill', counted('skillRoutes'));
     },
   }, { boot: false });
   server.on('request', app);
@@ -100,8 +123,12 @@ async function startPlatform(opts: { downstream?: FakeDownstreamMcpServer } = {}
     });
     expect(response.status).toBe(200);
   };
-  return { baseUrl, key, setHint, core, userId: user.id, hits };
+  return { baseUrl, key, setHint, core, userId: user.id, hits, manualLists };
 }
+
+/** The two skills of the test knowledge base: one everyone reads, one only an admin does. */
+const OPEN_SKILL = 'open-skill';
+const ADMIN_SKILL = 'admin-skill';
 
 /** A path a key is recorded with. No file is there: core reads none (see the last test). */
 const AGENT_PATH = 'Agents/narrow.agent';
@@ -152,9 +179,10 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint lists the read-only hint
 
   // The endpoint reads the caller's revision in process, so on this
   // composition the tool surface is always the cached one: each of the two
-  // tests below ends by showing it was built once.
+  // tests below ends by showing it was built once (a build reads the caller's
+  // manual list once).
   it("lists an admin's change on the client's NEXT tools/list, with no reconnect and from the cached surface, and a reset undoes it", async () => {
-    const { baseUrl, key, setHint, hits } = await startPlatform();
+    const { baseUrl, key, setHint, manualLists } = await startPlatform();
     const client = await connect(baseUrl, key);
     expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
 
@@ -171,18 +199,18 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint lists the read-only hint
     expect(listed.read_file).toEqual({ readOnlyHint: true });
     expect(listed.write_file).toEqual({ readOnlyHint: false });
     expect(listed.call_tool_chain).toEqual({ readOnlyHint: false });
-    expect(hits.allTools).toBe(1);
+    expect(manualLists).toHaveLength(1);
   });
 
   it('does not keep an override in the cached surface: one set before the surface is built is undone by its reset', async () => {
-    const { baseUrl, key, setHint, hits } = await startPlatform();
+    const { baseUrl, key, setHint, manualLists } = await startPlatform();
     await setHint('read_file', false);
     const client = await connect(baseUrl, key);
     expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: false });
 
     await setHint('read_file', null);
     expect((await annotationsOf(client)).read_file).toEqual({ readOnlyHint: true });
-    expect(hits.allTools).toBe(1);
+    expect(manualLists).toHaveLength(1);
   });
 
   it('lists a tool from a plugin MCP server with conservative effects', async () => {
@@ -203,7 +231,7 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint lists the read-only hint
  */
 describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the catalog revision in process', () => {
   it('sends its own revision route no request, and keeps the tool surface between requests', async () => {
-    const { baseUrl, key, hits } = await startPlatform();
+    const { baseUrl, key, hits, manualLists } = await startPlatform();
     const client = await connect(baseUrl, key);
     await client.listTools();
     await client.listTools();
@@ -211,7 +239,7 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the catalog revisi
     expect(hits.revisionRoute).toBe(0);
     // Built once. A request with no revision builds a surface of its own, so
     // one build over three requests is a revision that was read each time.
-    expect(hits.allTools).toBe(1);
+    expect(manualLists).toHaveLength(1);
   });
 
   it('answers a caller over HTTP what the reader answers in process', async () => {
@@ -247,5 +275,155 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the catalog revisi
     // A key with no agent, for the same person, is told nothing of the kind.
     const { plaintext: plainKey } = await core.externalApiKeyService.mint(userId, 'everything');
     expect((await connect(baseUrl, plainKey)).getInstructions()).not.toContain('made as the agent');
+  });
+});
+
+/**
+ * The same composition, for the two other things the endpoint read from its
+ * own server: a caller's manual list (once for every surface build) and the
+ * skills behind `prompts/list` and `prompts/get`. Each is read by the code its
+ * route answers with, called as a function, as the caller the request's
+ * credential resolved to.
+ */
+describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the manual list and the skills in process', () => {
+  /** A second person, in no role: reads only what is opened to everyone. */
+  const MEMBER = 'member@example.com';
+
+  const memberKey = async (core: Awaited<ReturnType<typeof startPlatform>>['core']) => {
+    const member = await core.authService.getOrCreateByEmail(MEMBER);
+    return (await core.externalApiKeyService.mint(member!.id, 'member')).plaintext;
+  };
+
+  const post = (baseUrl: string, key: string, tool: string, body: unknown) =>
+    fetch(`${baseUrl}/api/agent/tools/${tool}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('sends its own server no request for the manual list, the revision or the skills', async () => {
+    const { baseUrl, key, hits } = await startPlatform();
+    const client = await connect(baseUrl, key);
+    await client.listTools();
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name)).toEqual(expect.arrayContaining([OPEN_SKILL, ADMIN_SKILL]));
+    const prompt = await client.getPrompt({ name: OPEN_SKILL });
+    expect(JSON.stringify(prompt.messages)).toContain(`Follow the ${OPEN_SKILL} steps.`);
+    expect(hits).toEqual({ manualListRoute: 0, revisionRoute: 0, skillRoutes: 0 });
+  });
+
+  it('lists each caller the prompts the skill route lists them: an admin, a person in no role, and a key made as an agent', async () => {
+    const { baseUrl, key: adminKey, core, userId } = await startPlatform();
+    const { plaintext: agentKey } = await core.externalApiKeyService.mint(userId, 'as-an-agent', { agentPath: AGENT_PATH });
+    const callers = [
+      { who: 'admin', key: adminKey, narrowed: false, reads: [ADMIN_SKILL, OPEN_SKILL] },
+      { who: 'member', key: await memberKey(core), narrowed: false, reads: [OPEN_SKILL] },
+      // Open core reads no agent file, so this connection loads nothing: the
+      // route refuses it the skills, and the endpoint lists it no prompt.
+      { who: 'agent', key: agentKey, narrowed: true, reads: [] },
+    ];
+    for (const caller of callers) {
+      const answer = await post(baseUrl, caller.key, 'list_skills', {});
+      expect(answer.status, caller.who).toBe(caller.narrowed ? 403 : 200);
+      const skills = caller.narrowed ? [] : ((await answer.json()) as { skills: SkillSummary[] }).skills;
+      expect(skills.map((s) => s.name).sort(), caller.who).toEqual(caller.reads);
+
+      const { prompts } = await (await connect(baseUrl, caller.key)).listPrompts();
+      // The platform's own prompt is offered beside the skills on a connection
+      // that is not narrowed, exactly as the shared rule says.
+      expect(prompts, caller.who).toEqual(promptsForSkills(skills, !caller.narrowed));
+    }
+  });
+
+  it('serves each caller the skill the skill route serves them, and refuses the one it refuses', async () => {
+    const { baseUrl, key: adminKey, core } = await startPlatform();
+    const member = await memberKey(core);
+    for (const [who, key, name, served] of [
+      ['admin', adminKey, ADMIN_SKILL, true],
+      ['admin', adminKey, OPEN_SKILL, true],
+      ['member', member, OPEN_SKILL, true],
+      ['member', member, ADMIN_SKILL, false],
+    ] as const) {
+      const answer = (await (await post(baseUrl, key, 'get_skill', { name })).json()) as { ok?: boolean; skill?: LoadedSkill };
+      expect(answer.ok === true, `${who} ${name}`).toBe(served);
+      const client = await connect(baseUrl, key);
+      if (!served) {
+        await expect(client.getPrompt({ name }), `${who} ${name}`).rejects.toThrow(`Unknown skill "${name}".`);
+        continue;
+      }
+      const prompt = await client.getPrompt({ name });
+      expect(prompt.description, `${who} ${name}`).toBe(answer.skill!.description);
+      expect(prompt.messages, `${who} ${name}`).toEqual([
+        { role: 'user', content: { type: 'text', text: skillPromptText(answer.skill!) } },
+      ]);
+    }
+  });
+
+  it('reads the manual list for the caller the route reads it for, and answers what the route answers', async () => {
+    const { baseUrl, key: adminKey, core, userId, manualLists } = await startPlatform();
+    const { plaintext: agentKey } = await core.externalApiKeyService.mint(userId, 'as-an-agent', { agentPath: AGENT_PATH });
+    const member = await core.authService.getOrCreateByEmail(MEMBER);
+    const callers = [
+      { who: 'admin', key: adminKey, caller: { userId, agentPath: null } },
+      { who: 'member', key: await memberKey(core), caller: { userId: member!.id, agentPath: null } },
+      { who: 'agent', key: agentKey, caller: { userId, agentPath: AGENT_PATH } },
+    ];
+    for (const { who, key, caller } of callers) {
+      // The endpoint's build asks the catalog once, as this caller.
+      manualLists.length = 0;
+      await (await connect(baseUrl, key)).listTools();
+      const [fromEndpoint, ...more] = manualLists;
+      expect(more, who).toEqual([]);
+
+      // The route asks it the same question for the same key.
+      manualLists.length = 0;
+      const overHttp = await (
+        await fetch(`${baseUrl}/api/agent/all-tools?remote=true`, { headers: { Authorization: `Bearer ${key}` } })
+      ).json();
+      expect(manualLists, who).toEqual([fromEndpoint]);
+      expect(fromEndpoint, who).toMatchObject({ remoteOnly: true, narrowed: who === 'agent' });
+
+      // And the reader the endpoint calls answers what the route answered.
+      expect(JSON.parse(JSON.stringify(await core.readManualList(caller, { remoteOnly: true }))), who).toEqual(overHttp);
+    }
+    // Three different callers were three different questions.
+    expect(new Set(callers.map((c) => c.who)).size).toBe(3);
+  });
+
+  // Over loopback every read carried the bearer and its route verified it
+  // again. In process the read resolves the bearer itself, with the same
+  // verifier, when it reads. The request here is handed to the endpoint as its
+  // route hands it over once admitted, and the key is revoked before it runs:
+  // a request admitted a moment before its key was revoked.
+  it('reads nothing for a key revoked after its request was admitted, as the routes answer that key', async () => {
+    const { baseUrl, core, userId, hits } = await startPlatform();
+    const { plaintext: key, summary } = await core.externalApiKeyService.mint(userId, 'revoked-mid-request');
+    await core.externalApiKeyService.revoke(summary.id, userId);
+
+    expect((await post(baseUrl, key, 'list_skills', {})).status).toBe(401);
+    expect((await fetch(`${baseUrl}/api/agent/all-tools`, { headers: { Authorization: `Bearer ${key}` } })).status).toBe(401);
+    const routeHits = { ...hits };
+
+    const server = await core.mcpService.createRequestServer(
+      { userId, tokenId: summary.id, connectionId: null, bearer: key },
+      { jsonrpc: '2.0', id: 1, method: 'prompts/list', params: {} },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: 'admitted-before-the-revoke', version: '0.0.0' }, { capabilities: {} });
+    await client.connect(clientTransport);
+    stops.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    // No skill is listed or served: the platform's own prompt alone.
+    expect((await client.listPrompts()).prompts.map((p) => p.name)).toEqual(['onboard']);
+    await expect(client.getPrompt({ name: OPEN_SKILL })).rejects.toThrow(`Unknown skill "${OPEN_SKILL}".`);
+    // No manual is listed, and the platform's own tools are refused the key
+    // where they are discovered, which is the answer the request gets.
+    await expect(client.listTools()).rejects.toThrow(/tool discovery failed: HTTP 401 .*Invalid or revoked connection key/);
+    // All of it without a request to the list or skill routes.
+    expect(hits).toEqual(routeHits);
   });
 });

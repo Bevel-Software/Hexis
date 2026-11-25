@@ -177,6 +177,25 @@ export interface McpProxyOptions {
     agentPath: string | null;
   }) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
   /**
+   * Reads a caller's manual list in process: the same computation
+   * `GET /api/agent/all-tools` answers with (`createManualListReader` in
+   * `modules/tool-manuals`), called as a function, for the same reason as
+   * {@link McpProxyOptions.readCatalogRevision}. The list is read once for
+   * every surface build.
+   *
+   * It is handed the bearer the loopback request carried, and resolves it as
+   * the route's auth did: the list is read for whoever the bearer names when
+   * it is read, and a bearer refused by then (a key revoked, an account
+   * switched off) is refused here too, by throwing.
+   *
+   * Absent (a test, or a composition that serves the route elsewhere), the
+   * list is read over loopback as before.
+   */
+  readManualList?: (
+    bearer: string,
+    opts: { remoteOnly: boolean },
+  ) => Promise<{ manuals: readonly unknown[]; connection?: ConnectionScopeWire }>;
+  /**
    * How long a read this service makes in process may take: a limit a held
    * event loop cannot use up (`shared/loop-time-limit.ts`); default
    * {@link IN_PROCESS_READ_LIMIT_MS}. A read that passes it is given up on, as
@@ -222,6 +241,25 @@ export interface McpCaller {
 }
 
 /**
+ * A caller's skills, read in process: the two reads the endpoint serves
+ * prompts from, called as functions with what their routes
+ * (`POST /api/agent/tools/list_skills` and `get_skill`) run. Each answers what
+ * its route answers a successful call, and throws where its route refuses or
+ * fails.
+ *
+ * Each is handed the bearer the loopback request carried, and resolves it as
+ * the route's auth did. So a read is made for whoever the bearer names when
+ * the read is made: a key revoked or an account switched off since the request
+ * was admitted is refused the skills, as it was at the route.
+ */
+export interface McpSkillReads {
+  /** The caller's released skills: what `list_skills` answers a call with no arguments. */
+  list(bearer: string): Promise<unknown>;
+  /** One released skill by name: what `get_skill` answers `{ name }`. */
+  get(bearer: string, name: string): Promise<unknown>;
+}
+
+/**
  * Upper bound on one `loopbackJson` round-trip (manual list, skill fetch) so a
  * hung loopback can't stall a request. Generous: these endpoints answer in
  * milliseconds; only a wedged process ever comes near it.
@@ -229,8 +267,9 @@ export interface McpCaller {
 const LOOPBACK_TIMEOUT_MS = 15_000;
 
 /**
- * Upper bound on a read made in process (the catalog revision), as long as the
- * loopback request it replaces was given. The loopback's limit ran on the
+ * Upper bound on a read made in process (the catalog revision, the manual
+ * list, a skill read), as long as the loopback request it replaces was given.
+ * The loopback's limit ran on the
  * clock, so a server whose loop was held passed it on a read that needed
  * milliseconds. This one is spent only while the event loop turns: a stretch
  * the loop is held for spends one tick of it, however long the stretch. Under
@@ -298,8 +337,8 @@ interface RequestSurface {
    */
   degraded: boolean;
   /**
-   * The caller's manual list could not be read (the `all-tools` loopback
-   * failed, or answered nothing usable), so this surface carries the platform
+   * The caller's manual list could not be read (the read failed, or answered
+   * nothing usable), so this surface carries the platform
    * manual alone. It answers the request that built it and is never kept:
    * served from the cache it would hide every `.tool` of the caller until
    * their catalog revision moved, a secret of theirs changed, or the process
@@ -391,9 +430,9 @@ interface PooledDownstream {
  * The MCP server is a GENERIC, STATELESS proxy over the UTCP tool surface. It
  * owns no tool logic and no session: every HTTP request gets its own MCP
  * `Server`, built from that request's bearer. When the request needs tools it
- * uses the caller's `UtcpClient` — pointed at the backend's own
- * `GET /api/agent/all-tools` catalog (over loopback, authenticated as the
- * caller, so ACL filtering lives ONCE behind the REST surface), every tool
+ * uses the caller's `UtcpClient` — built from the caller's manual list (what
+ * `GET /api/agent/all-tools` answers them, read by that route's own reader, so
+ * ACL filtering lives ONCE, there), every tool
  * discovered — and re-exposes each one to the MCP client. A tool call is dispatched straight back through the same
  * REST endpoint the tool's UTCP `tool_call_template` names — so the agent logic,
  * thread continuity, and per-key token metering all live ONCE behind that REST
@@ -480,6 +519,9 @@ export class McpService {
   // Tool definitions shared by every surface that discovered the same ones.
   private readonly definitions = new SharedDefinitions();
 
+  // The skill reads behind the prompts, in process — see `readSkillsWith`.
+  private skillReads: McpSkillReads | undefined;
+
   constructor(
     private readonly opts: McpProxyOptions,
     // The vault + manual catalog, used to check a caller's per-user credentials
@@ -523,6 +565,22 @@ export class McpService {
     // Paced on the pool's clock, so a test that moves one moves both.
     this.tokenRefreshes = new DownstreamRefreshGuard(undefined, opts.downstreamPool?.now);
     this.surfaces = new SurfaceCache<RequestSurface>(opts.surfaceCache);
+  }
+
+  /**
+   * Read skills in process from now on, and not over loopback. Prompts are
+   * skills: `prompts/list` and `prompts/get` read them, and so does the Audit
+   * log to tell a skill read from a file read. Over loopback each was a request
+   * the server sent itself, behind `LOOPBACK_TIMEOUT_MS`, which a busy server
+   * failed.
+   *
+   * A setter and not an option, because the reads are the skill tools' own
+   * handlers, and those are registered with the routes, after this service is
+   * made. Until it is called (a test, or a composition that hosts the skill
+   * routes elsewhere) skills are read over loopback as before.
+   */
+  readSkillsWith(reads: McpSkillReads): void {
+    this.skillReads = reads;
   }
 
   /**
@@ -632,7 +690,7 @@ export class McpService {
             kbManualName: EXTERNAL_KB_MANUAL_NAME,
             catalogNames: () => catalogNamesHolder.current,
             loadSkills: () =>
-              this.fetchSkillList(loopbackBearer).then((skills) =>
+              this.skillListOf(loopbackBearer).then((skills) =>
                 skills.flatMap((s) => (s.path ? [{ name: s.name, path: s.path }] : [])),
               ),
           })
@@ -922,16 +980,16 @@ export class McpService {
     }));
 
     // Prompts = skills. Each skill becomes a user-callable prompt (slash command
-    // in MCP clients). Backed by the same skill endpoints the tools use, over
-    // loopback with the caller's key — so the default-branch catalog, access
-    // filtering, and progressive disclosure all live ONCE behind that REST
-    // surface, never duplicated here. Neither handler needs the tool catalog.
+    // in MCP clients). Backed by the same two skill reads the tools use, run as
+    // the caller — so the default-branch catalog, access filtering, and
+    // progressive disclosure all live ONCE, in those reads, never duplicated
+    // here. Neither handler needs the tool catalog.
     // The one prompt that is not a skill is the platform's `onboard`, offered
     // only on a connection not narrowed to an agent, and only while no skill
     // takes its name (see `promptsForSkills`).
     const offerOnboard = agentPath === null;
     server.setRequestHandler(ListPromptsRequestSchema, async () => {
-      const skills = await this.fetchSkillList(loopbackBearer);
+      const skills = await this.skillListOf(loopbackBearer);
       const prompts: Prompt[] = promptsForSkills(skills, offerOnboard);
       return { prompts };
     });
@@ -944,7 +1002,7 @@ export class McpService {
       // `onboard` skill is then read like any other prompt, and a read that
       // fails is a failed read, not a reason to serve the platform's text.
       if (offerOnboard && request.params.name === ONBOARD_PROMPT.name) {
-        const released = await this.fetchSkillList(loopbackBearer);
+        const released = await this.skillListOf(loopbackBearer);
         if (!released.some((s) => s.name === ONBOARD_PROMPT.name)) {
           return {
             description: ONBOARD_PROMPT.description,
@@ -953,7 +1011,7 @@ export class McpService {
         }
       }
       const started = performance.now();
-      const skill = await this.fetchSkill(loopbackBearer, request.params.name);
+      const skill = await this.skillOf(loopbackBearer, request.params.name);
       // A prompt IS a skill read — the same event `get_skill` produces.
       audit?.emit(
         { kind: 'skill', manual: skill?.path ?? null, name: request.params.name },
@@ -998,7 +1056,7 @@ export class McpService {
       kbManualName: EXTERNAL_KB_MANUAL_NAME,
       catalogNames: () => catalogNames,
       loadSkills: () =>
-        this.fetchSkillList(loopbackBearer).then((skills) =>
+        this.skillListOf(loopbackBearer).then((skills) =>
           skills.flatMap((s) => (s.path ? [{ name: s.name, path: s.path }] : [])),
         ),
     });
@@ -1034,7 +1092,7 @@ export class McpService {
   private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
     const { userId, tokenId } = caller;
     const { revision } = await this.catalogRevisionOf(caller, loopbackBearer);
-    if (revision === null) return this.buildSurface(userId, tokenId, loopbackBearer, 'uncached');
+    if (revision === null) return this.buildSurface(caller, loopbackBearer, 'uncached');
     // The agent the connection was made as is part of the key: two
     // connections of one person made as different agents are two surfaces.
     // (The revision already moves when the agent's FILE changes — it carries
@@ -1049,7 +1107,7 @@ export class McpService {
     ].join(POOL_KEY_SEPARATOR);
     const { value } = await this.surfaces.get(
       key,
-      () => this.buildSurface(userId, tokenId, loopbackBearer, 'miss'),
+      () => this.buildSurface(caller, loopbackBearer, 'miss'),
       // A surface whose catalog could not be read is not kept at all (its
       // entry ends as it is made); one missing a manual that failed is kept
       // for the refresh window; any other for as long as it is used.
@@ -1118,7 +1176,7 @@ export class McpService {
   }
 
   /**
-   * Build a tool surface: catalog over loopback, a UTCP client, every manual
+   * Build a tool surface: the caller's manual list, a UTCP client, every manual
    * registered (pooled for `mcp` ones), tools flattened, definitions shared.
    *
    * Runs inside the request that asked for it, whose bearer the knowledge
@@ -1129,16 +1187,16 @@ export class McpService {
    * one line for two requests shows the second was served warm.
    */
   private async buildSurface(
-    userId: string,
-    tokenId: string | null,
+    caller: Pick<McpCaller, 'userId' | 'tokenId' | 'agentPath'>,
     loopbackBearer: string,
     cache: 'miss' | 'uncached',
   ): Promise<RequestSurface> {
+    const { userId, tokenId } = caller;
     const started = performance.now();
     // The list of manuals this caller gets: the KB manual + each `.tool` they
-    // can read. Fetched over loopback with the caller's key, so ACL filtering
-    // lives ONCE behind the REST surface.
-    const { manuals, connection, unread } = await this.fetchManualTemplates(loopbackBearer);
+    // can read. Read as the caller by the code the `all-tools` route answers
+    // with, so ACL filtering lives ONCE, there.
+    const { manuals, connection, unread } = await this.manualTemplatesOf(loopbackBearer);
     const catalogMs = performance.now() - started;
     const client = await this.buildClient(userId, manuals);
     const discovered = await this.discoverTools(client, manuals, userId);
@@ -1185,20 +1243,55 @@ export class McpService {
     }
   }
 
-  /** Loopback GET of the default-branch skill catalog (via the `list_skills` tool). */
-  private async fetchSkillList(bearer: string): Promise<SkillSummary[]> {
-    const res = await this.loopbackTool(bearer, 'list_skills', {});
+  /** The caller's default-branch skill catalog (the `list_skills` tool's answer); empty when it cannot be read. */
+  private async skillListOf(bearer: string): Promise<SkillSummary[]> {
+    const res = await this.skillRead(bearer, 'list_skills', {}, (reads) => reads.list(bearer));
     const skills = (res as { skills?: SkillSummary[] } | null)?.skills;
     return Array.isArray(skills) ? skills : [];
   }
 
-  /** Loopback GET of one skill's body (via the `get_skill` tool); null if unavailable. */
-  private async fetchSkill(bearer: string, name: string): Promise<LoadedSkill | null> {
-    const res = (await this.loopbackTool(bearer, 'get_skill', { name })) as
+  /** One skill's body (the `get_skill` tool's answer); null if unavailable. */
+  private async skillOf(bearer: string, name: string): Promise<LoadedSkill | null> {
+    const res = (await this.skillRead(bearer, 'get_skill', { name }, (reads) => reads.get(bearer, name))) as
       | { ok?: boolean; kind?: string; skill?: LoadedSkill }
       | null;
     if (res?.ok && res.kind === 'skill' && res.skill) return res.skill;
     return null;
+  }
+
+  /**
+   * One skill tool's answer, or null when it refused or failed: in process
+   * when the composition handed over the reads (`readSkillsWith`), over
+   * loopback otherwise. A failure is logged under the tool's name and degrades
+   * to null either way — a skill read must not throw into the MCP request. A
+   * read in process is held to {@link IN_PROCESS_READ_LIMIT_MS}, as the
+   * loopback request was to its limit.
+   *
+   * The in-process answer is passed through JSON, as the route's answer was on
+   * its way here, so what the handlers below read is what they always read.
+   */
+  private async skillRead(
+    bearer: string,
+    tool: 'list_skills' | 'get_skill',
+    body: Record<string, unknown>,
+    read: (reads: McpSkillReads) => Promise<unknown>,
+  ): Promise<unknown> {
+    const reads = this.skillReads;
+    if (!reads) return this.loopbackTool(bearer, tool, body);
+    try {
+      return JSON.parse(JSON.stringify((await this.inProcess(read(reads))) ?? null)) as unknown;
+    } catch (err) {
+      // A refusal the route answers with a status (a connection that loads
+      // nothing is refused the skills on every `prompts/list`) is one line,
+      // as it was over loopback, and carries no stack.
+      const status = (err as { status?: unknown } | null)?.status;
+      if (typeof status === 'number' && err instanceof Error) {
+        log.error(`skill ${tool} refused: HTTP ${status} ${err.message}`);
+      } else {
+        log.error(`skill ${tool} could not be read:`, { err });
+      }
+      return null;
+    }
   }
 
   /**
@@ -1236,21 +1329,55 @@ export class McpService {
   }
 
   /**
-   * Loopback GET of the caller's manual list (KB + accessible `.tool` manuals),
-   * validated into `CallTemplate`s at the boundary. The KB manual is guaranteed
-   * present (a fallback covers an unavailable endpoint); a user manual that
-   * fails validation is dropped + logged so one bad `.tool` can't break the
-   * request. HTTP transport loses the `CallTemplate` type, so we re-validate the
-   * received JSON even though the producing endpoint already validated it.
+   * The caller's manual list as the `all-tools` route answers it, or null when
+   * it could not be read: in process when the composition offers a reader
+   * (`McpProxyOptions.readManualList`), over loopback otherwise. Either way
+   * the read ends at a limit, and a list not read by then is one that could
+   * not be read.
+   *
+   * The in-process answer is passed through JSON, as the route's answer was on
+   * its way here, so the validation that follows is handed exactly what it
+   * was always handed. It also makes the list this build's own: discovery
+   * renames each template in place, and nothing the reader handed out may
+   * change under the catalog every caller is served from.
    */
-  private async fetchManualTemplates(
-    bearer: string,
-  ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire; unread: boolean }> {
+  private async manualListOf(bearer: string): Promise<{ manuals?: unknown; connection?: unknown } | null> {
     // This is the REMOTE proxy, so ask for remote-capable manuals only — local-only
     // `.tool`s are surfaced instead via the `list_local_tools` tool in the KB manual.
-    const body = (await this.loopbackJson(bearer, '/api/agent/all-tools?remote=true', 'all-tools')) as
-      | { manuals?: unknown; connection?: unknown }
-      | null;
+    const read = this.opts.readManualList;
+    if (!read) {
+      return (await this.loopbackJson(bearer, '/api/agent/all-tools?remote=true', 'all-tools')) as
+        | { manuals?: unknown; connection?: unknown }
+        | null;
+    }
+    try {
+      const answer = await this.inProcess(read(bearer, { remoteOnly: true }));
+      return JSON.parse(JSON.stringify(answer)) as { manuals?: unknown; connection?: unknown };
+    } catch (err) {
+      // A bearer refused since the request was admitted is one line, as the
+      // loopback's 401 was; anything else is a failed read, with its stack.
+      const status = (err as { status?: unknown } | null)?.status;
+      if (typeof status === 'number' && err instanceof Error) {
+        log.error(`all-tools refused: HTTP ${status} ${err.message}`);
+      } else {
+        log.error('the manual list could not be read:', { err });
+      }
+      return null;
+    }
+  }
+
+  /**
+   * The caller's manual list (KB + accessible `.tool` manuals), validated into
+   * `CallTemplate`s at the boundary. The KB manual is guaranteed present (a
+   * fallback covers a list that could not be read); a user manual that fails
+   * validation is dropped + logged so one bad `.tool` can't break the request.
+   * The list arrives as JSON, which loses the `CallTemplate` type, so it is
+   * validated again here even though the code that produced it already did.
+   */
+  private async manualTemplatesOf(
+    bearer: string,
+  ): Promise<{ manuals: CallTemplate[]; connection?: ConnectionScopeWire; unread: boolean }> {
+    const body = await this.manualListOf(bearer);
     // No answer, or one without a list: the catalog was not read. The request
     // is still served the platform manual below, and the surface built from it
     // is marked so that it is never cached (`RequestSurface.catalogUnread`).
