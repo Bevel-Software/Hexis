@@ -131,9 +131,13 @@ describe('ManageAccessDialog: what each access verb means', () => {
     );
     render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
 
-    // The add field's button, and each row's.
-    expect(await screen.findByRole('button', { name: 'Can edit' })).toHaveAccessibleDescription(EDIT);
-    expect(screen.getByRole('button', { name: 'Can read' })).toHaveAccessibleDescription(READ);
+    // The add field's button, and each row's; each says whether its menu is open.
+    const add = await screen.findByRole('button', { name: 'Can edit' });
+    expect(add).toHaveAccessibleDescription(EDIT);
+    expect(add).toHaveAttribute('aria-expanded', 'false');
+    const row = screen.getByRole('button', { name: 'Can read' });
+    expect(row).toHaveAccessibleDescription(READ);
+    expect(row).toHaveAttribute('aria-expanded', 'false');
     // A row naming two verbs says which line is whose.
     expect(screen.getByRole('button', { name: 'Can read, Can download' })).toHaveAccessibleDescription(
       `Can read: ${READ}. Can download: ${DOWNLOAD}`,
@@ -145,7 +149,9 @@ describe('ManageAccessDialog: what each access verb means', () => {
     api.fetchFileAccess.mockResolvedValue(view());
     render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
 
-    await user.click(await screen.findByRole('button', { name: 'Can edit' }));
+    const trigger = await screen.findByRole('button', { name: 'Can edit' });
+    await user.click(trigger);
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
     const menu = screen.getByRole('button', { name: 'Can download' }).parentElement as HTMLElement;
     for (const [name, line] of VERB_LINES) {
       // Named by the verb alone; the line is visible inside it and is its description.
@@ -191,6 +197,7 @@ describe('ManageAccessDialog: what each access verb means', () => {
       expect(radio).toHaveAccessibleDescription(line);
       expect(screen.getByText(line)).toBeVisible();
     }
+    expect(screen.getByRole('dialog', { name: 'Manage access' })).toBeInTheDocument();
     expect(screen.getByText(/^Only people with edit access can manage access here\./)).toBeInTheDocument();
   });
 
@@ -203,13 +210,16 @@ describe('ManageAccessDialog: what each access verb means', () => {
     expect(screen.queryByText(READ)).toBeNull();
     trigger.focus();
     await user.keyboard('{Enter}');
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
 
     const menu = screen.getByRole('button', { name: 'Can download' }).parentElement as HTMLElement;
     for (const [name, line] of VERB_LINES) {
       const item = within(menu).getByRole('button', { name });
       expect(within(item).getByText(line)).toBeVisible();
       expect(item).toHaveAccessibleDescription(line);
-      expect(item).toBeDisabled();
+      // Unavailable, yet focusable, so its line reaches assistive tech.
+      expect(item).toHaveAttribute('aria-disabled', 'true');
+      expect(item).not.toBeDisabled();
     }
     // No Deny, and pressing an item writes nothing.
     expect(within(menu).queryByRole('button', { name: 'Deny' })).toBeNull();

@@ -370,7 +370,7 @@ describe('ManageAccessDialog: a file whose folder governs its access', () => {
     // A row's verbs open only to be read: every item off, and no Deny.
     await user.click(screen.getByRole('button', { name: /^can edit$/i }));
     const menu = screen.getByRole('button', { name: /^can download$/i }).parentElement as HTMLElement;
-    for (const item of within(menu).getAllByRole('button')) expect(item).toBeDisabled();
+    for (const item of within(menu).getAllByRole('button')) expect(item).toHaveAttribute('aria-disabled', 'true');
     expect(within(menu).queryByRole('button', { name: /^deny$/i })).toBeNull();
     await user.keyboard('{Escape}');
 

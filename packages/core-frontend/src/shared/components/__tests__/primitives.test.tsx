@@ -348,10 +348,28 @@ describe('Menu', () => {
       </MenuItem>,
     );
     const item = screen.getByRole('button');
-    // Nothing fades the whole item; the label and the adornment fade on their own.
+    // Nothing fades the whole item; the label and the adornment fade on their own,
+    // and hovering it neither fills it nor brightens it.
     expect(item.className).not.toMatch(/(^|\s)(aria-)?disabled:opacity-50/);
+    expect(item.className).toMatch(/(^|\s)disabled:hover:bg-transparent/);
+    expect(item.className).toMatch(/(^|\s)disabled:hover:text-ink-muted/);
     expect(within(item).getByText('Can read').className).toMatch(/group-disabled:opacity-50/);
     expect(within(item).getByText('✓').parentElement!.className).toMatch(/group-disabled:opacity-50/);
+    expect(within(item).getByText('Open and read it').className).not.toMatch(/opacity/);
+  });
+
+  it('an aria-disabled MenuItem dims its label and adornment the same way, and stays focusable', () => {
+    render(
+      <MenuItem description="Open and read it" trailing={<span>✓</span>} aria-disabled>
+        Can read
+      </MenuItem>,
+    );
+    const item = screen.getByRole('button');
+    expect(item).not.toBeDisabled();
+    expect(item.className).not.toMatch(/(^|\s)aria-disabled:opacity-50/);
+    expect(item.className).toMatch(/aria-disabled:hover:bg-transparent/);
+    expect(within(item).getByText('Can read').className).toMatch(/group-aria-disabled:opacity-50/);
+    expect(within(item).getByText('✓').parentElement!.className).toMatch(/group-aria-disabled:opacity-50/);
     expect(within(item).getByText('Open and read it').className).not.toMatch(/opacity/);
   });
 

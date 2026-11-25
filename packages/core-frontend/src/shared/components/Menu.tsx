@@ -78,8 +78,10 @@ export function MenuItem({
       type={type}
       className={cn(
         'flex w-full items-center gap-2 rounded-sm px-2.5 py-2 text-left text-ui',
+        // Described, `disabled` stays as still as `aria-disabled` does below:
+        // no fill or brighter text on hover, since nothing fades the whole item.
         described
-          ? 'group transition-colors disabled:cursor-not-allowed'
+          ? 'group transition-colors disabled:cursor-not-allowed disabled:hover:bg-transparent'
           : 'transition-colors disabled:cursor-not-allowed disabled:opacity-50',
         described
           ? 'aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent'
@@ -90,6 +92,7 @@ export function MenuItem({
           // undoes is: only the default tone brightens to `text-ink`, and a
           // disabled row that still lights up on hover reads as usable.
           : 'text-ink-muted hover:bg-hover hover:text-ink aria-disabled:hover:text-ink-muted',
+        described && tone !== 'danger' && 'disabled:hover:text-ink-muted',
         active && 'font-medium text-ink',
         className,
       )}

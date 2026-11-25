@@ -1729,6 +1729,7 @@ export function ManageAccessDialog({
         variant="quiet"
         size="sm"
         aria-description={summaryHelp(p.verbs)}
+        aria-expanded={openRowKey === p.key}
         onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
         trailingIcon={<ChevronDown size={14} />}
       >
@@ -1763,7 +1764,10 @@ export function ManageAccessDialog({
                     rule the separator has always drawn. */}
                 {role === 'Can download' && i > 0 && <div className="my-1 border-t border-line" />}
                 <MenuItem
-                  disabled={readOnly || busy || next === null}
+                  // Read-only items stay focusable (`aria-disabled`, and no
+                  // handler), so their line and note reach assistive tech.
+                  disabled={!readOnly && (busy || next === null)}
+                  aria-disabled={readOnly || undefined}
                   active={checked}
                   aria-pressed={checked}
                   // What the verb lets someone do, under its label.
@@ -2155,6 +2159,7 @@ export function ManageAccessDialog({
                   size="sm"
                   className="max-w-44"
                   aria-description={summaryHelp(effectiveNewVerbs)}
+                  aria-expanded={verbOpen}
                   onClick={() => setVerbOpen((o) => !o)}
                   trailingIcon={<ChevronDown size={14} className="shrink-0" />}
                 >
