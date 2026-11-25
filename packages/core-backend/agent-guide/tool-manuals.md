@@ -33,8 +33,10 @@ address. Use lowercase `snake_case`. Without an `id`, the `name`, then the file
 name, is used. It must be unique among all `.tool` files and `mcp.json` server
 names, and names differing only in `-` and `_` collide. One is refused, not
 renamed, and `list_tool_setup` names it under `invalid`: an `mcp.json` server
-beats a `.tool`, an older personal tool a newer. The same service in two
-plugins needs two ids, each with its own secrets and access.
+beats a `.tool`, except between two people's personal tools, where the one that
+reached the branch first wins whatever its kind; while that order cannot be
+read, both are left out until it can (no rename needed). The same service in
+two plugins needs two ids, each with its own secrets and access.
 
 ### Secrets: `${VAR}` and `variables`
 
