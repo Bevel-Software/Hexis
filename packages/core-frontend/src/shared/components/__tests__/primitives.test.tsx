@@ -366,8 +366,10 @@ describe('Menu', () => {
     );
     const item = screen.getByRole('button');
     expect(item).not.toBeDisabled();
+    expect(item).toHaveAttribute('aria-disabled', 'true');
     expect(item.className).not.toMatch(/(^|\s)aria-disabled:opacity-50/);
-    expect(item.className).toMatch(/aria-disabled:hover:bg-transparent/);
+    expect(item.className).toMatch(/(^|\s)aria-disabled:hover:bg-transparent/);
+    expect(item.className).toMatch(/(^|\s)aria-disabled:hover:text-ink-muted/);
     expect(within(item).getByText('Can read').className).toMatch(/group-aria-disabled:opacity-50/);
     expect(within(item).getByText('✓').parentElement!.className).toMatch(/group-aria-disabled:opacity-50/);
     expect(within(item).getByText('Open and read it').className).not.toMatch(/opacity/);
