@@ -8,6 +8,8 @@ import os from 'node:os';
 import type { WorkspaceService } from '../../../workspace/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { GitService } from '../git.service.js';
+import { NodeGitRunner } from '../node-git-runner.js';
+import type { IGitRunner } from '../../../../shared/git.contract.js';
 
 /**
  * `GitService.commitFile` says what kind of change it committed
@@ -84,6 +86,34 @@ describe('GitService.commitFile — what kind of change it was', () => {
   it('a changed access entry in the frontmatter of a file of another kind is reported', async () => {
     await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Finance]\n---\nA note\n');
     expect((await commit('notes.txt'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('a version the replaced file cannot be read at counts as a changed frontmatter', async () => {
+    // The real runner, except that git answers the replaced version as missing, as
+    // `cat-file --batch` does for a path HEAD does not hold: nothing to compare is no proof
+    // the file's own entries stayed the same.
+    const real = new NodeGitRunner();
+    const runner: IGitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: ((cwd: string, args: string[], opts?: { input?: string | Buffer }) => {
+        const input = String(opts?.input ?? '');
+        if (args[0] === 'cat-file' && args[1] === '--batch' && input.startsWith('HEAD:notes.txt')) {
+          return Promise.resolve({ stdout: Buffer.from('HEAD:notes.txt missing\n'), stderr: '' });
+        }
+        return real.run(cwd, args, opts as never);
+      }) as IGitRunner['run'],
+    };
+    const blind = new GitService(
+      { getWorkspacePath: async () => path.dirname(repo) } as unknown as WorkspaceService,
+      new VersionControlHooks(),
+      testKbContext(),
+      undefined,
+      null,
+      runner,
+    );
+    await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Sales]\n---\nA note, longer\n');
+    expect((await blind.commitFile(WS, USER, 'notes.txt', undefined, true))?.contentEdit).toEqual({ frontmatterChanged: true });
   });
 
   it('frontmatter added to a file of another kind is reported', async () => {
