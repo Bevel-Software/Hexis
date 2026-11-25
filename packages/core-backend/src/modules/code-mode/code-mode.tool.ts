@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   omitImagePayloads,
-  retiredToolInFailure,
   CHAIN_TIMEOUT_DEFAULT_MS,
   CHAIN_TIMEOUT_MAX_MS,
   CHAIN_TIMEOUT_MIN_MS,
@@ -84,14 +83,9 @@ export function createCallToolChainTool(
       // null result (which is what the runner's own resolved shape looks like).
       const outcome = await runToolChain(client, input.code, timeout);
       if (!outcome.ok) {
-        // A chain that failed while calling a REMOVED tool gets the reason it
-        // was removed (who does it now, and where), not "is not a function".
-        // The failure is the signal, not the chain's source: a chain that only
-        // mentions the name and died of something else keeps its own error.
-        const message = retiredToolInFailure(outcome.error) ?? outcome.error;
         return {
           success: false,
-          error: message,
+          error: outcome.error,
           ...(outcome.logs.length ? { logs: outcome.logs } : {}),
           ...(outcome.status !== undefined ? { status: outcome.status } : {}),
           ...(outcome.data !== undefined ? { data: outcome.data } : {}),

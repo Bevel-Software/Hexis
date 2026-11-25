@@ -81,7 +81,7 @@ const TASKS: Task[] = [
     sections: ['for-git-users'],
     facts: [
       ['drafts, and a protected default branch', /Work in progress goes on a draft branch/],
-      ['the agent opens, a person merges', /a person reviews, approves and merges it in the app\. No agent tool approves or merges one/],
+      ['the agent opens, and applies only with the approvals it may give', /`merge_change_request` applies it with the person's own approvals, and is refused while another approver's is missing/],
       ['access per folder, with an example', /Per folder and per file.*An example\. A team keeps its specs/],
       ['merging is where owners approve', /Merging is where the owners of the files approve/],
       ['saving shares, no git', /you have no git command.*Every save is committed and shared as the person/],
