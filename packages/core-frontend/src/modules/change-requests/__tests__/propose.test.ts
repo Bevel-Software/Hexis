@@ -1,27 +1,34 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// Each module is replaced at its entry, which is where the propose flow reaches
+// it; the rest of each entry, the error classes included, stays real.
 const gitApi = vi.hoisted(() => ({
   createBranch: vi.fn(),
   deleteBranch: vi.fn(),
 }));
-vi.mock('../../git/services/git.api', () => gitApi);
+vi.mock('../../git', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../git')>()),
+  ...gitApi,
+}));
 const wsApi = vi.hoisted(() => ({
   getOrCreateWorkspace: vi.fn(async () => ({
     workspace: { id: 'sugg-ws', kbDirName: 'knowledge-base' },
   })),
   writeFile: vi.fn(async () => {}),
 }));
-// The real error class, so the flow tells statuses apart exactly as it does in the app.
-vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../workspace/services/workspace.api')>()),
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   ...wsApi,
 }));
-vi.mock('../../pr/services/pr-open.api', () => ({ openChangeRequest: vi.fn(async () => null) }));
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  openChangeRequest: vi.fn(async () => null),
+}));
 const listMine = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
 vi.mock('../services/change-requests.api', () => ({ listMyChangeRequests: listMine }));
 
 import { ensureKnowledgeSuggestionWorkspace, proposeKnowledgeChange } from '../services/propose.api';
-import { WorkspaceApiError } from '../../workspace/services/workspace.api';
+import { WorkspaceApiError } from '../../workspace';
 
 const rae = { email: 'reader@example.com', id: 'u9-1234-abcd' };
 
@@ -118,8 +125,13 @@ describe('proposeKnowledgeChange: the branch the proposal goes to cannot be open
       userName: 'Rae',
     });
 
-  it('says that nothing was sent and to try again, not the bare status', async () => {
-    wsApi.getOrCreateWorkspace.mockRejectedValueOnce(new WorkspaceApiError(410));
+  it.each([
+    ['the branch is gone (410)', new WorkspaceApiError(410)],
+    ['the branch is not there (404)', new WorkspaceApiError(404)],
+    ['the server failed (503)', new WorkspaceApiError(503)],
+    ['no answer came back', new TypeError('Failed to fetch')],
+  ])('says that nothing was sent and to try again, not the bare status, when %s', async (_case, failure) => {
+    wsApi.getOrCreateWorkspace.mockRejectedValueOnce(failure);
 
     await expect(propose()).rejects.toThrow(
       "Nothing was sent: your proposal couldn't be saved for review just now. Try again in a moment.",
