@@ -1114,7 +1114,6 @@ export class VersionControlService implements IVersionControlService {
     to: string,
     when: string,
   ): Promise<{ changedPaths: string[]; carried: number } | null> {
-    const owed = this.owedApprovalCarries.get(number);
     let outcome: { changedPaths: string[]; carried: number } | null = null;
     try {
       const changedPaths = await this.git.pathsChangedBetween(workspaceId, from, to);
@@ -1126,8 +1125,12 @@ export class VersionControlService implements IVersionControlService {
         { err },
       );
     }
-    if (outcome === null || owed) {
-      const list = owed ?? [];
+    // The map is read HERE, after the awaits above and with none below: two
+    // carries of one request failing at once then append to one list, where a
+    // list looked up before the awaits would be two lists and the second
+    // `set` would drop the first one's move.
+    if (outcome === null || this.owedApprovalCarries.has(number)) {
+      const list = this.owedApprovalCarries.get(number) ?? [];
       if (!list.some((move) => move.from === from && move.to === to)) list.push({ workspaceId, from, to });
       if (list.length > VersionControlService.OWED_APPROVAL_CARRY_CAP) {
         log.warn(
@@ -4423,7 +4426,10 @@ export class VersionControlService implements IVersionControlService {
     //
     // The restore commit is the SERVER's, and it touches roles.yaml alone, so
     // the approvals given on the head it replaced are carried across it by
-    // content, exactly as an update from the target carries them. Without the
+    // content, exactly as an update from the target carries them. From the
+    // head the restore REPLACED, as the guard resolved it, not from the
+    // caller's `headSha`: if the author pushed in between, the approvals on
+    // the caller's head are out of date by that push and stay so. Without the
     // carry every approval on the request went out of date here, seconds after
     // it was given, and the gate below told the approver to approve again
     // files nobody had changed. That happened to every draft cut before the
@@ -4446,11 +4452,12 @@ export class VersionControlService implements IVersionControlService {
         return fresh;
       };
       let fresh = await reload();
-      if (headSha && fresh.headSha && fresh.headSha !== headSha) {
+      const replacedHead = preserved.replacedHead;
+      if (replacedHead && fresh.headSha && fresh.headSha !== replacedHead) {
         const carry = await this.carryApprovalsAcross(
           number,
           workspaceId,
-          headSha,
+          replacedHead,
           fresh.headSha,
           'after restoring roles.yaml',
         );
@@ -4484,14 +4491,17 @@ export class VersionControlService implements IVersionControlService {
       if (err instanceof ChangeRequestConflictsError) {
         return { kind: 'conflicts-need-resolution', conflictedPaths: err.conflictedPaths };
       }
-      // The gate refused while a carry is still owed: its reasons would name
-      // approvals that are out of date only because the server could not
-      // copy them. Say that instead. An approver who approves again anyway
-      // passes the gate, so this can never hold a request for good.
+      // The gate is waiting on approvals while a carry is still owed: its
+      // reasons would name approvals that are out of date only because the
+      // server could not copy them. Say that instead. Only that refusal: one
+      // that says the request is already merged, closed or empty carries the
+      // same `mergeBlockedReasons` and is true as worded. An approver who
+      // approves again anyway passes the gate, so this can never hold a
+      // request for good.
       if (
         this.owedApprovalCarries.has(number) &&
         err instanceof VersionControlDomainError &&
-        Array.isArray(err.payload?.mergeBlockedReasons)
+        err.payload?.awaitingApprovals === true
       ) {
         throw new ApprovalCarryPendingError();
       }
@@ -4968,12 +4978,15 @@ export class VersionControlService implements IVersionControlService {
    * Fail-CLOSED: any error restoring the base version throws
    * {@link RolesYamlPreservationError}, aborting the merge. We must never let a
    * roles.yaml change slip through because the neutralisation step failed.
+   *
+   * Answers `null` when nothing was restored, else the published head the
+   * restore replaced (`replacedHead`, `null` when it could not be resolved).
    */
   private async preserveBaseRolesYaml(
     number: number,
     user: AuthUser,
     baseBranch: string,
-  ): Promise<boolean> {
+  ): Promise<{ replacedHead: string | null } | null> {
     const ROLES_YAML = 'roles.yaml';
     let headBranch: string;
     try {
@@ -4989,7 +5002,7 @@ export class VersionControlService implements IVersionControlService {
       // A CR into a protected branch is the only escalation vector we're closing;
       // base is always a protected branch here, head is always a feature branch.
       // Guard against a degenerate self-targeting CR (head === base) just in case.
-      if (!headBranch || headBranch === summary.base) return false;
+      if (!headBranch || headBranch === summary.base) return null;
 
       // Work in the SOURCE branch's own per-branch workspace (already checked out
       // on that branch). Fetch so we read the CR's TRUE published roles.yaml from
@@ -5005,7 +5018,24 @@ export class VersionControlService implements IVersionControlService {
       const headRoles = await this.git.readFileAtRef(ws.id, `origin/${headBranch}`, ROLES_YAML);
 
       // Identical (incl. both-absent) → the CR doesn't change roles.yaml. Done.
-      if (baseRoles === headRoles) return false;
+      if (baseRoles === headRoles) return null;
+
+      // The published head the restore commit is about to replace: the head
+      // the approvals are carried FROM. Resolved here, from the refs the
+      // fetch above just brought, and not taken from the caller: an author
+      // may have pushed since the caller read the request, and approvals
+      // given before that push are out of date by the author's commit, which
+      // no carry may undo. Bookkeeping only, so a failure costs the carry and
+      // never the guard.
+      let replacedHead: string | null = null;
+      try {
+        replacedHead = (await this.git.resolvePrShas(ws.id, summary.base, headBranch)).headSha;
+      } catch (err) {
+        mergeLog.warn(
+          `could not resolve the published head of change request #${number} before restoring roles.yaml; its approvals will not be carried across the restore`,
+          { err },
+        );
+      }
 
       // The restore below writes roles.yaml directly to the shared per-branch
       // working tree. `LockingFilesystem` serializes every OTHER roles.yaml edit
@@ -5085,7 +5115,7 @@ export class VersionControlService implements IVersionControlService {
         }
         await this.pushWithRecovery(ws.id, headBranch, ROLES_YAML, user);
         this.accessControl.invalidate(ws.id);
-        return true;
+        return { replacedHead };
       } finally {
         // We already committed inline, so drop the lock row directly rather than
         // going through `releaseLock` (which would enqueue a duplicate commit).

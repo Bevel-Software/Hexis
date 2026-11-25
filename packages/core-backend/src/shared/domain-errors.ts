@@ -721,15 +721,6 @@ export class DuplicateChangeRequestError extends VersionControlDomainError {
 }
 
 /**
- * Raised when a merge must neutralise a CR's `roles.yaml` change (restore the
- * base branch's version on the source branch) but that preservation write fails.
- * `roles.yaml` decides admin membership and is mutable ONLY via the admin Roles
- * & Members surface — a CR must never carry a roles.yaml change across a merge,
- * so if we cannot guarantee the base version is preserved we abort the merge
- * rather than risk landing the CR's version on a protected branch. 502: the
- * failure is an internal git/push hiccup, not the caller's fault.
- */
-/**
  * Apply was refused by the approval gate while this request is still owed an
  * approval carry: the server moved the draft's head itself (the roles.yaml
  * restore, or an update from the target) and could not copy the approvals of
@@ -752,6 +743,15 @@ export class ApprovalCarryPendingError extends VersionControlDomainError {
   }
 }
 
+/**
+ * Raised when a merge must neutralise a CR's `roles.yaml` change (restore the
+ * base branch's version on the source branch) but that preservation write fails.
+ * `roles.yaml` decides admin membership and is mutable ONLY via the admin Roles
+ * & Members surface — a CR must never carry a roles.yaml change across a merge,
+ * so if we cannot guarantee the base version is preserved we abort the merge
+ * rather than risk landing the CR's version on a protected branch. 502: the
+ * failure is an internal git/push hiccup, not the caller's fault.
+ */
 export class RolesYamlPreservationError extends VersionControlDomainError {
   readonly kind = 'roles-yaml-preservation-failed' as const;
   /**

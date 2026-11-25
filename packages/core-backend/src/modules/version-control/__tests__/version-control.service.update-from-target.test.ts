@@ -407,13 +407,48 @@ describe('VersionControlService.updateFromTarget: the approvals the merge did no
       expect(await worked.svc.updateFromTarget(WS, USER, 7)).not.toHaveProperty('approvalCarryNotice');
     });
 
-    it('says so when the diff worked and the copy itself failed', async () => {
-      const h = harness({ changedPaths: ['Sales/Terms.md'] });
+    it('says so when the diff worked and the copy itself failed, and the next read retries that copy once', async () => {
+      const h = harness({ changedPaths: ['Sales/Terms.md'], carried: 1 });
       h.changeRequestReview.carryApprovalsForward.mockRejectedValueOnce(new Error('approval lock timed out'));
       const result = await h.svc.updateFromTarget(WS, USER, 7);
       expect(result.approvalCarryNotice).toMatch(NOTICE);
       // The copy failed, so no file is known to be safe to keep showing.
       expect(result.updatedPaths).toEqual(['Sales/Deal.md']);
+
+      // The same copy, which now works, and then nothing is owed any more.
+      await h.svc.getChangeRequestDetail(7, { workspaceId: WS });
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledTimes(2);
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenLastCalledWith(7, HEAD, MERGED_HEAD, ['Sales/Terms.md']);
+      await h.svc.getChangeRequestDetail(7, { workspaceId: WS });
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledTimes(2);
+    });
+
+    it('two updates whose carries fail at the same time are both owed', async () => {
+      // Both fail in the same turn of the loop. Each has to find the list the
+      // other made, or the later one overwrites it and one move is never
+      // replayed.
+      const THIRD = 'f'.repeat(40);
+      const h = harness({});
+      // In step: each update resolves its head before the merge, then after.
+      const heads = [HEAD, HEAD, MERGED_HEAD, THIRD];
+      h.git.resolvePrShas = vi.fn(async () => ({ baseSha: 'b'.repeat(40), headSha: heads.shift()! }));
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      h.git.pathsChangedBetween.mockImplementation(async () => {
+        await held;
+        throw new Error('git exploded');
+      });
+      const both = Promise.all([h.svc.updateFromTarget(WS, USER, 7), h.svc.updateFromTarget(WS, USER, 7)]);
+      await vi.waitFor(() => expect(h.git.pathsChangedBetween).toHaveBeenCalledTimes(2));
+      release();
+      for (const result of await both) expect(result.approvalCarryNotice).toMatch(NOTICE);
+
+      h.git.pathsChangedBetween.mockReset().mockResolvedValue([]);
+      await h.svc.getChangeRequestDetail(7, { workspaceId: WS });
+      expect(h.changeRequestReview.carryApprovalsForward.mock.calls.map((c) => [c[1], c[2]])).toEqual([
+        [HEAD, MERGED_HEAD],
+        [HEAD, THIRD],
+      ]);
     });
 
     it('the next read of the request tries the same carry again, and a read after that does not', async () => {
@@ -481,14 +516,28 @@ describe('VersionControlService.updateFromTarget: the approvals the merge did no
       ]);
     });
 
-    it('two reads at once replay the owed carry once', async () => {
+    it('two reads at once replay the owed carry once, and neither answers before it is done', async () => {
       const h = harness({ changedPathsError: new Error('git exploded') });
       await h.svc.updateFromTarget(WS, USER, 7);
       h.git.pathsChangedBetween.mockReset().mockResolvedValue([]);
-      await Promise.all([
-        h.svc.getChangeRequestDetail(7, { workspaceId: WS }),
-        h.svc.getChangeRequestDetail(7, { workspaceId: WS }),
-      ]);
+      // The copy is held open, so both reads are in flight together.
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      h.changeRequestReview.carryApprovalsForward.mockImplementation(async () => {
+        await held;
+        return 1;
+      });
+      const done: string[] = [];
+      const first = h.svc.getChangeRequestDetail(7, { workspaceId: WS }).then(() => done.push('first'));
+      const second = h.svc.getChangeRequestDetail(7, { workspaceId: WS }).then(() => done.push('second'));
+      await new Promise((r) => setTimeout(r, 20));
+      // Neither read answers before the rows it reports are written.
+      expect(done).toEqual([]);
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledTimes(1);
+
+      release();
+      await Promise.all([first, second]);
+      expect(done).toHaveLength(2);
       expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledTimes(1);
     });
   });
