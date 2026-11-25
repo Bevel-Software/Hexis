@@ -148,6 +148,16 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
     expectOneUnmarked();
   });
 
+  it('a save that added access entries to a file of another kind that had none says nothing', async () => {
+    await save('Data/table.csv', '---\nread: [Finance]\n---\na,b\n');
+    expectOneUnmarked();
+  });
+
+  it('a save that removed the access entries of a file of another kind says nothing', async () => {
+    await save('Data/notes.txt', 'A note\n');
+    expectOneUnmarked();
+  });
+
   it('a new file says nothing, so the tree is asked for', async () => {
     await save('Data/new.md', '# Name\nNew\n');
     expectOneUnmarked();

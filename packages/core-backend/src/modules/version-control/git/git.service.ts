@@ -1399,11 +1399,12 @@ export class GitService implements IGitService {
     const code = lines[0]!.slice(0, 2);
     if (!/^(?: M|M |MM)$/.test(code)) return undefined;
     try {
-      const [{ stdout: before }, after] = await Promise.all([
-        this.git(cwd, ['show', `HEAD:${repoRelativePath}`]),
+      const [before, after] = await Promise.all([
+        this.blobAtRef(cwd, 'HEAD', repoRelativePath),
         frontmatterHead(path.join(cwd, repoRelativePath)),
       ]);
-      return { frontmatterChanged: fencedHead(frontmatterHeadOfBytes(Buffer.from(before, 'utf8'))) !== fencedHead(after) };
+      if (!before) return { frontmatterChanged: true };
+      return { frontmatterChanged: fencedHead(frontmatterHeadOfBytes(before.bytes)) !== fencedHead(after) };
     } catch {
       return { frontmatterChanged: true };
     }
