@@ -130,6 +130,11 @@ describe('DeploymentPage', () => {
     const save = await screen.findByRole('button', { name: 'Save and continue' });
     expect(save.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByTestId('deployment-panel')).toContainElement(panel);
+    // "What agents are told" is core's last section, below the form, and the
+    // distribution's panel keeps the last place on the page under it.
+    const told = await screen.findByRole('heading', { name: 'What agents are told' });
+    expect(save.compareDocumentPosition(told) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(told.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('keeps the distribution panel when the settings cannot be loaded', async () => {

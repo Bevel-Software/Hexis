@@ -86,6 +86,15 @@ export function DeploymentPage() {
         </div>
       )}
 
+      {/* What every connecting agent is told about this knowledge base. A
+          workspace setting, so it sits with the other workspace settings and
+          not on the page each member opens to connect their own agent. Core's
+          last section: only a distribution's panel comes after it. */}
+      {/* The form's own column, so the two share one right edge. */}
+      <div className="w-full max-w-2xl">
+        <AgentInstructionsCard />
+      </div>
+
       {/* The distribution's panel, last on the page and outside every
           condition above: it does not depend on the settings, so neither a
           load in flight nor a failed one takes it away.
@@ -95,14 +104,6 @@ export function DeploymentPage() {
           the page and not the form above — the form is where an admin fixes
           the sign-in or the repository connection, and must not go down with
           a panel it has nothing to do with. */}
-      {/* What every connecting agent is told about this knowledge base. A
-          workspace setting, so it sits with the other workspace settings and
-          not on the page each member opens to connect their own agent. */}
-      {/* The form's own column, so the two share one right edge. */}
-      <div className="w-full max-w-2xl">
-        <AgentInstructionsCard />
-      </div>
-
       {DeploymentPanel && (
         <div className="mt-10" data-testid="deployment-panel">
           <SlotBoundary label="workspace panel">

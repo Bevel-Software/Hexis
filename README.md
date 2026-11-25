@@ -354,7 +354,7 @@ followed by `mcp-description.md` from the root of your repository, where an
 admin describes what the knowledge base holds and when to consult it. Clients
 that read the handshake (Claude Code, Claude Desktop, Cursor) put it in the
 system prompt; for the ones that do not, the first line is also shown on the
-four core tools. The end of the Deployment page shows admins exactly what agents get.
+four core tools. The Deployment page, below its settings form, shows admins exactly what agents get.
 </details>
 
 <details>

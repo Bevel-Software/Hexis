@@ -47,7 +47,9 @@ const DESCRIPTION_MARKDOWN =
  * can change it); the admin's description is the centrepiece, with its count
  * against the cap right beside it.
  *
- * Sits at the end of the Deployment page: it applies to every connection
+ * The last of core's sections on the Deployment page, below the settings form
+ * (a distribution's own panel, when one is registered, stays below it): it
+ * applies to every connection
  * type, and it is a workspace setting, not part of anyone's own setup, so it
  * stays off the page each member opens to connect their agent.
  *
