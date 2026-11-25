@@ -26,7 +26,7 @@ export function CopyPromptButton({
   const refused = status === 'failed';
 
   async function copyPrompt() {
-    if (!(await copy(value))) onCopyFailed?.();
+    if ((await copy(value)) === 'failed') onCopyFailed?.();
   }
 
   return (

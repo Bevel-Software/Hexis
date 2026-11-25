@@ -486,8 +486,13 @@ describe('skills as native plugins: optional, and never a command that cannot ru
     expect(registrationMock).not.toHaveBeenCalled();
     await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
     await waitFor(() => expect(registrationMock).toHaveBeenCalledTimes(1));
-    const asked = authFetchMock.mock.calls.map((call) => String((call as unknown[])[0]));
-    expect(asked.filter((url) => url.startsWith('/api/admin/github-facade'))).toEqual([]);
+    // Every form authFetch accepts (a path, an absolute URL, a URL, a Request), as its pathname.
+    const asked = authFetchMock.mock.calls.map((call) => {
+      const input = (call as unknown[])[0];
+      const href = input instanceof Request ? input.url : String(input);
+      return new URL(href, window.location.origin).pathname;
+    });
+    expect(asked.filter((path) => path.startsWith('/api/admin/github-facade'))).toEqual([]);
   });
 
   it('shows a member nothing about Cowork until the deployment is registered', async () => {

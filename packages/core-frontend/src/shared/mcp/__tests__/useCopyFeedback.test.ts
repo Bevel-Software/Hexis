@@ -100,11 +100,11 @@ describe('useCopyFeedback', () => {
     vi.useFakeTimers();
     stubClipboard({ writeText: vi.fn().mockRejectedValue(new Error('denied')) });
     const { result } = renderHook(() => useCopyFeedback());
-    let ok: boolean | undefined;
+    let answer: string | undefined;
     await act(async () => {
-      ok = await result.current.copy('hello');
+      answer = await result.current.copy('hello');
     });
-    expect(ok).toBe(false);
+    expect(answer).toBe('failed');
     expect(result.current.status).toBe('failed');
     act(() => vi.advanceTimersByTime(5000));
     expect(result.current.status).toBe('failed');
@@ -121,7 +121,7 @@ describe('useCopyFeedback', () => {
     const { result } = renderHook(() => useCopyFeedback());
     await act(async () => result.current.copy('first'));
     expect(result.current.status).toBe('copied');
-    let second!: Promise<boolean>;
+    let second!: Promise<string>;
     act(() => {
       second = result.current.copy('second');
     });
@@ -131,6 +131,37 @@ describe('useCopyFeedback', () => {
       await second;
     });
     expect(result.current.status).toBe('copied');
+  });
+
+  /** Only the latest copy speaks: a slow refusal from an earlier click cannot overwrite a later "Copied". */
+  it('drops an earlier copy’s answer that arrives after a later copy started', async () => {
+    vi.useFakeTimers();
+    let refuseFirst!: (error: Error) => void;
+    const writeText = vi
+      .fn()
+      .mockReturnValueOnce(new Promise<void>((_, reject) => (refuseFirst = reject)))
+      .mockResolvedValueOnce(undefined);
+    stubClipboard({ writeText });
+    const { result } = renderHook(() => useCopyFeedback());
+
+    let first!: Promise<string>;
+    act(() => {
+      first = result.current.copy('first');
+    });
+    await act(async () => result.current.copy('second'));
+    expect(result.current.status).toBe('copied');
+
+    let firstAnswer: string | undefined;
+    await act(async () => {
+      refuseFirst(new Error('denied'));
+      firstAnswer = await first;
+    });
+    expect(firstAnswer).toBe('idle');
+    expect(result.current.status).toBe('copied');
+
+    // The later copy's fade still runs on its own clock.
+    act(() => vi.advanceTimersByTime(1500));
+    expect(result.current.status).toBe('idle');
   });
 
   it('clears the checkmark when a copy fails right after one succeeded', async () => {

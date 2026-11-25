@@ -36,7 +36,7 @@ export function SnippetBlock({
   const textRef = useRef<HTMLDivElement>(null);
 
   async function copyValue() {
-    if (await copy(value)) return;
+    if ((await copy(value)) !== 'failed') return;
     onCopyFailed?.();
     // A refused copy stays said until the next try, and the text is selected,
     // so the way round (the keyboard's own copy) is one key away. A cross that
