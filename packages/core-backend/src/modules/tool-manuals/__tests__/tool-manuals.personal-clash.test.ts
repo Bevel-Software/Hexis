@@ -231,5 +231,21 @@ describe('GitService.addedAt', () => {
 
     expect(await g.addedAt('ws', 'a.tool')).toBe(4_000);
     expect(await g.addedAt('ws', 'b.tool')).toBeNull();
+    // A literal path, not a glob: `*.tool` names no committed file.
+    expect(await g.addedAt('ws', '*.tool')).toBeNull();
+
+    // Added on a draft at 5_000, merged (`--no-ff`, as the platform merges) at
+    // 7_000: it reached the branch at the merge, after main's own 6_000 add.
+    await git(['checkout', '-q', '-b', 'draft'], 5_000);
+    await writeFile(join(repo, 'c.tool'), 'draft\n');
+    await git(['add', 'c.tool'], 5_000);
+    await git(['commit', '-m', 'draft add'], 5_000);
+    await git(['checkout', '-q', 'main'], 6_000);
+    await writeFile(join(repo, 'd.tool'), 'main\n');
+    await git(['add', 'd.tool'], 6_000);
+    await git(['commit', '-m', 'main add'], 6_000);
+    await git(['merge', '--no-ff', '-m', 'merge draft', 'draft'], 7_000);
+    expect(await g.addedAt('ws', 'c.tool')).toBe(7_000);
+    expect(await g.addedAt('ws', 'd.tool')).toBe(6_000);
   });
 });

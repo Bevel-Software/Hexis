@@ -3,8 +3,8 @@
 A skill is a folder holding a `SKILL.md` and whatever files it needs. Shared
 skills live under `{{skillsDir}}/`, organised by ownership; a skill that
 belongs to one plugin alone may live in that plugin's `skills/` folder. Skill
-names are unique across the catalog. The frontmatter names the skill, says
-when to use it, and may list tools and a version:
+names are unique per owner. The frontmatter names the skill, says when to use
+it, and may list tools and a version:
 
 ```yaml
 ---

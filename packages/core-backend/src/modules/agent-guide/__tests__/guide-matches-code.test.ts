@@ -57,8 +57,6 @@ const NOT_THE_REGISTRYS: Readonly<Record<string, string>> = {
   image_omitted: 'the stub a chained image read yields',
   // Words about identifiers, and example identifiers in the manual format.
   snake_case: 'a naming style',
-  serper_everyone: 'an example manual id',
-  serper_finance: 'an example manual id',
   // `.tool` and `plugin.json` fields: the file formats, not tool schemas.
   access_type: 'a Google sign-in parameter, in an `authParams` example',
   tool_call_template: 'a `.tool` field',

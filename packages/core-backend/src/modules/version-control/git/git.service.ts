@@ -4784,6 +4784,10 @@ export class GitService implements IGitService {
    * committed yet. What decides which of two personal tools keeps a secret
    * namespace both claim: the one that was there first.
    *
+   * First-parent: a file added on a draft reached HEAD when the draft was
+   * merged (merges are `--no-ff`), not when the draft's own commit was made.
+   * The path is literal (`git()` sets `GIT_LITERAL_PATHSPECS`), never a glob.
+   *
    * Lock-free, like `pathHistory`: a read of history that a concurrent commit
    * can only extend, and a file committed a moment after this read is the
    * newer claimant either way, which is what null already says.
@@ -4791,9 +4795,11 @@ export class GitService implements IGitService {
   async addedAt(workspaceId: string, repoRelativePath: string): Promise<number | null> {
     const cwd = await this.repoDir(workspaceId);
     const { stdout } = await this.git(cwd, [
-      'log', '--max-count=1', '--diff-filter=A', '--format=%ct', 'HEAD', '--', repoRelativePath,
+      'log', '--first-parent', '--diff-filter=A', '--format=%ct', 'HEAD', '--', repoRelativePath,
     ]);
-    const added = stdout.trim();
+    // Newest first; no `--max-count`, which git applies BEFORE `--diff-filter`
+    // and would answer null for a file edited since it was added.
+    const added = stdout.split('\n')[0]?.trim() ?? '';
     return added === '' ? null : Number(added);
   }
 
