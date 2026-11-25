@@ -86,6 +86,31 @@ export async function runRedacted<T>(scope: SubstitutionScope, fn: () => Promise
   }
 }
 
+/**
+ * The stream `open` produces, with every resumption of it — opening it, each
+ * step, closing it — run through `runRedacted` in `scope`: the streaming
+ * counterpart of `runRedacted`, so whatever the stream rejects with on any of
+ * those is redacted, and values it substitutes meanwhile are recorded.
+ */
+export async function* streamRedacted<T>(scope: SubstitutionScope, open: () => AsyncIterable<T>): AsyncGenerator<T, void, unknown> {
+  // An inner generator, so even the call that opens the stream runs on its
+  // first resumption, inside the scope.
+  const steps = (async function* () {
+    yield* open();
+  })();
+  try {
+    for (;;) {
+      const step = await runRedacted(scope, () => steps.next());
+      if (step.done) return;
+      yield step.value;
+    }
+  } finally {
+    // A consumer that stops early ends the stream underneath too; once the
+    // stream has ended this is a no-op.
+    await runRedacted(scope, () => steps.return(undefined));
+  }
+}
+
 /** `text` with every recorded value of `scope` replaced by the `${NAME}` it was written as. */
 export function redactSubstitutedText(text: string, scope: SubstitutionScope): string {
   return redactorFor(scope)(text);
@@ -114,10 +139,13 @@ export function redactSubstitutedFailure(err: unknown, scope: SubstitutionScope)
 }
 
 /**
- * One pass over the text replacing every spelling a recorded value can take
- * once quoted (raw, percent-encoded, form-encoded, JSON-escaped), longest
- * first at each position. One pass, so a marker already put in is never
- * searched again: a short value that occurs inside `${NAME}` cannot garble it.
+ * Replace every spelling a recorded value can take once quoted (raw,
+ * percent-encoded, form-encoded, JSON-escaped). Every occurrence of every
+ * spelling is found in the ORIGINAL text, overlapping ones included, and each
+ * run of characters they cover goes as a whole: two values that overlap leave
+ * no part of either, and one inside another leaves the outer one's marker.
+ * The markers are put in once, never searched again, so a short value that
+ * occurs inside `${NAME}` cannot garble it.
  */
 function redactorFor(scope: SubstitutionScope): (text: string) => string {
   const markers = new Map<string, string>();
@@ -128,10 +156,34 @@ function redactorFor(scope: SubstitutionScope): (text: string) => string {
     if (value.length === 0) continue;
     for (const form of spellings(value)) if (!markers.has(form)) markers.set(form, `\${${name}}`);
   }
-  if (markers.size === 0) return (text) => text;
-  const forms = [...markers.keys()].sort((a, b) => b.length - a.length);
-  const pattern = new RegExp(forms.map((form) => form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
-  return (text) => text.replace(pattern, (form) => markers.get(form)!);
+  return (text) => {
+    const hits: { start: number; end: number; marker: string }[] = [];
+    for (const [form, marker] of markers) {
+      for (let at = text.indexOf(form); at !== -1; at = text.indexOf(form, at + 1)) {
+        hits.push({ start: at, end: at + form.length, marker });
+      }
+    }
+    if (hits.length === 0) return text;
+    hits.sort((a, b) => a.start - b.start || b.end - a.end);
+    let out = '';
+    let copied = 0;
+    for (let i = 0; i < hits.length; ) {
+      const start = hits[i].start;
+      let end = hits[i].end;
+      let replacement = hits[i].marker;
+      // Every hit that starts inside the run joins it; one that reaches past
+      // its end extends it and adds its own marker, one inside it adds nothing.
+      for (i++; i < hits.length && hits[i].start < end; i++) {
+        if (hits[i].end > end) {
+          end = hits[i].end;
+          if (!replacement.endsWith(hits[i].marker)) replacement += hits[i].marker;
+        }
+      }
+      out += text.slice(copied, start) + replacement;
+      copied = end;
+    }
+    return out + text.slice(copied);
+  };
 }
 
 function spellings(value: string): string[] {

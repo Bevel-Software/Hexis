@@ -6,6 +6,7 @@ import {
   openSubstitutionScope,
   recordSubstitutions,
   runRedacted,
+  streamRedacted,
 } from './substituted-secrets.js';
 
 /**
@@ -230,30 +231,17 @@ export function installCallGuards(client: CodeModeUtcpClient): void {
       toolName: string,
       toolArgs: Record<string, unknown>,
     ): AsyncGenerator<unknown, void, unknown> {
-      // Every step of the stream, its cleanup included, runs in the call's
-      // scope and is redacted on the way out: the template is substituted on
-      // the first step, and any later one may still fail and quote it.
-      const scope = openSubstitutionScope();
-      let open: AsyncIterator<unknown> | undefined;
-      try {
-        const refusal = await runRedacted(scope, () => argumentRefusal(client, toolName, toolArgs));
+      // The guarded stream is a plain `for await`, run through
+      // `streamRedacted`: opening it, every step and closing it run in the
+      // call's scope and are redacted on the way out.
+      yield* streamRedacted(openSubstitutionScope(), async function* () {
+        const refusal = await argumentRefusal(client, toolName, toolArgs);
         if (refusal) throw new ArgumentsDoNotMatchError(refusal);
-        const stream = callToolStreaming(toolName, toolArgs)[Symbol.asyncIterator]();
-        open = stream;
-        for (;;) {
-          const step = await runRedacted(scope, () => stream.next());
-          if (step.done) {
-            open = undefined;
-            return;
-          }
-          await runRedacted(scope, () => guardResult(toolName, step.value));
-          yield step.value;
+        for await (const chunk of callToolStreaming(toolName, toolArgs)) {
+          await guardResult(toolName, chunk);
+          yield chunk;
         }
-      } finally {
-        // A consumer that stops early, or a refused chunk, ends the stream
-        // underneath too, as the `for await` this replaced did.
-        if (open?.return) await runRedacted(scope, async () => void (await open!.return!()));
-      }
+      });
     };
     (guardedStreaming as unknown as Record<symbol, unknown>)[GUARDED] = true;
     client.callToolStreaming = guardedStreaming as typeof client.callToolStreaming;

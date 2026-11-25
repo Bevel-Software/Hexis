@@ -270,3 +270,62 @@ describe('a streamed call', () => {
     expectNoSecret(`${failure?.message} ${failure?.stack} ${JSON.stringify(failure?.data)}`);
   });
 });
+
+describe('overlapping substituted values', () => {
+  /** A scope holding each of `values` as its `${NAME}` had substituted it. */
+  async function scopeWith(values: Record<string, string>) {
+    const substitutor = { _getVariable: async (key: string) => values[key] ?? '' };
+    recordSubstitutions({ substituteCallTemplateVariables: () => {}, variableSubstitutor: substitutor } as never);
+    const scope = openSubstitutionScope();
+    await inSubstitutionScope(scope, async () => {
+      for (const key of Object.keys(values)) await substitutor._getVariable(key);
+    });
+    return scope;
+  }
+
+  it('leave no part of either value, whichever is matched first', async () => {
+    const scope = await scopeWith({ KEY: 'abcdef12', OTHER: 'ef12ghij' });
+    const err = new Error('refused abcdef12ghij and ef12ghij');
+    redactSubstitutedFailure(err, scope);
+    expect(err.message).toBe('refused ${KEY}${OTHER} and ${OTHER}');
+  });
+
+  it('leave the outer marker when one value lies inside another', async () => {
+    const scope = await scopeWith({ KEY: 'secret-long', OTHER: 'long' });
+    const err = new Error('refused secret-long, then long');
+    redactSubstitutedFailure(err, scope);
+    expect(err.message).toBe('refused ${KEY}, then ${OTHER}');
+  });
+});
+
+describe('a streamed call that fails as it opens', () => {
+  it('is redacted all the same', async () => {
+    const substitutor = { _getVariable: async (key: string) => (key === 'KEY' ? SECRET : '') };
+    const double = {
+      // A step before the stream opens has already substituted the value.
+      config: {
+        tool_repository: {
+          getTool: async () => {
+            await substitutor._getVariable('KEY');
+            return undefined;
+          },
+        },
+      },
+      substituteCallTemplateVariables: () => {},
+      variableSubstitutor: substitutor,
+      // Not a generator: it throws as it is called, before any stream exists.
+      callToolStreaming(): AsyncGenerator<unknown> {
+        throw new Error(`cannot open ${SECRET}`);
+      },
+    };
+    installCallGuards(double as never);
+    const failure = await (async () => {
+      for await (const _ of (double as unknown as Client).callToolStreaming('NS.query', {})) void _;
+    })().then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    expect(failure?.message).toBe('cannot open ${KEY}');
+    expectNoSecret(`${failure?.message} ${failure?.stack}`);
+  });
+});
