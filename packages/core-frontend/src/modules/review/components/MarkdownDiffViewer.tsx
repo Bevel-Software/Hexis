@@ -6,6 +6,7 @@ import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdow
 import {
   KB_REMARK_PLUGINS,
   KB_DIFF_REHYPE_PLUGINS,
+  KB_DIFF_CHANGE_REHYPE_PLUGINS,
   useKbMarkdownComponents,
   type KbImageResolver,
 } from '../../workspace/components/renderers/kbMarkdownPipeline';
@@ -104,6 +105,7 @@ export function MarkdownDiffViewer({
         lines: [] as DiffLine[],
         bodyBlocks: [] as DisplayBlock[],
         frontmatterChanged: false,
+        frontmatterComments: [] as DiffLine[],
         oldFrontmatter: {} as FrontmatterData,
         newFrontmatter: {} as FrontmatterData,
       };
@@ -118,6 +120,7 @@ export function MarkdownDiffViewer({
       lines,
       bodyBlocks: groupDiffBlocks(split.body),
       frontmatterChanged: split.frontmatter.some((l) => l.type !== 'same'),
+      frontmatterComments: split.frontmatter.filter(isChangedYamlComment),
       oldFrontmatter: parseFrontmatter(baseline).data,
       newFrontmatter: parseFrontmatter(current).data,
     };
@@ -141,6 +144,7 @@ export function MarkdownDiffViewer({
           newData={data.newFrontmatter}
         />
       )}
+      <FrontmatterCommentLines lines={data.frontmatterComments} />
       <DiffPreview
         blocks={data.bodyBlocks}
         onOpenFile={onOpenFile}
@@ -266,6 +270,35 @@ function FrontmatterDiffPanel({
   );
 }
 
+/**
+ * A YAML comment the change adds or removes. The panel above shows the PARSED
+ * frontmatter, and a comment parses to nothing, so a request whose only change
+ * was one showed the reviewer an unmarked page.
+ */
+function isChangedYamlComment(line: DiffLine): boolean {
+  return line.type !== 'same' && line.text.trimStart().startsWith('#');
+}
+
+/** The changed frontmatter comments, as the marked source lines they are. */
+function FrontmatterCommentLines({ lines }: { lines: DiffLine[] }) {
+  if (lines.length === 0) return null;
+  return (
+    <div className="mb-4 space-y-1 font-mono text-xs">
+      {lines.map((line, i) =>
+        line.type === 'removed' ? (
+          <del key={i} className="block whitespace-pre-wrap break-words rounded-sm bg-red-100 px-2 py-0.5 text-red-700">
+            {line.text}
+          </del>
+        ) : (
+          <ins key={i} className="block whitespace-pre-wrap break-words rounded-sm bg-emerald-100 px-2 py-0.5 text-emerald-700 no-underline">
+            {line.text}
+          </ins>
+        ),
+      )}
+    </div>
+  );
+}
+
 // ── body diff helpers ───────────────────────────────────────────────────
 
 /**
@@ -368,10 +401,15 @@ function DiffPreview({
 
   // Each block is parsed as a standalone document, so the space-escaping that
   // makes `[Foo](Some File.md)` resolve has to be applied per fragment.
-  const fragment = (text: string, fragmentComponents = components) => (
+  // A changed fragment shows its comments as source (see
+  // KB_DIFF_CHANGE_REHYPE_PLUGINS): every line the change touches is visible.
+  const fragment = (
+    text: string,
+    { changed, fragmentComponents = components }: { changed: boolean; fragmentComponents?: typeof components },
+  ) => (
     <Markdown
       remarkPlugins={KB_REMARK_PLUGINS}
-      rehypePlugins={KB_DIFF_REHYPE_PLUGINS}
+      rehypePlugins={changed ? KB_DIFF_CHANGE_REHYPE_PLUGINS : KB_DIFF_REHYPE_PLUGINS}
       components={fragmentComponents}
     >
       {escapeSpacesInLinkDestinations(text)}
@@ -382,18 +420,21 @@ function DiffPreview({
     <div className="prose prose-sm max-w-none">
       {blocks.map((block, i) => {
         if (block.type === 'same') {
-          return <div key={i}>{fragment(block.lines.join('\n'))}</div>;
+          return <div key={i}>{fragment(block.lines.join('\n'), { changed: false })}</div>;
         }
         return (
           <div key={i} className="my-2">
             {block.removed.length > 0 && (
               <div className="bg-red-50 border-l-2 border-red-700 px-3 py-1 rounded-sm">
-                {fragment(block.removed.join('\n'), baselineComponents)}
+                {fragment(block.removed.join('\n'), {
+                  changed: true,
+                  fragmentComponents: baselineComponents,
+                })}
               </div>
             )}
             {block.added.length > 0 && (
               <div className="bg-emerald-50 border-l-2 border-emerald-700 px-3 py-1 rounded-sm mt-1">
-                {fragment(block.added.join('\n'))}
+                {fragment(block.added.join('\n'), { changed: true })}
               </div>
             )}
           </div>

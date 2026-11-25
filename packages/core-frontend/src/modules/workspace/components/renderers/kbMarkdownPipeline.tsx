@@ -93,6 +93,61 @@ export const KB_REHYPE_PLUGINS: PluginList = [rehypeRaw, rehypeSanitize, rehypeS
  */
 export const KB_DIFF_REHYPE_PLUGINS: PluginList = [rehypeRaw, rehypeSanitize];
 
+/** The slice of a hast node the comment reveal below reads and writes. */
+interface HastNode {
+  type: string;
+  value?: string;
+  tagName?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+}
+
+/**
+ * Turns every HTML comment into visible source text: `<!-- x -->` becomes an
+ * inline `<code>` showing exactly that. A comment renders to nothing, so in a
+ * CHANGED fragment it left the reviewer an empty red or green bar and a file
+ * to approve without seeing the line it adds (an agent can hide instructions
+ * to other agents there). Runs after rehype-raw, which is what turns the
+ * markdown's HTML into comment nodes, and before rehype-sanitize, which would
+ * drop them; the `<code>` it leaves is text sanitize keeps.
+ */
+function rehypeRevealComments() {
+  return (tree: HastNode) => revealComments(tree);
+}
+
+function revealComments(node: HastNode): void {
+  if (!node.children) return;
+  node.children = node.children.map((child) => {
+    if (child.type !== 'comment') {
+      revealComments(child);
+      return child;
+    }
+    const code: HastNode = {
+      type: 'element',
+      tagName: 'code',
+      properties: {},
+      children: [{ type: 'text', value: `<!--${child.value ?? ''}-->` }],
+    };
+    // A comment on a line of its own sits at the root: give it a block, so it
+    // reads as the line it is rather than running into its neighbour.
+    return node.type === 'root'
+      ? { type: 'element', tagName: 'p', properties: {}, children: [code] }
+      : code;
+  });
+}
+
+/**
+ * The diff pipeline for a CHANGED fragment: {@link KB_DIFF_REHYPE_PLUGINS}
+ * plus the comment reveal, so every line a change adds or removes is on
+ * screen. Unchanged fragments keep the plain diff pipeline: a comment nobody
+ * touched stays out of the way, as it does on the page.
+ */
+export const KB_DIFF_CHANGE_REHYPE_PLUGINS: PluginList = [
+  rehypeRaw,
+  rehypeRevealComments,
+  rehypeSanitize,
+];
+
 export interface KbMarkdownComponentOptions {
   /**
    * Called with the raw href of an internal `.md` link. The caller resolves it
