@@ -527,21 +527,26 @@ export class SkillService implements ISkillService {
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
     // resolves it, so it must be unique — per OWNER: a personal folder is one
     // person's, nobody else reads it, so a name there never takes a skill away
-    // from anyone else, nor theirs from them (`readableSkills` picks one per
-    // name for each reader). Sort by (name, root, path) for a
-    // deterministic winner — the shared root FIRST, since `Skills/` is a
-    // skill's canonical home and a same-named inline copy is the stale one —
+    // from another person, nor theirs from them (`readableSkills` picks one per
+    // name for each reader). A shared skill still takes the name from every
+    // personal one. Sort by (name, root, path) for a deterministic winner —
+    // the shared root FIRST, since `Skills/` is a skill's canonical home and a
+    // same-named inline copy is the stale one, and personal folders LAST —
     // then REFUSE later duplicates via the shared dedup — the same rule tools
     // use (no silent auto-suffix that would rebind an id under the caller).
-    const rootRank = (p: string) => (p === skillsDir || p.startsWith(`${skillsDir}/`) ? 0 : 1);
+    const ownerOf = (s: ParsedSkill) => personalPluginFolderOf(s.summary.path, this.kb.layout);
+    const rootRank = (s: ParsedSkill) =>
+      s.summary.path === skillsDir || s.summary.path.startsWith(`${skillsDir}/`) ? 0 : ownerOf(s) === null ? 1 : 2;
     out.sort(
       (a, b) =>
         a.summary.name.localeCompare(b.summary.name) ||
-        rootRank(a.summary.path) - rootRank(b.summary.path) ||
+        rootRank(a) - rootRank(b) ||
         a.summary.path.localeCompare(b.summary.path),
     );
-    const ownerOf = (s: ParsedSkill) => personalPluginFolderOf(s.summary.path, this.kb.layout) ?? '';
-    return dedupeById(out, (s) => `${ownerOf(s)}\u0000${s.summary.name}`, (s) =>
+    const shared = new Set(out.filter((s) => ownerOf(s) === null).map((s) => s.summary.name));
+    const idOf = (s: ParsedSkill) =>
+      shared.has(s.summary.name) ? s.summary.name : `${ownerOf(s)}\u0000${s.summary.name}`;
+    return dedupeById(out, idOf, (s) =>
       log.warn(
         `skipping "${s.summary.path}": id "${s.summary.name}" is already used by another skill — ` +
           'give it a unique `id`/`name` in its SKILL.md frontmatter.',

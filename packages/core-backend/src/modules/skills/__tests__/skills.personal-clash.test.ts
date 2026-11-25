@@ -3,12 +3,12 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { SkillService } from '../skills.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 
 /**
  * ONE PERSON'S PRIVATE SKILL NEVER TAKES ANOTHER PERSON'S AWAY.
@@ -49,7 +49,7 @@ describe('two people, one skill name, each in their own personal plugin', () => 
     readFile: async (id: string, rel: string) => readFile(join(root, id, rel), 'utf-8'),
   } as unknown as WorkspaceService;
 
-  const svc = () => new SkillService(workspaceService, ownFolderOnly, testKbContext({ kbDirName: KB_DIR }), new NodeFs());
+  const svc = () => new SkillService(workspaceService, ownFolderOnly, testKbContext({ kbDirName: KB_DIR }), realDisk());
   const writeSkill = async (folder: string, body: string) => {
     const dir = join(root, wsId, KB_DIR, folder);
     await mkdir(dir, { recursive: true });
@@ -96,15 +96,26 @@ describe('two people, one skill name, each in their own personal plugin', () => 
     });
   });
 
-  test('a shared skill of the same name still wins for the owner of a personal copy', async () => {
-    await writeSkill('Skills/qa-standup-notes', 'shared');
-    await writeSkill(ZZZ, 'personal');
-    const got = await svc().getSkill('zzz@x.eu', NAME);
-    expect(got.ok && got.kind === 'skill' && got.skill.path).toBe('Skills/qa-standup-notes');
-    expect((await svc().listSkills('zzz@x.eu')).filter((s) => s.name === NAME).map((s) => s.path)).toEqual([
-      'Skills/qa-standup-notes',
-    ]);
-  });
+  // `Skills/` sorts after `Plugins/`, and a team plugin's folder after
+  // `personal-aaa`: the shared copy wins on every surface, path order or not.
+  test.each(['Skills/qa-standup-notes', 'Plugins/team/skills/qa-standup-notes'])(
+    'a shared skill of the same name (%s) still wins for the owners of personal copies',
+    async (sharedPath) => {
+      await writeSkill(sharedPath, 'shared');
+      await writeSkill(AAA, 'personal');
+      await writeSkill(ZZZ, 'personal');
+      const service = svc();
+      for (const email of ['aaa@x.eu', 'zzz@x.eu']) {
+        const got = await service.getSkill(email, NAME);
+        expect(got.ok && got.kind === 'skill' && got.skill.path).toBe(sharedPath);
+        expect((await service.listSkills(email)).filter((s) => s.name === NAME).map((s) => s.path)).toEqual([
+          sharedPath,
+        ]);
+      }
+      // The unfiltered catalog (the marketplace, plugin counts) agrees.
+      expect((await service.listSkills()).filter((s) => s.name === NAME).map((s) => s.path)).toEqual([sharedPath]);
+    },
+  );
 
   test('one owner holding the name twice still keeps one: the dedup is per owner, not abolished', async () => {
     await writeSkill('Plugins/personal-zzz/a/qa-standup-notes', 'first');
