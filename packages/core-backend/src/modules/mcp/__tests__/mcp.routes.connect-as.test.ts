@@ -111,7 +111,7 @@ describe('the local server’s exchanged grant', () => {
     const verify = createTokenVerifier({ looksLikeExternalApiKey: () => false } as never, internalTokens);
     expect(await verify(token)).toEqual({
       ok: true,
-      auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', agentPath: 'Agents/ops.agent', scope: 'write' },
+      auth: { source: 'external', userId: 'user-5', connectionId: 'conn-9', agentPath: 'Agents/ops.agent', localRuntime: true, scope: 'write' },
     });
   });
 
