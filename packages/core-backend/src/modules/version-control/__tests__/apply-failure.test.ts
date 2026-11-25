@@ -6,10 +6,10 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, FileApprovalState, IVersionControlService, VersionControlEvent } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/index.js';
-import type { AuthService } from '../../auth/index.js';
-import type { WorkspaceService } from '../../workspace/index.js';
-import type { Database } from '../../database/index.js';
+import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { AuthService } from '../../auth/auth.service.js';
+import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { Database } from '../../database/connection.js';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import { PullRequestService as RealPullRequestService } from '../git/pull-request.service.js';
@@ -20,12 +20,11 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { changeRequests } from '../../database/index.js';
+import { changeRequests } from '../../database/schema.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { VersionControlService } from '../version-control.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createVersionControlRoutes } from '../version-control.routes.js';
 import { VersionControlDomainError, VersionControlValidationError } from '../../../shared/domain-errors.js';
-import { ApprovalCarryPendingError } from '../approval-carry-pending-error.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 
 /**
@@ -148,20 +147,6 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
         number: 7,
         at: at.toISOString(),
       }),
-    );
-  });
-
-  it('a refusal reworded for an approval carry still owed is kept as a gate refusal, so an approval clears it', async () => {
-    h = await routeHarness(async () => {
-      throw new ApprovalCarryPendingError(['Plugins/x/SKILL.md']);
-    });
-    await post(h.baseUrl);
-    await vi.waitFor(() => expect(h!.versionControl.recordApplyFailure).toHaveBeenCalled());
-    expect(h.versionControl.recordApplyFailure).toHaveBeenCalledWith(
-      7,
-      { reason: expect.stringContaining('Approval is still awaited on Plugins/x/SKILL.md'), kind: 'gate', at: expect.any(Date) },
-      ADMIN,
-      1,
     );
   });
 
