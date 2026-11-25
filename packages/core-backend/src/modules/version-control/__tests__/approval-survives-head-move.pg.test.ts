@@ -124,6 +124,19 @@ async function startPlatform() {
     for (const [path, content] of Object.entries(files)) {
       await tool('write_file', { branch: draft, path, content, mode: path === SHARED ? 'overwrite' : 'create' });
     }
+    // A write answers once the file is on disk; its commit is made and pushed
+    // by the background worker. Wait for every file to be on the published
+    // draft, or the request is opened, read and approved against a draft that
+    // does not hold them yet.
+    const published = async (path: string) =>
+      run('git', ['show', `${draft}:${path}`], { cwd: repository }).then((r) => r.stdout, () => null);
+    for (const [path, content] of Object.entries(files)) {
+      const waitingSince = Date.now();
+      while ((await published(path)) !== content) {
+        if (Date.now() - waitingSince > 60_000) throw new Error(`${path} was not published on ${draft} in 60 seconds`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
     const opened = await send<{ number: number }>(token, 'POST', '/workflow/change-requests', {
       sourceBranch: draft, targetBranch: 'main', title: `Request on ${draft}`,
     });
