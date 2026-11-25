@@ -6,13 +6,13 @@ import path from 'node:path';
 import express from 'express';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { WorkspaceService } from '../workspace.service.js';
 
@@ -84,7 +84,7 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
         testKbContext({ kbDirName: KB }),
         { planForCreate: async () => null, noteAccessFileWritten: () => {} } as unknown as ICreatorAccess,
         { isAdmin: async () => true } as unknown as IAdminAccessService,
-        new NodeFs(),
+        realDisk(),
       ),
     );
     server = await new Promise<Server>((resolve) => {

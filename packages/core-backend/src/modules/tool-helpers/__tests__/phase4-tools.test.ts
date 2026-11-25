@@ -1,18 +1,17 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { createToolContextResolver } from '../tool-context.js';
 import { createToolHandlerFactory } from '../tool-handler.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
-import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
+import {
+  InternalTokenService,
+  RoutineWritePolicyService,
+  VersionControlHooks,
+  createToolAuthMiddleware,
+  registerWorkspaceTools,
+} from '../../../__tests__/tool-wiring.js';
+import { DocExtractService, SpillStore, ToolDescriptionNotes, WorkerDocumentExtractor } from '../../workspace/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const WS = 'target-company-state';

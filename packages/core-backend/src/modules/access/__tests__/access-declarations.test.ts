@@ -5,7 +5,7 @@ import {
   AccessDeclarationsError,
   DECLARATION_SCAN_FILE_CAP,
 } from '../access-declarations.js';
-import { registerAccessFrontmatterExtensions } from '../../access-model/access-grammar.js';
+import { registerAccessFrontmatterExtensions } from '../../access-model/index.js';
 
 /**
  * The declaration scan: WHICH files under a folder declare access rules, and
