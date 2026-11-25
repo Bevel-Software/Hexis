@@ -4681,7 +4681,7 @@ export class VersionControlService implements IVersionControlService {
     // branch's key at either end; a draft source's key is held, and every
     // competing request from this source takes it too.
     return this.runOnBranchPair(sourceBranch, targetBranch, async () => {
-      // A person merges a change request. Only the request's OWN direction is
+      // A change request lands through its own gate. Only the request's OWN direction is
       // blocked: the target merged into the source is how a draft under review
       // stays current, and that must keep working while the request is open.
       const open = await this.openRequestBlockingMerge(sourceBranch, targetBranch);

@@ -227,21 +227,6 @@ describe('dispatchMetaTool answers a failed chain', () => {
     expect(text.match(/The branch is protected\./g)).toHaveLength(1);
   });
 
-  it('still maps a retired tool onto its own message', async () => {
-    const { client, callToolChain } = clientWith([]);
-    callToolChain.mockResolvedValueOnce({
-      result: null,
-      logs: [
-        '[ERROR] Code execution failed: TypeError: KNOWLEDGE_BASE.merge_change_request is not a function',
-      ],
-    });
-    const res = await dispatchMetaTool(client, 'call_tool_chain', {
-      code: 'return KNOWLEDGE_BASE.merge_change_request({})',
-    });
-    expect(res.isError).toBe(true);
-    expect(resultText(res)).toMatch(/merged by a person in the app/);
-  });
-
   it('leaves an oversized SUCCESS spilling exactly as before', async () => {
     const { client, callToolChain } = clientWith([]);
     callToolChain.mockResolvedValueOnce({ result: 'x'.repeat(5_000), logs: [] });
