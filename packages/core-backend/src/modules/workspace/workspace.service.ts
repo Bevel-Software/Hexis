@@ -1370,6 +1370,78 @@ export class WorkspaceService implements IWorkspaceService {
     return this.buildFileTree(workspaceDir, workspaceDir, readFilter);
   }
 
+  /**
+   * The whole tree cut at `depth` levels (`1`: the workspace's own entries),
+   * walking no folder below the cut. See {@link listFilesUnder} for what a
+   * folder at the cut looks like.
+   */
+  async listFilesToDepth(workspaceId: string, depth: number, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    return this.buildFileTree(workspaceDir, workspaceDir, readFilter, { depth });
+  }
+
+  /**
+   * The part of the tree at `wsPath`: a folder's subtree exactly as
+   * {@link listFiles} holds it (the same read filter, `.bevelignore` rules,
+   * order and workspace-relative paths), built by walking that folder alone.
+   * A file answers its own entry, when the filter lets the caller read it.
+   * `null` when nothing is at the path, when it is not a file or a folder, or
+   * when a `.bevelignore` above it hides it, as the whole tree would not show
+   * it either.
+   *
+   * `depth` cuts the listing (`1`: the folder's own entries). A folder at the
+   * cut has no `children` field, since it was not looked into. One the caller
+   * may not read is left out there and counted as withheld: whether something
+   * readable lies beneath it is only known by walking it, which is what the
+   * cut is for. A caller that must show the way to a grant deeper down asks
+   * for more depth.
+   *
+   * The folder's own readability is the caller's question, as it is for the
+   * workspace root in `listFiles`: the filter judges what is INSIDE.
+   */
+  async listFilesUnder(
+    workspaceId: string,
+    wsPath: string,
+    options: { depth?: number; readFilter?: ReadTreeFilter } = {},
+  ): Promise<FileTreeEntry | null> {
+    return this.entryUnder(await this.located(workspaceId, wsPath), options);
+  }
+
+  /** {@link listFilesUnder}, for the place its path resolved to. */
+  private async entryUnder(
+    at: { workspaceDir: string; relativePath: string; absolutePath: string },
+    options: { depth?: number; readFilter?: ReadTreeFilter },
+  ): Promise<FileTreeEntry | null> {
+    const { workspaceDir, relativePath, absolutePath } = at;
+    assertNoGitInternalsSegment(relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
+    let stat;
+    try {
+      stat = await fs.lstat(absolutePath);
+    } catch (err) {
+      if (isAbsence(err)) return null;
+      throw err;
+    }
+    if (!stat.isFile() && !stat.isDirectory()) return null;
+    const repoRoot = path.join(workspaceDir, this.kbDirName);
+    const inRepo = (relativePath === this.kbDirName ? '' : relativePath.slice(this.kbDirName.length + 1)).replace(/\/+$/, '');
+    // The rules above the entry, and whether one of them hides it or a folder
+    // on the way to it.
+    const parent = inRepo.includes('/') ? inRepo.slice(0, inRepo.lastIndexOf('/')) : '';
+    const above = await ignoreRulesAbove(repoRoot, stat.isDirectory() ? inRepo : parent);
+    if (!above) return null;
+    if (stat.isFile()) {
+      const rules = await above.extendedWith(path.dirname(absolutePath));
+      if (rules.isIgnored(absolutePath, false)) return null;
+      const name = path.basename(absolutePath);
+      if (isFolderPlaceholder(name)) return null;
+      if (options.readFilter && (await options.readFilter([relativePath])).get(relativePath) !== true) return null;
+      return { name, relativePath, type: 'file' };
+    }
+    return this.buildFileTree(absolutePath, workspaceDir, options.readFilter, { depth: options.depth, ignore: above });
+  }
+
   /** The repository inside a workspace directory: `<workspaceDir>/<kbDirName>`. */
   private repoRoot(workspaceDir: string): string {
     return path.join(workspaceDir, this.kbDirName);
@@ -1411,6 +1483,11 @@ export class WorkspaceService implements IWorkspaceService {
     const absolutePath = path.resolve(workspaceDir, relativePath);
     assertWithinDirectory(absolutePath, this.repoRoot(workspaceDir));
     return { workspaceDir, relativePath, absolutePath };
+  }
+
+  /** The resolution above, for a method this file declares before it. */
+  private located(workspaceId: string, wsPath: string): Promise<{ workspaceDir: string; relativePath: string; absolutePath: string }> {
+    return this.resolveInsideRepo(workspaceId, wsPath);
   }
 
   async readFile(workspaceId: string, wsPath: string): Promise<string> {
@@ -2739,12 +2816,25 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
-  private async buildFileTree(root: string, workspaceRoot: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {
+  /**
+   * The tree of the folder at `root`, with paths relative to `workspaceRoot`.
+   * `within.ignore` are the `.bevelignore` rules in force above `root` (none
+   * for a walk from the workspace's top); `within.depth` cuts the walk: no
+   * folder deeper than that many levels below `root` is listed.
+   */
+  private async buildFileTree(
+    root: string,
+    workspaceRoot: string,
+    readFilter?: ReadTreeFilter,
+    within: { depth?: number; ignore?: IgnoreRules } = {},
+  ): Promise<FileTreeEntry> {
     /** A folder while the tree is built: whether the caller may read it decides, once its subtree is known, whether it stays. */
     interface DirNode {
       name: string;
       relativePath: string;
       readable: boolean;
+      /** Whether the walk listed it: false for a folder at the depth cut, whose `children` say nothing. */
+      listed: boolean;
       children: (FileTreeEntry | DirNode)[];
       /**
        * Files directly in it the caller's read rules kept out — counted, never
@@ -2755,13 +2845,23 @@ export class WorkspaceService implements IWorkspaceService {
       withheld: number;
     }
     const relOf = (abs: string) => path.relative(workspaceRoot, abs).replace(/\\/g, '/');
-    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, children: [], withheld: 0 };
+    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, listed: false, children: [], withheld: 0 };
     const nodes = new Map<string, DirNode>([['', top]]);
+    // A folder `depth - 1` levels down is the last one listed: its entries are
+    // level `depth`, and the walk enters none of them.
+    const cut = within.depth === undefined ? Infinity : Math.max(1, Math.floor(within.depth));
+    const levelOf = (rel: string) => (rel === '' ? 0 : rel.split('/').length);
+    const walk: TreeWalkOptions = {
+      ...explorerWalk(),
+      ...(within.ignore ? { ignore: within.ignore } : {}),
+      ...(cut === Infinity ? {} : { leaf: (dir) => levelOf(dir.rel) >= cut - 1 }),
+    };
 
-    await this.disk.walk(root, explorerWalk(), [
+    await this.disk.walk(root, walk, [
       {
         async onDir(rel, entries) {
           const node = nodes.get(rel)!;
+          node.listed = true;
           const abs = path.join(root, rel);
           const rels = entries.map((e) => relOf(path.join(abs, e.name)));
           // Read-permission filter: ONE batched check per directory. Drops files the
@@ -2783,6 +2883,7 @@ export class WorkspaceService implements IWorkspaceService {
                 name: entry.name,
                 relativePath: entryRel,
                 readable: readable(entryRel),
+                listed: false,
                 children: [],
                 withheld: 0,
               };
@@ -2809,6 +2910,8 @@ export class WorkspaceService implements IWorkspaceService {
      * stays exactly the tree it always was.
      */
     const finish = (node: DirNode): FileTreeEntry => {
+      // At the depth cut: not looked into, so it says nothing of its children.
+      if (!node.listed && cut !== Infinity) return { name: node.name, relativePath: node.relativePath, type: 'directory' };
       const children: FileTreeEntry[] = [];
       let withheld = node.withheld;
       for (const child of node.children) {
@@ -2818,6 +2921,8 @@ export class WorkspaceService implements IWorkspaceService {
         }
         const sub = finish(child);
         withheld += sub.withheld ?? 0;
+        // A folder at the cut the caller may not read is left out: only a walk
+        // of it would show whether something readable lies beneath.
         if (child.readable || (sub.children?.length ?? 0) > 0) children.push(sub);
         else withheld++;
       }
