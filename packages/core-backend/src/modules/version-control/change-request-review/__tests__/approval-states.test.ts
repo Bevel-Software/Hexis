@@ -13,13 +13,13 @@ const mergeChangeRequestMock = vi.fn(async () => ({
 }));
 
 import { ChangeRequestReviewService } from '../change-request-review.service.js';
-import { changeRequests } from '../../../database/schema.js';
-import type { Database } from '../../../database/connection.js';
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import { changeRequests } from '../../../database/index.js';
+import type { Database } from '../../../database/index.js';
+import type { WorkspaceService } from '../../../workspace/index.js';
 import type { GitService } from '../../git/git.service.js';
-import type { IAccessControl } from '../../../access/access-control.interface.js';
+import type { IAccessControl } from '../../../access/index.js';
 import { hashEmail as hash } from '../../../../shared/email-identity.js';
-import { AccessUnreadableError } from '../../../access-model/access-errors.js';
+import { AccessUnreadableError } from '../../../access-model/index.js';
 
 function file(overrides: Partial<PullRequestFile>): PullRequestFile {
   return {
@@ -669,7 +669,11 @@ describe('merge gate — every file type', () => {
 
         await expect(
           svc.mergePr(1, AUTHOR, HEAD, approvals, 'open', 'Update', BASE, 'ws-1'),
-        ).rejects.toMatchObject({ name: 'MergeBlockedError' });
+        ).rejects.toMatchObject({
+          name: 'MergeBlockedError',
+          // The files the refusal waits on, by path alone, for a caller that rewords it.
+          payload: { awaitingApprovals: true, waitingPaths: files.map((f) => f.path) },
+        });
         expect(mergeChangeRequestMock).not.toHaveBeenCalled();
       });
 

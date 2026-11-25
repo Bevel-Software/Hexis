@@ -85,10 +85,13 @@ class MergeBlockedError extends VersionControlDomainError {
    * closed, nothing to approve) are refusals no approval changes, and a
    * caller that rewords the first must not reword those.
    */
-  constructor(reasons: string[], opts: { awaitingApprovals?: boolean } = {}) {
+  constructor(reasons: string[], opts: { awaitingApprovals?: boolean; waitingPaths?: string[] } = {}) {
     super(`Merge gate rejected: ${reasons.join('; ') || 'unknown'}`, 422, {
       mergeBlockedReasons: reasons,
       ...(opts.awaitingApprovals ? { awaitingApprovals: true } : {}),
+      // The files those reasons wait on, by path alone: what a caller that
+      // rewords the refusal names, without the approvers the reasons carry.
+      ...(opts.waitingPaths ? { waitingPaths: opts.waitingPaths } : {}),
     });
     this.name = 'MergeBlockedError';
   }
@@ -204,9 +207,10 @@ function eligibleLabel(a: FileApprovalState): string {
  * files) refuse every merge; `warnings` (missing approvals) refuse too, but
  * an admin may merge past them with the bypass flag.
  */
-function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warnings: string[] } {
+function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warnings: string[]; waitingPaths: string[] } {
   const reasons: string[] = [];
   const warnings: string[] = [];
+  const waitingPaths: string[] = [];
 
   if (input.state === 'merged') {
     reasons.push('This pull request has already been merged.');
@@ -231,6 +235,7 @@ function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warn
 
     const hasStale = a.approvedBy.some((e) => e.isStale);
     const label = eligibleLabel(a);
+    waitingPaths.push(a.path);
     if (hasStale) {
       warnings.push(`${label} need to re-approve ${a.path} after the latest push.`);
     } else {
@@ -238,7 +243,7 @@ function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warn
     }
   }
 
-  return { hardReasons: reasons, warnings };
+  return { hardReasons: reasons, warnings, waitingPaths };
 }
 
 function assertValidPath(p: unknown): asserts p is string | undefined {
@@ -541,7 +546,7 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       throw new MergeBlockedError(gate.hardReasons);
     }
     if (gate.warnings.length > 0 && !opts.bypass) {
-      throw new MergeBlockedError(gate.warnings, { awaitingApprovals: true });
+      throw new MergeBlockedError(gate.warnings, { awaitingApprovals: true, waitingPaths: gate.waitingPaths });
     }
 
     // Bypass authority: admin-only. Resolved against `origin/<baseBranch>`

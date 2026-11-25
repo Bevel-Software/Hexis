@@ -1,8 +1,10 @@
 /**
- * Version-control domain errors. This is the single source of truth — every error
- * raised by the version-control domain (branches, changes, change requests, access
- * control, locks) lives here. Route handlers shape responses via the
- * `.status` + `.payload` contract on the base class.
+ * Version-control domain errors that cross a module boundary (branches, changes,
+ * change requests, access control, locks) live here. An error only its own
+ * module raises and reads lives in that module instead (for example
+ * `ApprovalCarryPendingError` and `MergeBlockedError` in version-control).
+ * Route handlers shape responses via the `.status` + `.payload` contract on
+ * the base class.
  *
  * Lives in `src/shared` (not `modules/version-control`) because the classes are
  * consumed across module boundaries — access, diff, plugins and workspace all
@@ -717,29 +719,6 @@ export class DuplicateChangeRequestError extends VersionControlDomainError {
       },
     );
     this.name = 'DuplicateChangeRequestError';
-  }
-}
-
-/**
- * Apply was refused by the approval gate while this request is still owed an
- * approval carry: the server moved the draft's head itself (the roles.yaml
- * restore, or an update from the target) and could not copy the approvals of
- * the files that commit left alone onto the new head. Answering with the
- * gate's own words would tell an approver to approve again a file nobody
- * changed, so this says what happened instead. Nothing was applied, and the
- * carry is tried again by the next read of the request, so trying again is
- * the whole fix. 503: the fault is the server's and it is temporary.
- */
-export class ApprovalCarryPendingError extends VersionControlDomainError {
-  readonly kind = 'approval-carry-pending' as const;
-  constructor() {
-    super(
-      'The server updated this draft while applying it and could not carry the approvals already given over to the updated draft. ' +
-        'Nothing was applied, and no file needs approving again. Apply again to retry.',
-      503,
-      { kind: 'approval-carry-pending', retryable: true },
-    );
-    this.name = 'ApprovalCarryPendingError';
   }
 }
 

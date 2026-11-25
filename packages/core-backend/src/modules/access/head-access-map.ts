@@ -7,6 +7,7 @@ import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import path from 'node:path';
 import { frontmatterHead, frontmatterHeadOfBytes } from './frontmatter-head.js';
 import { detachEntries } from './own-entries-memo.js';
+import { mapPooled } from './map-pooled.js';
 import type { CommitPaths, ITreeIndexer } from './tree-index.js';
 
 const log = logger('access');
@@ -325,7 +326,7 @@ export class HeadMaps<M> implements IHeadMaps<M> {
     // An `access.md` says what it declares for itself only with its body read too (`accessMdSelfEntries`), so it is
     // never read from its start alone: it goes through git, in parts, as before. There are few, and they are small.
     for (const u of unseen) (isAccessMdPath(u.paths[0]!) || u.paths.some((p) => before.has(p)) ? viaGit : fromDisk).push(u);
-    const read = await inParallel(fromDisk, (u) => readDeclaredOnDisk(repoDir, u.paths[0]!));
+    const read = await mapPooled(fromDisk, DISK_READS_AT_ONCE, (u) => readDeclaredOnDisk(repoDir, u.paths[0]!));
     // A file written while it was read differs now: what was read of it is no fact about its version.
     const after = await this.changedOnDisk(repoDir, commit);
     fromDisk.forEach((u, i) => {
@@ -481,17 +482,6 @@ async function readDeclaredOnDisk(repoDir: string, relativePath: string): Promis
     throw err;
   }
   return detachEntries(parseOwnAccessEntries(head));
-}
-
-/** `read` for each item, at most `DISK_READS_AT_ONCE` at a time, in order. */
-async function inParallel<T, R>(items: readonly T[], read: (item: T) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    for (let i = next++; i < items.length; i = next++) out[i] = await read(items[i]!);
-  };
-  await Promise.all(Array.from({ length: Math.min(DISK_READS_AT_ONCE, items.length) }, worker));
-  return out;
 }
 
 /**

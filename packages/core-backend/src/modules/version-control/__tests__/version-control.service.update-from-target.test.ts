@@ -4,11 +4,11 @@ import type { AuthUser, PullRequestDetail } from '@bevel-software/platform-share
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import { VersionControlService } from '../version-control.service.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import type { VersionControlEventBus } from '../event-bus.js';
@@ -396,12 +396,15 @@ describe('VersionControlService.updateFromTarget: the approvals the merge did no
   });
 
   describe('when the carry cannot be done', () => {
-    const NOTICE = /could not be carried over.*No file needs approving again/;
+    // Never "no file needs approving": a file the update changed does, and the notice cannot tell which.
+    // Nor a promise that the next open succeeds: it tries again, and can fail again.
+    const NOTICE = /could not be carried over.*The server tries again to carry over.*a file the update changed needs approving again/;
 
     it('says so in words on the answer, and says nothing when the carry worked', async () => {
       const failed = harness({ changedPathsError: new Error('git exploded') });
       const result = await failed.svc.updateFromTarget(WS, USER, 7);
       expect(result.approvalCarryNotice).toMatch(NOTICE);
+      expect(result.approvalCarryNotice).not.toMatch(/no file needs approving/i);
 
       const worked = harness({ changedPaths: ['Sales/Deal.md'], carried: 1 });
       expect(await worked.svc.updateFromTarget(WS, USER, 7)).not.toHaveProperty('approvalCarryNotice');
