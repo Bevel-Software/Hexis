@@ -180,3 +180,23 @@ export interface IPluginIndexService {
   /** Drop the cached catalog (call after a default-branch change under a plugin root). */
   invalidate(): void;
 }
+
+/** One `skills` entry of a plugin.json that links nothing for its reader, and why. */
+export interface SkillLinkWarning {
+  /** The entry as the manifest holds it; a root by its normalised spelling. */
+  entry: string;
+  message: string;
+}
+
+/**
+ * Which `skills` entries of a plugin.json link nothing, said to ONE reader:
+ * the app's save of a manifest and the plugin listing both ask it. A root is
+ * reported when no skill that reader may read on the default branch sits
+ * under it. Advisory; neither method throws.
+ */
+export interface ISkillLinkCheck {
+  /** The saved file's warnings: `[]` unless it is a plugin.json under the plugins root. */
+  checkSave(userEmail: string, workspacePath: string, content: string): Promise<SkillLinkWarning[]>;
+  /** For each list of roots, one warning per root holding no skill `userEmail` can read; one catalog read for all. */
+  emptyRootWarnings(userEmail: string, rootLists: readonly (readonly string[])[]): Promise<SkillLinkWarning[][]>;
+}

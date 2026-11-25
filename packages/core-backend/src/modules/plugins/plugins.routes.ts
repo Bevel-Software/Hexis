@@ -21,7 +21,6 @@ import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
 import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
-import type { SkillLinkCheck } from './skill-link-warnings.js';
 import type { JoinRequestsService } from './join-requests.service.js';
 import { folderTarget } from '../access/index.js';
 import type { PluginJoinRequestJobs } from './join-request-jobs.service.js';
@@ -30,6 +29,7 @@ import type {
   PluginCatalogEntry,
   PluginSummary,
   IPluginIndexService,
+  ISkillLinkCheck,
 } from './plugins.contract.js';
 
 /**
@@ -232,7 +232,7 @@ export function createPluginsRoutes(
    * Optional: says, per caller, which linked roots hold no skill they can
    * read. A host without it lists no such warning.
    */
-  skillLinks?: Pick<SkillLinkCheck, 'emptyRootWarnings'>,
+  skillLinks?: ISkillLinkCheck,
 ): express.Router {
   const router = express.Router();
 

@@ -21,7 +21,7 @@ import type { JoinRequestsService } from '../join-requests.service.js';
 import { PluginJoinRequestJobs } from '../join-request-jobs.service.js';
 import { pluginFolderBelowRoot } from '../plugins.service.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
-import type { PluginSummary, IPluginIndexService } from '../plugins.contract.js';
+import type { PluginSummary, IPluginIndexService, ISkillLinkCheck } from '../plugins.contract.js';
 import { SkillLinkCheck } from '../skill-link-warnings.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
@@ -63,7 +63,7 @@ interface HarnessOpts {
   /** More plugins: folder path below `Plugins/` → manifest name. */
   extraPlugins?: Record<string, string>;
   /** What says, per caller, which linked roots hold no skill they can read. */
-  skillLinks?: SkillLinkCheck;
+  skillLinks?: ISkillLinkCheck;
 }
 
 function cr(over: Partial<ChangeRequest>): ChangeRequest {

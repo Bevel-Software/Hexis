@@ -2,6 +2,7 @@ import { PLUGIN_MANIFEST_FILE, linkedSkillEntries, skillUnderRoot } from '@bevel
 import { logger } from '../../shared/logging.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { ISkillService } from '../skills/index.js';
+import type { ISkillLinkCheck, SkillLinkWarning } from './plugins.contract.js';
 
 const log = logger('plugins');
 
@@ -12,13 +13,6 @@ const log = logger('plugins');
  */
 export function droppedSkillEntryWarning(entry: unknown, skillsDir: string): string {
   return `skills entry ${spelled(entry)} is ignored: use a folder path like "${skillsDir}/Engineering/deploy"`;
-}
-
-/** One `skills` entry of a plugin.json that links nothing for its reader, and why. */
-export interface SkillLinkWarning {
-  /** The entry as the manifest holds it; a root by its normalised spelling. */
-  entry: string;
-  message: string;
 }
 
 /**
@@ -37,7 +31,7 @@ export interface SkillLinkWarning {
  * the price is that a reader who can read no skill at all is not told about
  * roots either. Advisory throughout, and it never throws.
  */
-export class SkillLinkCheck {
+export class SkillLinkCheck implements ISkillLinkCheck {
   constructor(
     private readonly skills: Pick<ISkillService, 'listSkills'>,
     private readonly kb: Pick<KbContext, 'kbDirName' | 'layout' | 'defaultBranch'>,
