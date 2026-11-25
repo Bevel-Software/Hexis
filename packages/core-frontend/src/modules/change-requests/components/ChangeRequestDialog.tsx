@@ -1021,6 +1021,10 @@ export function ChangeRequestDialog({
       setBranchRevision((r) => r + 1);
       setBaseRevision((r) => r + 1);
       setBroughtUpToDate(true);
+      // The update landed, but the server could not carry the approvals over
+      // yet. It says so in a sentence; without it the reader sees approvals
+      // go out of date on files nobody changed, with no reason given.
+      if (result.approvalCarryNotice) setError(result.approvalCarryNotice);
     } catch (err) {
       const conflicts =
         err instanceof GitApiError &&

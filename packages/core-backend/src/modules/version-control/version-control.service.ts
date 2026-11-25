@@ -92,6 +92,7 @@ import {
 import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
+  ApprovalCarryPendingError,
   BranchAuthorshipError,
   BranchDeleteBlockedError,
   BranchNotFoundError,
@@ -140,6 +141,14 @@ const OPEN_PAIR_CONSTRAINT = 'change_requests_open_pair_unq';
 
 /** Cap on a persisted apply refusal — long enough to name the files a gate waits on. */
 const APPLY_FAILURE_MAX_LEN = 1000;
+
+/**
+ * What an update from the target says when it landed but the approvals on the
+ * files it left alone could not be carried onto the new head.
+ */
+const APPROVAL_CARRY_OWED_NOTICE =
+  'This request was brought up to date, but the approvals already given could not be carried over to the updated draft yet. ' +
+  'No file needs approving again: the next time the request is opened, the server tries once more.';
 
 /**
  * True only for a Postgres unique violation (23505) on the open-CR-per-pair
@@ -1057,6 +1066,118 @@ export class VersionControlService implements IVersionControlService {
    * workspace, merged with whatever that sync finds.
    */
   private readonly owedAnnouncements = new Map<string, { after: string; changedPaths: string[] }>();
+
+  /**
+   * Head moves whose approval carry a change request is still OWED, per
+   * request number, oldest first.
+   *
+   * The server moves a draft's head itself in two places: an update from the
+   * target, and the roles.yaml restore Apply makes. Each time, the approvals
+   * on the files that commit left alone are copied onto the new head
+   * (`carryApprovalsAcross`). When that copy fails, the approvals stay on the
+   * old head and read as out of date, and nothing later would repair them:
+   * the head has already moved, so no later call sees a move to carry across.
+   * The move is remembered here and replayed by the next read of the request.
+   *
+   * While a request owes one, every later move of its head is appended too,
+   * carried or not: a replay of A to B lands rows on B, and they still have
+   * to travel B to C. The carry is idempotent, so replaying one that already
+   * succeeded writes nothing.
+   *
+   * In memory, like `owedAnnouncements`: a restart forgets what is owed, and
+   * the approvals concerned then need giving again.
+   */
+  private readonly owedApprovalCarries = new Map<
+    number,
+    Array<{ workspaceId: string; from: string; to: string }>
+  >();
+  /** One replay per request at a time: two reads at once must not both splice the list. */
+  private readonly settlingApprovalCarries = new Map<number, Promise<void>>();
+  /** Past this many owed moves a request's list is dropped: it is not coming back. */
+  private static readonly OWED_APPROVAL_CARRY_CAP = 20;
+
+  /**
+   * Carry the approvals of change request `number` across a commit the SERVER
+   * put on its draft: every file whose bytes are the same at `from` and `to`
+   * keeps its approval, decided by git's own diff between the two heads.
+   *
+   * Answers the paths that differ and how many approval rows were written,
+   * or `null` when the diff or the copy failed. A failure is never thrown:
+   * the commit is already published and the caller's work must go on. It is
+   * logged, and the move is remembered in `owedApprovalCarries` so the next
+   * read of the request tries again.
+   */
+  private async carryApprovalsAcross(
+    number: number,
+    workspaceId: string,
+    from: string,
+    to: string,
+    when: string,
+  ): Promise<{ changedPaths: string[]; carried: number } | null> {
+    const owed = this.owedApprovalCarries.get(number);
+    let outcome: { changedPaths: string[]; carried: number } | null = null;
+    try {
+      const changedPaths = await this.git.pathsChangedBetween(workspaceId, from, to);
+      const carried = await this.changeRequestReview.carryApprovalsForward(number, from, to, changedPaths);
+      outcome = { changedPaths, carried };
+    } catch (err) {
+      log.warn(
+        `could not carry approvals forward on change request #${number} ${when}; the next read of the request tries again`,
+        { err },
+      );
+    }
+    if (outcome === null || owed) {
+      const list = owed ?? [];
+      if (!list.some((move) => move.from === from && move.to === to)) list.push({ workspaceId, from, to });
+      if (list.length > VersionControlService.OWED_APPROVAL_CARRY_CAP) {
+        log.warn(
+          `change request #${number} owes more than ${VersionControlService.OWED_APPROVAL_CARRY_CAP} approval carries; giving up on them`,
+        );
+        this.owedApprovalCarries.delete(number);
+      } else {
+        this.owedApprovalCarries.set(number, list);
+      }
+    }
+    return outcome;
+  }
+
+  /**
+   * Replay the approval carries change request `number` is owed, oldest
+   * first, stopping at the first that fails. Never throws: this runs in front
+   * of a read, and a read must not fail because of bookkeeping.
+   */
+  private settleOwedApprovalCarries(number: number): Promise<void> {
+    const running = this.settlingApprovalCarries.get(number);
+    if (running) return running;
+    const run = (async () => {
+      const owed = this.owedApprovalCarries.get(number);
+      if (!owed) return;
+      let settled = 0;
+      try {
+        // By index, and re-reading the length: a move appended while this
+        // runs is replayed by this same pass.
+        for (let i = 0; i < owed.length; i++) {
+          const move = owed[i]!;
+          const changedPaths = await this.git.pathsChangedBetween(move.workspaceId, move.from, move.to);
+          await this.changeRequestReview.carryApprovalsForward(number, move.from, move.to, changedPaths);
+          settled++;
+        }
+      } catch (err) {
+        log.warn(`change request #${number} is still owed an approval carry; the next read tries again`, { err });
+      }
+      if (settled === 0) return;
+      owed.splice(0, settled);
+      if (owed.length === 0 && this.owedApprovalCarries.get(number) === owed) {
+        this.owedApprovalCarries.delete(number);
+      }
+      this.prs.invalidateDetailCache(number);
+      log.info(`settled ${settled} owed approval carr${settled === 1 ? 'y' : 'ies'} on change request #${number}`);
+    })().finally(() => {
+      this.settlingApprovalCarries.delete(number);
+    });
+    this.settlingApprovalCarries.set(number, run);
+    return run;
+  }
 
   /**
    * The latest RUNNING apply attempt per change-request number (see
@@ -2283,10 +2404,13 @@ export class VersionControlService implements IVersionControlService {
     return { number: row.number, state: row.state as ChangeRequestState };
   }
 
-  getChangeRequestDetail(
+  async getChangeRequestDetail(
     number: number,
     opts?: { fresh?: boolean; workspaceId?: string; viewerEmail?: string; patches?: boolean },
   ): Promise<ChangeRequestDetail | null> {
+    // A request that is owed an approval carry gets it tried again here, in
+    // front of the approvals this read reports. One map lookup otherwise.
+    if (this.owedApprovalCarries.has(number)) await this.settleOwedApprovalCarries(number);
     return this.prs.getPrDetail(number, opts);
   }
 
@@ -2791,9 +2915,10 @@ export class VersionControlService implements IVersionControlService {
     // The merge is a commit the APPROVERS did not make. Re-pin their
     // approvals onto the new head for every file whose bytes it left alone —
     // git's own two-dot diff between the two heads is the verdict on which
-    // those are. Best effort: a request that IS up to date is worth far more
-    // than the bookkeeping, so a failure here is logged and the fresh detail
-    // still goes back.
+    // those are. A request that IS up to date is worth far more than the
+    // bookkeeping, so a carry that fails does not fail the update: the fresh
+    // detail still goes back, with a sentence saying the approvals were not
+    // carried, and the carry is owed (see `owedApprovalCarries`).
     //
     // The head moving is the real gate: nothing moved, nothing moved under
     // anyone. It also covers the sha that is not a sha — a resolve that
@@ -2812,30 +2937,25 @@ export class VersionControlService implements IVersionControlService {
     // that the dialog then re-read would be the dialog discarding content the
     // server just called unchanged.
     let updatedPaths: string[] = [];
+    let approvalCarryNotice: string | undefined;
     if (headMoved) {
-      try {
-        updatedPaths = await this.git.pathsChangedBetween(
-          workspaceId,
-          headBeforeMerge,
-          headAfterMerge,
-        );
-        await this.changeRequestReview.carryApprovalsForward(
-          number,
-          headBeforeMerge,
-          headAfterMerge,
-          updatedPaths,
-        );
-      } catch (err) {
-        log.warn(
-          `could not carry approvals forward on change request #${number} after updating from target`,
-          { err },
-        );
-        // The diff is what failed, so which files moved is unknown. Say so as
-        // "every file this request had", which is every file a caller can
-        // already be showing: slow beats a dialog that goes on presenting
-        // pre-merge text as current. Anything the merge ADDED is not on the
-        // list and does not need to be — no caller has read it yet.
+      const carry = await this.carryApprovalsAcross(
+        number,
+        workspaceId,
+        headBeforeMerge,
+        headAfterMerge,
+        'after updating from target',
+      );
+      if (carry) {
+        updatedPaths = carry.changedPaths;
+      } else {
+        // Which files moved is not known for certain. Say so as "every file
+        // this request had", which is every file a caller can already be
+        // showing: slow beats a dialog that goes on presenting pre-merge text
+        // as current. Anything the merge ADDED is not on the list and does
+        // not need to be — no caller has read it yet.
         updatedPaths = (detail.files ?? []).map((f) => f.path);
+        approvalCarryNotice = APPROVAL_CARRY_OWED_NOTICE;
       }
     }
     this.prs.invalidateDetailCache(number);
@@ -2849,7 +2969,7 @@ export class VersionControlService implements IVersionControlService {
         `Refreshed change request #${number} but could not re-fetch its detail.`,
       );
     }
-    return { ...refreshed, updatedPaths };
+    return { ...refreshed, updatedPaths, ...(approvalCarryNotice ? { approvalCarryNotice } : {}) };
   }
 
   async approveFile(
@@ -4300,18 +4420,46 @@ export class VersionControlService implements IVersionControlService {
     // Fail CLOSED: if the fresh detail can't be loaded we abort rather than fall
     // back to the stale inputs — merging on outdated gate inputs after a
     // security-sensitive rewrite is exactly what this path exists to prevent.
+    //
+    // The restore commit is the SERVER's, and it touches roles.yaml alone, so
+    // the approvals given on the head it replaced are carried across it by
+    // content, exactly as an update from the target carries them. Without the
+    // carry every approval on the request went out of date here, seconds after
+    // it was given, and the gate below told the approver to approve again
+    // files nobody had changed. That happened to every draft cut before the
+    // target's roles.yaml last changed: the guard compares the draft's copy
+    // with the target's current one, so an old copy counts as a change.
     let mergeHeadSha = headSha;
     let mergeApprovals = approvals;
     if (preserved) {
-      const fresh = await this.getChangeRequestDetail(number, {
-        fresh: true,
-        workspaceId,
-        viewerEmail: user.email,
-      });
-      if (!fresh) {
-        throw new RolesYamlPreservationError(
-          `could not reload change request #${number} after roles.yaml preservation; refusing to merge on stale gate inputs`,
+      const reload = async (): Promise<ChangeRequestDetail> => {
+        const fresh = await this.getChangeRequestDetail(number, {
+          fresh: true,
+          workspaceId,
+          viewerEmail: user.email,
+        });
+        if (!fresh) {
+          throw new RolesYamlPreservationError(
+            `could not reload change request #${number} after roles.yaml preservation; refusing to merge on stale gate inputs`,
+          );
+        }
+        return fresh;
+      };
+      let fresh = await reload();
+      if (headSha && fresh.headSha && fresh.headSha !== headSha) {
+        const carry = await this.carryApprovalsAcross(
+          number,
+          workspaceId,
+          headSha,
+          fresh.headSha,
+          'after restoring roles.yaml',
         );
+        // The detail above was assembled before the rows existed. Read again
+        // only when rows were written; this is the restore path alone.
+        if (carry && carry.carried > 0) {
+          this.prs.invalidateDetailCache(number);
+          fresh = await reload();
+        }
       }
       mergeHeadSha = fresh.headSha;
       mergeApprovals = fresh.approvals;
@@ -4336,8 +4484,20 @@ export class VersionControlService implements IVersionControlService {
       if (err instanceof ChangeRequestConflictsError) {
         return { kind: 'conflicts-need-resolution', conflictedPaths: err.conflictedPaths };
       }
+      // The gate refused while a carry is still owed: its reasons would name
+      // approvals that are out of date only because the server could not
+      // copy them. Say that instead. An approver who approves again anyway
+      // passes the gate, so this can never hold a request for good.
+      if (
+        this.owedApprovalCarries.has(number) &&
+        err instanceof VersionControlDomainError &&
+        Array.isArray(err.payload?.mergeBlockedReasons)
+      ) {
+        throw new ApprovalCarryPendingError();
+      }
       throw err;
     }
+    this.owedApprovalCarries.delete(number);
     await this.pullMergeTarget(baseBranch, user);
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-merged', number });

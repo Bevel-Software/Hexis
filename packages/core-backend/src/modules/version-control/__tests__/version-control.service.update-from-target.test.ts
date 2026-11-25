@@ -395,6 +395,104 @@ describe('VersionControlService.updateFromTarget: the approvals the merge did no
     expect(result.updatedPaths).toEqual(['Sales/Deal.md']);
   });
 
+  describe('when the carry cannot be done', () => {
+    const NOTICE = /could not be carried over.*No file needs approving again/;
+
+    it('says so in words on the answer, and says nothing when the carry worked', async () => {
+      const failed = harness({ changedPathsError: new Error('git exploded') });
+      const result = await failed.svc.updateFromTarget(WS, USER, 7);
+      expect(result.approvalCarryNotice).toMatch(NOTICE);
+
+      const worked = harness({ changedPaths: ['Sales/Deal.md'], carried: 1 });
+      expect(await worked.svc.updateFromTarget(WS, USER, 7)).not.toHaveProperty('approvalCarryNotice');
+    });
+
+    it('says so when the diff worked and the copy itself failed', async () => {
+      const h = harness({ changedPaths: ['Sales/Terms.md'] });
+      h.changeRequestReview.carryApprovalsForward.mockRejectedValueOnce(new Error('approval lock timed out'));
+      const result = await h.svc.updateFromTarget(WS, USER, 7);
+      expect(result.approvalCarryNotice).toMatch(NOTICE);
+      // The copy failed, so no file is known to be safe to keep showing.
+      expect(result.updatedPaths).toEqual(['Sales/Deal.md']);
+    });
+
+    it('the next read of the request tries the same carry again, and a read after that does not', async () => {
+      const h = harness({ changedPaths: ['Sales/Terms.md'], carried: 1 });
+      h.git.pathsChangedBetween.mockRejectedValueOnce(new Error('git exploded'));
+      await h.svc.updateFromTarget(WS, USER, 7);
+      expect(h.changeRequestReview.carryApprovalsForward).not.toHaveBeenCalled();
+      h.prs.invalidateDetailCache.mockClear();
+
+      await h.svc.getChangeRequestDetail(7, { workspaceId: WS });
+      // Between the same two heads, with what git now answers.
+      expect(h.git.pathsChangedBetween).toHaveBeenLastCalledWith(WS, HEAD, MERGED_HEAD);
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledTimes(1);
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledWith(7, HEAD, MERGED_HEAD, ['Sales/Terms.md']);
+      // The detail cached before the rows existed is dropped before the read.
+      expect(h.prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+      expect(h.prs.invalidateDetailCache.mock.invocationCallOrder[0]).toBeLessThan(
+        h.prs.getPrDetail.mock.invocationCallOrder.at(-1)!,
+      );
+
+      await h.svc.getChangeRequestDetail(7, { workspaceId: WS });
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledTimes(1);
+    });
+
+    it('a read whose retry fails too still answers, and the read after it tries again', async () => {
+      const h = harness({ changedPathsError: new Error('git exploded') });
+      await h.svc.updateFromTarget(WS, USER, 7);
+      await expect(h.svc.getChangeRequestDetail(7, { workspaceId: WS })).resolves.toBe(h.refreshed);
+      h.git.pathsChangedBetween.mockReset().mockResolvedValue([]);
+      await h.svc.getChangeRequestDetail(7, { workspaceId: WS });
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledWith(7, HEAD, MERGED_HEAD, []);
+    });
+
+    it('a request that never failed a carry costs its reads nothing', async () => {
+      const h = harness({ changedPaths: ['Sales/Deal.md'], carried: 1 });
+      await h.svc.updateFromTarget(WS, USER, 7);
+      h.git.pathsChangedBetween.mockClear();
+      await h.svc.getChangeRequestDetail(7, { workspaceId: WS });
+      expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledTimes(1);
+    });
+
+    it('replays every move of the head since the one that failed, oldest first', async () => {
+      // The carry from HEAD to MERGED_HEAD fails. A second update then moves
+      // the head on to THIRD and its own carry works, but the rows it could
+      // have copied are still on HEAD. The retry has to walk both moves, or
+      // the approvals stop one head short.
+      const THIRD = 'f'.repeat(40);
+      const h = harness({ changedPaths: [], carried: 0 });
+      h.git.pathsChangedBetween.mockRejectedValueOnce(new Error('git exploded'));
+      await h.svc.updateFromTarget(WS, USER, 7);
+
+      h.git.resolvePrShas = vi
+        .fn()
+        .mockResolvedValueOnce({ baseSha: 'b'.repeat(40), headSha: MERGED_HEAD })
+        .mockResolvedValue({ baseSha: 'b'.repeat(40), headSha: THIRD });
+      const second = await h.svc.updateFromTarget(WS, USER, 7);
+      expect(second).not.toHaveProperty('approvalCarryNotice');
+      h.changeRequestReview.carryApprovalsForward.mockClear();
+
+      await h.svc.getChangeRequestDetail(7, { workspaceId: WS });
+      expect(h.changeRequestReview.carryApprovalsForward.mock.calls.map((c) => [c[1], c[2]])).toEqual([
+        [HEAD, MERGED_HEAD],
+        [MERGED_HEAD, THIRD],
+      ]);
+    });
+
+    it('two reads at once replay the owed carry once', async () => {
+      const h = harness({ changedPathsError: new Error('git exploded') });
+      await h.svc.updateFromTarget(WS, USER, 7);
+      h.git.pathsChangedBetween.mockReset().mockResolvedValue([]);
+      await Promise.all([
+        h.svc.getChangeRequestDetail(7, { workspaceId: WS }),
+        h.svc.getChangeRequestDetail(7, { workspaceId: WS }),
+      ]);
+      expect(h.changeRequestReview.carryApprovalsForward).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('when the repository host refuses the push', () => {
     const REFUSED = new Error('git push failed: remote: Internal Server Error');
 

@@ -14,8 +14,10 @@ import { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlService } from '../version-control.service.js';
 import type { Database } from '../../database/connection.js';
 import {
+  ApprovalCarryPendingError,
   PushNeedsAgentResolutionError,
   RolesYamlPreservationError,
+  VersionControlDomainError,
 } from '../../../shared/domain-errors.js';
 import type { VersionControlEventBus } from '../event-bus.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
@@ -75,6 +77,10 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     pushImpl?: () => Promise<void>;
     getPrResult?: { branch: string; base: string } | null;
     getPrDetailResult?: unknown;
+    /** What git says differs between the head before the restore and the head after it. */
+    changedPaths?: string[];
+    /** How many approval rows the carry across the restore commit writes. */
+    carried?: number;
     // Simulate a concurrent editor already holding the roles.yaml lock. When set,
     // acquire returns { acquired: false } and the restore must fail-closed.
     lockHeldBy?: string;
@@ -83,6 +89,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     const ac = noopAccessControl();
     const changeRequestReview = {
       mergePr: vi.fn().mockResolvedValue({ prNumber: 1, sha: 'merged', mergedAt: 't' }),
+      carryApprovalsForward: vi.fn().mockResolvedValue(opts.carried ?? 0),
     } as unknown as IChangeRequestReviewService;
 
     const workspaceService = {
@@ -101,6 +108,7 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
         'commitFileResult' in opts ? opts.commitFileResult : { sha: 'preserve-sha' },
       ),
       push: vi.fn(opts.pushImpl ?? (async () => undefined)),
+      pathsChangedBetween: vi.fn().mockResolvedValue(opts.changedPaths ?? ['roles.yaml']),
       headContainsOrigin: vi.fn(async () => {
         const answer = opts.headContainsOrigin ?? false;
         if (answer instanceof Error) throw answer;
@@ -399,6 +407,132 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
     });
     await expect(merge(svc)).rejects.toBeInstanceOf(RolesYamlPreservationError);
     expect(changeRequestReview.mergePr).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The restore commit is the server's own and moves the draft's head, which
+   * is what an approval is pinned to. A draft cut before the target's
+   * roles.yaml last changed gets one on every first Apply, so without a carry
+   * every such request was refused with "need to re-approve" seconds after it
+   * was approved (hx-approval-survives-the-update-apply-makes).
+   */
+  describe('approvals across the restore commit', () => {
+    const APPROVED = [{ path: 'Sales/Deal.md', isApproved: true }];
+    const STALE = [{ path: 'Sales/Deal.md', isApproved: false }];
+    const after = (approvals: unknown) => ({
+      headSha: 'sha-after-preserve', approvals, state: 'open', title: 'Title', base: BASE,
+    });
+    /** The gate's refusal, as `mergePr` throws it. */
+    const gateRefusal = () =>
+      new VersionControlDomainError('Merge gate rejected: Admin need to re-approve Sales/Deal.md after the latest push.', 422, {
+        mergeBlockedReasons: ['Admin need to re-approve Sales/Deal.md after the latest push.'],
+      });
+    const mocked = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
+
+    async function restoring(opts: { changedPaths?: string[]; carried?: number } = {}) {
+      await fs.writeFile(path.join(headRepoDir, 'roles.yaml'), ATTACKER_ROLES);
+      const h = makeSvc({ headRoles: ATTACKER_ROLES, baseRoles: BASE_ROLES, ...opts });
+      return {
+        ...h,
+        carry: mocked(h.changeRequestReview.carryApprovalsForward),
+        mergePr: mocked(h.changeRequestReview.mergePr),
+        getPrDetail: mocked(h.prs.getPrDetail),
+        pathsChangedBetween: mocked(h.git.pathsChangedBetween),
+      };
+    }
+
+    it('carries them from the head Apply was given onto the head the restore left, by what git says changed', async () => {
+      const h = await restoring({ carried: 1 });
+      // The detail read before the rows exist, then the one read after them.
+      h.getPrDetail.mockResolvedValueOnce(after(STALE)).mockResolvedValue(after(APPROVED));
+
+      await expect(merge(h.svc)).resolves.toMatchObject({ kind: 'merged' });
+
+      expect(h.pathsChangedBetween).toHaveBeenCalledWith('w1', 'sha', 'sha-after-preserve');
+      expect(h.carry).toHaveBeenCalledWith(1, 'sha', 'sha-after-preserve', ['roles.yaml']);
+      // The gate judges the approvals as they are AFTER the carry.
+      expect(h.mergePr).toHaveBeenCalledWith(
+        1, USER, 'sha-after-preserve', APPROVED, 'open', 'Title', BASE, 'w1', { bypass: false },
+      );
+      expect(h.carry.mock.invocationCallOrder[0]).toBeLessThan(h.mergePr.mock.invocationCallOrder[0]!);
+    });
+
+    it('hands the carry every path the head move changed, so an approval on one of them is not kept', async () => {
+      // Somebody pushed to the draft between the read Apply started from and
+      // the restore. Which approvals survive is the carry's decision, made on
+      // this list: it must be git's whole answer, not just roles.yaml.
+      const h = await restoring({ changedPaths: ['roles.yaml', 'Sales/Deal.md'] });
+      await merge(h.svc);
+      expect(h.carry).toHaveBeenCalledWith(1, 'sha', 'sha-after-preserve', ['roles.yaml', 'Sales/Deal.md']);
+    });
+
+    it('reads the detail once more only when rows were written', async () => {
+      const none = await restoring({ carried: 0 });
+      await merge(none.svc);
+      expect(none.getPrDetail).toHaveBeenCalledTimes(1);
+
+      const some = await restoring({ carried: 2 });
+      await merge(some.svc);
+      expect(some.getPrDetail).toHaveBeenCalledTimes(2);
+    });
+
+    it('carries nothing when the restore did not run', async () => {
+      const h = makeSvc({ headRoles: BASE_ROLES, baseRoles: BASE_ROLES });
+      await merge(h.svc);
+      expect(h.git.pathsChangedBetween).not.toHaveBeenCalled();
+      expect(h.changeRequestReview.carryApprovalsForward).not.toHaveBeenCalled();
+    });
+
+    it('a carry that fails turns the gate refusal into words about the carry, not "re-approve"', async () => {
+      const h = await restoring();
+      h.carry.mockRejectedValueOnce(new Error('approval lock timed out'));
+      h.mergePr.mockRejectedValue(gateRefusal());
+
+      const err = await merge(h.svc).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApprovalCarryPendingError);
+      expect((err as ApprovalCarryPendingError).status).toBe(503);
+      expect((err as Error).message).toMatch(/could not carry the approvals/);
+      expect((err as Error).message).toMatch(/Nothing was applied, and no file needs approving again/);
+      expect((err as Error).message).not.toMatch(/re-approve/);
+      // Not a gate refusal to the route: an approval does not answer it.
+      expect((err as ApprovalCarryPendingError).payload).not.toHaveProperty('mergeBlockedReasons');
+    });
+
+    it('the next read tries the failed carry again, and the Apply after it goes through', async () => {
+      const h = await restoring({ carried: 1 });
+      h.carry.mockRejectedValueOnce(new Error('approval lock timed out'));
+      h.mergePr.mockRejectedValueOnce(gateRefusal());
+      await expect(merge(h.svc)).rejects.toBeInstanceOf(ApprovalCarryPendingError);
+      h.carry.mockClear();
+
+      // The read the Apply route makes before it merges.
+      await h.svc.getChangeRequestDetail(1, { fresh: true, workspaceId: 'w1' });
+      expect(h.carry).toHaveBeenCalledWith(1, 'sha', 'sha-after-preserve', ['roles.yaml']);
+
+      await expect(merge(h.svc)).resolves.toMatchObject({ kind: 'merged' });
+    });
+
+    it('a gate refusal with no carry owed is passed on as the gate worded it', async () => {
+      const h = await restoring({ carried: 1 });
+      const refusal = gateRefusal();
+      h.mergePr.mockRejectedValue(refusal);
+      await expect(merge(h.svc)).rejects.toBe(refusal);
+    });
+
+    it('a failed carry does not stop a merge the gate lets through', async () => {
+      const h = await restoring();
+      h.pathsChangedBetween.mockRejectedValue(new Error('git exploded'));
+      await expect(merge(h.svc)).resolves.toMatchObject({ kind: 'merged' });
+      expect(h.carry).not.toHaveBeenCalled();
+    });
+
+    it('an error that is not the gate keeps its own words while a carry is owed', async () => {
+      const h = await restoring();
+      h.carry.mockRejectedValueOnce(new Error('approval lock timed out'));
+      const other = new VersionControlDomainError('Merge failed: remote hung up', 502);
+      h.mergePr.mockRejectedValue(other);
+      await expect(merge(h.svc)).rejects.toBe(other);
+    });
   });
 
   it('ABORTS the merge when reading roles.yaml fails for a non-absence reason (fail-closed)', async () => {

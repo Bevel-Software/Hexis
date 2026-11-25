@@ -729,6 +729,29 @@ export class DuplicateChangeRequestError extends VersionControlDomainError {
  * rather than risk landing the CR's version on a protected branch. 502: the
  * failure is an internal git/push hiccup, not the caller's fault.
  */
+/**
+ * Apply was refused by the approval gate while this request is still owed an
+ * approval carry: the server moved the draft's head itself (the roles.yaml
+ * restore, or an update from the target) and could not copy the approvals of
+ * the files that commit left alone onto the new head. Answering with the
+ * gate's own words would tell an approver to approve again a file nobody
+ * changed, so this says what happened instead. Nothing was applied, and the
+ * carry is tried again by the next read of the request, so trying again is
+ * the whole fix. 503: the fault is the server's and it is temporary.
+ */
+export class ApprovalCarryPendingError extends VersionControlDomainError {
+  readonly kind = 'approval-carry-pending' as const;
+  constructor() {
+    super(
+      'The server updated this draft while applying it and could not carry the approvals already given over to the updated draft. ' +
+        'Nothing was applied, and no file needs approving again. Apply again to retry.',
+      503,
+      { kind: 'approval-carry-pending', retryable: true },
+    );
+    this.name = 'ApprovalCarryPendingError';
+  }
+}
+
 export class RolesYamlPreservationError extends VersionControlDomainError {
   readonly kind = 'roles-yaml-preservation-failed' as const;
   /**
