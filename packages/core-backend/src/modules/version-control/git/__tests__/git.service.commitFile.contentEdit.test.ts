@@ -47,6 +47,7 @@ describe('GitService.commitFile — what kind of change it was', () => {
     await fs.writeFile(path.join(repo, 'page.md'), PAGE);
     await fs.writeFile(path.join(repo, 'plain.md'), '# Name\nNo frontmatter\n');
     await fs.writeFile(path.join(repo, 'data.csv'), 'a,b\n1,2\n');
+    await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Sales]\n---\nA note\n');
     await runGit(repo, ['add', '-A']);
     await runGit(repo, ['commit', '-m', 'seed']);
     svc = new GitService(
@@ -71,9 +72,23 @@ describe('GitService.commitFile — what kind of change it was', () => {
     expect((await commit('plain.md'))?.contentEdit).toEqual({ frontmatterChanged: false });
   });
 
-  it('an edit of a file whose kind carries no access entries is one, whatever its first lines look like', async () => {
-    await fs.writeFile(path.join(repo, 'data.csv'), '---\nread: [Everyone]\n---\na,b\n');
+  it('an edit of the body of a file of another kind is a content edit that left its frontmatter alone', async () => {
+    await fs.writeFile(path.join(repo, 'data.csv'), 'a,b\n1,2\n3,4\n');
     expect((await commit('data.csv'))?.contentEdit).toEqual({ frontmatterChanged: false });
+    await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Sales]\n---\nA note, longer\n');
+    expect((await commit('notes.txt'))?.contentEdit).toEqual({ frontmatterChanged: false });
+  });
+
+  // The access gate reads a file's own entries whatever its kind, so a .txt or .csv that opens
+  // with a `---` block is restricted by it, and a change to that block changes who may read it.
+  it('a changed access entry in the frontmatter of a file of another kind is reported', async () => {
+    await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Finance]\n---\nA note\n');
+    expect((await commit('notes.txt'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('frontmatter added to a file of another kind is reported', async () => {
+    await fs.writeFile(path.join(repo, 'data.csv'), '---\nread: [Everyone]\n---\na,b\n');
+    expect((await commit('data.csv'))?.contentEdit).toEqual({ frontmatterChanged: true });
   });
 
   it('a changed access entry in the frontmatter is reported', async () => {
