@@ -55,6 +55,19 @@ export interface IWorkspaceService {
   getMetadata(workspaceId: string): Promise<WorkspaceInfo | null>;
   deleteWorkspace(workspaceId: string): Promise<void>;
   listFiles(workspaceId: string): Promise<FileTreeEntry>;
+  /**
+   * The part of the tree at `wsPath` (workspace-relative, as `readFile` takes
+   * it): the folder's subtree, with the same entries, order and paths the
+   * whole tree has for it, built by walking that folder alone. A caller that
+   * needs one folder asks for it here instead of building every folder of
+   * the branch. A file answers its own entry; `null` when nothing is there,
+   * or when a `.bevelignore` above hides it as the whole tree would.
+   *
+   * `depth` cuts the listing: `1` is the folder's own entries, `2` theirs as
+   * well. A folder at the cut is listed without `children` (not an empty
+   * list: it was not looked into).
+   */
+  listFilesUnder(workspaceId: string, wsPath: string, options?: { depth?: number }): Promise<FileTreeEntry | null>;
   readFile(workspaceId: string, relativePath: string): Promise<string>;
   writeFile(workspaceId: string, relativePath: string, content: string): Promise<void>;
   createDirectory(workspaceId: string, relativePath: string): Promise<void>;
