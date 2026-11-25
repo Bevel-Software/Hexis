@@ -68,6 +68,15 @@ export interface FileChangedEvent {
   /** The user whose write caused the change. */
   byUserId: string;
   byUserName: string;
+  /**
+   * `true` when the sender knows this change cannot alter what a listing of
+   * the branch shows anyone: an existing file's content changed, and the file
+   * is not one that decides who may read what (an `access.md`, the roles and
+   * groups files, a plugin manifest, `.bevelignore`, a file whose own access
+   * entries changed). A file explorer keeps the tree it has. Absent means
+   * "the listing may differ": the sender did not look, or could not tell.
+   */
+  listingUnchanged?: true;
 }
 
 /** Someone (`holderUserId`) just acquired the lock on `(branch, path)`. */
@@ -99,6 +108,13 @@ export interface FsTreeChangedEvent {
   kind: 'fs-tree-changed';
   workspaceId: string;
   branch: string;
+  /**
+   * `true` when bytes hit the working tree but its listing is the same as
+   * before (see {@link FileChangedEvent.listingUnchanged}). The server's own
+   * listeners still act on the event (a catalog drops what it scanned); a
+   * file explorer keeps the tree it has.
+   */
+  listingUnchanged?: true;
 }
 
 /**
