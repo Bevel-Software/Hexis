@@ -719,3 +719,47 @@ describe('GitService.readFileAtBranch', () => {
     expect(asked).toHaveLength(1);
   });
 });
+
+/**
+ * The names a conflict reports are the files' own names. The merge read
+ * `git status` without `-z`, which quotes a path holding a space and writes a
+ * non-ASCII letter as an octal escape, and the quoted forms name no file: the
+ * change-request dialog showed a stray quote, handed the agent a path that
+ * does not exist, and marked none of those files in its tree.
+ */
+describe('GitService: the paths a conflict names', () => {
+  const SPACED = 'Projects/Customer Programmes/Region APAC/Launch plan.md';
+  const UMLAUT = 'Übersicht Preise.md';
+  let root: string;
+  const workspaceId = encodeURIComponent(DRAFT);
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-conflict-names-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  it('bringing a request up to date names each conflicting file as git stores it, a space or a non-ASCII letter included', async () => {
+    const { repo, pusher } = await seed(root);
+    await pushOn(pusher, TARGET, { [SPACED]: 'on the target\n', [UMLAUT]: 'on the target\n' }, 'target adds both');
+    await fs.mkdir(path.dirname(path.join(repo, SPACED)), { recursive: true });
+    await commitLocally(repo, { [SPACED]: 'on the draft\n', [UMLAUT]: 'on the draft\n' }, 'draft adds both');
+    const svc = new GitService(stubWorkspaceService({ [workspaceId]: path.join(root, workspaceId) }), stubVersionControlHooks(), testKbContext());
+
+    const outcome = await svc.mergeFromOrigin(workspaceId, DRAFT, TARGET, USER);
+
+    expect(outcome.kind).toBe('conflicts');
+    if (outcome.kind !== 'conflicts') return;
+    expect([...outcome.paths].sort()).toEqual([SPACED, UMLAUT].sort());
+  });
+
+  it('has one reader: every unmerged list in the git service comes from the same NUL-separated read', async () => {
+    // The merge, the rebase probe and the stash-reapply check used to read
+    // the list without `-z`, the merge by a command of its own. A second
+    // reader is how a quoted list comes back.
+    const source = await fs.readFile(new URL('../git.service.ts', import.meta.url), 'utf8');
+    expect(source.match(/'--diff-filter=U'/g)).toHaveLength(1);
+    expect(source).toContain("['diff', '--name-only', '--diff-filter=U', '-z']");
+  });
+});

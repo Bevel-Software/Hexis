@@ -2385,14 +2385,16 @@ export class GitService implements IGitService {
     return null;
   }
 
-  /** Conflicted paths from a half-done merge, parsed from porcelain status. */
+  /**
+   * The paths a half-done merge, rebase or stash reapply left unmerged, as git
+   * stores them. Read NUL-separated: without `-z` git writes a non-ASCII
+   * letter as a quoted octal escape (and `status` quotes a path holding a
+   * space), and those quoted forms name no file. The one reader of this list:
+   * the merge, the rebase probe and the stash-reapply check all ask here.
+   */
   private async conflictedPaths(cwd: string): Promise<string[]> {
-    const { stdout } = await this.git(cwd, ['status', '--porcelain=v1']);
-    const paths: string[] = [];
-    for (const line of stdout.split('\n')) {
-      if (/^(UU|AA|DD|AU|UA|DU|UD) /.test(line)) paths.push(line.slice(3));
-    }
-    return paths;
+    const { stdout } = await this.git(cwd, ['diff', '--name-only', '--diff-filter=U', '-z']);
+    return stdout.split('\0').filter(Boolean);
   }
 
   /**
@@ -2730,8 +2732,7 @@ export class GitService implements IGitService {
       // is surfaced unchanged.
       let conflictedPaths: string[] = [];
       try {
-        const { stdout } = await this.git(cwd, ['diff', '--name-only', '--diff-filter=U']);
-        conflictedPaths = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+        conflictedPaths = await this.conflictedPaths(cwd);
       } catch {
         // fall through with an empty list
       }
@@ -2770,8 +2771,7 @@ export class GitService implements IGitService {
     // branch is at the remote commit; resetting to it drops only the
     // half-applied stash (still in the stash list) and lets the conflict
     // travel the same typed path a rebase conflict does.
-    const { stdout: unmergedOut } = await this.git(cwd, ['diff', '--name-only', '--diff-filter=U']);
-    const unmerged = unmergedOut.split('\n').map((l) => l.trim()).filter(Boolean);
+    const unmerged = await this.conflictedPaths(cwd);
     if (unmerged.length > 0) {
       await this.git(cwd, ['reset', '--hard', 'HEAD']);
       throw new PullRebaseConflictError(
