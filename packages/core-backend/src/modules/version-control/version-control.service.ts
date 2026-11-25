@@ -148,7 +148,8 @@ const APPLY_FAILURE_MAX_LEN = 1000;
  */
 const APPROVAL_CARRY_OWED_NOTICE =
   'This request was brought up to date, but the approvals already given could not be carried over to the updated draft yet. ' +
-  'No file needs approving again: the next time the request is opened, the server tries once more.';
+  'The approvals of files the update left alone are carried over the next time the request is opened; ' +
+  'a file the update changed needs approving again, as after any update.';
 
 /**
  * True only for a Postgres unique violation (23505) on the open-CR-per-pair
@@ -4491,19 +4492,21 @@ export class VersionControlService implements IVersionControlService {
       if (err instanceof ChangeRequestConflictsError) {
         return { kind: 'conflicts-need-resolution', conflictedPaths: err.conflictedPaths };
       }
-      // The gate is waiting on approvals while a carry is still owed: its
-      // reasons would name approvals that are out of date only because the
-      // server could not copy them. Say that instead. Only that refusal: one
-      // that says the request is already merged, closed or empty carries the
-      // same `mergeBlockedReasons` and is true as worded. An approver who
-      // approves again anyway passes the gate, so this can never hold a
-      // request for good.
+      // The gate is waiting on approvals while a carry is still owed: some of
+      // its reasons may name approvals that are out of date only because the
+      // server could not copy them, others a file the head move really
+      // changed. Say what happened, and keep the gate's reasons beside it.
+      // Only that refusal: one that says the request is already merged,
+      // closed or empty carries the same `mergeBlockedReasons` and is true as
+      // worded. An approver who approves again anyway passes the gate, so
+      // this can never hold a request for good.
       if (
         this.owedApprovalCarries.has(number) &&
         err instanceof VersionControlDomainError &&
         err.payload?.awaitingApprovals === true
       ) {
-        throw new ApprovalCarryPendingError();
+        const reasons = err.payload.mergeBlockedReasons;
+        throw new ApprovalCarryPendingError(Array.isArray(reasons) ? reasons.filter((r): r is string => typeof r === 'string') : []);
       }
       throw err;
     }

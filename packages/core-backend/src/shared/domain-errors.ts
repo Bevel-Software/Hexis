@@ -724,20 +724,26 @@ export class DuplicateChangeRequestError extends VersionControlDomainError {
  * Apply was refused by the approval gate while this request is still owed an
  * approval carry: the server moved the draft's head itself (the roles.yaml
  * restore, or an update from the target) and could not copy the approvals of
- * the files that commit left alone onto the new head. Answering with the
- * gate's own words would tell an approver to approve again a file nobody
- * changed, so this says what happened instead. Nothing was applied, and the
- * carry is tried again by the next read of the request, so trying again is
- * the whole fix. 503: the fault is the server's and it is temporary.
+ * the files that commit left alone onto the new head. Some of the files the
+ * gate waits on wait only on that copy, and the next read of the request
+ * tries it again; but a file the head move changed genuinely needs approving
+ * again, and this refusal cannot tell the two apart. So it says what happened
+ * and keeps the gate's reasons (`gateReasons`), never that no file needs
+ * approving. Nothing was applied. 503: the copy is the server's fault and
+ * temporary. Not `mergeBlockedReasons`: a route reads that key as a refusal
+ * an approval answers, and an approval does not answer the copy.
  */
 export class ApprovalCarryPendingError extends VersionControlDomainError {
   readonly kind = 'approval-carry-pending' as const;
-  constructor() {
+  constructor(gateReasons: readonly string[] = []) {
     super(
-      'The server updated this draft while applying it and could not carry the approvals already given over to the updated draft. ' +
-        'Nothing was applied, and no file needs approving again. Apply again to retry.',
+      'The server updated this draft while applying it and could not yet carry the approvals already given over to the updated draft, so nothing was applied. ' +
+        'Apply again to retry: the approvals of files the update left alone are carried over then. ' +
+        (gateReasons.length > 0
+          ? `The approval check was waiting on: ${gateReasons.join(' ')} Any of those files the update changed still needs approving.`
+          : 'A file the update changed still needs approving.'),
       503,
-      { kind: 'approval-carry-pending', retryable: true },
+      { kind: 'approval-carry-pending', retryable: true, ...(gateReasons.length > 0 ? { gateReasons: [...gateReasons] } : {}) },
     );
     this.name = 'ApprovalCarryPendingError';
   }
