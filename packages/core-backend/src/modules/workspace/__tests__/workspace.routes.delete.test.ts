@@ -6,16 +6,16 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
+import { AccessDeniedError, type ICreatorAccess } from '../../access-model/index.js';
 import type { WorkspaceService } from '../workspace.service.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { VersionControlValidationError } from '../../../shared/domain-errors.js';
 
 const stubCreatorAccess: ICreatorAccess = {
   planForCreate: async () => null,
@@ -49,6 +49,13 @@ interface Harness {
   deleteFileMock: ReturnType<typeof vi.fn>;
   /** Exposed so a test can make the write gate inside it refuse. */
   acquireLockMock: ReturnType<typeof vi.fn>;
+  /** Exposed so a test can say the caller already holds a path. */
+  getLockMock: ReturnType<typeof vi.fn>;
+  /** Exposed so a test can see which releases queued a commit. */
+  releaseLockMock: ReturnType<typeof vi.fn>;
+  /** Exposed so a test can say the caller's hold lapsed before it was renewed. */
+  heartbeatLockMock: ReturnType<typeof vi.fn>;
+  eventBusEmit: ReturnType<typeof vi.fn>;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -77,6 +84,9 @@ async function makeHarness(): Promise<Harness> {
     deleteFile: vi.fn(async (_id: string, relPath: string) => {
       await fs.rm(path.resolve(workspaceDir, relPath));
     }),
+    moveEntry: vi.fn(async (_id: string, from: string, to: string) => {
+      await fs.rename(path.resolve(workspaceDir, from), path.resolve(workspaceDir, to));
+    }) as unknown as WorkspaceService['moveEntry'],
   };
   const workspaceService = workspaceServiceMock as WorkspaceService;
 
@@ -85,6 +95,7 @@ async function makeHarness(): Promise<Harness> {
     acquireLock: vi.fn(async () => ({ acquired: true, lock: {} as never })),
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
+    heartbeatLock: vi.fn(async () => ({}) as never),
   };
   const versionControlService = versionControlServiceMock as unknown as IVersionControlService;
 
@@ -98,7 +109,7 @@ async function makeHarness(): Promise<Harness> {
   const app = express();
   app.use(express.json());
   app.use('/api', (req, _res, next) => {
-    (req as any).userId = USER_ID;
+    (req as unknown as { userId: string }).userId = USER_ID;
     next();
   });
   app.use('/api', createWorkspaceRoutes(
@@ -111,7 +122,8 @@ async function makeHarness(): Promise<Harness> {
     stubCreatorAccess,
     // Not exercised here — only `.bevelignore`'s tree visibility consults it.
     { isAdmin: async () => false } as unknown as IAdminAccessService,
-    new NodeFs(),
+    // The directory walk, from the fixture that stands in for the composition root.
+    realDisk(),
   ));
 
   const server = await new Promise<Server>((resolve) => {
@@ -129,6 +141,10 @@ async function makeHarness(): Promise<Harness> {
     repoDir: path.join(workspaceDir, KB),
     deleteFileMock: workspaceServiceMock.deleteFile as unknown as ReturnType<typeof vi.fn>,
     acquireLockMock: versionControlServiceMock.acquireLock as unknown as ReturnType<typeof vi.fn>,
+    getLockMock: versionControlServiceMock.getLock as unknown as ReturnType<typeof vi.fn>,
+    releaseLockMock: versionControlServiceMock.releaseLock as unknown as ReturnType<typeof vi.fn>,
+    heartbeatLockMock: versionControlServiceMock.heartbeatLock as unknown as ReturnType<typeof vi.fn>,
+    eventBusEmit: (eventBus as unknown as { emit: ReturnType<typeof vi.fn> }).emit,
   };
 }
 
@@ -318,5 +334,249 @@ describe('DELETE /workspace/:id/file — the repository\'s own files', () => {
     for (const f of ['access.md', 'roles.yaml', 'Team/notes.md']) {
       expect(await exists(path.join(h.repoDir, f))).toBe(true);
     }
+  });
+});
+
+/**
+ * A removal made while the caller already holds the path's lock — the editor
+ * took it for a save that is still on its way — used to run "inside" that
+ * hold and leave the commit to the holder's own release. The file is gone,
+ * so that release never came (the tab closed, the hold expired, the save was
+ * refused): the deletion stayed on disk with nothing queued to commit it, and
+ * the repository kept the file. A removal ends the edit, so it is committed
+ * by the request that made it, held or not.
+ */
+describe('DELETE and move under the caller\'s own hold — the removal is committed', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) {
+      await closeServer(h.server);
+      await fs.rm(h.workspaceDir, { recursive: true, force: true });
+    }
+    h = null;
+  });
+
+  const heldBy = (id: string, name = 'Alice') => ({ holderUserId: id, holderName: name });
+  const holdOnly = (held: string[]) => async (_ws: string, _branch: string, p: string) =>
+    held.includes(p) ? heldBy(USER_ID) : null;
+  const del = (base: string, p: string) =>
+    fetch(`${base}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+  const lockNotHeld = () =>
+    new VersionControlValidationError('Cannot release lock: not held by you (or no longer exists).', {
+      kind: 'lock-not-held',
+    });
+  const releasedPaths = () => h!.releaseLockMock.mock.calls.map((c) => c[2]);
+
+  it('queues the deletion of a file the caller holds, without taking a second hold', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+    h.getLockMock.mockImplementation(holdOnly([`${KB}/Team/Draft.md`]));
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(200);
+    expect(await exists(path.join(h.repoDir, 'Team/Draft.md'))).toBe(false);
+    expect(releasedPaths()).toEqual([`${KB}/Team/Draft.md`]);
+    expect(h.acquireLockMock).not.toHaveBeenCalled();
+    expect(h.eventBusEmit).toHaveBeenCalledWith(expect.objectContaining({ kind: 'fs-tree-changed' }));
+  });
+
+  it('takes a fresh hold to queue the deletion when the caller\'s hold ended before its release', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+    h.getLockMock.mockImplementation(holdOnly([`${KB}/Team/Draft.md`]));
+    h.releaseLockMock.mockRejectedValueOnce(lockNotHeld());
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(200);
+    expect(h.acquireLockMock).toHaveBeenCalledWith(WORKSPACE_ID, WORKSPACE_ID, `${KB}/Team/Draft.md`, USER);
+    expect(releasedPaths()).toEqual([`${KB}/Team/Draft.md`, `${KB}/Team/Draft.md`]);
+  });
+
+  it('answers 409 naming the new holder, not success, when someone else took the path before the deletion was queued', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+    h.getLockMock.mockImplementation(holdOnly([`${KB}/Team/Draft.md`]));
+    h.releaseLockMock.mockRejectedValueOnce(lockNotHeld());
+    h.acquireLockMock.mockResolvedValueOnce({ acquired: false, lock: heldBy('user-2', 'Bob') });
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('Bob started editing it before the deletion was shared');
+    expect(releasedPaths()).toEqual([`${KB}/Team/Draft.md`]);
+  });
+
+  it('passes on a release failure that is not an ended hold', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+    h.getLockMock.mockImplementation(holdOnly([`${KB}/Team/Draft.md`]));
+    h.releaseLockMock.mockRejectedValueOnce(new Error('queue unavailable'));
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(500);
+    expect(h.acquireLockMock).not.toHaveBeenCalled();
+  });
+
+  it('queues the deletion of a held file inside a deleted folder, with the folder\'s other files', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team/Old'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/Old/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/Old/Other.md'), 'other', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+    h.getLockMock.mockImplementation(holdOnly([`${KB}/Team/Old/Draft.md`]));
+
+    const res = await del(h.baseUrl, 'Team/Old');
+
+    expect(res.status).toBe(200);
+    expect(await exists(path.join(h.repoDir, 'Team/Old'))).toBe(false);
+    expect(releasedPaths().sort()).toEqual([`${KB}/Team/Old/Draft.md`, `${KB}/Team/Old/Other.md`]);
+  });
+
+  it('queues the source side of a move the caller holds', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+    h.getLockMock.mockImplementation(holdOnly([`${KB}/Team/Draft.md`]));
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: 'Team/Draft.md', newPath: 'Team/Final.md' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await exists(path.join(h.repoDir, 'Team/Final.md'))).toBe(true);
+    expect(releasedPaths().sort()).toEqual([`${KB}/Team/Draft.md`, `${KB}/Team/Final.md`]);
+  });
+
+  it('still leaves the release of a held path the op keeps to its holder', async () => {
+    // The destination of a move is written, not removed: a hold the caller
+    // has there stays theirs to release, as a save under the editor's hold does.
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(h.repoDir, 'Team/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(h.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+    h.getLockMock.mockImplementation(holdOnly([`${KB}/Team/Final.md`]));
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: 'Team/Draft.md', newPath: 'Team/Final.md' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(releasedPaths()).toEqual([`${KB}/Team/Draft.md`]);
+  });
+});
+
+/**
+ * The caller's hold is read once, and can lapse before the removal runs: a
+ * hold that ended may already be someone else's. Everything that can refuse
+ * the removal is decided BEFORE the file is touched, so another editor never
+ * loses a file to a request that then answers 409.
+ */
+describe('DELETE under the caller\'s own hold — refused before anything is removed', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) {
+      await closeServer(h.server);
+      await fs.rm(h.workspaceDir, { recursive: true, force: true });
+    }
+    h = null;
+  });
+
+  const del = (base: string, p: string) =>
+    fetch(`${base}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' });
+  const lockNotHeld = () =>
+    new VersionControlValidationError('Cannot heartbeat lock: not held by you (or no longer exists).', {
+      kind: 'lock-not-held',
+    });
+  const seed = async (hh: Harness) => {
+    await fs.mkdir(path.join(hh.repoDir, 'Team'), { recursive: true });
+    await fs.writeFile(path.join(hh.repoDir, 'Team/Draft.md'), 'draft', 'utf-8');
+    await fs.writeFile(path.join(hh.repoDir, 'Team/Keep.md'), 'keep', 'utf-8');
+  };
+  const DRAFT = `${KB}/Team/Draft.md`;
+
+  it('renews the caller\'s hold before the removal runs', async () => {
+    h = await makeHarness();
+    await seed(h);
+    h.getLockMock.mockImplementation(async (_w: string, _b: string, p: string) =>
+      p === DRAFT ? { holderUserId: USER_ID, holderName: 'Alice', mode: 'edit' } : null,
+    );
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(200);
+    expect(h.heartbeatLockMock).toHaveBeenCalledWith(WORKSPACE_ID, WORKSPACE_ID, DRAFT, USER);
+    const renewedAt = h.heartbeatLockMock.mock.invocationCallOrder[0];
+    const removedAt = h.deleteFileMock.mock.invocationCallOrder[0];
+    expect(renewedAt).toBeLessThan(removedAt);
+  });
+
+  it('answers 409 naming the new holder and leaves the file when the hold lapsed to someone else', async () => {
+    h = await makeHarness();
+    await seed(h);
+    h.getLockMock.mockImplementation(async (_w: string, _b: string, p: string) =>
+      p === DRAFT ? { holderUserId: USER_ID, holderName: 'Alice', mode: 'edit' } : null,
+    );
+    h.heartbeatLockMock.mockRejectedValueOnce(lockNotHeld());
+    h.acquireLockMock.mockResolvedValueOnce({ acquired: false, lock: { holderUserId: 'user-2', holderName: 'Bob' } });
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('being edited by Bob');
+    expect(await exists(path.join(h.repoDir, 'Team/Draft.md'))).toBe(true);
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(h.releaseLockMock).not.toHaveBeenCalled();
+  });
+
+  it('takes the path as an unheld removal does when the hold lapsed and nobody took it', async () => {
+    h = await makeHarness();
+    await seed(h);
+    h.getLockMock.mockImplementation(async (_w: string, _b: string, p: string) =>
+      p === DRAFT ? { holderUserId: USER_ID, holderName: 'Alice', mode: 'edit' } : null,
+    );
+    h.heartbeatLockMock.mockRejectedValueOnce(lockNotHeld());
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(200);
+    expect(await exists(path.join(h.repoDir, 'Team/Draft.md'))).toBe(false);
+    expect(h.acquireLockMock.mock.invocationCallOrder[0]).toBeLessThan(h.deleteFileMock.mock.invocationCallOrder[0]);
+    expect(h.releaseLockMock.mock.calls.map((c) => c[2])).toEqual([DRAFT]);
+  });
+
+  it('refuses with 409 and leaves the file under the caller\'s own coordination hold', async () => {
+    h = await makeHarness();
+    await seed(h);
+    h.getLockMock.mockImplementation(async (_w: string, _b: string, p: string) =>
+      p === DRAFT ? { holderUserId: USER_ID, holderName: 'Alice', mode: 'coordination' } : null,
+    );
+
+    const res = await del(h.baseUrl, 'Team/Draft.md');
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('held for coordination');
+    expect(await exists(path.join(h.repoDir, 'Team/Draft.md'))).toBe(true);
+    expect(h.deleteFileMock).not.toHaveBeenCalled();
+    expect(h.releaseLockMock).not.toHaveBeenCalled();
+    expect(h.heartbeatLockMock).not.toHaveBeenCalled();
   });
 });

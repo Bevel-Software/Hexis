@@ -7,7 +7,7 @@ import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import { printable } from '../../shared/printable.js';
 import type { IAdminAccessService } from '../admin/index.js';
 import express from 'express';
-import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
+import type { AuthUser, FileLock, IVersionControlService } from '@bevel-software/platform-shared';
 import {
   KNOWLEDGE_DIR,
   canonicalRelativePath,
@@ -264,6 +264,13 @@ export function createWorkspaceRoutes(
        * either. See the `IVersionControlService.acquireLock` contract.
        */
       platformRestore?: { source: string };
+      /**
+       * `op` takes `targetPath` away (a delete, a folder sweep's per-file
+       * delete, the source side of a move). A removal ENDS any edit of the
+       * path, the caller's own included, so it is committed here even when
+       * the caller already holds the lock: see the held-lock branch below.
+       */
+      removesPath?: boolean;
     },
   ): Promise<T> {
     const branch = branchForWorkspaceId(workspaceId);
@@ -278,7 +285,27 @@ export function createWorkspaceRoutes(
     // it on their own schedule (which is what fuses commit + push into
     // one atomic step the user explicitly triggered).
     const existing = await versionControlService.getLock(workspaceId, branch, targetPath);
-    if (existing && existing.holderUserId === user.id) {
+    // A REMOVAL under the caller's own hold is not left to their release.
+    // The file is gone, so the edit the hold was for is over: the editor's
+    // tab closes, its heartbeat stops, and the release it would have sent
+    // may never come (the hold expires first, or the save that held it is
+    // refused). A deletion waiting on that release stayed on disk with no
+    // commit queued for it, so the repository kept the file the server no
+    // longer had. It is committed by this request, and every check that can
+    // refuse it runs BEFORE anything is removed (see `holdForRemoval`).
+    if (existing && existing.holderUserId === user.id && options?.removesPath) {
+      if (await holdForRemoval(workspaceId, branch, targetPath, user, existing)) {
+        const result = await op();
+        await commitRemovalUnderHeldLock(workspaceId, branch, targetPath, user);
+        if (!options.skipFsTreeEvent) {
+          eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
+        }
+        return result;
+      }
+      // The caller's hold ended between the read and the renewal: the path
+      // is free or someone else's, so take it as an unheld removal does
+      // below, which answers 409 naming the holder before the op runs.
+    } else if (existing && existing.holderUserId === user.id) {
       const result = await op();
       // Disk write landed but no commit yet (caller will release later,
       // at which point releaseLock fires its own `file-changed` with a
@@ -375,6 +402,82 @@ export function createWorkspaceRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
     }
     return result;
+  }
+
+  /**
+   * Make the caller's own hold on `targetPath` cover a removal about to run
+   * under it, BEFORE anything is removed. Answers true when the hold is
+   * theirs for the removal, false when it had already ended (the caller then
+   * takes the path as an unheld removal does, which refuses with 409 if
+   * someone else holds it — again before the removal).
+   *
+   * - A coordination hold grants no write authority (see
+   *   `IVersionControlService.acquireLock`): its release may not queue a
+   *   commit, so a removal under it could never be committed. It is refused
+   *   with 409 here, and the file stays.
+   * - An edit hold is renewed with a heartbeat, which extends it only while
+   *   it is still live and still the caller's. The read in `withLock` may be
+   *   up to a TTL old, and a hold that lapsed in between can already belong
+   *   to someone else; renewing first means the removal never runs on a
+   *   path another editor has taken, and the renewed TTL outlasts the
+   *   removal itself.
+   */
+  async function holdForRemoval(
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+    existing: FileLock,
+  ): Promise<boolean> {
+    if (existing.mode === 'coordination') {
+      const err: Error & { status?: number } = new Error(
+        `"${targetPath}" is held for coordination, which allows no change to it. Try again in a moment.`,
+      );
+      err.status = 409;
+      throw err;
+    }
+    try {
+      await versionControlService.heartbeatLock(workspaceId, branch, targetPath, user);
+      return true;
+    } catch (err) {
+      if (err instanceof VersionControlDomainError && err.payload?.kind === 'lock-not-held') return false;
+      throw err;
+    }
+  }
+
+  /**
+   * Release the caller's own hold on a path the request just removed, which
+   * queues the removal's commit (see `withLock`). The hold was renewed just
+   * before the removal (`holdForRemoval`), so the one way it can have ended
+   * since is the caller's own client releasing it while the removal ran:
+   * then a fresh hold is taken for the commit, as an unheld removal takes
+   * one. If somebody else took the path in that moment, the removal is on
+   * disk but not committed by this request, and the request says so with a
+   * 409 rather than answering success.
+   */
+  async function commitRemovalUnderHeldLock(
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+  ): Promise<void> {
+    try {
+      await versionControlService.releaseLock(workspaceId, branch, targetPath, user);
+      return;
+    } catch (err) {
+      const holdEnded = err instanceof VersionControlDomainError && err.payload?.kind === 'lock-not-held';
+      if (!holdEnded) throw err;
+    }
+    const acquired = await versionControlService.acquireLock(workspaceId, branch, targetPath, user);
+    if (!acquired.acquired) {
+      const holder = acquired.lock.holderName || 'another user';
+      const err: Error & { status?: number } = new Error(
+        `"${targetPath}" was deleted here, but ${holder} started editing it before the deletion was shared. Try again in a moment.`,
+      );
+      err.status = 409;
+      throw err;
+    }
+    await versionControlService.releaseLock(workspaceId, branch, targetPath, user);
   }
 
   /**
@@ -1124,7 +1227,7 @@ export function createWorkspaceRoutes(
                 async () => {
                   await workspaceService.deleteFile(id, relFile);
                 },
-                { skipFsTreeEvent: true },
+                { skipFsTreeEvent: true, removesPath: true },
               );
             }
             // No explicit push here — each per-file release enqueues a
@@ -1184,7 +1287,7 @@ export function createWorkspaceRoutes(
         res.status(409).json({ error: repositoryOwnFileDeleteRefusal(rel) });
         return;
       }
-      await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath));
+      await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath), { removesPath: true });
       // Deleting content is not deleting structure: an emptied folder stays.
       await keepFolderOf(id, user, filePath);
       res.json({ status: 'deleted' });
@@ -1285,6 +1388,9 @@ export function createWorkspaceRoutes(
       // one out of a folder that denies them.
       const restoreAt = (p: string) => ({
         platformRestore: platformRestore && p === newPath ? { source: oldPath } : undefined,
+        // The move takes the source away: committed even under the caller's
+        // own hold (see `withLock`).
+        removesPath: p === oldPath,
       });
       // The restore was authorised against a destination that was missing when
       // the access module looked. Both locks are in hand by the time this runs,

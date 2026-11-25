@@ -54,6 +54,8 @@ import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
 import { isBinaryFile } from '../../../workspace/components/renderers';
+import { landingAfterClose, useItemDeletedElsewhere } from '../../../workspace';
+import { DeletedFileNotice } from '../../../workspace/components/DeletedFileNotice';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of
@@ -544,6 +546,26 @@ export function SkillPage({
   const resolveImage = useWorkspaceImageResolver(skillWorkspaceId, fileWorkspacePath);
 
   /**
+   * The text in the editor that is not saved yet — reported by the editor as
+   * it changes, and kept HERE because the editor unmounts when the skill is
+   * deleted under it, and the deleted notice is then the only place left to
+   * offer it. Dropped as soon as the page leaves editing.
+   */
+  const [draft, setDraft] = useState<string | null>(null);
+  if (!editing && draft !== null) setDraft(null);
+
+  /**
+   * Someone else deleted this skill (its SKILL.md): the page shows the same
+   * "This file was deleted" notice as the Knowledge file page, in place of
+   * the old content it would otherwise keep until a reload.
+   */
+  const deletedBy = useItemDeletedElsewhere({
+    workspaceId: skillWorkspaceId,
+    itemPath: kbDirName && skillPath ? `${kbDirName}/${skillPath}` : null,
+    keyFile: kbDirName && skillPath ? `${kbDirName}/${skillPath}/SKILL.md` : null,
+  });
+
+  /**
    * A heading's citation deep-link — the file's KNOWLEDGE URL plus `#slug`,
    * because that is the surface that scrolls to a heading fragment. Same
    * affordance, same destination as copying the link from the Knowledge view
@@ -565,8 +587,20 @@ export function SkillPage({
    * save the Knowledge editor performs, minus the app switch.
    */
   async function saveDirect(content: string) {
+    // The text the editor opened on, read now: the write lands only while the
+    // file still holds it (`ifMatch`, compared by the server inside the
+    // path's turn). A skill deleted while the save is on its way reads there
+    // as empty and is refused (409), not re-created; so is a file changed on
+    // the default branch since the editor opened, which this save would
+    // otherwise overwrite. The editor keeps the text and shows the refusal.
+    const expected = editorBase;
     const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
-    const saved = await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    const saved = await writeFile(
+      workspace.id,
+      `${workspace.kbDirName}/${fileRepoPath}`,
+      content,
+      expected !== null ? { ifMatch: expected } : undefined,
+    );
     // Only a SKILL.md save has a say: a bundled file's answer carries no
     // warnings, and taking it as "none" would hide the loaded skill's.
     if (active === 'SKILL.md') setSavedWarnings(saved?.warnings ?? []);
@@ -638,6 +672,25 @@ export function SkillPage({
   //
   // A confirmed name (the catalog resolved this URL to it) is unaffected: its
   // detail error is real and gets reported immediately.
+  if (deletedBy) {
+    return (
+      <DeletedFileNotice
+        // The file whose delete this is: the notice comes from SKILL.md's
+        // 404, and another file of the skill on screen may still exist.
+        // Under the skill's own folder name, so it says which skill it was.
+        fileName={`${skillPath.slice(skillPath.lastIndexOf('/') + 1)}/SKILL.md`}
+        branch={DEFAULT_BRANCH}
+        deletedBy={deletedBy}
+        edits={editing ? draft : null}
+        onClose={() => {
+          // No tab to close: the page lands where a closed Library item does.
+          navigate(landingAfterClose(location.pathname, DEFAULT_BRANCH, null), { replace: true });
+          data.reload();
+        }}
+      />
+    );
+  }
+
   const catalogAnswered = !data.loading && !data.error;
   const mayConcludeAbsence = !provisional || catalogAnswered;
   if (!detail.loading && mayConcludeAbsence && (detail.error || !skill)) {
@@ -863,6 +916,7 @@ export function SkillPage({
           owner={ownerName}
           onCancel={() => setEditing(false)}
           onSubmit={canEditDirectly ? saveDirect : submitProposal}
+          onDraftChange={setDraft}
         />
       ) : (
         <SkillFilePane

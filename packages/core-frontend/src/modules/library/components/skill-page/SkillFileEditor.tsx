@@ -21,6 +21,12 @@ interface SkillFileEditorProps {
   onCancel(): void;
   /** Resolves when the text has landed (on the branch, or on the default branch). */
   onSubmit(next: string): Promise<void>;
+  /**
+   * The unsaved text whenever it changes: the edited text, or null once it
+   * reads as the base again. The page keeps it so that, if someone else
+   * deletes the file mid-edit, the deleted notice can still offer it.
+   */
+  onDraftChange?(draft: string | null): void;
 }
 
 /**
@@ -43,6 +49,7 @@ export function SkillFileEditor({
   owner,
   onCancel,
   onSubmit,
+  onDraftChange,
 }: SkillFileEditorProps) {
   const [text, setText] = useState(base);
   const [busy, setBusy] = useState(false);
@@ -107,7 +114,10 @@ export function SkillFileEditor({
         rows={22}
         className="block max-h-[60vh] min-h-64 w-full resize-y bg-sunken px-6 py-4 font-mono text-detail leading-relaxed text-ink outline-none"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          onDraftChange?.(lf(e.target.value) === lf(base) ? null : toFileEndings(e.target.value));
+        }}
       />
 
       {error && (
