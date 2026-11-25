@@ -44,7 +44,7 @@ describe('withinLoopTime', () => {
     expect(outcome).toBe('pending');
     await vi.advanceTimersByTimeAsync(1);
     expect(outcome).toBeInstanceOf(LoopTimeLimitError);
-    expect((outcome as LoopTimeLimitError).message).toBe('not finished after 1000ms of event-loop time');
+    expect((outcome as LoopTimeLimitError).message).toBe('not finished within its 1000ms limit');
     expect(vi.getTimerCount()).toBe(0);
   });
 

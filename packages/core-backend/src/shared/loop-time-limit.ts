@@ -1,6 +1,8 @@
 /**
- * A limit on work this process awaits from itself, counted in time the event
- * loop was free to run.
+ * A limit on work this process awaits from itself that a held event loop
+ * cannot use up. It is spent in ticks, and a stretch the loop is held for
+ * spends one tick, however long the stretch. While the loop keeps turning it
+ * runs on the clock, like any limit.
  *
  * A plain `setTimeout` limit measures the clock. When the loop is held busy,
  * the clock runs and the work cannot: its callbacks wait behind whatever holds
@@ -23,7 +25,7 @@
  */
 export class LoopTimeLimitError extends Error {
   constructor(readonly limitMs: number) {
-    super(`not finished after ${limitMs}ms of event-loop time`);
+    super(`not finished within its ${limitMs}ms limit`);
     this.name = 'LoopTimeLimitError';
   }
 }
@@ -38,8 +40,8 @@ const TICK_MS = 250;
 const MIN_TICKS = 4;
 
 /**
- * `work`'s outcome, or a {@link LoopTimeLimitError} once `limitMs` of
- * event-loop time has passed without one. `tickMs` is for tests; by default a
+ * `work`'s outcome, or a {@link LoopTimeLimitError} once the limit of
+ * `limitMs` is spent without one (see the top of this file for how it is spent). `tickMs` is for tests; by default a
  * limit is spent in ticks of {@link TICK_MS}, and in at least {@link MIN_TICKS}.
  */
 export function withinLoopTime<T>(

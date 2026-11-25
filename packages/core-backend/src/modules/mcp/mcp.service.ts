@@ -177,8 +177,8 @@ export interface McpProxyOptions {
     agentPath: string | null;
   }) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
   /**
-   * How long a read this service makes in process may take, in time the event
-   * loop was free to run (`shared/loop-time-limit.ts`); default
+   * How long a read this service makes in process may take: a limit a held
+   * event loop cannot use up (`shared/loop-time-limit.ts`); default
    * {@link IN_PROCESS_READ_LIMIT_MS}. A read that passes it is given up on, as
    * a loopback request that passed its limit was. Set by tests.
    */
@@ -1082,7 +1082,7 @@ export class McpService {
     }
   }
 
-  /** A read made in process, held to {@link IN_PROCESS_READ_LIMIT_MS} of event-loop time. */
+  /** A read made in process, held to {@link IN_PROCESS_READ_LIMIT_MS} (a limit a held event loop cannot use up). */
   private inProcess<T>(read: Promise<T>): Promise<T> {
     return withinLoopTime(read, this.opts.inProcessReadLimitMs ?? IN_PROCESS_READ_LIMIT_MS);
   }

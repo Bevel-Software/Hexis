@@ -61,7 +61,7 @@ interface HarnessOptions {
    * Absent, it asks the loopback.
    */
   revisionReader?: 'in-process' | 'throws' | 'stalls' | 'slow';
-  /** The limit on an in-process read, in event-loop time. Absent, the service's own. */
+  /** The limit on an in-process read. Absent, the service's own. */
   inProcessReadLimitMs?: number;
 }
 
@@ -525,8 +525,8 @@ describe('McpService — the revision is read in process', () => {
 describe('McpService — a revision read that never answers', () => {
   // The loopback request this read replaces ended at its limit and the request
   // fell back to a surface of its own. A read made in process has no request
-  // to end, so it is held to a limit of its own: one counted in event-loop
-  // time, which a busy server does not use up (`shared/loop-time-limit.ts`).
+  // to end, so it is held to a limit of its own: one a held event loop cannot
+  // use up (`shared/loop-time-limit.ts`).
   it('ends at its limit, and the request is served a surface of its own', async () => {
     const { state, mcp } = await harness({ revisionReader: 'stalls', inProcessReadLimitMs: 150 });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
