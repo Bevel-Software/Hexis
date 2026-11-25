@@ -386,7 +386,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
   /**
    * `stillWanted` lets a caller whose request was overtaken drop its answer:
-   * a tree that arrives after a later request's must not replace it.
+   * a tree that arrives after a later request's answer must not replace
+   * that answer.
    */
   const refreshFileTree = useCallback(async (stillWanted?: () => boolean) => {
     if (!workspaceId) return null;
