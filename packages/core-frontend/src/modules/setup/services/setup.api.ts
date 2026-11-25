@@ -287,9 +287,11 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
  * about a change of the knowledge-base repository — without it the server
  * refuses such a save (409), which arrives as
  * {@link RepositoryChangeNeedsConfirmation} rather than as an error.
+ * A `null` value removes a setting the server allows to be removed (the
+ * single sign-on provider's address, application ID and secret).
  */
 export async function saveSettings(
-  settings: Record<string, string>,
+  settings: Record<string, string | null>,
   confirmRepositoryChange?: RepositoryChangeChoice,
   /**
    * How many open change requests the question showed when it was answered.

@@ -170,3 +170,56 @@ describe('SetupScreen — single sign-on check', () => {
     expect(await screen.findByTestId('oidc-verification')).toHaveTextContent('Not configured');
   });
 });
+
+describe('SetupScreen — removing single sign-on', () => {
+  const SAVED = SETTINGS.map((s) =>
+    ['oidcIssuerUrl', 'oidcClientId', 'oidcClientSecret'].includes(s.key)
+      ? { ...s, source: 'stored' as const, configured: true, value: s.secret ? undefined : 'saved' }
+      : s,
+  );
+
+  it('removes the saved provider after a confirmation, sending null for each saved value, and refreshes', async () => {
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS, oidcVerification: 'not-configured' });
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SAVED} onSaved={onSaved} variant="settings" oidcVerification="verified" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Remove single sign-on' }));
+    expect(api.saveSettings).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(api.saveSettings).toHaveBeenCalledWith({ oidcIssuerUrl: null, oidcClientId: null, oidcClientSecret: null });
+    expect(screen.getByTestId('oidc-verification')).toHaveTextContent('Not configured');
+  });
+
+  it('cancelling removes nothing', async () => {
+    render(<SetupScreen settings={SAVED} onSaved={() => {}} variant="settings" oidcVerification="verified" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Remove single sign-on' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(api.saveSettings).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Remove single sign-on' })).toBeInTheDocument();
+  });
+
+  it('leaves out a value the environment sets', async () => {
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS, oidcVerification: 'not-configured' });
+    const withEnvSecret = SAVED.map((s) => (s.key === 'oidcClientSecret' ? { ...s, source: 'env' as const } : s));
+    render(<SetupScreen settings={withEnvSecret} onSaved={() => {}} variant="settings" oidcVerification="verified" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Remove single sign-on' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ oidcIssuerUrl: null, oidcClientId: null }));
+  });
+
+  it('shows a refused removal against its field', async () => {
+    api.saveSettings.mockRejectedValue(new SettingsProblems({ oidcClientSecret: 'Remove the application secret along with the provider address.' }));
+    render(<SetupScreen settings={SAVED} onSaved={() => {}} variant="settings" oidcVerification="verified" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Remove single sign-on' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(await screen.findByText('Remove the application secret along with the provider address.')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['nothing is saved', SETTINGS],
+    ['the environment sets the provider address', SAVED.map((s) => (s.key === 'oidcIssuerUrl' ? { ...s, source: 'env' as const } : s))],
+  ])('offers no Remove when %s', (_name, settings) => {
+    render(<SetupScreen settings={settings} onSaved={() => {}} variant="settings" />);
+    expect(screen.queryByRole('button', { name: 'Remove single sign-on' })).not.toBeInTheDocument();
+  });
+});

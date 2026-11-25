@@ -383,6 +383,23 @@ describe('OidcAuthProvider — live configuration', () => {
     ]);
   });
 
+  it('is no longer advertised once removed, without a restart, and password sign-in is still offered', async () => {
+    const idp = makeIdpFetch();
+    const { base, settings, probe } = await boot(idp.impl);
+    await settings.save({ oidcIssuerUrl: ISSUER, oidcClientId: 'client-1', oidcClientSecret: 'secret-1' }, null);
+    expect((await probe()).map((p) => p.key)).toEqual(['microsoft', 'oidc']);
+
+    await settings.save({ oidcIssuerUrl: null, oidcClientId: null, oidcClientSecret: null }, null);
+    const providers = await (await fetch(`${base}/api/auth/providers`)).json();
+    expect(providers).toEqual({
+      password: true,
+      sso: [{ key: 'microsoft', label: 'Sign in with Microsoft', startPath: '/api/auth/microsoft/login' }],
+    });
+    const login = await fetch(`${base}/api/auth/oidc/login`, { redirect: 'manual' });
+    expect(login.headers.get('location')).toBe('http://localhost:5173/auth/oidc/callback#error=not_configured');
+    expect(idp.calls).toEqual([]);
+  });
+
   it('login while unconfigured sends the browser back to sign-in with an error, not a 500', async () => {
     const idp = makeIdpFetch();
     const { base, settings } = await boot(idp.impl);

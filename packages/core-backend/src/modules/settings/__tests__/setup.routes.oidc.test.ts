@@ -301,6 +301,83 @@ describe('POST /setup/settings — a sign-in configuration is checked before it 
   });
 });
 
+describe('POST /setup/settings — removing the sign-in provider', () => {
+  const REMOVE = { oidcIssuerUrl: null, oidcClientId: null, oidcClientSecret: null };
+
+  it('removes the saved issuer, application id and secret, without probing, and the status reads not configured', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save(FULL, null);
+    await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
+
+    const res = await post(base, '/api/setup/settings', { settings: REMOVE });
+    expect(res.status).toBe(200);
+    expect((await res.json()).oidcVerification).toBe('not-configured');
+    expect(idp.asked).toEqual([]);
+    expect(settings.resolveOidcCredentials()).toEqual({ issuerUrl: '', clientId: '', clientSecret: '' });
+    const status = await (await fetch(`${base}/api/setup/status`)).json();
+    expect(status.oidcVerification).toBe('not-configured');
+    for (const key of Object.keys(REMOVE)) {
+      expect(status.settings.find((s: { key: string }) => s.key === key)).toMatchObject({ source: 'unset', configured: false });
+    }
+  });
+
+  it('a blank still leaves the provider alone — only null removes it', async () => {
+    const { base, settings } = listen({ checkOidc: provider({ outcome: 'verified' }).check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { oidcIssuerUrl: '', oidcClientId: '', oidcClientSecret: '' },
+    });
+    expect(res.status).toBe(200);
+    expect(settings.resolveOidcCredentials()).toEqual({ issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'secret-1' });
+  });
+
+  it('refuses null for a setting that cannot be removed, and the whole batch with it', async () => {
+    const { base, settings } = listen({ checkOidc: provider({ outcome: 'verified' }).check });
+    await settings.save({ ...FULL, oidcScopes: 'openid email' }, null);
+    const res = await post(base, '/api/setup/settings', { settings: { ...REMOVE, oidcScopes: null } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems).toEqual({ oidcScopes: 'This setting cannot be removed.' });
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+    expect(settings.resolve('oidcScopes')).toBe('openid email');
+  });
+
+  it('refuses to remove the issuer while the saved secret stays — the next issuer would be handed it', async () => {
+    const { base, settings } = listen({ checkOidc: provider({ outcome: 'verified' }).check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.oidcClientSecret).toMatch(/Remove the application secret/);
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+  });
+
+  it('removes the saved values beside an OIDC_CLIENT_SECRET, which the environment keeps', async () => {
+    process.env.OIDC_CLIENT_SECRET = 'from-env';
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save({ oidcIssuerUrl: ISSUER, oidcClientId: 'app-id' }, null);
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null, oidcClientId: null } });
+    expect(res.status).toBe(200);
+    expect(idp.asked).toEqual([]);
+    expect(settings.resolve('oidcIssuerUrl')).toBe('');
+    expect((await res.json()).oidcVerification).toBe('not-configured');
+  });
+
+  it('refuses to remove a value the environment sets', async () => {
+    process.env.OIDC_ISSUER_URL = ISSUER;
+    const { base } = listen({ checkOidc: provider({ outcome: 'verified' }).check });
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.oidcIssuerUrl).toMatch(/OIDC_ISSUER_URL environment variable/);
+  });
+
+  it('still refuses a value that is neither a string nor null', async () => {
+    const { base } = listen({});
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: 42 } });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('POST /setup/test-oidc', () => {
   it('checks the typed values and reports the outcome, without saving them', async () => {
     const idp = provider({ outcome: 'verified' });

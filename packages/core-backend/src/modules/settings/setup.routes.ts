@@ -9,6 +9,7 @@ import {
   SettingsValidationError,
   validateHttpsRemote,
   type OidcCredentials,
+  type SettingsBatch,
 } from './deployment-settings.service.js';
 import {
   checkOidcConfiguration,
@@ -360,10 +361,11 @@ export function createSetupRoutes(
     };
     /** Lets the commit worker go again, once a move has held it. */
     let releaseCommits: (() => void) | undefined;
-    const entries: Record<string, string> = {};
+    const entries: SettingsBatch = {};
     for (const [key, value] of Object.entries(body.settings ?? {})) {
-      if (typeof value !== 'string') {
-        res.status(400).json({ error: `"${key}" must be a string.` });
+      // `null` asks to remove the setting; the service decides whether it may be.
+      if (typeof value !== 'string' && value !== null) {
+        res.status(400).json({ error: `"${key}" must be a string, or null to remove it.` });
         return;
       }
       entries[key] = value;
@@ -682,7 +684,7 @@ export function createSetupRoutes(
    * Returns null when it has already answered the request.
    */
   async function repositoryChangeFor(
-    entries: Record<string, string>,
+    entries: SettingsBatch,
     confirmation: unknown,
     /** How many open change requests the screen showed when the answer was given, when it says. */
     seenOpenChangeRequests: unknown,
@@ -732,7 +734,7 @@ export function createSetupRoutes(
    * environment supplies, stands. Every other mode has a repository that
    * already exists, whose branches are asked for, never guessed.
    */
-  function nameBranchesOfManagedRepository(entries: Record<string, string>): void {
+  function nameBranchesOfManagedRepository(entries: SettingsBatch): void {
     if (!source) return;
     const after = settings.resolveAfter(entries);
     if (source.mode(after) !== 'managed') return;
@@ -756,7 +758,7 @@ export function createSetupRoutes(
    */
   async function githubConnectionHoldsFor(
     setup: RepositorySetup,
-    entries: Record<string, string>,
+    entries: SettingsBatch,
     after: (key: string) => string,
     wasComplete: boolean,
     res: express.Response,
@@ -840,7 +842,7 @@ export function createSetupRoutes(
    * {@link SettingsValidationError} before any probe, exactly as the save would.
    */
   async function connectionHoldsFor(
-    entries: Record<string, string>,
+    entries: SettingsBatch,
     wasComplete: boolean,
     res: express.Response,
   ): Promise<boolean> {
@@ -937,7 +939,7 @@ export function createSetupRoutes(
    * when nothing about the configuration was proven.
    */
   async function signInHoldsFor(
-    entries: Record<string, string>,
+    entries: SettingsBatch,
     res: express.Response,
   ): Promise<{
     record?: { state: 'verified' | 'unverified'; credentials: OidcCredentials };
@@ -964,8 +966,14 @@ export function createSetupRoutes(
     // issuer is configured there is no provider it was set for — the save
     // that first names one (beside an OIDC_CLIENT_SECRET the form cannot
     // edit) pairs them.
+    //
+    // So a REMOVED provider takes its saved secret with it: left behind, it
+    // would be paired with whichever issuer is saved next, and sent there.
+    if (now.issuerUrl && !next.issuerUrl && next.clientSecret && settings.sourceOf('oidcClientSecret') !== 'env') {
+      return refuse({ oidcClientSecret: 'Remove the application secret along with the provider address.' });
+    }
     const secretSupplied = Boolean(entries.oidcClientSecret?.trim());
-    if (now.issuerUrl && next.issuerUrl !== now.issuerUrl && next.clientSecret && !secretSupplied) {
+    if (now.issuerUrl && next.issuerUrl && next.issuerUrl !== now.issuerUrl && next.clientSecret && !secretSupplied) {
       return settings.sourceOf('oidcClientSecret') === 'env'
         ? refuse({
             oidcIssuerUrl:
