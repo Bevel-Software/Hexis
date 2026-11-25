@@ -721,6 +721,29 @@ export class DuplicateChangeRequestError extends VersionControlDomainError {
 }
 
 /**
+ * Apply was refused by the approval gate while this request is still owed an
+ * approval carry: the server moved the draft's head itself (the roles.yaml
+ * restore, or an update from the target) and could not copy the approvals of
+ * the files that commit left alone onto the new head. Answering with the
+ * gate's own words would tell an approver to approve again a file nobody
+ * changed, so this says what happened instead. Nothing was applied, and the
+ * carry is tried again by the next read of the request, so trying again is
+ * the whole fix. 503: the fault is the server's and it is temporary.
+ */
+export class ApprovalCarryPendingError extends VersionControlDomainError {
+  readonly kind = 'approval-carry-pending' as const;
+  constructor() {
+    super(
+      'The server updated this draft while applying it and could not carry the approvals already given over to the updated draft. ' +
+        'Nothing was applied, and no file needs approving again. Apply again to retry.',
+      503,
+      { kind: 'approval-carry-pending', retryable: true },
+    );
+    this.name = 'ApprovalCarryPendingError';
+  }
+}
+
+/**
  * Raised when a merge must neutralise a CR's `roles.yaml` change (restore the
  * base branch's version on the source branch) but that preservation write fails.
  * `roles.yaml` decides admin membership and is mutable ONLY via the admin Roles

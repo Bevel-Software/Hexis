@@ -99,6 +99,13 @@ export function ChangeRequestDialog({
 }: ChangeRequestDialogProps) {
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The sentence an update answered when the server could not carry the
+   * approvals over yet. Its own state, not `error`: it stops being true once
+   * the server tries again, which the next read of the detail makes it do, so
+   * every later detail that lands clears it.
+   */
+  const [carryNotice, setCarryNotice] = useState<string | null>(null);
   const [branchContents, setBranchContents] = useState<Record<string, string | null>>({});
   /**
    * Files whose branch copy could not be read, and WHY — shown as such, never
@@ -231,7 +238,9 @@ export function ChangeRequestDialog({
       const seq = ++detailSeq.current;
       fetchPrDetail(cr.number, { fresh: true })
         .then((d) => {
-          if (!cancelled && seq === detailSeq.current) setDetail(d);
+          if (cancelled || seq !== detailSeq.current) return;
+          setDetail(d);
+          setCarryNotice(null);
         })
         .catch(() => undefined);
     };
@@ -760,7 +769,10 @@ export function ChangeRequestDialog({
       setPicked(null);
       const seq = ++detailSeq.current;
       const next = await fetchPrDetail(cr.number);
-      if (seq === detailSeq.current) setDetail(next);
+      if (seq === detailSeq.current) {
+        setDetail(next);
+        setCarryNotice(null);
+      }
       // The selection can land back on this same path (a scope base file), and
       // a cleared cache is only re-read when the read effect runs again.
       setBranchRevision((r) => r + 1);
@@ -936,7 +948,10 @@ export function ChangeRequestDialog({
     const seq = ++detailSeq.current;
     try {
       const fresh = await fetchPrDetail(cr.number, { fresh: true });
-      if (seq === detailSeq.current) setDetail(fresh);
+      if (seq === detailSeq.current) {
+        setDetail(fresh);
+        setCarryNotice(null);
+      }
     } catch {
       // The server's `change-request-edited` broadcast re-reads it again.
     }
@@ -1021,6 +1036,10 @@ export function ChangeRequestDialog({
       setBranchRevision((r) => r + 1);
       setBaseRevision((r) => r + 1);
       setBroughtUpToDate(true);
+      // The update landed, but the server could not carry the approvals over
+      // yet. It says so in a sentence; without it the reader sees approvals
+      // go out of date on files nobody changed, with no reason given.
+      setCarryNotice(result.approvalCarryNotice ?? null);
     } catch (err) {
       const conflicts =
         err instanceof GitApiError &&
@@ -1235,9 +1254,9 @@ export function ChangeRequestDialog({
           <GitSyncFailedBanner workspaceId={sourceWorkspaceId} />
         </div>
 
-        {error && (
+        {(error ?? carryNotice) && (
           <Banner tone="danger" role="alert" className="mx-8 mt-4">
-            {error}
+            {error ?? carryNotice}
           </Banner>
         )}
 
