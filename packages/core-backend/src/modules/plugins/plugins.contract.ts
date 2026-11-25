@@ -192,11 +192,21 @@ export interface SkillLinkWarning {
  * Which `skills` entries of a plugin.json link nothing, said to ONE reader:
  * the app's save of a manifest and the plugin listing both ask it. A root is
  * reported when no skill that reader may read on the default branch sits
- * under it. Advisory; neither method throws.
+ * under it, and no root is reported when that reader's catalog is empty or
+ * cannot be read (an empty catalog proves no absence). Advisory; neither
+ * method throws.
  */
 export interface ISkillLinkCheck {
-  /** The saved file's warnings: `[]` unless it is a plugin.json under the plugins root. */
+  /**
+   * The saved file's warnings: `[]` unless it is a plugin.json under the
+   * plugins root that parses as JSON; else its dropped entries, and its
+   * roots as `emptyRootWarnings` judges them.
+   */
   checkSave(userEmail: string, workspacePath: string, content: string): Promise<SkillLinkWarning[]>;
-  /** For each list of roots, one warning per root holding no skill `userEmail` can read; one catalog read for all. */
+  /**
+   * For each list of roots, one warning per root holding no skill `userEmail`
+   * can read, from one catalog read for all; every list answers `[]` when that
+   * catalog is empty or cannot be read.
+   */
   emptyRootWarnings(userEmail: string, rootLists: readonly (readonly string[])[]): Promise<SkillLinkWarning[][]>;
 }
