@@ -7,10 +7,10 @@
  *  - `pickFileRenderer` and `isViewOnlyFile`: the same lookup the file page
  *    runs, registered renderers included, and whether the file has an
  *    editing surface behind it at all.
- *  - `hasFileViewer`, `isBinaryFile` and `rendersAsText`: what the file page
- *    would show a file as (a viewer of its own, bytes that are not text,
- *    plain text), for a surface that shows a file's change outside it (the
- *    change-request dialog).
+ *  - `hasFileViewer`, `isBinaryFile` and `rendersAsText`: how the file page
+ *    shows a file (with a viewer of its own; from its raw bytes rather than
+ *    as text, which includes `.svg` and `.eml`; as plain text), for a surface
+ *    that shows a file's change outside it (the change-request dialog).
  *  - `RendererSurfaceContext` and `RendererSurface`: where a renderer reads
  *    bytes from and how its links leave, when there is no workspace around
  *    it (see `rendererSurface.ts` for why it is this narrow).
