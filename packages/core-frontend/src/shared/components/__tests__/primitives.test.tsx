@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type ReactElement } from 'react';
 import { cn } from '../../../lib/utils';
@@ -321,6 +321,31 @@ describe('Menu', () => {
     const { container: b } = render(<MenuItem tone="danger">Delete</MenuItem>);
     expect(a.firstElementChild!.className).not.toContain('text-danger');
     expect(b.firstElementChild!.className).toContain('text-danger');
+  });
+
+  it('MenuItem shows its description under the label, outside its name, as its accessible description', () => {
+    render(<MenuItem description="Open and read it">Can read</MenuItem>);
+    const item = screen.getByRole('button', { name: 'Can read' });
+    expect(within(item).getByText('Open and read it')).toBeVisible();
+    expect(item).toHaveAccessibleDescription('Open and read it');
+  });
+
+  it("MenuItem keeps the caller's own accessible description over its description", () => {
+    render(
+      <MenuItem description="Open and read it" aria-description="from Sales. Open and read it">
+        Can read
+      </MenuItem>,
+    );
+    expect(screen.getByRole('button', { name: 'Can read' })).toHaveAccessibleDescription(
+      'from Sales. Open and read it',
+    );
+  });
+
+  it('MenuItem without a description renders exactly as before', () => {
+    render(<MenuItem>Rename</MenuItem>);
+    const item = screen.getByRole('button', { name: 'Rename' });
+    expect(item.innerHTML).toBe('<span class="min-w-0 flex-1 truncate">Rename</span>');
+    expect(item).not.toHaveAttribute('aria-description');
   });
 
   it('MenuItem renders the trailing adornment slot', () => {

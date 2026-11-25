@@ -5,10 +5,10 @@ import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-sha
 import type { AccessResponse } from '../api';
 
 /**
- * Can read, Can edit, Can download and Owner each say what they mean where a
- * person meets them: one line per verb, as the tooltip and the accessible
- * description of every verb in the two pickers, of the request radios, and of
- * the verb summary on a row the reader cannot change.
+ * Can read, Can edit, Can download and Owner each say what they let someone
+ * do where a person meets them: a visible line under each verb in an opened
+ * picker and under the request choices for the chosen level, and the
+ * accessible description of every verb shown. The closed dialog shows none.
  */
 
 const api = vi.hoisted(() => ({
@@ -52,13 +52,10 @@ const FILE: FileTreeEntry = {
   type: 'file',
 } as unknown as FileTreeEntry;
 
-const READ = 'Can read: open it and read it.';
-const EDIT =
-  'Can edit: everything Can read allows, plus changing it, approving change requests to it and choosing who has access.';
-const DOWNLOAD =
-  'Can download: everything Can read allows, plus downloading a copy, which Can edit does not include.';
-const OWNER =
-  'Owner: everything Can edit allows, plus downloading a copy. Owners are also named as the people to ask about it.';
+const READ = 'Open and read it';
+const EDIT = 'Read, change, approve changes, manage access';
+const DOWNLOAD = 'Read and save a copy';
+const OWNER = 'Edit, download, and be its contact';
 
 /** Each verb under the name the pickers show for it. */
 const VERB_LINES: [string, string][] = [
@@ -94,7 +91,20 @@ beforeEach(() => {
 });
 
 describe('ManageAccessDialog: what each access verb means', () => {
-  it("hangs each verb's line on the add field's verb picker", async () => {
+  it('the closed dialog shows none of the lines', async () => {
+    api.fetchFileAccess.mockResolvedValue(
+      view({
+        readers: { restricted: true, roles: [], users: [ALICE] },
+        sources: { 'u:alice@x.com': { read: [{ kind: 'direct' }] } },
+      }),
+    );
+    render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
+
+    await screen.findByText('Alice');
+    for (const [, line] of VERB_LINES) expect(screen.queryByText(line)).toBeNull();
+  });
+
+  it("shows each verb's line under it in the add field's opened picker", async () => {
     const user = userEvent.setup();
     api.fetchFileAccess.mockResolvedValue(view());
     render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
@@ -102,13 +112,15 @@ describe('ManageAccessDialog: what each access verb means', () => {
     await user.click(await screen.findByRole('button', { name: 'Can edit' }));
     const menu = screen.getByRole('button', { name: 'Can download' }).parentElement as HTMLElement;
     for (const [name, line] of VERB_LINES) {
+      // Named by the verb alone; the line is visible inside it and is its description.
       const item = within(menu).getByRole('button', { name });
-      expect(item).toHaveAttribute('title', line);
+      expect(within(item).getByText(line)).toBeVisible();
       expect(item).toHaveAccessibleDescription(line);
+      expect(item).not.toHaveAttribute('title');
     }
   });
 
-  it("hangs each verb's line on a grantee row's picker, after the row's own note", async () => {
+  it("shows each verb's line under it in a grantee row's opened picker, after the row's own note", async () => {
     const user = userEvent.setup();
     api.fetchFileAccess.mockResolvedValue(
       view({
@@ -123,13 +135,15 @@ describe('ManageAccessDialog: what each access verb means', () => {
     const menu = screen.getByRole('button', { name: 'Deny' }).parentElement as HTMLElement;
     for (const [name, line] of VERB_LINES) {
       const item = within(menu).getByRole('button', { name });
-      expect(item).toHaveAttribute('title', line);
+      expect(within(item).getByText(line)).toBeVisible();
+      expect(item).not.toHaveAttribute('title');
       // Alice's read comes from Sales: the row says so first, then what read means.
       expect(item).toHaveAccessibleDescription(name === 'Can read' ? `from Sales. ${line}` : line);
     }
   });
 
-  it('a reader who cannot edit: each level it offers, and each verb the rows state, says what it means', async () => {
+  it('a reader who cannot edit: the chosen level says what it means, and so does each verb the rows state', async () => {
+    const user = userEvent.setup();
     api.fetchFileAccess.mockResolvedValue(
       view({
         canWrite: false,
@@ -145,20 +159,27 @@ describe('ManageAccessDialog: what each access verb means', () => {
     );
     render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
 
+    // One visible line, for the level chosen, under the choices.
+    expect(await screen.findByText(`Can edit: ${EDIT}`)).toBeVisible();
+    await user.click(screen.getByRole('radio', { name: 'Owner' }));
+    expect(screen.getByText(`Owner: ${OWNER}`)).toBeVisible();
+    expect(screen.queryByText(`Can edit: ${EDIT}`)).toBeNull();
     for (const [name, line] of [
       ['Can edit', EDIT],
       ['Owner', OWNER],
     ]) {
-      const radio = await screen.findByRole('radio', { name });
+      const radio = screen.getByRole('radio', { name });
       expect(radio).toHaveAccessibleDescription(line);
-      expect(radio.closest('label')).toHaveAttribute('title', line);
+      expect(radio.closest('label')).not.toHaveAttribute('title');
     }
-    // The rows are text here: one line per verb each one names, in its order.
+    // The rows are text here: one line per verb each one names, in its order,
+    // as tooltip and description, never as visible text.
     const readOnly = screen.getByText('Can read');
     expect(readOnly).toHaveAttribute('title', READ);
     expect(readOnly).toHaveAccessibleDescription(READ);
     const readAndDownload = screen.getByText('Can read, Can download');
-    expect(readAndDownload).toHaveAttribute('title', `${READ} ${DOWNLOAD}`);
-    expect(readAndDownload).toHaveAccessibleDescription(`${READ} ${DOWNLOAD}`);
+    expect(readAndDownload).toHaveAttribute('title', `${READ}. ${DOWNLOAD}`);
+    expect(readAndDownload).toHaveAccessibleDescription(`${READ}. ${DOWNLOAD}`);
+    expect(screen.queryByText(READ)).toBeNull();
   });
 });

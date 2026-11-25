@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { AccessResponse } from '../api';
+import { VERB_HELP } from '../verb-help';
 
 /**
  * A ROW'S MENU IS AS WIDE AS ITS ITEMS, NOT AS ITS TRIGGER.
@@ -16,9 +17,10 @@ import type { AccessResponse } from '../api';
  * re-measures when its items change while it stays open across writes.
  *
  * jsdom does not lay text out, so `offsetWidth` is stubbed to a deterministic
- * width per item (8px a character of its text); what these tests pin is the
- * CONTRACT — which element's width the panel follows, the clamp, what
- * truncates, and the re-measure — not a pixel rendering.
+ * width per item (8px a character of its first line, the label and its note;
+ * 7px a character of the verb's own line under it, set smaller); what these
+ * tests pin is the CONTRACT — which element's width the panel follows, the
+ * clamp, what truncates, and the re-measure — not a pixel rendering.
  */
 
 const api = vi.hoisted(() => ({
@@ -31,10 +33,12 @@ vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
   return { ...actual, ...api };
 });
-vi.mock('../../workspace/state/workspace.context', () => ({
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   useWorkspace: () => ({ workspaceId: 'ws-1', kbDirName: 'knowledge-base' }),
 }));
-vi.mock('../../auth/state/auth.context', () => ({
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   useAuth: () => ({ user: { email: 'me@x.com', name: 'Me' } }),
 }));
 
@@ -100,11 +104,30 @@ function writeRestrictedHere(parent: string): AccessResponse {
 
 /** A folder name long enough that "Can edit · from <it>" measures between the floor and the cap. */
 const MID_PARENT = 'Regional-Sales-Operations/access.md';
+/** Longer again: "Can read · from <it>" outgrows every verb's line, still under the cap. */
+const LONG_PARENT = 'Regional-Sales-Operations-Team/access.md';
 
-/** The width the stub gives a panel: its widest item's text, 8px a character. */
+/** The verb lines an item can carry under its label. */
+const VERB_LINES: readonly string[] = Object.values(VERB_HELP);
+/** A verb's line is set smaller than the label (11.5px against 13px). */
+const PX_PER_LINE_CHAR = 7;
+
+/**
+ * The width the stub gives a panel: its widest item, and an item is as wide
+ * as the wider of its two lines (label and note, 8px a character; the verb's
+ * line, 7px a character).
+ */
 function widestItemPx(panel: HTMLElement): number {
   const items = Array.from(panel.querySelectorAll('button'));
-  return Math.max(...items.map((b) => (b.textContent ?? '').length)) * PX_PER_CHAR;
+  return Math.max(
+    ...items.map((b) => {
+      const text = b.textContent ?? '';
+      const line = VERB_LINES.find((l) => text.includes(l));
+      return line
+        ? Math.max((text.length - line.length) * PX_PER_CHAR, line.length * PX_PER_LINE_CHAR)
+        : text.length * PX_PER_CHAR;
+    }),
+  );
 }
 
 /** Open Alice's row menu; return the item panel and the positioned wrapper the width is pinned on. */
@@ -158,15 +181,18 @@ describe('ManageAccessDialog row menu: width follows the items', () => {
     expect(edit.querySelector('[title="from Regional-Sales-Operations"]')).toHaveClass('truncate');
   });
 
-  it('a menu with no notes sits at the minimum width', async () => {
+  it('a menu with no notes is as wide as its widest verb line', async () => {
     const user = userEvent.setup();
     api.fetchFileAccess.mockResolvedValue(EDIT_HERE);
     render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
     await screen.findByText('Alice');
 
     const { panel, wrapper } = await openRowMenu(user, /^can edit$/i);
-    expect(widestItemPx(panel)).toBeLessThan(MIN);
-    await waitFor(() => expect(wrapper.style.width).toBe(`${MIN}px`));
+    const expected = Math.max(...VERB_LINES.map((l) => l.length)) * PX_PER_LINE_CHAR;
+    expect(widestItemPx(panel)).toBe(expected);
+    expect(expected).toBeGreaterThan(MIN);
+    expect(expected).toBeLessThan(MAX);
+    await waitFor(() => expect(wrapper.style.width).toBe(`${expected}px`));
   });
 
   it('a very long folder name stops at the cap, and the note is what truncates, with its full text on hover', async () => {
@@ -189,23 +215,23 @@ describe('ManageAccessDialog row menu: width follows the items', () => {
 
   it('re-measures when the items change while the menu stays open', async () => {
     const user = userEvent.setup();
-    // Short notes to start with ("from Sales"): the widest item is under the
-    // floor, so the menu opens at the minimum.
+    // Short notes to start with ("from Sales"): the widest item is a verb's
+    // line, and the menu opens at its width.
     api.fetchFileAccess.mockResolvedValue(editFrom('Sales/access.md'));
     // The fresh view after the write names a longer folder for the read that
-    // remains, so the widest item now clears the floor.
-    api.revokeAccess.mockResolvedValue(writeRestrictedHere(MID_PARENT));
+    // remains, so the widest item is now that note's line.
+    api.revokeAccess.mockResolvedValue(writeRestrictedHere(LONG_PARENT));
     render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
     await user.click(await screen.findByRole('button', { name: /People invited to Sales/ }));
     await screen.findByText('Alice');
 
     const { panel, wrapper } = await openRowMenu(user, /^can edit$/i);
-    expect(widestItemPx(panel)).toBeLessThan(MIN);
-    await waitFor(() => expect(wrapper.style.width).toBe(`${MIN}px`));
+    const before = widestItemPx(panel);
+    await waitFor(() => expect(wrapper.style.width).toBe(`${before}px`));
 
     // Picking Can read writes a deny and the fresh view relabels the items:
-    // "restricted here" on Can edit, "from Regional-Sales-Operations" on Can
-    // read. The menu stays open, so its width has to follow the new widest
+    // "restricted here" on Can edit, "from Regional-Sales-Operations-Team" on
+    // Can read. The menu stays open, so its width has to follow the new widest
     // item — which the observer on the pinned wrapper alone could never see.
     await user.click(within(panel).getByRole('button', { name: /^can read$/i }));
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
@@ -218,7 +244,8 @@ describe('ManageAccessDialog row menu: width follows the items', () => {
       return p;
     });
     const after = widestItemPx(relocated);
-    expect(after).toBeGreaterThan(MIN);
+    expect(after).toBeGreaterThan(before);
+    expect(after).toBeLessThan(MAX);
     await waitFor(() =>
       expect((relocated.parentElement as HTMLElement).style.width).toBe(`${after}px`),
     );

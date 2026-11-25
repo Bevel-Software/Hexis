@@ -49,15 +49,23 @@ export interface MenuItemProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   active?: boolean;
   /** Right-aligned adornment: a check, a lock, a shortcut hint. */
   trailing?: React.ReactNode;
+  /**
+   * A short muted line under the label saying what the item does, visible
+   * without hover or focus. It stays out of the item's accessible name, and a
+   * string is the item's `aria-description` unless the caller passes one.
+   */
+  description?: string;
 }
 
 export function MenuItem({
   tone = 'default',
   active = false,
   trailing,
+  description,
   className,
   children,
   type = 'button',
+  'aria-description': ariaDescription,
   ...rest
 }: MenuItemProps) {
   return (
@@ -76,9 +84,19 @@ export function MenuItem({
         active && 'font-medium text-ink',
         className,
       )}
+      aria-description={ariaDescription ?? description}
       {...rest}
     >
-      <span className="min-w-0 flex-1 truncate">{children}</span>
+      {description === undefined ? (
+        <span className="min-w-0 flex-1 truncate">{children}</span>
+      ) : (
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate">{children}</span>
+          <span aria-hidden className="text-meta font-normal text-ink-muted">
+            {description}
+          </span>
+        </span>
+      )}
       {trailing && <span className="flex-none text-ink-faint">{trailing}</span>}
     </button>
   );

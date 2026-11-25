@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import { ExternalLink, Users } from 'lucide-react';
 import { Badge, Surface } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
@@ -129,6 +130,9 @@ export function LibraryCard({
   onShare,
   flavor,
 }: LibraryCardProps) {
+  // The Owner pill's line, as the card button's own description (see OwnerPill).
+  const ownerLineId = useId();
+  const showsOwner = owned && !pending;
   /**
    * What the bottom-left says, and when it says anything at all.
    *
@@ -172,7 +176,7 @@ export function LibraryCard({
         In review
       </Badge>
     ) : null,
-    owned && !pending ? <OwnerPill key="owner" /> : null,
+    showsOwner ? <OwnerPill key="owner" lineId={ownerLineId} /> : null,
     /* The card is on a plugin's page and the item lives somewhere else. The
        Owner pill's exact dress, because it makes the same kind of statement —
        a fact about the item's standing, not a problem — and the skill's own
@@ -198,6 +202,7 @@ export function LibraryCard({
   const card = (
     <Surface
       as="button"
+      aria-describedby={showsOwner ? ownerLineId : undefined}
       type="button"
       data-testid={`library-card-${kind}-${id}`}
       interactive

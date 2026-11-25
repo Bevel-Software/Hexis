@@ -119,11 +119,7 @@ export function AccessRequestControl({
         className="flex items-center gap-4"
       >
         {(['write', 'owner'] as const).map((option) => (
-          <label
-            key={option}
-            className="flex items-center gap-1.5 text-detail text-ink"
-            title={VERB_HELP[option]}
-          >
+          <label key={option} className="flex items-center gap-1.5 text-detail text-ink">
             <input
               type="radio"
               name="access-request-level"
@@ -137,6 +133,8 @@ export function AccessRequestControl({
           </label>
         ))}
       </div>
+      {/* What the chosen level lets someone do, visible without hover or focus. */}
+      <p className="text-meta text-ink-muted">{`${LEVEL_WORDS[level]}: ${VERB_HELP[level]}`}</p>
       <TextAreaField
         aria-label="Why you need it (optional)"
         placeholder="Why you need it (optional)"

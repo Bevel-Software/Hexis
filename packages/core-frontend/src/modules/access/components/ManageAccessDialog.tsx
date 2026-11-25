@@ -484,8 +484,9 @@ function summarizeVerbs(v: VerbSet): string {
 }
 
 /**
- * What the verbs `summarizeVerbs` names mean, one line each in the same order,
- * for its tooltip and accessible description. Undefined when it names none.
+ * What the verbs `summarizeVerbs` names let someone do, one line each in the
+ * same order, for its tooltip and accessible description. Undefined when it
+ * names none.
  */
 function summaryHelp(v: VerbSet): string | undefined {
   const tier = tierOf(v);
@@ -493,7 +494,7 @@ function summaryHelp(v: VerbSet): string | undefined {
     ...(tier ? [VERB_HELP[ROLE_TO_VERB[tier]]] : []),
     ...(v.download ? [VERB_HELP.download] : []),
   ];
-  return lines.length ? lines.join(' ') : undefined;
+  return lines.length ? lines.join('. ') : undefined;
 }
 
 /**
@@ -1841,11 +1842,12 @@ export function ManageAccessDialog({
                             disabled={busy || next === null}
                             active={checked}
                             aria-pressed={checked}
+                            // What the verb lets someone do, under its label.
+                            description={help}
                             // The note is the row's own explanation, not part of
                             // what the item DOES: keep it out of the name ("Can
                             // read"), and give it to assistive tech as the
                             // description it is, ahead of what the verb means.
-                            title={help}
                             aria-description={note ? `${note}. ${help}` : help}
                             onClick={() => next && doApplyVerbSet(p, next)}
                             trailing={
@@ -2154,7 +2156,13 @@ export function ManageAccessDialog({
                   <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
                 </Button>
                 {verbOpen && (
-                  <AnchoredMenu onDismiss={() => setVerbOpen(false)} triggerRef={verbTriggerRef}>
+                  <AnchoredMenu
+                    onDismiss={() => setVerbOpen(false)}
+                    triggerRef={verbTriggerRef}
+                    // Sized to the items, as the row menus are: each verb's
+                    // line sits on one line under it.
+                    width="content"
+                  >
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];
@@ -2166,8 +2174,7 @@ export function ManageAccessDialog({
                           disabled={disabled}
                           active={checked}
                           aria-pressed={checked}
-                          title={VERB_HELP[k]}
-                          aria-description={VERB_HELP[k]}
+                          description={VERB_HELP[k]}
                           onClick={() =>
                             setNewVerbs((v) => {
                               const on = !v[k];
@@ -2191,8 +2198,7 @@ export function ManageAccessDialog({
                       disabled={conferredByOthers(newVerbs, 'download')}
                       active={effectiveNewVerbs.download}
                       aria-pressed={effectiveNewVerbs.download}
-                      title={VERB_HELP.download}
-                      aria-description={VERB_HELP.download}
+                      description={VERB_HELP.download}
                       // Same rule as the tiers: unticking download keeps the
                       // read it implied.
                       onClick={() =>

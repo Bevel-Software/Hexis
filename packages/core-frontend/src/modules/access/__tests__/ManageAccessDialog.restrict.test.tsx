@@ -191,8 +191,8 @@ describe('ManageAccessDialog: lowering an inherited set by one verb', () => {
 
     // And the row says, verb by verb, where each one stands (ahead of what the verb means).
     const menu = await openRowMenu(user, /^can read$/i);
-    expect(setItem(menu, /^can edit$/i)).toHaveAccessibleDescription(/^restricted here\. Can edit: /);
-    expect(setItem(menu, /^can read$/i)).toHaveAccessibleDescription(/^from Sales\. Can read: /);
+    expect(setItem(menu, /^can edit$/i)).toHaveAccessibleDescription(/^restricted here\. \S/);
+    expect(setItem(menu, /^can read$/i)).toHaveAccessibleDescription(/^from Sales\. \S/);
   });
 
   it('a GROUP with download from the parent: unticking Can download denies download for the group', async () => {
@@ -382,10 +382,10 @@ describe('ManageAccessDialog: every row has the same controls', () => {
     ]);
     // And the provenance rides along as a description, on exactly the verbs she
     // holds: edit from the parent, and the read it implies.
-    expect(setItem(menu, /^can edit$/i)).toHaveAccessibleDescription(/^from Sales\. Can edit: /);
-    expect(setItem(menu, /^can read$/i)).toHaveAccessibleDescription(/^from Sales\. Can read: /);
-    expect(setItem(menu, /^owner$/i)).toHaveAccessibleDescription(/^Owner: /);
-    expect(setItem(menu, /^can download$/i)).toHaveAccessibleDescription(/^Can download: /);
+    expect(setItem(menu, /^can edit$/i)).toHaveAccessibleDescription(/^from Sales\. \S/);
+    expect(setItem(menu, /^can read$/i)).toHaveAccessibleDescription(/^from Sales\. \S/);
+    expect(setItem(menu, /^owner$/i)).not.toHaveAccessibleDescription(/from Sales/);
+    expect(setItem(menu, /^can download$/i)).not.toHaveAccessibleDescription(/from Sales/);
     // Nothing is disabled: picking a set BELOW what is held is the point.
     for (const item of within(menu).getAllByRole('button')) expect(item).not.toBeDisabled();
   });
