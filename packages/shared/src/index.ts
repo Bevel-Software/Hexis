@@ -35,3 +35,4 @@ export * from './git/legacy-change-request-body.js';
 export * from './version-control/types.js';
 export * from './version-control/interface.js';
 export * from './version-control/events.js';
+export * from './version-control/conflict-files.js';

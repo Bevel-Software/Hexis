@@ -224,6 +224,40 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
     );
   });
 
+  it("a conflict names its files in the clicker's answer when the clicker may read every one", async () => {
+    const SPACED = 'Plugins/x/Launch plan.md';
+    h = await routeHarness(async () => ({ kind: 'conflicts-need-resolution', conflictedPaths: [SPACED] }), {
+      touchedNodePaths: [SPACED, 'Plugins/x/SKILL.md'],
+    });
+    await post(h.baseUrl);
+    await vi.waitFor(() => expect(h!.versionControl.recordApplyFailure).toHaveBeenCalled());
+    expect(h.emitted).toContainEqual(
+      expect.objectContaining({ kind: 'change-request-merge-failed', conflicts: true, conflictedPaths: [SPACED] }),
+    );
+    // What every other viewer reads names no file.
+    expect(h.versionControl.recordApplyFailure).toHaveBeenCalledWith(
+      7,
+      expect.not.objectContaining({ conflictedPaths: expect.anything() }),
+      ADMIN,
+      1,
+    );
+  });
+
+  it('a conflict names no file to a clicker who may not read one of them', async () => {
+    h = await routeHarness(
+      async () => ({ kind: 'conflicts-need-resolution', conflictedPaths: ['Plugins/x/SKILL.md', 'Secret/a.md'] }),
+      {
+        touchedNodePaths: ['Plugins/x/SKILL.md'],
+        canReadBatch: async (paths) => new Map(paths.map((p) => [p, !p.startsWith('Secret/')])),
+      },
+    );
+    await post(h.baseUrl);
+    await vi.waitFor(() => expect(h!.versionControl.recordApplyFailure).toHaveBeenCalled());
+    const answer = h.emitted.find((e) => e.kind === 'change-request-merge-failed');
+    expect(answer).toMatchObject({ conflicts: true });
+    expect(answer).not.toHaveProperty('conflictedPaths');
+  });
+
   it('a landed apply records no failure', async () => {
     // Resolve a deferred merge and await the route's own settle, so the negative
     // assertion runs after the background attempt has finished — not after a

@@ -1,10 +1,13 @@
 ---
 '@bevel-software/platform-core-frontend': patch
+'@bevel-software/platform-core-backend': patch
 '@bevel-software/platform-shared': patch
 ---
 
-When opening a change request runs its update from the target and the server refuses that update on conflicts, the dialog now names the files the server reported. The banner lists them under "The file(s) that can't be combined", by the name the file tree shows (the full path on hover), the tree marks the rows of those files, and the prompt the banner offers to copy lists their full paths in a data block of their own, marked as data and not instructions. Before, the dialog dropped the list the refusal carried, and neither the banner, the tree nor the prompt said which file conflicted. A refusal from an apply attempt reaches the dialog without a file list, so it names no file, as before.
+A change request that conflicts with its target now names the conflicting files in its dialog. The names come from the server's refusal: the update that opening the request runs, or this tab's own apply (whose refusal names the files only to a clicker who may read every one of them). The banner names up to three files, one per line, by the name the file tree shows (with the folder beside two names that would read the same, and the full path on hover); clicking one opens that file, and the rest are counted ("and 5 more files"). The tree marks the rows of those files, in a colour that reads at 3:1 or more. The banner and the files now scroll as one, so a long banner no longer squeezes the files out of the dialog.
 
-The prompt now keeps a backtick in a branch or file name as it is, inside a longer code-span fence, where it used to replace it with an apostrophe and so name a branch or file that does not exist.
+The prompt for the person's agent now sits behind a "Copy prompt for your agent" button, wherever it is offered (this dialog, the file page's change boxes, the skill page). "Show prompt" opens it, and a copy the browser refuses opens it with its text selected. It lists the full path of every conflicting file the server named, in a data block of its own, and keeps a backtick in a branch or file name as it is.
 
-`@bevel-software/platform-shared` exports `markdownCodeSpan`, the quoting the agent instructions already used for the default branch's name, moved there from core-backend so the prompt above quotes names by the same rule. The agent instructions' text is unchanged.
+The server now reads git's list of conflicting files NUL-separated, by one reader. Before, the list a merge reported held a name with a space in quotes, and every list held a non-ASCII letter as an octal escape: names no file has. The same list is what a sync conflict reports (`PullRebaseConflictError.conflictedPaths`), so the sync-conflict banner gets the corrected names too.
+
+`@bevel-software/platform-shared` exports `markdownCodeSpan` (moved from core-backend, so the agent instructions and the prompt quote names by one rule; the instructions' text is unchanged) and `namedConflictFiles` / `moreConflictFiles` (the "three, then and N more" rule the server's sync-conflict sentence used, now shared with the dialog; that sentence is unchanged). `change-request-merge-failed` carries `conflictedPaths` on a conflict, under the read check above.

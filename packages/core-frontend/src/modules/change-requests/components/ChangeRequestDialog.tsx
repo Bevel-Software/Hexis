@@ -1,6 +1,8 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DEFAULT_BRANCH,
+  moreConflictFiles,
+  namedConflictFiles,
   type FileDiffPayload,
   type PullRequestDetail,
   type PullRequestSummary,
@@ -122,8 +124,8 @@ export function ChangeRequestDialog({
    * apply it sends them looking for a decision that was never made.
    *
    * `conflictedPaths` are the files the refusal named. The update's 409
-   * carries them; an apply's refusal reaches this tab without them, so it
-   * names none.
+   * carries them, and so does this tab's own apply refusal when its clicker
+   * may read every one; otherwise it names none.
    */
   const [blockedBy, setBlockedBy] = useState<null | {
     attempt: 'apply' | 'update';
@@ -969,8 +971,11 @@ export function ChangeRequestDialog({
       // other refusal (an approval the gate is still waiting on, a transient
       // git error) can change under the reader, so it is reported with the
       // button intact.
-      if (refusal.conflicts) setBlockedBy({ attempt: 'apply', conflictedPaths: [] });
-      else setError(refusal.reason);
+      if (refusal.conflicts) {
+        setBlockedBy({ attempt: 'apply', conflictedPaths: refusal.conflictedPaths ?? [] });
+      } else {
+        setError(refusal.reason);
+      }
     },
   });
   const applyBusy = applying.activeCr === cr.number;
@@ -1159,6 +1164,11 @@ export function ChangeRequestDialog({
           </Button>
         </div>
 
+        {/* Everything between the header and the verdict scrolls as one: a
+            tall banner (many conflicting files, an open prompt) pushes the
+            files down instead of squeezing them to nothing, and the verdict
+            below stays whole. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {/* Why, in the author's words. Omitted rather than faked when the
             request carries no description — an empty quote block reads as the
             author having said nothing worth reading.
@@ -1297,20 +1307,11 @@ export function ChangeRequestDialog({
               </>
             )}
             {blockedBy.conflictedPaths.length > 0 && (
-              <div className="mt-1.5">
-                {blockedBy.conflictedPaths.length === 1
-                  ? "The file that can't be combined:"
-                  : "The files that can't be combined:"}
-                {/* Named as the tree names them; the full path is the
-                    tooltip, and the prompt below carries it. */}
-                <ul className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
-                  {blockedBy.conflictedPaths.map((p) => (
-                    <li key={p} className="font-mono" title={p}>
-                      {displayFileName(p)}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              <ConflictedFileNames
+                paths={blockedBy.conflictedPaths}
+                inRequest={allFiles}
+                onOpen={(p) => setSelected(p)}
+              />
             )}
             <div className="mt-2.5">
               <ConflictHelp prompt={conflictResolutionPrompt(cr, blockedBy.conflictedPaths)} />
@@ -1381,7 +1382,11 @@ export function ChangeRequestDialog({
         <>
         {/* The folder on the left, the file with the change marked in it on the
             right — the same reading as version history. */}
-        <div className="mt-4 grid min-h-0 flex-1 grid-cols-[17rem_minmax(0,1fr)] gap-7 px-8">
+        {/* A floor under the files, so the body scrolls before they shrink. */}
+        <div
+          data-testid="cr-files"
+          className="mt-4 grid min-h-80 flex-1 grid-cols-[17rem_minmax(0,1fr)] gap-7 px-8"
+        >
           <Surface
             tone="surface"
             radius="lg"
@@ -1537,6 +1542,7 @@ export function ChangeRequestDialog({
         </div>
         </>
         )}
+        </div>
 
         {/* The verdict. Fixed to the bottom of the surface — a decision the
             reader has to scroll to find is one they will make without reading. */}
@@ -1730,5 +1736,62 @@ function MarkedFile({
         ),
       )}
     </pre>
+  );
+}
+
+/**
+ * The files a conflict names, in its banner. At most three, then "and N
+ * more" — the rule the server's sync-conflict sentence follows — so the
+ * banner stays short however many there are; the full list goes to the
+ * agent in the prompt, and the tree marks each file it has a row for.
+ *
+ * One per line, because a file name may hold spaces and several on one line
+ * read as one. Each is named as the tree names it, with its folder beside it
+ * when two of the names shown would read the same, and the full path as its
+ * tooltip. A file of the request opens in the dialog when clicked.
+ */
+function ConflictedFileNames({
+  paths,
+  inRequest,
+  onOpen,
+}: {
+  paths: readonly string[];
+  inRequest: readonly string[];
+  onOpen(path: string): void;
+}) {
+  const { named, more } = namedConflictFiles(paths);
+  const names = named.map((p) => displayFileName(p));
+  return (
+    <div className="mt-1.5">
+      {paths.length === 1 ? "The file that can't be combined:" : "The files that can't be combined:"}
+      <ul className="mt-0.5 space-y-0.5">
+        {named.map((p, i) => {
+          const sameName = names.filter((n) => n === names[i]).length > 1;
+          const folder = sameName ? p.slice(0, Math.max(0, p.lastIndexOf('/'))) : '';
+          const label = (
+            <>
+              <span className="font-mono">{names[i]}</span>
+              {folder && <span className="ml-2 font-mono text-ink-muted">{folder}</span>}
+            </>
+          );
+          return (
+            <li key={p} title={p}>
+              {inRequest.includes(p) ? (
+                <button
+                  type="button"
+                  className="text-left underline underline-offset-2 transition-colors hover:text-ink"
+                  onClick={() => onOpen(p)}
+                >
+                  {label}
+                </button>
+              ) : (
+                label
+              )}
+            </li>
+          );
+        })}
+        {more > 0 && <li className="text-ink-muted">{moreConflictFiles(more)}</li>}
+      </ul>
+    </div>
   );
 }

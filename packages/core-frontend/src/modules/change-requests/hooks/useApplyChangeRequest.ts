@@ -21,6 +21,8 @@ export type ApplyPhase = 'idle' | 'approving' | 'applying';
 export interface ApplyRefusal {
   reason: string;
   conflicts: boolean;
+  /** On a conflict, the files the server named (only to a clicker who may read them all). */
+  conflictedPaths?: readonly string[];
   /**
    * When it failed (ISO): the server's instant for a refusal the server
    * reported — the same one it persists — else this tab's clock.
@@ -168,6 +170,7 @@ export function useApplyChangeRequest(opts: {
       fail(e.number, {
         reason: e.reason ? friendlyGitMessage(e.reason) : "Couldn't apply this change.",
         conflicts: e.conflicts === true,
+        conflictedPaths: e.conflictedPaths,
         at: e.at,
       });
     });

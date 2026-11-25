@@ -1,7 +1,7 @@
 import { StrictMode } from 'react';
 import type { ReactElement } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { FileApprovalState, PullRequestSummary } from '@bevel-software/platform-shared';
 
 /**
@@ -26,30 +26,30 @@ import type { FileApprovalState, PullRequestSummary } from '@bevel-software/plat
  */
 
 const detailMock = vi.hoisted(() => ({ fetchPrDetail: vi.fn() }));
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: detailMock.fetchPrDetail }));
+const mergeApi = vi.hoisted(() => ({
+  mergePullRequest: vi.fn(),
+  refreshChangeRequestFromTarget: vi.fn(),
+}));
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  fetchPrDetail: detailMock.fetchPrDetail,
+  approvePrFile: vi.fn(),
+  revertPrFile: vi.fn(),
+  unapprovePrFile: vi.fn(),
+  mergePullRequest: mergeApi.mergePullRequest,
+  refreshChangeRequestFromTarget: mergeApi.refreshChangeRequestFromTarget,
+  cancelPullRequest: vi.fn(),
+  deleteChangeRequest: vi.fn(),
+}));
 
 const filesApi = vi.hoisted(() => ({
   readFileOnBranch: vi.fn(),
   readFileAtForkPoint: vi.fn(),
 }));
 vi.mock('../services/change-requests.api', () => filesApi);
-vi.mock('../../pr/services/pr-approvals.api', () => ({
-  approvePrFile: vi.fn(),
-  revertPrFile: vi.fn(),
-  unapprovePrFile: vi.fn(),
-}));
-const mergeApi = vi.hoisted(() => ({
-  mergePullRequest: vi.fn(),
-  refreshChangeRequestFromTarget: vi.fn(),
-}));
-vi.mock('../../pr/services/pr-merge.api', () => mergeApi);
-vi.mock('../../pr/services/pr-cancel.api', () => ({
-  cancelPullRequest: vi.fn(),
-  deleteChangeRequest: vi.fn(),
-}));
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
-import { GitApiError } from '../../git/services/git.api';
+import { GitApiError } from '../../git';
 
 /**
  * The default branch's git name, as the deployment sets it. No rendered
@@ -418,7 +418,8 @@ describe('ChangeRequestDialog: an update that cannot be combined', () => {
     );
     // NOT the apply refusal: nobody tried to apply anything.
     expect(banner.textContent).not.toContain("Can't apply");
-    expect(screen.getByText(/Fastest fix: ask your agent to resolve it/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy prompt for your agent' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show prompt' }));
     expect(screen.getByText(/Change request #105 can no longer be applied/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
   });
@@ -446,7 +447,7 @@ describe('ChangeRequestDialog: an update that cannot be combined', () => {
 
     const banner = await screen.findByRole('alert');
     expect(banner.textContent).toContain("the two can't be combined automatically");
-    expect(screen.getByText(/Fastest fix: ask your agent to resolve it/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy prompt for your agent' })).toBeInTheDocument();
     // The request is still readable: the conflict is news about applying it,
     // not a reason to take the proposal off the screen.
     expect(container.textContent).toContain('deal.yaml');
@@ -460,7 +461,7 @@ describe('ChangeRequestDialog: an update that cannot be combined', () => {
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
 
     expect(await screen.findByText(/Only the author of this change request/)).toBeInTheDocument();
-    expect(screen.queryByText(/Fastest fix/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy prompt for your agent' })).not.toBeInTheDocument();
     // Refused, but the request is readable: the files are still shown.
     await waitFor(() => expect(screen.getByText(/1 file/)).toBeInTheDocument());
   });
