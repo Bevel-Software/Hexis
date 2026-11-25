@@ -265,7 +265,11 @@ describe('McpService — the platform manual is discovered in process', () => {
     state.readPlatform = () => new Promise<never>(() => {});
     const started = performance.now();
     await expect(toolNames(await connect(mcp))).rejects.toThrow(/Bevel tool discovery failed: discovering tools from 'KNOWLEDGE_BASE': not finished within its 150ms limit/);
-    expect(performance.now() - started).toBeGreaterThanOrEqual(140);
+    const took = performance.now() - started;
+    expect(took).toBeGreaterThanOrEqual(140);
+    // Near its limit, and far from the service's own 15 seconds: a read that
+    // was waited for much longer would be a request left hanging.
+    expect(took).toBeLessThan(2000);
   });
 
   it('discovers over loopback, as before, on a request with no reader', async () => {
