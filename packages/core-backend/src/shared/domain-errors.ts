@@ -1,8 +1,10 @@
 /**
- * Version-control domain errors. This is the single source of truth — every error
- * raised by the version-control domain (branches, changes, change requests, access
- * control, locks) lives here. Route handlers shape responses via the
- * `.status` + `.payload` contract on the base class.
+ * Version-control domain errors that cross a module boundary (branches, changes,
+ * change requests, access control, locks) live here. An error only its own
+ * module raises and reads lives in that module instead (for example
+ * `ApprovalCarryPendingError` and `MergeBlockedError` in version-control).
+ * Route handlers shape responses via the `.status` + `.payload` contract on
+ * the base class.
  *
  * Lives in `src/shared` (not `modules/version-control`) because the classes are
  * consumed across module boundaries — access, diff, plugins and workspace all
