@@ -55,7 +55,7 @@ const FILE: FileTreeEntry = {
 const READ = 'Open and read it';
 const EDIT = 'Read, change, approve changes, manage access';
 const DOWNLOAD = 'Read and save a copy';
-const OWNER = 'Edit, download, and be its contact';
+const OWNER = 'Can edit and download; be its contact';
 
 /** Each verb under the name the pickers show for it. */
 const VERB_LINES: [string, string][] = [

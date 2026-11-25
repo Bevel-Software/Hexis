@@ -34,8 +34,8 @@ import { OwnerPill } from '../components/OwnerPill';
 import { LibraryCard, type LibraryCardProps } from '../components/LibraryCard';
 import { PluginRows } from '../components/PluginRows';
 
-const OWNER = 'Edit, download, and be its contact';
-const PLUGIN_OWNER = 'Edit, download, delete it, and be its contact';
+const OWNER = 'Can edit and download; be its contact';
+const PLUGIN_OWNER = 'Can edit, download, delete it; be its contact';
 const COMPONENTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'components');
 
 function card(owned: boolean) {

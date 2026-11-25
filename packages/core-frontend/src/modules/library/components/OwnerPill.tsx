@@ -1,12 +1,5 @@
 import { Badge } from '../../../shared/components';
-import { VERB_HELP } from '../../access';
-
-/**
- * What Owner lets someone do on a plugin: the general line, plus deleting it,
- * which only an owner of the plugin may do (`DELETE /api/plugins/:name` asks
- * the `owner:` lists alone). Eight words or fewer, like the verb lines.
- */
-const PLUGIN_OWNER_HELP = 'Edit, download, delete it, and be its contact';
+import { PLUGIN_OWNER_HELP, VERB_HELP } from '../../access';
 
 /**
  * The Library's Owner pill: the reader is named in the item's `owner:` grant.
