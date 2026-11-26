@@ -57,6 +57,11 @@ function build() {
   // the real `releaseLock` does once it has enqueued the commit.
   const versionControlService = {
     getLock: vi.fn((id: string, branch: string, path: string) => locks.get(id, branch, path)),
+    // The real service's answer when the write gate still grants.
+    holdsEditLock: vi.fn(async (id: string, branch: string, path: string, user: AuthUser) => {
+      const lock = await locks.get(id, branch, path);
+      return lock !== null && lock.holderUserId === user.id && lock.mode !== 'coordination';
+    }),
     acquireLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
       locks.acquire(id, branch, path, user),
     ),

@@ -139,6 +139,7 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
     releaseLockUntouched = vi.fn(async () => undefined);
     const versionControlService = {
       getLock: vi.fn(async () => null),
+      holdsEditLock: vi.fn(async () => false),
       acquireLock,
       releaseLock: vi.fn(async () => undefined),
       releaseLockNoCommit,

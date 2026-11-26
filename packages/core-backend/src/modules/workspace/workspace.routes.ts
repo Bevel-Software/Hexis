@@ -295,8 +295,10 @@ export function createWorkspaceRoutes(
       if (before === null || decidesListing(toKbRelative(targetPath, kbDirName) ?? targetPath, kb.layout.pluginsDir)) return {};
       return (await listingProbe(workspaceId, targetPath)) === before ? { listingUnchanged: true } : {};
     };
-    const existing = await versionControlService.getLock(workspaceId, branch, targetPath);
-    if (existing && existing.holderUserId === user.id) {
+    // `holdsEditLock` re-asks the write gate: a lock taken while the caller
+    // could write is no licence to write once they cannot (it then refuses
+    // with the acquire's 403 and drops the lock).
+    if (await versionControlService.holdsEditLock(workspaceId, branch, targetPath, user)) {
       const result = await op();
       const listing = await mark();
       // Disk write landed but no commit yet (caller will release later,

@@ -464,6 +464,16 @@ export interface IVersionControlService {
   hasUnpushedCommits(workspaceId: string): Promise<boolean>;
   /** Current lock holder for `(branch, path)`, or null when nobody holds it. */
   getLock(workspaceId: string, branch: string, path: string): Promise<FileLock | null>;
+  /**
+   * Whether `user` holds a live EDIT lock on the path AND may still write it,
+   * judged by the same gate as `acquireLock`, asked again now. The question
+   * every write under an already-held lock asks instead of reading the lock
+   * row: a lock does not outlive the write access it was granted under.
+   * `false` when the caller holds no edit lock there (they acquire instead);
+   * when they hold it but the gate now refuses, the lock is released and the
+   * gate's `AccessDeniedError` is thrown.
+   */
+  holdsEditLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<boolean>;
 
   // ── Change Requests ───────────────────────────────────────────────────────
 

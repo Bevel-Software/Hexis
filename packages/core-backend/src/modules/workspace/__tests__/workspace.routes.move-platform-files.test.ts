@@ -70,6 +70,7 @@ async function makeHarness(): Promise<Harness> {
   const acquireLock = vi.fn(async () => ({ acquired: true, lock: {} as never }));
   const versionControlServiceMock: Partial<IVersionControlService> = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: acquireLock as unknown as IVersionControlService['acquireLock'],
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),

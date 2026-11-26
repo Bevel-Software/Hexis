@@ -70,6 +70,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
 
   const versionControlService = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       lockedPaths.push(p);
       return { acquired: true, lock: { holderUserId: USER_ID, holderName: 'Alice' } };

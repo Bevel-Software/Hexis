@@ -63,6 +63,7 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
     } as unknown as WorkspaceService;
     const versionControlService = {
       getLock: vi.fn(async () => (heldBy ? { holderUserId: heldBy } : null)),
+      holdsEditLock: vi.fn(async () => heldBy === USER.id),
       acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderUserId: USER.id, holderName: 'Alice' } })),
       releaseLock: vi.fn(async () => null),
       releaseLockNoCommit: vi.fn(async () => undefined),

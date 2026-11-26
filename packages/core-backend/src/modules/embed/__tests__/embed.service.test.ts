@@ -92,6 +92,7 @@ function build(opts: Opts = {}) {
     // No live lock: a save takes it. The contention rules themselves are
     // exercised against the real lock in embed.service.lock.test.ts.
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     // The suggestions branch is created here, under the version-control service's own
     // branch-lifecycle lock, never straight through git.
     createBranch: opts.createBranch ?? vi.fn(async () => ({})),

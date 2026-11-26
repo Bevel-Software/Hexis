@@ -91,6 +91,7 @@ async function makeHarness(opts: {
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
   const versionControlService = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: vi.fn(async () => ({ acquired: true, lock: {} })),
     releaseLock: vi.fn(async () => undefined),
     releaseLockNoCommit: vi.fn(async () => undefined),

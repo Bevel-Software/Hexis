@@ -78,6 +78,7 @@ async function makeHarness(): Promise<Harness> {
   const locked: string[] = [];
   const versionControlService = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       locked.push(p);
       return { acquired: true, lock: {} as never };

@@ -314,6 +314,7 @@ describe('Admin write floor at the repository root', () => {
           { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
           {
             getLock: async () => null,
+            holdsEditLock: async () => false,
             acquireLock: async () => ({ acquired: true, lock: {} }),
             releaseLock: async () => undefined,
             releaseLockNoCommit: async () => undefined,

@@ -181,6 +181,7 @@ afterEach(async () => {
 function makeVersionControl() {
   return {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderUserId: USER.id, holderName: USER.name } })),
     releaseLock: vi.fn(async () => null),
     releaseLockNoCommit: vi.fn(async () => undefined),

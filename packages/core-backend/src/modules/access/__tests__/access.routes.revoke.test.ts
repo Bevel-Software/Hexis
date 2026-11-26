@@ -123,6 +123,7 @@ async function makeHarness(opts: {
   const releaseLockNoCommit = vi.fn(async () => undefined);
   const versionControlService = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock,
     releaseLock,
     releaseLockNoCommit,

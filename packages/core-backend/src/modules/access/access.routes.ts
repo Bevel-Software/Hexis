@@ -882,9 +882,9 @@ export function createAccessRoutes(
     user: AuthUser,
     op: () => Promise<void>,
   ): Promise<void> {
-    const existing = await versionControlService.getLock(workspaceId, branch, wsEditPath);
-    if (existing && existing.holderUserId === user.id) {
-      // Caller already holds the lock (mid-edit) — write without touching it.
+    if (await versionControlService.holdsEditLock(workspaceId, branch, wsEditPath, user)) {
+      // Caller already holds the lock (mid-edit) and may still write it —
+      // write without touching it.
       await op();
       eventBus.emit({
         kind: 'file-changed',

@@ -531,13 +531,12 @@ export class EmbedService implements IEmbedService {
    */
   private async ensureHoldsLock(workspaceId: string, wsPath: string, user: AuthUser): Promise<void> {
     const branch = this.kb.defaultBranch;
-    const current = await this.versionControlService.getLock(workspaceId, branch, wsPath);
-    if (current) {
-      // A coordination hold grants no write authority, so it is not "ours"
-      // for a save even when the id matches.
-      if (current.holderUserId === user.id && current.mode !== 'coordination') return;
-      throw new EmbedLockedError(current.holderName);
-    }
+    // Our own edit lock counts only while we may still write the file
+    // (`holdsEditLock` re-asks the acquire's gate, and refuses with its 403
+    // once the grant is gone). Anything else — no lock, somebody else's, a
+    // coordination hold — goes to the acquire, which takes a free lock and
+    // names the holder of a taken one.
+    if (await this.versionControlService.holdsEditLock(workspaceId, branch, wsPath, user)) return;
     const taken = await this.versionControlService.acquireLock(workspaceId, branch, wsPath, user);
     if (!taken.acquired) throw new EmbedLockedError(taken.lock.holderName);
   }

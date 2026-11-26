@@ -117,6 +117,7 @@ describe('access routes on a proposal branch (real git)', () => {
     });
     const versionControlService = {
       getLock: async () => null,
+      holdsEditLock: async () => false,
       acquireLock: async () => ({ acquired: true, lock: {} }),
       releaseLock,
       releaseLockNoCommit: async () => undefined,
