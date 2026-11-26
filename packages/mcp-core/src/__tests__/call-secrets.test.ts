@@ -41,8 +41,12 @@ describe('substitution capture', () => {
     expect([...a]).toEqual(['value-for-a-123']);
     expect([...b]).toEqual(['value-for-b-456']);
 
-    // Outside a registration the substitutor still works and records nothing.
-    expect(await substitutorOf(client).substitute('${TOKEN}', client.config, 'a')).toBe('value-for-a-123');
+    // Outside a registration the substitutor still works, and no store gains anything.
+    expect(await substitutorOf(client).substitute('${TOKEN}', client.config, 'b')).toBe('value-for-b-456');
+    expect([...a]).toEqual(['value-for-a-123']);
+    expect([...b]).toEqual(['value-for-b-456']);
+    const [, outside] = await recordingSubstitutions(async () => undefined);
+    expect([...outside]).toEqual([]);
   });
 
   it('keeps the values per client and manual, a later registration replacing them', () => {

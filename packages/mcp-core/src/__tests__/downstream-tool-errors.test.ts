@@ -135,12 +135,18 @@ describe('a downstream isError over a real MCP connection', () => {
     const client = await CodeModeUtcpClient.create(
       process.cwd(),
       new UtcpClientConfigSerializer().validateDict({
-        variables: { notion_TOKEN: 'sk-live-1234567890abcdef', notion_A: 'a', notion_B: 'middle|secret-9876', notion_C: 'd' },
+        // The manual's name has a `-`: UTCP registers it as `my_notion`, and its variables under `my__notion_`.
+        variables: {
+          my__notion_TOKEN: 'sk-live-1234567890abcdef',
+          my__notion_A: 'a',
+          my__notion_B: 'middle|secret-9876',
+          my__notion_C: 'd',
+        },
       }),
     );
     cleanups.push(() => client.close());
     const template = serializer.validateDict({
-      name: 'notion',
+      name: 'my-notion',
       call_template_type: 'mcp',
       config: {
         mcpServers: {
@@ -164,7 +170,7 @@ describe('a downstream isError over a real MCP connection', () => {
       'Rejected: token sk-live-1234567890abcdef (or its head sk-live-1234…), key literal-key-abcdef123456, trace middle|secret-9876.',
     );
 
-    const result = await dispatchToolCall(client, echo, { text: 'hi' });
+    const result = await dispatchToolCall(client, { ...echo, utcpName: 'my_notion.srv.echo', mcpName: 'my_notion_srv_echo', manualName: 'my_notion' }, { text: 'hi' });
 
     expect(result.isError).toBe(true);
     expect(result.content).toEqual([

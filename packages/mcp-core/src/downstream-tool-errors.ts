@@ -3,6 +3,7 @@ import { McpCommunicationProtocol } from '@utcp/mcp';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { SecretRedactor, rememberCallCredentials } from './secret-redactor.js';
 import { manualSecrets } from './call-secrets.js';
+import { utcpManualName } from './utcp-namespace.js';
 
 /**
  * A downstream MCP server said its own call failed: it answered a
@@ -138,7 +139,7 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
       } catch (err) {
         if (!(err instanceof DownstreamToolError)) throw err;
         const redactor = new SecretRedactor();
-        for (const value of manualSecrets(caller, String(template.name ?? ''))) redactor.remember(value);
+        for (const value of manualSecrets(caller, utcpManualName(String(template.name ?? '')))) redactor.remember(value);
         rememberCallCredentials(redactor, template);
         throw err.redactedWith(redactor);
       }
