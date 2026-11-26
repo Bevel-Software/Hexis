@@ -152,7 +152,8 @@ export class ArchiveRefusedError extends VersionControlDomainError {
  *    whole archive with what was thrown.
  *  - `skipped`: what an entry that will not land, for any reason, means for
  *    the archive: the whole-archive refusal to raise, or null when only the
- *    entry is skipped. `wsPath` is where the entry would land, or null when
+ *    entry is skipped. (An extraction drops macOS metadata entries without
+ *    asking.) `wsPath` is where the entry would land, or null when
  *    its name gives it no place.
  */
 export interface ArchiveEntryJudge {
@@ -2403,8 +2404,10 @@ export class WorkspaceService implements IWorkspaceService {
    * lock's own gates refuse is skipped through the judge's `refusedAtLock`.
    *
    * Every entry that will not land, whatever the reason, is put to the
-   * judge's `skipped`, and one that decides the archive refuses it whole
-   * (`ArchiveRefusedError`) with nothing written. A landing refused because
+   * judge's `skipped` (macOS metadata aside, which is never put to it, and
+   * under the entry cap is not reported either), and one that decides the
+   * archive refuses it whole (`ArchiveRefusedError`) with nothing written. A
+   * landing refused because
    * another holds one of its paths' locks is answered as a 409 naming that
    * path, and no directory entry is created. A landing whose commit landed
    * but whose push needs resolution (`PushNeedsAgentResolutionError`) has its
