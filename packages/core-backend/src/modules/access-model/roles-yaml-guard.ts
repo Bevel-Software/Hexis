@@ -23,7 +23,7 @@
 
 import type { FileContent } from '@mastra/core/workspace';
 import { GROUP_REF_PREFIX, canonicalRoleName, parseRolesYaml, parseYamlSubset } from './access-grammar.js';
-import { GROUPS_YAML, type GroupsIndex } from './group-files.js';
+import { GROUPS_YAML, parseGroupsFile, type GroupsIndex } from './group-files.js';
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import type { WriteValidator } from '../kb-fs/index.js';
 
@@ -269,6 +269,23 @@ export class GroupsYamlDuplicateGroupError extends VersionControlDomainError {
 }
 
 /**
+ * An AGENT write whose candidate `groups.yaml` the resolver's own parser
+ * refuses (a repeated key, a non-mapping `groups:`). The resolver would retire
+ * EVERY group in the file, so it is refused like an unparseable `roles.yaml`.
+ */
+export class GroupsYamlInvalidError extends VersionControlDomainError {
+  readonly errors: string[];
+  constructor(errors: string[]) {
+    super(`${GROUPS_YAML} would be invalid and was not saved: ${errors.join('; ')}`, 422, {
+      kind: 'groups-yaml-invalid',
+      groupsYamlErrors: errors,
+    });
+    this.name = 'GroupsYamlInvalidError';
+    this.errors = errors;
+  }
+}
+
+/**
  * The group names `text` declares, canonical → display spellings in file
  * order. Lenient, like {@link declaredRoleNames}: text that is absent, does not
  * parse or holds no `groups:` mapping declares none.
@@ -318,8 +335,9 @@ function isGroupsYamlPath(workspaceRelPath: string, kbDirName: string): boolean 
  * everything {@link makeRolesYamlWriteValidator} refuses, plus any role the
  * current file does not declare and — when `loadGroups` is given — any added
  * `- group:<Name>` entry naming a group the active group source does not
- * declare. For `groups.yaml`: any group whose canonical name the file would
- * then declare twice. Agents manage membership only; the human editor and the
+ * declare. For `groups.yaml`: a candidate the resolver's parser refuses, and
+ * any canonical group name declared more times than the current file declares
+ * it. Agents manage membership only; the human editor and the
  * App roles and groups services keep their own validators. `readCurrent`
  * returns the named root file's current text, null when absent. Content of any
  * type is checked — decoded as UTF-8 — so bytes cannot slip past.
@@ -341,6 +359,8 @@ export function makeAgentAccessYamlWriteValidator(
     if (!roles && !isGroupsYamlPath(path, kbDirName)) return;
     const text = typeof content === 'string' ? content : Buffer.from(content).toString('utf-8');
     if (!roles) {
+      const parsed = parseGroupsFile(text, GROUPS_YAML);
+      if (!parsed.ok) throw new GroupsYamlInvalidError(parsed.errors);
       assertNoNewDuplicateGroups(await readCurrent(GROUPS_YAML), text);
       return;
     }

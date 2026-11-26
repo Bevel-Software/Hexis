@@ -82,12 +82,14 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
     const validatorCache = new Map<string, WriteValidator>();
     /**
      * The agent's pre-disk `roles.yaml` / `groups.yaml` gate for `branch`'s
-     * workspace (cached): refuses a write that would leave `roles.yaml`
-     * unparseable (an app-wide admin lockout), that creates a role, that adds
-     * a `- group:` entry naming no group, or that declares a group in
-     * `groups.yaml` twice — agents manage membership; roles are pre-set. ONE gate for every agent write to the workspace: the file
-     * tools take it before a byte lands, and `update_branch` takes it for a
-     * resolution's content before the merge.
+     * workspace (cached): refuses a write that would leave `roles.yaml` or
+     * `groups.yaml` unparseable (an app-wide admin lockout; every group
+     * retired), that creates a role, that adds a `- group:` entry naming no
+     * group, or that declares a group in `groups.yaml` more times than the
+     * current file does — agents manage membership; roles are pre-set. ONE
+     * gate for every agent write to the workspace: the file tools take it
+     * before a byte lands, and `update_branch` takes it for a resolution's
+     * content before the merge.
      */
     const getWriteValidator = async (branch: string): Promise<WriteValidator> => {
       assertBranchProvided(branch);

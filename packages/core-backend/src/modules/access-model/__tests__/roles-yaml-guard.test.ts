@@ -250,13 +250,32 @@ describe('roles-yaml-guard', () => {
       await expect(runOn(ABOVE, null).result).rejects.toMatchObject({ duplicates: [{ group: 'Product', existing: 'PRODUCT' }] });
     });
 
+    it('refuses a candidate the resolver cannot parse — an exact repeat included — before reading the current file', async () => {
+      const exact = runOn(`${GROUPS}  Product:\n    - z@x.eu\n`);
+      await expect(exact.result).rejects.toMatchObject({
+        status: 422,
+        payload: { kind: 'groups-yaml-invalid', groupsYamlErrors: [expect.stringContaining("duplicate key 'Product'")] },
+      });
+      expect(exact.read).toEqual([]);
+      await expect(runOn('groups:\n  - Product\n').result).rejects.toMatchObject({
+        status: 422,
+        payload: { kind: 'groups-yaml-invalid' },
+      });
+      // Even when the current file is already broken the same way: the write must mend it, not keep it.
+      const broken = `${GROUPS}  Product: []\n`;
+      await expect(runOn(`${broken}  Phoenix: []\n`, broken).result).rejects.toMatchObject({
+        payload: { kind: 'groups-yaml-invalid' },
+      });
+      await expect(runOn('', broken).result).resolves.toBeUndefined();
+    });
+
     it('passes membership edits, a new distinct group and a respelling that replaces the old block', async () => {
       await expect(runOn(GROUPS.replace('    - g@x.eu\n', '    - g@x.eu\n    - h@x.eu\n')).result).resolves.toBeUndefined();
       await expect(runOn(`${GROUPS}  Phoenix:\n    - p@x.eu\n`).result).resolves.toBeUndefined();
       await expect(runOn(GROUPS.replace('  Product:', '  PRODUCT:')).result).resolves.toBeUndefined();
     });
 
-    it('leaves a duplicate the file already holds alone, so it cannot block an unrelated edit', async () => {
+    it('leaves a case-duplicate the file already holds alone, so it cannot block an unrelated edit', async () => {
       await expect(runOn(`${ABOVE}  Phoenix: []\n`, ABOVE).result).resolves.toBeUndefined();
       // A third spelling of that name is new, and is refused.
       await expect(runOn(`${ABOVE}  product:\n    - z@x.eu\n`, ABOVE).result).rejects.toBeInstanceOf(
