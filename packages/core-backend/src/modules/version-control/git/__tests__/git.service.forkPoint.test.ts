@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { GitService } from '../git.service.js';
+import { WorkspaceIdMutex } from '../../../kb-fs/index.js';
 import { gitOut, runGit, stubVersionControlHooks, stubWorkspaceService } from './git-test-helpers.js';
 
 /**
@@ -247,20 +248,44 @@ describe('GitService — fork point, behind, and Update', () => {
   it('the publish runs over the merge inside its one reservation: a git operation asked meanwhile waits for the push', async () => {
     await propose(['price: 100', 'price: 120']);
     await editTargetDirectly(['status: draft', 'status: signed']);
+    // The service's own mutex, injected through its constructor, recording
+    // which workspaces are reserved right now and when each queued operation
+    // starts. No sleep: whether the publish runs under the reservation is read
+    // from the mutex itself, at the moment the publish runs.
+    const held = new Map<string, number>();
+    const started: boolean[] = [];
+    class RecordingMutex extends WorkspaceIdMutex {
+      override async runAll<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+        const i = started.push(false) - 1;
+        return super.runAll(keys, async () => {
+          started[i] = true;
+          for (const k of keys) held.set(k, (held.get(k) ?? 0) + 1);
+          try {
+            return await fn();
+          } finally {
+            for (const k of keys) held.set(k, held.get(k)! - 1);
+          }
+        });
+      }
+    }
+    git = new GitService(
+      stubWorkspaceService({ [WS]: path.dirname(repo) }),
+      stubVersionControlHooks(),
+      testKbContext(),
+      new RecordingMutex(),
+    );
     let probe: Promise<boolean> | null = null;
-    let probed = false;
     const outcome = await git.mergeFromOrigin(WS, SOURCE, TARGET, USER, {
       publish: async (merged, ops) => {
         expect(merged).toEqual({ kind: 'clean', alreadyUpToDate: false });
+        // The publish runs while the workspace is reserved.
+        expect(held.get(WS)).toBe(1);
         expect(await ops.hasUnpushedCommits()).toBe(true);
-        // Takes the workspace's reservation: it cannot run before the push.
-        probe = git.hasUnpushedCommits(WS).then((unpushed) => {
-          probed = true;
-          return unpushed;
-        });
-        await new Promise((r) => setTimeout(r, 50));
-        expect(probed).toBe(false);
+        // Queues on the workspace's reservation, which this publish holds.
+        probe = git.hasUnpushedCommits(WS);
+        const queued = started.length - 1;
         await ops.push();
+        expect(started[queued]).toBe(false);
       },
     });
     expect(outcome).toEqual({ kind: 'clean', alreadyUpToDate: false });

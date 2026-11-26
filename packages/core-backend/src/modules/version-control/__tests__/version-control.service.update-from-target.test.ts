@@ -161,8 +161,15 @@ function harness(opts: {
     .fn()
     .mockResolvedValueOnce(opts.first === undefined ? detail() : opts.first)
     .mockResolvedValue(refreshed);
-  // `listOpenPrs` and `getWorkspacePath` are what an open (the race below) reads on its way to its row.
-  const prs = { getPrDetail, invalidateDetailCache: vi.fn(), listOpenPrs: vi.fn().mockResolvedValue([]) };
+  // `listOpenPrs` and `getWorkspacePath` are what an open (the race below)
+  // reads on its way to its row, and `linkFor` what it hands its listeners.
+  const prs = {
+    getPrDetail,
+    invalidateDetailCache: vi.fn(),
+    listOpenPrs: vi.fn().mockResolvedValue([]),
+    // No public address configured: the in-app path, with its note.
+    linkFor: vi.fn((number: number) => ({ url: `/change-requests/${number}`, urlNote: 'Set PUBLIC_FRONTEND_URL to get absolute links.' })),
+  };
   const pendingCommits = { enqueueIfAbsent: vi.fn().mockResolvedValue(true) };
   const changeRequestReview = {
     carryApprovalsForward: vi.fn().mockResolvedValue(opts.carried ?? 0),
@@ -305,7 +312,13 @@ describe('VersionControlService.updateFromTarget', () => {
     const update = h.svc.updateFromTarget(WS, USER, 7).catch((e: unknown) => e);
     await new Promise<void>((r) => setImmediate(r));
     release();
-    await opening;
+    // The open itself succeeds: a failure after its row lands is not an open.
+    const opened = await opening;
+    // It read its own request back and told its listeners (`notified`); the
+    // detail double answers in call order, so the body is #7's fixture.
+    expect(opened).not.toBeInstanceOf(Error);
+    expect(opened).toHaveProperty('notified');
+    expect(h.prs.getPrDetail).toHaveBeenCalledWith(9, expect.anything());
     expect(requests).toEqual([{ number: 9, sourceBranch: 'bob/base', targetBranch: 'alice/deal', state: 'open' }]);
     expect(((await update) as VersionControlDomainError).payload).toMatchObject({
       kind: 'open-change-request-blocks-merge',
