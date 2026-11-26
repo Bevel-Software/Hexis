@@ -1409,7 +1409,7 @@ describe('LockingFilesystem — the agent gate refuses a case-duplicate group in
     expect(await fs.readFile(path.join(root, GROUPS), 'utf-8')).toBe(CURRENT);
   });
 
-  it('is judged again under the lock, against a Product a concurrent writer added meanwhile', async () => {
+  it('an append is judged again under the lock, against a Product a concurrent writer added meanwhile', async () => {
     await fs.writeFile(path.join(root, GROUPS), 'groups:\n  GTM:\n    - s@x.eu\n');
     const versionControl = makeVersionControl();
     const acquired = (versionControl.acquireLock as ReturnType<typeof vi.fn>).getMockImplementation()!;
@@ -1417,9 +1417,13 @@ describe('LockingFilesystem — the agent gate refuses a case-duplicate group in
       await fs.writeFile(path.join(root, GROUPS), CURRENT);
       return acquired(...args);
     });
-    await expect(
-      layer(versionControl).writeFile(GROUPS, 'groups:\n  GTM:\n    - s@x.eu\n  PRODUCT:\n    - qa.dup@x.eu\n  Product:\n    - f@x.eu\n'),
-    ).rejects.toMatchObject({ status: 422, payload: { kind: 'groups-yaml-duplicate-group' } });
+    // Judged before the lock the append adds a distinct group; under it, the file it lands on already holds Product.
+    await expect(layer(versionControl).appendFile(GROUPS, '  PRODUCT:\n    - qa.dup@x.eu\n')).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'groups-yaml-duplicate-group', duplicates: [{ group: 'PRODUCT', existing: 'Product' }] },
+    });
+    expect(versionControl.acquireLock).toHaveBeenCalledTimes(1);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(1);
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
     expect(await fs.readFile(path.join(root, GROUPS), 'utf-8')).toBe(CURRENT);
   });
