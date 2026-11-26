@@ -741,6 +741,21 @@ describe('AccessControlService: reads answered from the map of the head commit',
     ]);
   }, 120_000);
 
+  it('lists a file\'s denials from both copies of its own entries closest first, each place once', async () => {
+    const page = 'Team/Doc.md';
+    const sales = { kind: 'role' as const, role: 'Sales' };
+    const svc = service();
+    // The commit's copy: the page says nothing; its folder denies Sales reading.
+    expect((await svc.denialSources('ws', 'file', page, sales)).read).toEqual([{ kind: 'ancestor', path: 'Team/access.md' }]);
+    // On disk only, and nothing reported: the page denies Sales reading too. The commit's copy lists the folder, the
+    // disk's the page and then the folder.
+    await write(repo, { [page]: '---\nread:\n  - deny Sales\n---\n# doc\n' });
+    expect((await svc.denialSources('ws', 'file', page, sales)).read).toEqual([
+      { kind: 'direct' },
+      { kind: 'ancestor', path: 'Team/access.md' },
+    ]);
+  }, 120_000);
+
   it('says whether a file is public, and through what, as its gates do, with a denial written into it and not yet committed', async () => {
     const page = 'Team/Pub.md';
     await commit('a page public through a plugin', {

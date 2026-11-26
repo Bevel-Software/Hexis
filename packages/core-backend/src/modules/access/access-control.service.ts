@@ -134,7 +134,7 @@ function sameSource(a: DenialSource, b: DenialSource): boolean {
 
 /** How close a source is to its target: the target's own scope, then deeper folders before shallower ones. */
 function closeness(s: DenialSource): number {
-  return s.kind === 'direct' ? Number.MAX_SAFE_INTEGER : s.path === '' ? 0 : s.path.split('/').length;
+  return s.kind === 'direct' ? Number.MAX_SAFE_INTEGER : s.path.split('/').length;
 }
 
 /** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
@@ -1682,10 +1682,12 @@ export class AccessControlService implements IAccessControl {
      * `fs.readFile` per node per tree build. Dropped by `invalidate()`, which
      * fires on every commit / pull / branch switch, so that is the PRIMARY
      * freshness mechanism; its age limit is only a backstop. Single-file
-     * gates (`canRead` / `canWrite`, through `rulesOf`) keep out of it: where
-     * the checkout answers them, a file's own entries are read disk-fresh, on
-     * purpose for the write gate; where a head map answers, they are the
-     * map's, read with its model.
+     * gates (`canRead` / `canWrite`, through `rulesOf` and `ownCopiesOf`)
+     * keep out of it: where the checkout answers them, a file's own entries
+     * are read disk-fresh, on purpose for the write gate; where a head map
+     * answers, a file the commit holds is judged under the map's copy of its
+     * own entries and under a copy read disk-fresh, and a file the commit
+     * does not hold under the disk-fresh copy alone.
      *
      * The memo keeps entries only for paths in the access-frontmatter
      * extension set; a batch reads any other path as before, without keeping
@@ -2400,7 +2402,7 @@ export class AccessControlService implements IAccessControl {
     // restriction made here is written into. A folder's are its `access.md` in
     // the dir model; a file node's are its own frontmatter, in every copy
     // `ownCopiesOf` reads, as its gates refuse what any copy denies.
-    const { model, copies } = await this.copiesFor(workspaceId, kind === 'folder' ? 'folder' : 'file', relativePath);
+    const { model, copies } = await this.copiesFor(workspaceId, kind, relativePath);
     const owns: OwnEntries[] = (
       kind === 'folder' ? [model.accessFilesByDir.get(relativePath)?.entries ?? null] : copies
     ).filter((o): o is OwnEntries => o !== null);
