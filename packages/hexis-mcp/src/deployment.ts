@@ -94,14 +94,19 @@ function refusalSentence(refusal: { error?: unknown } | null): string | undefine
   return error && error.length <= 500 ? error : undefined;
 }
 
-/** `work`, or a DeploymentError once `signal` aborts first (the work goes on unobserved). */
+/**
+ * `work`, or a DeploymentError once `signal` aborts first. The work goes on,
+ * and stays observed whichever way this settles: its handlers are attached
+ * before the abort check, so a rejection after the deadline (already passed or
+ * not) is never unhandled.
+ */
 function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined, label: string): Promise<T> {
   if (!signal) return work;
   return new Promise<T>((resolve, reject) => {
     const abort = (): void => reject(new DeploymentError(`Gave up on ${label}: ${String(signal.reason)}`));
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
     if (signal.aborted) return abort();
     signal.addEventListener('abort', abort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
 }
 

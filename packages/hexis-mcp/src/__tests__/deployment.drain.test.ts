@@ -92,6 +92,40 @@ describe('a refusal whose body stalls past the confirmation deadline stays a ref
   });
 });
 
+describe('a renewal that rejects after the confirmation deadline', () => {
+  it('stays observed: the confirmation gives up and no rejection goes unhandled', { timeout: 20_000 }, async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    // The first 401 arrives after the 3 s deadline, so the renewal starts on a
+    // signal that has already aborted, and then fails.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 3_300));
+        return new Response('{}', { status: 401 });
+      }),
+    );
+    const config = {
+      ...keyConfig(),
+      renewConnectionKey: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        throw new Error('renewal failed');
+      },
+    } as HexisMcpConfig;
+    try {
+      await expect(confirmConnectionKey(config)).rejects.toThrow(/Gave up on the agent instructions/);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      closeRenewal(config);
+    }
+  });
+});
+
 describe('every refusal the key check meets is drained', () => {
   it.each([
     ['a revoked key (401)', 401, {}, /connection key was rejected/],
