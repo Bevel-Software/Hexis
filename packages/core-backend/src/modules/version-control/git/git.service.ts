@@ -53,7 +53,6 @@ import {
 } from '../../../shared/domain-errors.js';
 import {
   GitRunError,
-  assertOneSpecPerLine,
   redactGitToken,
   type GitCredentials,
   type GitRunOptions,
@@ -61,6 +60,7 @@ import {
   type IGitRunner,
 } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from './node-git-runner.js';
+import { catFileBatchBytes } from '../../../shared/cat-file-batch.js';
 import { printable } from '../../../shared/printable.js';
 import { branchForWorkspaceId } from '../../../shared/workspace-id.js';
 import { sanitizeError } from '../sanitize-error.js';
@@ -4641,57 +4641,13 @@ export class GitService implements IGitService {
     ref: string,
     repoRelativePath: string,
   ): Promise<{ bytes: Buffer; blobId: string } | null> {
-    const [blob] = await this.blobsAtSpecs(cwd, [`${ref}:${repoRelativePath}`]);
-    return blob ?? null;
-  }
-
-  /**
-   * {@link blobAtRef} for many `<ref>:<path>` specs in ONE `cat-file --batch`
-   * process, index-aligned with `specs`: each a blob's bytes and object id, or
-   * null when nothing (or nothing that is a file) is at that spec.
-   */
-  private async blobsAtSpecs(
-    cwd: string,
-    specs: readonly string[],
-  ): Promise<({ bytes: Buffer; blobId: string } | null)[]> {
-    if (specs.length === 0) return [];
-    // One spec per LINE: the path is refused a control character twice over
-    // before it gets here (at the route's normaliser and again at
-    // `assertValidRelativePath`), and this is the fence at the protocol —
-    // `--batch` would otherwise read `<sha>:Docs/x.md\nzzz` as two object
-    // names, answer about the first under the gates of the second, and shift
-    // every answer after it.
-    assertOneSpecPerLine(specs);
-    const { stdout } = await this.gitBytes(cwd, ['cat-file', '--batch'], {
-      input: `${specs.join('\n')}\n`,
-    });
-    const out: ({ bytes: Buffer; blobId: string } | null)[] = [];
-    let off = 0;
-    for (let i = 0; i < specs.length; i++) {
-      const nl = stdout.indexOf(0x0a, off);
-      if (nl < 0) throw new Error('unexpected end of git cat-file output');
-      // The spec may itself contain spaces (a KB file routinely does), hence the
-      // endsWith checks rather than a split — same protocol reading as the
-      // access resolver's `catFileBatch`.
-      const header = stdout.subarray(off, nl).toString('utf-8');
-      off = nl + 1;
-      if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-        out.push(null);
-        continue;
-      }
-      const [blobId, type, rawSize] = header.split(' ');
-      const size = Number(rawSize);
-      if (blobId === undefined || !Number.isSafeInteger(size) || size < 0) {
-        throw new Error(`unexpected git cat-file header: ${header}`);
-      }
-      // A tree here would be the per-file gate bypassed, and `assertNotTreeAtRef`
-      // is what refuses it before a version is served; anything else non-blob (a
-      // tag, a commit) is not a file either. Nothing to serve in either case,
-      // and its payload is still stepped over to stay aligned.
-      out.push(type === 'blob' ? { bytes: stdout.subarray(off, off + size), blobId } : null);
-      off += size + 1; // payload + trailing LF
-    }
-    return out;
+    // One spec per LINE is fenced inside the reader (the path is also refused
+    // a control character at the route's normaliser and at
+    // `assertValidRelativePath`). A tree here would be the per-file gate
+    // bypassed, and `assertNotTreeAtRef` refuses it before this runs; anything
+    // else non-blob (a tag, a commit) is not a file either. Nothing to serve.
+    const [read] = await catFileBatchBytes(this.gitRunner, cwd, [`${ref}:${repoRelativePath}`]);
+    return read?.kind === 'blob' ? { bytes: read.bytes, blobId: read.oid } : null;
   }
 
   /**
@@ -4854,13 +4810,14 @@ export class GitService implements IGitService {
     // The versions back to the newest one where the file was not there.
     const gap = touches.findIndex((t) => t.blobId === null);
     const run = gap < 0 ? touches : touches.slice(0, gap);
+    if (run.length === 0) return null;
     // Every version in one process: a long-edited file costs three git calls,
     // not one per edit.
-    const versions = await this.blobsAtSpecs(cwd, run.map((t) => t.blobId as string));
+    const versions = await catFileBatchBytes(this.gitRunner, cwd, run.map((t) => t.blobId as string));
     let since: string | null = null;
     for (const [k, { sha }] of run.entries()) {
       const version = versions[k];
-      if (!version) throw new Error(`git history of ${repoRelativePath} names a version at ${sha} that cannot be read`);
+      if (version?.kind !== 'blob') throw new Error(`git history of ${repoRelativePath} names a version at ${sha} that cannot be read`);
       if (!holds(version.bytes.toString('utf-8'))) break;
       since = sha;
     }

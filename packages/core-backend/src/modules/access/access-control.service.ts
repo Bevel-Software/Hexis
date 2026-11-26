@@ -7,7 +7,7 @@ const log = logger('access');
 
 import { isAbsence, isSkippedEntry, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import { isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
-import { catFileBatchBytes } from './cat-file-batch.js';
+import { catFileBatchBytes } from '../../shared/cat-file-batch.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../version-control/index.js';
 import { readRevSha } from '../kb-fs/index.js';

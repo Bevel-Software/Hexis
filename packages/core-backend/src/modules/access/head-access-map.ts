@@ -2,7 +2,7 @@ import { logger } from '../../shared/logging.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { readRevSha } from '../kb-fs/index.js';
 import { accessMdSelfEntries, isAccessMdPath, parseOwnAccessEntries, type OwnEntries } from '../access-model/index.js';
-import { catFileBatchBytes } from './cat-file-batch.js';
+import { catFileBatchBytes } from '../../shared/cat-file-batch.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import path from 'node:path';
 import { frontmatterHead, frontmatterHeadOfBytes } from './frontmatter-head.js';

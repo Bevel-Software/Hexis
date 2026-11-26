@@ -1,4 +1,4 @@
-import { assertOneSpecPerLine, type IGitRunner } from '../../shared/git.contract.js';
+import { assertOneSpecPerLine, type IGitRunner } from './git.contract.js';
 
 /**
  * What one spec of a batched read came back as: a blob's bytes, nothing at
@@ -8,7 +8,7 @@ import { assertOneSpecPerLine, type IGitRunner } from '../../shared/git.contract
  * read from.
  */
 export type CatFileBytes =
-  | { kind: 'blob'; bytes: Buffer }
+  | { kind: 'blob'; bytes: Buffer; oid: string }
   | { kind: 'missing' }
   | { kind: 'non-blob'; type: string };
 
@@ -18,6 +18,9 @@ export type CatFileBytes =
  * index-aligned with them. Output protocol per request:
  * `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n` (the spec may
  * itself contain spaces, hence the endsWith checks).
+ *
+ * The one reader of this protocol in the backend: the access resolver and
+ * the git service's history reads both go through it.
  *
  * A blob's bytes are a view onto the one reply: a caller that keeps anything
  * of them past its own use copies what it keeps.
@@ -54,7 +57,7 @@ export async function catFileBatchBytes(runner: IGitRunner, repoDir: string, spe
     // A non-blob (a directory path resolves to a tree) is reported as such,
     // and its payload still has to be skipped to stay aligned.
     results.push(
-      parts[1] === 'blob' ? { kind: 'blob', bytes: out.subarray(off, off + size) } : { kind: 'non-blob', type: parts[1]! },
+      parts[1] === 'blob' ? { kind: 'blob', bytes: out.subarray(off, off + size), oid: parts[0]! } : { kind: 'non-blob', type: parts[1]! },
     );
     off += size + 1; // payload + trailing LF
   }
