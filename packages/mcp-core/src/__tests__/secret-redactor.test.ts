@@ -17,6 +17,12 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('region us, status 401 for users')).toBe('region [redacted], status 401 for users');
   });
 
+  it('reads a query name as URLSearchParams does, a malformed escape included', () => {
+    const redactor = new SecretRedactor();
+    rememberCredentialQuery('https://x.example/mcp?%74oken%FF=ab%FFverysecret-tail', redactor);
+    expect(redactor.redact('sent ab%FFverysecret-tail')).toBe('sent [redacted]');
+  });
+
   it('takes out a query credential in both spellings, as sent and as read', () => {
     const redactor = new SecretRedactor();
     rememberCredentialQuery('https://x.example/mcp?region=eu&api_key=a%2Bb%2Fc1234567', redactor);
@@ -27,6 +33,18 @@ describe('SecretRedactor', () => {
 });
 
 describe('rememberCallCredentials', () => {
+  it('takes out each of several values substituted into one string, the later one echoed alone', () => {
+    const redactor = new SecretRedactor();
+    const raw = {
+      name: 'n',
+      call_template_type: 'mcp',
+      config: { mcpServers: { s: { url: 'https://${HOST}/v1/$TOKEN?x=1' } } },
+    };
+    const processed = { ...raw, config: { mcpServers: { s: { url: 'https://api.example.com/v1/tok-abcdef123456?x=1' } } } };
+    rememberCallCredentials(redactor, processed as unknown as CallTemplate, raw as unknown as CallTemplate);
+    expect(redactor.redact('refused tok-abcdef123456 at api.example.com')).toBe('refused [redacted] at [redacted]');
+  });
+
   it('takes out what substitution put in, and leaves the public text around it', () => {
     const redactor = new SecretRedactor();
     const raw = {

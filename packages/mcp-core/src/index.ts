@@ -156,6 +156,7 @@ export {
 } from './skills.js';
 
 export {
+  VARIABLE_REFERENCE_RE,
   utcpManualName,
   utcpNamespacePrefix,
   utcpNamespacedKey,

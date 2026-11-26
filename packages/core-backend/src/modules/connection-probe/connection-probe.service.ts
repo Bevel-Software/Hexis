@@ -9,6 +9,7 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   registerManual,
   SecretRedactor,
+  VARIABLE_REFERENCE_RE,
   rememberCredentialHeaders,
   rememberCredentialQuery,
 } from '@bevel-software/platform-mcp-core';
@@ -50,7 +51,7 @@ const NO_PROBE: Outcome = {
  * this one is used for both scanning and replacing.
  */
 function varRefPattern(): RegExp {
-  return /\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+)/g;
+  return new RegExp(VARIABLE_REFERENCE_RE.source, 'g');
 }
 
 /**

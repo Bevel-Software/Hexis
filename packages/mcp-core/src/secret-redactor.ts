@@ -1,4 +1,5 @@
 import type { CallTemplate } from '@utcp/sdk';
+import { VARIABLE_REFERENCE_RE } from './utcp-namespace.js';
 
 /*
  * Keeping a secret out of text we quote back. One mechanism for every place
@@ -180,22 +181,15 @@ export function rememberCredentialQuery(url: string, redactor: SecretRedactor): 
     return;
   }
   // Both spellings of each value: a provider can quote the url as it was sent
-  // (`a%2Bb`) or as it read it (`a+b`).
+  // (`a%2Bb`) or as it read it (`a+b`). Decoded by `URLSearchParams`, the
+  // parser the request is read with, so a malformed escape (`%74oken%FF`)
+  // decodes here exactly as it does there.
   for (const pair of query.split('&')) {
     const at = pair.indexOf('=');
-    if (at < 0 || !carriesCredential(decodeQueryPart(pair.slice(0, at)))) continue;
-    const raw = pair.slice(at + 1);
-    redactor.remember(raw);
-    redactor.remember(decodeQueryPart(raw));
-  }
-}
-
-/** A query name or value as `URLSearchParams` reads it (`+` a space, `%xx` decoded); a malformed escape stays as written. */
-function decodeQueryPart(part: string): string {
-  try {
-    return decodeURIComponent(part.replace(/\+/g, ' '));
-  } catch {
-    return part;
+    const [decoded] = new URLSearchParams(pair);
+    if (at < 0 || !decoded || !carriesCredential(decoded[0])) continue;
+    redactor.remember(pair.slice(at + 1));
+    redactor.remember(decoded[1]);
   }
 }
 
@@ -204,12 +198,10 @@ function decodeQueryPart(part: string): string {
  * from the template as the client filled it in (`processed`) and as it is
  * stored (`raw`, with its `${VAR}` references):
  *
- * - every value substitution put in: for each string that differs between the
- *   two, the span that differs (the text between the longest shared head and
- *   tail). For a string with one reference that span is exactly the
- *   substituted value; for a string with several it is the run from the first
- *   to the last, so an echo of a later value alone is not matched. The public
- *   text around it (a url's scheme and host, an auth scheme) is not
+ * - every value substitution put in, each on its own: the stored string's
+ *   references (`VARIABLE_REFERENCE_RE`, the substitutor's grammar) are
+ *   matched against the filled-in string around the literal text between
+ *   them. The public text (a url's scheme and host, an auth scheme) is not
  *   remembered, so it is not blanked out of the message;
  * - every credential a server entry spells out in full: credential-named
  *   headers (and the part after the auth scheme), credential-named query
@@ -241,25 +233,39 @@ function rememberCredentialFields(fields: object, redactor: SecretRedactor): voi
   }
 }
 
-/** Walk both templates side by side and remember what substitution changed. */
+/** Walk both templates side by side and remember what substitution put in. */
 function rememberSubstitutions(redactor: SecretRedactor, raw: unknown, processed: unknown): void {
   if (typeof processed === 'string') {
-    if (typeof raw !== 'string' || raw === processed) return;
-    let head = 0;
-    while (head < raw.length && head < processed.length && raw[head] === processed[head]) head++;
-    let tail = 0;
-    while (
-      tail < raw.length - head &&
-      tail < processed.length - head &&
-      raw[raw.length - 1 - tail] === processed[processed.length - 1 - tail]
-    ) {
-      tail++;
+    if (typeof raw === 'string' && raw !== processed) {
+      for (const value of substitutedValues(raw, processed)) redactor.remember(value);
     }
-    redactor.remember(processed.slice(head, processed.length - tail));
     return;
   }
   if (!processed || typeof processed !== 'object' || !raw || typeof raw !== 'object') return;
   for (const [key, value] of Object.entries(processed)) {
     rememberSubstitutions(redactor, (raw as Record<string, unknown>)[key], value);
   }
+}
+
+/**
+ * The value each reference in `raw` took in `processed`. The literal text
+ * between the references anchors them; where a value could also contain the
+ * literal after it, both the shortest and the longest reading are returned, so
+ * neither is missed. A string the stored one does not describe (it changed
+ * some other way) is returned whole.
+ */
+function substitutedValues(raw: string, processed: string): string[] {
+  const literals = raw.split(new RegExp(VARIABLE_REFERENCE_RE.source));
+  // `split` with capture groups interleaves the captured names: keep the
+  // literal text only, the pieces at every third position.
+  const pieces = literals.filter((_, i) => i % 3 === 0);
+  if (pieces.length < 2) return [processed];
+  const values: string[] = [];
+  for (const group of ['(.*?)', '(.*)']) {
+    const pattern = new RegExp(`^${pieces.map(escapeRegExp).join(group)}$`, 's');
+    const match = pattern.exec(processed);
+    if (!match) return [processed];
+    values.push(...match.slice(1));
+  }
+  return values;
 }

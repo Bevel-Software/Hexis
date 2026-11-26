@@ -8,13 +8,12 @@
  * so the classifiers must not each keep their own approximation of it.
  */
 
-/**
- * The SDK substitutor's reference grammar, exactly: `${VAR}` or `$VAR`, names
- * `[a-zA-Z0-9_]+`. Note a LEADING DIGIT is legal — `$5TOKEN` (and `$5` in
- * prose) is a reference as far as substitution is concerned, and classifying
- * it as anything else here would diverge from what actually expands.
- */
-export const VARIABLE_REFERENCE_RE = /\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+)/g;
+// The SDK substitutor's reference grammar. It lives in
+// `@bevel-software/platform-mcp-core`, which also needs it (redacting a call's
+// substituted values); re-exported here because this is the path the rest of
+// the package imports.
+import { VARIABLE_REFERENCE_RE } from '@bevel-software/platform-mcp-core';
+export { VARIABLE_REFERENCE_RE };
 
 // `.test()` on a global regex is stateful (lastIndex persists across calls) —
 // the predicate gets its own non-global compilation of the same source.
