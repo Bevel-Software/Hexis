@@ -5242,12 +5242,14 @@ export class VersionControlService implements IVersionControlService {
         { kind: 'protected-update-target', branch },
       );
     }
-    // The one merge a person makes: a change request's. An update that would
-    // land an OPEN request from `from` into this draft is that merge by
-    // another name, and `mergeBranch`'s gate refuses it here too — asked once
-    // before waiting, and again under the locks below, where the answer
-    // counts. (The other direction, the request's target into its source, is
-    // how a draft under review stays current, and is never blocked.)
+    // An open change request lands by being applied, and `mergeBranch`
+    // refuses a merge of its source into its target while it is open. An
+    // update that would land an OPEN request from `from` into this draft is
+    // that merge by another name, and the same gate refuses it here too —
+    // asked once before waiting, and again under the locks below, where the
+    // answer counts. (The other direction, the request's target into its
+    // source, is how a draft under review stays current, and is never
+    // blocked.)
     if (from !== branch) {
       const openBefore = await this.openRequestBlockingMerge(from, branch);
       if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore);
