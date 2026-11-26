@@ -60,6 +60,16 @@ export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './rout
 export { PageLinkHomeContext } from './components/renderers/htmlToolBridge';
 export type { KbLinkTarget } from './components/renderers/KbAppLink';
 export { scrollToHeading } from './components/renderers/scrollToHeading';
+// The KB markdown pipeline, for a surface that renders a file's markdown in
+// fragments outside the file page: the review diff, which shows the HTML
+// comments of a changed fragment as source.
+export {
+  KB_DIFF_CHANGE_REHYPE_PLUGINS,
+  KB_DIFF_REHYPE_PLUGINS,
+  KB_REMARK_PLUGINS,
+  useKbMarkdownComponents,
+  type KbImageResolver,
+} from './components/renderers/kbMarkdownPipeline';
 // Reached by other modules; exported here so they stop importing the files.
 export { useCreatePage } from './hooks/useCreatePage';
 export { useMergedWorkspaceTree } from './hooks/useMergedWorkspaceTree';
