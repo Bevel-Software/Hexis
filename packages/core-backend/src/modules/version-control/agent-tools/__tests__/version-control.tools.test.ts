@@ -130,6 +130,9 @@ const versionControlService = {
     calls.push(['createBranch', ws, name]);
     return { name, isProtected: false, hasRemote: true };
   },
+  // The caller here (`e@x`) is no admin: a bare name gets their prefix.
+  draftNameFor: async (_ws: string, name: string, user: { email: string }) =>
+    name.includes('/') ? name : `${user.email.split('@')[0]}/${name}`,
   acquireLock: async (ws: string, branch: string, path: string) => {
     calls.push(['acquireLock', ws, branch, path]);
     return { acquired: true, lock: { branch, path, holderUserId: 'user-A', holderName: 'N' } };
@@ -957,6 +960,17 @@ describe('registerVersionControlTools', () => {
     // and 500s with "Remote branch not found in upstream origin". No fromBase:
     // the base is the workspace's own checked-out branch (HEAD).
     expect(calls).toContainEqual(['createBranch', WS, 'me/new-draft']);
+  });
+
+  it("create_branch creates a bare name under the caller's prefix, and answers the name it made", async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/create_branch`, writeTok(), {
+      name: 'copilot-check',
+      branch: WS,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ branch: { name: 'e/copilot-check' } });
+    expect(calls).toContainEqual(['createBranch', WS, 'e/copilot-check']);
   });
 
   it('create_branch rejects `branch` naming the draft being created with a 400, not a clone 500', async () => {

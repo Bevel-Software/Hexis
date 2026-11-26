@@ -382,7 +382,8 @@ export function registerVersionControlTools(
       `backend rejects protected names (${protectedInline(kb)}) and filesystem-invalid names — surface ` +
       'those errors verbatim. Name it `<you>/<kebab-slug>`: `<you>` is the person\'s email before the @, in lower case, ' +
       'with each run of characters other than letters and digits as one `-` (`paul.brandt@` gives `paul-brandt/`). ' +
-      'Only that prefix makes the draft theirs, to delete later. Does NOT switch the agent onto the new draft.',
+      'Only that prefix makes the draft theirs, to delete later; a name with no `/` that they could not delete gets the ' +
+      'prefix added for them, so use the name the answer gives. Does NOT switch the agent onto the new draft.',
     // `branch` here is the fork BASE — its own meaning — so skip the generic
     // workspace-`branch` injection ("the branch to work on: ... or your draft"),
     // whose wording invites filling in the draft being created instead.
@@ -430,8 +431,14 @@ export function registerVersionControlTools(
           400,
         );
       }
+      // A bare name the caller could not delete later gets their `<you>/`
+      // prefix: an agent rarely knows the person's email, and a draft its
+      // own maker cannot remove is a dead end (Copilot's create-then-delete
+      // ran into exactly that). The answer names the draft as created.
+      const workspaceId = workspaceIdForBranch(base);
+      const draft = await ctx.versionControlService.draftNameFor(workspaceId, name, ctx.user);
       return {
-        branch: await ctx.versionControlService.createBranch(workspaceIdForBranch(base), name),
+        branch: await ctx.versionControlService.createBranch(workspaceId, draft),
       };
     },
   });

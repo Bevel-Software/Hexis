@@ -57,6 +57,14 @@ export interface IVersionControlService {
    */
   createBranch(workspaceId: string, name: string, fromBase?: string): Promise<Branch>;
   /**
+   * The name a draft `user` asks for as `name` is created under. A bare name
+   * (no `/`) that `user` could not delete once it exists comes back as
+   * `<email-localpart>/<name>`, so the person who made a draft can always
+   * remove it; every other name comes back unchanged. An agent rarely knows
+   * the person's email, so it cannot be relied on to add the prefix itself.
+   */
+  draftNameFor(workspaceId: string, name: string, user: AuthUser): Promise<string>;
+  /**
    * Delete a branch. Removes both local and origin refs in one call. The
    * branch's author (per `<email-localpart>/...` naming) OR an admin (per the
    * workspace's `roles.yaml`) can delete it. Admins can additionally remove
