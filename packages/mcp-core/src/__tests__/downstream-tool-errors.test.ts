@@ -178,6 +178,52 @@ describe('a downstream isError over a real MCP connection', () => {
     ]);
   });
 
+  /** A manual at `url` whose server sends `${TOKEN}` in a header no credential rule would name. */
+  const tracedManual = (name: string, url: string) =>
+    serializer.validateDict({
+      name,
+      call_template_type: 'mcp',
+      config: { mcpServers: { srv: { transport: 'http', url, timeout: 10, terminate_on_close: true, headers: { 'X-Trace': '${TOKEN}' } } } },
+    });
+  const echoOf = (manual: string): ProxiedTool => ({ ...echo, utcpName: `${manual}.srv.echo`, mcpName: `${manual}_srv_echo`, manualName: manual });
+
+  it("keeps each manual's own values when two register on one client at once", async () => {
+    installDownstreamToolErrors();
+    const [alpha, beta] = await Promise.all([startFakeMcpServer('alpha'), startFakeMcpServer('beta')]);
+    cleanups.push(() => alpha.stop(), () => beta.stop());
+    const client = await CodeModeUtcpClient.create(
+      process.cwd(),
+      new UtcpClientConfigSerializer().validateDict({ variables: { alpha_TOKEN: 'alpha-value-1234', beta_TOKEN: 'beta-value-5678' } }),
+    );
+    cleanups.push(() => client.close());
+    expect(
+      await Promise.all([registerManual(client, tracedManual('alpha', alpha.url)), registerManual(client, tracedManual('beta', beta.url))]),
+    ).toEqual([{ ok: true }, { ok: true }]);
+    alpha.reportToolErrors('refused alpha-value-1234');
+    beta.reportToolErrors('refused beta-value-5678');
+
+    expect((await dispatchToolCall(client, echoOf('alpha'), {})).content).toEqual([{ type: 'text', text: 'refused [redacted]' }]);
+    expect((await dispatchToolCall(client, echoOf('beta'), {})).content).toEqual([{ type: 'text', text: 'refused [redacted]' }]);
+  });
+
+  it('redacts the value a later registration filled in, as after a session recovery', async () => {
+    installDownstreamToolErrors();
+    const server = await startFakeMcpServer('alpha');
+    cleanups.push(() => server.stop());
+    const config = new UtcpClientConfigSerializer().validateDict({ variables: { alpha_TOKEN: 'first-value-1234' } });
+    const client = await CodeModeUtcpClient.create(process.cwd(), config);
+    cleanups.push(() => client.close());
+    expect(await registerManual(client, tracedManual('alpha', server.url))).toEqual({ ok: true });
+
+    // The credential changes, and the manual registers again with it.
+    client.config.variables = { alpha_TOKEN: 'second-value-5678' };
+    await client.deregisterManual('alpha');
+    expect(await registerManual(client, tracedManual('alpha', server.url))).toEqual({ ok: true });
+    server.reportToolErrors('refused second-value-5678');
+
+    expect((await dispatchToolCall(client, echoOf('alpha'), {})).content).toEqual([{ type: 'text', text: 'refused [redacted]' }]);
+  });
+
   it('leaves a successful call untouched once installed', async () => {
     installDownstreamToolErrors();
     const server = await startFakeMcpServer('notion');

@@ -11,6 +11,15 @@ describe('SecretRedactor', () => {
     );
   });
 
+  it("takes out two values that share a head, whole, without one's head pass printing the other's tail", () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('sk-live-aaaa1111');
+    redactor.remember('sk-live-bbbb2222');
+    expect(redactor.redact('first sk-live-bbbb2222, then sk-live-aaaa1111, then sk-live-bbbb…')).toBe(
+      'first [redacted], then [redacted], then [redacted]…',
+    );
+  });
+
   it('matches a short value only where it stands alone', () => {
     const redactor = new SecretRedactor();
     redactor.remember('us');

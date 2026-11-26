@@ -55,26 +55,28 @@ export class SecretRedactor {
 
   redact(text: string): string {
     let out = text;
-    // Longest SECRET first, and not merely the longest prefix of each: when one
-    // resolved value is a prefix of another (a key and that same key with a
-    // suffix), redacting the short one first eats the head of the long one and
-    // leaves its tail printed — the exact half-redaction this class exists to
-    // avoid, arrived at from the other direction.
-    for (const secret of [...this.values].sort((a, b) => b.length - a.length)) {
-      if (secret.length < MIN_SECRET_CHARS) {
-        out = out.replace(standingAlone(secret), REDACTED);
-        continue;
+    // Longest SECRET first: when one value is a prefix of another (a key and
+    // that same key with a suffix), redacting the short one first eats the head
+    // of the long one and leaves its tail printed.
+    const secrets = [...this.values].sort((a, b) => b.length - a.length);
+    // Every whole value first. Only then any echoed head: two values can share
+    // a head (`sk-live-…`), and a head pass for one that ran before the other's
+    // own turn would eat that shared head and leave the other's tail printed.
+    for (const secret of secrets) {
+      out = secret.length < MIN_SECRET_CHARS ? out.replace(standingAlone(secret), REDACTED) : out.split(secret).join(REDACTED);
+    }
+    // Then every echoed head of every value, longest first across all of them,
+    // and each one present, not only the first: a provider can quote a value
+    // and a masked head of it in one message ("sk-live-abcd…").
+    const heads = new Set<string>();
+    for (const secret of secrets) {
+      if (secret.length < MIN_SECRET_CHARS) continue;
+      for (let len = secret.length - 1; len >= Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS); len--) {
+        heads.add(secret.slice(0, len));
       }
-      // Longest match first: replacing the whole value when it is present beats
-      // replacing a prefix of it and leaving the tail on screen. Then on down:
-      // a provider can quote the whole value and a masked head of it in one
-      // message ("sk-live-abcd…"), and stopping at the first match left the
-      // head printed.
-      const shortest = Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS);
-      for (let len = secret.length; len >= shortest; len--) {
-        const candidate = secret.slice(0, len);
-        if (out.includes(candidate)) out = out.split(candidate).join(REDACTED);
-      }
+    }
+    for (const head of [...heads].sort((a, b) => b.length - a.length)) {
+      if (out.includes(head)) out = out.split(head).join(REDACTED);
     }
     return out;
   }
