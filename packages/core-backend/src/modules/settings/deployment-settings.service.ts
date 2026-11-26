@@ -142,6 +142,17 @@ export function parseToolReadOnlyOverrides(raw: string): Record<string, boolean>
   return Object.fromEntries(entries) as Record<string, boolean>;
 }
 
+/** `a.com, @B.com` → `['a.com', 'b.com']`, tolerating a leading `@` or `.`. */
+function parseAllowedEmailDomains(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
+    .filter((d) => d.length > 0);
+}
+
+/** A lower-case DNS name: dot-separated labels of letters, digits and inner hyphens. */
+const EMAIL_DOMAIN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+
 export const CORE_SETTINGS: SettingDef[] = [
   {
     /**
@@ -407,6 +418,14 @@ export const CORE_SETTINGS: SettingDef[] = [
     envVar: 'ALLOWED_EMAIL_DOMAINS',
     section: 'sign-in',
     blankMeansDefault: true,
+    // Judged by the parser the check reads it with, so a saved value that
+    // names no domain cannot pass for a guard while the check reads none.
+    validate: (v) => {
+      const domains = parseAllowedEmailDomains(v);
+      if (domains.length === 0) return 'Name at least one domain, or leave the field empty to allow every domain.';
+      const bad = domains.find((d) => !EMAIL_DOMAIN.test(d));
+      return bad ? `"${bad}" is not a domain.` : null;
+    },
   },
 
   {
@@ -568,8 +587,9 @@ export interface ResolvedSetting {
  * second replica at that moment.
  *
  * The single sign-on settings are the first to bend that: they apply live, so
- * on a multi-replica deployment an OIDC change reaches only the replica that
- * served the save until the others restart.
+ * on a multi-replica deployment an OIDC change, or a change to the allowed
+ * email domains, reaches only the replica that served the save until the
+ * others restart.
  *
  * It stops being acceptable the moment a setting is something an operator
  * changes on a live multi-replica deployment. Adding one means adding
@@ -1024,16 +1044,12 @@ export class DeploymentSettingsService {
   }
 
   /**
-   * The SSO domain allow-list in effect, as domains: `a.com, @B.com` →
-   * `['a.com', 'b.com']`, tolerating a leading `@` or `.`. Empty means no
-   * guard. Answers from the environment, else the stored row, at the moment
+   * The SSO domain allow-list in effect, as domains (see
+   * `parseAllowedEmailDomains`). Empty means no guard. Answers from the environment, else the stored row, at the moment
    * it is asked, so a save is in effect for the next sign-in.
    */
   resolveAllowedEmailDomains(): string[] {
-    return this.resolve('allowedEmailDomains')
-      .split(/[\s,]+/)
-      .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
-      .filter((d) => d.length > 0);
+    return parseAllowedEmailDomains(this.resolve('allowedEmailDomains'));
   }
 
   /**

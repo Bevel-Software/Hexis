@@ -627,12 +627,32 @@ describe('DeploymentSettingsService — validation', () => {
   });
 
   it('keeps the environment ahead of a saved allow-list', async () => {
-    const { db } = makeDb();
+    const { db, rows } = makeDb();
+    rows.push({ key: 'allowedEmailDomains', value: 'saved.example', encrypted: false });
+    const saved = new DeploymentSettingsService(db, ENC_KEY, undefined, { env: {} });
+    await saved.load();
+    expect(saved.resolveAllowedEmailDomains()).toEqual(['saved.example']);
     const settings = new DeploymentSettingsService(db, ENC_KEY, undefined, {
       env: { ALLOWED_EMAIL_DOMAINS: 'bevel.software' },
     });
     await settings.load();
     expect(settings.resolveAllowedEmailDomains()).toEqual(['bevel.software']);
+  });
+
+  /** A value the check would read as no guard is never saved as a guard. */
+  it('refuses an allow-list that names no domain, or a token that is not one', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY, undefined, { env: {} });
+    await settings.save({ allowedEmailDomains: 'example.org' }, null);
+    for (const value of [',', '@', '.', ' , @ ; ', 'example.org, exa mple!.com', 'bad_domain.com', '-x.com', 'a..b']) {
+      await expect(settings.save({ allowedEmailDomains: value }, null)).rejects.toMatchObject({
+        problems: { allowedEmailDomains: expect.any(String) },
+      });
+    }
+    // Every refusal left the saved list in effect.
+    expect(settings.resolveAllowedEmailDomains()).toEqual(['example.org']);
+    await settings.save({ allowedEmailDomains: '@Example.COM, .eu.example.net xn--bcher-kva.example' }, null);
+    expect(settings.resolveAllowedEmailDomains()).toEqual(['example.com', 'eu.example.net', 'xn--bcher-kva.example']);
   });
 });
 

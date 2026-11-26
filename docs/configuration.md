@@ -77,7 +77,10 @@ at boot, so if you run more than one, restart the others after changing SSO
 - **Multi-tenant issuers** (Google, Entra `common`): set
   `ALLOWED_EMAIL_DOMAINS`. SSO auto-provisions accounts, and that list is the
   **only** signup boundary. Without it, anyone with an account at the issuer
-  can sign in.
+  can sign in. You can also set the list on the setup screen's Single sign-on
+  card, where the environment variable does not set it. A save there applies
+  like the provider settings: at the next sign-in on the replica that served
+  it, and on the others after they restart.
 
 ## The agent guide
 
