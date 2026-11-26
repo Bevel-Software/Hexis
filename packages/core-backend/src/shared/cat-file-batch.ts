@@ -1,19 +1,21 @@
-import { assertOneSpecPerLine, type IGitRunner } from '../../shared/git.contract.js';
+import { assertOneSpecPerLine, type IGitRunner } from './git.contract.js';
 
 /**
- * What one spec of a batched read came back as: a blob's bytes, nothing at
- * that spec, or an object that is not a file (a directory, say). The last
- * two are told apart on purpose: for the model at a commit, a path that is
- * there but is not a file is not "absent", it is config the model cannot be
- * read from.
+ * What one spec of a batched read came back as: a blob's bytes and object
+ * id, nothing at that spec, or an object that is not a file (a directory,
+ * say). The last two are told apart on purpose: for the access model at a
+ * commit, a path that is there but is not a file is not "absent", it is
+ * config the model cannot be read from.
  */
 export type CatFileBytes =
-  | { kind: 'blob'; bytes: Buffer }
+  | { kind: 'blob'; bytes: Buffer; objectId: string }
   | { kind: 'missing' }
   | { kind: 'non-blob'; type: string };
 
 /**
- * Read many objects from a git repo in ONE `git cat-file --batch` process.
+ * Read many objects from a git repo in ONE `git cat-file --batch` process:
+ * the one reader of that protocol, for the access service's batched reads
+ * and for a file's bytes at a ref (`GitService`).
  * `specs` are `<ref>:<path>` lines or object ids; the result array is
  * index-aligned with them. Output protocol per request:
  * `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n` (the spec may
@@ -54,7 +56,9 @@ export async function catFileBatchBytes(runner: IGitRunner, repoDir: string, spe
     // A non-blob (a directory path resolves to a tree) is reported as such,
     // and its payload still has to be skipped to stay aligned.
     results.push(
-      parts[1] === 'blob' ? { kind: 'blob', bytes: out.subarray(off, off + size) } : { kind: 'non-blob', type: parts[1]! },
+      parts[1] === 'blob'
+        ? { kind: 'blob', bytes: out.subarray(off, off + size), objectId: parts[0]! }
+        : { kind: 'non-blob', type: parts[1]! },
     );
     off += size + 1; // payload + trailing LF
   }

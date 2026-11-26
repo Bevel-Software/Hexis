@@ -53,7 +53,6 @@ import {
 } from '../../../shared/domain-errors.js';
 import {
   GitRunError,
-  assertOneSpecPerLine,
   redactGitToken,
   type GitCredentials,
   type GitRunOptions,
@@ -61,6 +60,7 @@ import {
   type IGitRunner,
 } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from './node-git-runner.js';
+import { catFileBatchBytes } from '../../../shared/cat-file-batch.js';
 import { printable } from '../../../shared/printable.js';
 import { branchForWorkspaceId } from '../../../shared/workspace-id.js';
 import { sanitizeError } from '../sanitize-error.js';
@@ -4632,7 +4632,8 @@ export class GitService implements IGitService {
    * lossless round trip: every byte sequence that is not valid UTF-8 comes
    * back as U+FFFD and the file is ruined. A past version has to be delivered
    * byte for byte, so this reads through `cat-file --batch`, whose framing is
-   * in BYTES (`<oid> <type> <size>\n<size bytes>\n`) rather than characters.
+   * in BYTES (`<oid> <type> <size>\n<size bytes>\n`) rather than characters,
+   * with the one reader of that protocol (`catFileBatchBytes`).
    *
    * One invocation, and absence is a PROTOCOL answer (`<spec> missing`) rather
    * than a parsed error message — which also covers `<sha>^` of a root commit,
@@ -4650,31 +4651,14 @@ export class GitService implements IGitService {
   ): Promise<{ bytes: Buffer; blobId: string } | null> {
     // The spec has to be ONE line: the path is refused a control character
     // twice over before it gets here (at the route's normaliser and again at
-    // `assertValidRelativePath`), and this is the fence at the protocol —
+    // `assertValidRelativePath`), and the reader refuses one at the protocol —
     // `--batch` would otherwise read `<sha>:Docs/x.md\nzzz` as two object
     // names and answer about the first, under the gates of the second.
-    const spec = `${ref}:${repoRelativePath}`;
-    assertOneSpecPerLine([spec]);
-    const { stdout } = await this.gitBytes(cwd, ['cat-file', '--batch'], {
-      input: `${spec}\n`,
-    });
-    const nl = stdout.indexOf(0x0a);
-    if (nl < 0) throw new Error('unexpected end of git cat-file output');
-    // The spec may itself contain spaces (a KB file routinely does), hence the
-    // endsWith checks rather than a split — same protocol reading as the
-    // access resolver's `catFileBatch`.
-    const header = stdout.subarray(0, nl).toString('utf-8');
-    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) return null;
-    const [blobId, type, rawSize] = header.split(' ');
+    const [outcome] = await catFileBatchBytes(this.gitRunner, cwd, [`${ref}:${repoRelativePath}`]);
     // A tree here would be the per-file gate bypassed, and `assertNotTreeAtRef`
     // is what refuses it before this runs; anything else non-blob (a tag, a
     // commit) is not a file either. Nothing to serve in either case.
-    if (type !== 'blob' || blobId === undefined) return null;
-    const size = Number(rawSize);
-    if (!Number.isSafeInteger(size) || size < 0) {
-      throw new Error(`unexpected git cat-file header: ${header}`);
-    }
-    return { bytes: stdout.subarray(nl + 1, nl + 1 + size), blobId };
+    return outcome?.kind === 'blob' ? { bytes: outcome.bytes, blobId: outcome.objectId } : null;
   }
 
   /**
@@ -4903,27 +4887,6 @@ export class GitService implements IGitService {
   private async asRepositoryAdministrator<T>(cwd: string, run: () => Promise<T>): Promise<T> {
     const repository = (await this.workspaceService.repositoryOfCheckout?.(cwd)) ?? null;
     return repository ? repository.exclusive(run) : run();
-  }
-
-  /**
-   * {@link git}, with stdout as raw BYTES.
-   *
-   * A sibling rather than an `encoding` option on `git()` itself: every other
-   * caller in this service reads text, and the two return types (`string` vs
-   * `Buffer`) are not interchangeable at any call site. Same
-   * `GIT_LITERAL_PATHSPECS` and same runner deadline — the only difference is
-   * that the bytes are not decoded.
-   */
-  private gitBytes(
-    cwd: string,
-    args: string[],
-    opts?: Omit<GitRunOptions, 'encoding'>,
-  ): Promise<GitRunResult<Buffer>> {
-    return this.gitRunner.run(cwd, args, {
-      ...opts,
-      encoding: 'buffer',
-      env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
-    });
   }
 }
 
