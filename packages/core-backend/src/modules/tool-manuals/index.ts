@@ -7,7 +7,6 @@ export { registerToolManualsTools } from './tool-manuals.tools.js';
 export {
   createInlineManualReader,
   createManualListReader,
-  InlineManualRefusedError,
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
   type InlineManualReader,
