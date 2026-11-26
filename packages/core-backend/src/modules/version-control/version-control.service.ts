@@ -2552,6 +2552,10 @@ export class VersionControlService implements IVersionControlService {
           mergeOutcome.paths,
         );
       }
+    } else {
+      // The refresh is this path's only fetch of `origin/<target>`; the
+      // touched paths and approvers below are read from it.
+      await this.git.fetch(workspaceId);
     }
 
     // Push the source *after* the auto-merge so the remote sees the merge

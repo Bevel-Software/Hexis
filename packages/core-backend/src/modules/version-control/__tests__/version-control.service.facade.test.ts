@@ -1853,6 +1853,8 @@ describe('VersionControlService.openChangeRequest — while a request in the rev
     await expect(h.svc.openChangeRequest('ali%2Fy', makeUser(), INPUT)).resolves.toMatchObject({ number: 20 });
     // No refresh: x's commits never reach y, so x→y still proposes its files.
     expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
+    // The refresh was the only fetch of the target; the diff still needs it fresh.
+    expect(h.git.fetch).toHaveBeenCalledWith('ali%2Fy');
     expect(h.values).toHaveBeenCalledWith(expect.objectContaining({ sourceBranch: 'ali/y', targetBranch: 'ali/x' }));
     expect(h.rows).toContainEqual({ number: 7, sourceBranch: 'ali/x', targetBranch: 'ali/y', state: 'open' });
   });
@@ -1867,6 +1869,8 @@ describe('VersionControlService.openChangeRequest — while a request in the rev
     const h = makeOpenHarness(rows);
     await h.svc.openChangeRequest('ali%2Fy', makeUser(), INPUT);
     expect(h.git.mergeFromOrigin).toHaveBeenCalledWith('ali%2Fy', 'ali/y', 'ali/x', expect.objectContaining({ email: 'alice@example.com' }));
+    // The merge fetches the target itself; no second fetch.
+    expect(h.git.fetch).not.toHaveBeenCalled();
   });
 
   it('an x→y opened at the same moment is seen: y→x waits for it, then skips the refresh', async () => {
