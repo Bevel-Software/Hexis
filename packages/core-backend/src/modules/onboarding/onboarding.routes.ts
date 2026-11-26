@@ -67,14 +67,16 @@ export function createOnboardingRoutes(
     try {
       res.json(await starterPacks.choose(user, id.trim()));
     } catch (err) {
-      if (err instanceof VersionControlDomainError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
       // The batch write's held-lock refusal: one of the pack's paths is
       // being written by someone else right now. Nothing was committed.
+      // Asked first: it is a domain error too, whose own sentence ("continuing
+      // with other edits") is not this answer.
       if (err instanceof PathHeldError) {
         res.status(409).json({ error: 'Someone is editing the knowledge base right now. Try again in a moment.' });
+        return;
+      }
+      if (err instanceof VersionControlDomainError) {
+        res.status(err.status).json({ error: err.message });
         return;
       }
       log.error('adding a starter pack failed:', { err });

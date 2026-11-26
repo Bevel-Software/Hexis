@@ -15,7 +15,7 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { GitInternalsError, VersionControlValidationError } from '../../shared/domain-errors.js';
+import { GitInternalsError, PushNeedsAgentResolutionError, VersionControlValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a version-control service, so this stays inside the module boundary.
 import {
@@ -692,7 +692,7 @@ async function planUpload(
 /**
  * Record on `entry` that this path was refused, saying what the gate that
  * refused it said. Four kinds of refusal count as one path's outcome: a
- * typed tool refusal (`exists`, `platform_file`, the mode gate), a permission
+ * typed tool refusal (`exists`, the mode gate), a permission
  * refusal (the caller may not write this path, where the DESTINATION was
  * writable), the git folder in any spelling, and a path-shape refusal from the
  * repository rules. Anything else
@@ -1189,8 +1189,9 @@ const isCallerRefusal = (err: unknown): err is Error & { status: number } =>
 /**
  * THE judge of an archive's entries (see `ArchiveEntryJudge`): the one the
  * agent `unzip` tool and the app's unzip route hand `unzipFile`, and the one
- * `apply_file_upload` asks about each path of an uploaded file. Per entry it
- * answers for:
+ * `apply_file_upload` asks about each path of an uploaded file. Of the archive
+ * itself it answers whether the caller may read it, refused as `read_file`
+ * refuses. Per entry it answers for:
  *
  *  - the path rules: inside the repository, never the git folder in any
  *    spelling, never the checkout's own name at the repository root;
@@ -1212,8 +1213,8 @@ const isCallerRefusal = (err: unknown): err is Error & { status: number } =>
  * `also` is the caller's own checks of each entry (the agent's write hook and
  * its run's write policy), asked after the path rules and the fixed-name rule;
  * what it throws is passed on as it is. A gate that fails rather than refuses
- * (anything but a 4xx), a folder's or a file's at its lock, is logged, and the
- * caller is told only that it could not be checked.
+ * (anything but a 4xx), the archive's read, a folder's or a file's at its
+ * lock, is logged, and the caller is told only that it could not be checked.
  */
 export function archiveEntryJudge(
   gates: { accessControl: IAccessControl; kb: KbContext; changeGate?: IChangeReadGate },
@@ -1251,6 +1252,17 @@ export function archiveEntryJudge(
     return new ToolError(what, 503);
   };
   return {
+    archive: async (wsPath) => {
+      try {
+        await assertCanRead(
+          { accessControl, kbDirName: kb.kbDirName, workspaceId: workspaceIdForBranch(branch), userEmail: email },
+          wsPath,
+        );
+      } catch (err) {
+        if (isCallerRefusal(err)) throw err;
+        throw unchecked('Whether this archive may be read could not be checked, so nothing was extracted.', wsPath, err);
+      }
+    },
     entry: async (wsPath, kind) => {
       // An entry that would land beside the repository is skipped with the
       // corrected-path reason, like any other refused entry.
@@ -1658,7 +1670,9 @@ export function registerWorkspaceTools(
    * preview answers `allowed: false` with the sentence and no `kind` or
    * `descendants`: those are the half of the impact the caller has to have
    * earned. The two `access` sides are the caller's own four verbs and tell
-   * them nothing they could not ask `file_stat` for.
+   * them nothing they could not ask `file_stat` for. Past the write verdict, a
+   * source the caller may not read is refused ({@link assertCopySourceReadable})
+   * before its kind or its files are looked at.
    */
   const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
     const fromTmp = isTmpRef(src);
@@ -1686,6 +1700,7 @@ export function registerWorkspaceTools(
         copied: false,
       };
     }
+    await assertCopySourceReadable(branch, ctx, src);
     const fs = await ctx.getFilesystem(branch);
     // A tmp ref names one file by rule: resolving it is the whole look, and
     // a folder or nothing there is refused by the resolver itself.
@@ -1714,6 +1729,21 @@ export function registerWorkspaceTools(
       dryRun: true,
       copied: false,
     };
+  };
+
+  /**
+   * `copy_file`'s source must be readable to the caller, refused as
+   * `read_file` refuses it and as `move_file` refuses its own source: a copy
+   * carries the source's bytes to a place the caller may read. The read hook
+   * is asked first, as `read_file` asks it. A staged file (`__tmp__/`) is the
+   * caller's own, not a file of the knowledge base, and is not asked. Asked
+   * once the write verdict on the destination has let the copy go on, in the
+   * order `copy_file` keeps (see `copyImpact`).
+   */
+  const assertCopySourceReadable = async (branch: string, ctx: ToolContext, src: string): Promise<void> => {
+    if (isTmpRef(src)) return;
+    await notifyAgentRead(agentAccessGate, ctx, branch, src);
+    await assertCanRead(readGateFor(branch, ctx), src);
   };
 
   /**
@@ -3196,8 +3226,8 @@ export function registerWorkspaceTools(
       // before any lock so an ordinary refusal never contends for one — but it
       // is a verdict about a path anyone may still change. The one the answer
       // carries is taken again inside `writeFile`, with the path's lock HELD
-      // (`write: true` guarantees the locking filesystem, as the batch cast
-      // below does): only there can `create` be sure it is not about to
+      // (`write: true` guarantees the locking filesystem; see
+      // `batchLandingOf`): only there can `create` be sure it is not about to
       // replace a file a human editor saved a moment ago, and `update` sure it
       // is not recreating one somebody just deleted. A filesystem without the
       // hook runs no second verdict, so the preflight one stands.
@@ -3633,23 +3663,16 @@ export function registerWorkspaceTools(
             message: `Nothing was deleted: "${path}" holds ${content.length} ${content.length === 1 ? 'file' : 'files'}, so deleting it requires confirm: true.`,
           };
         }
-        // ONE commit for the whole folder. `write: true` guarantees a
-        // LockingFilesystem here, and its `writeFiles` takes every path's lock
-        // BEFORE touching disk, deletes inside those locks and commits the set
-        // as a single change (fail-closed: a refusal commits nothing). A folder
+        // ONE commit for the whole folder, through the branch's batch
+        // (`batchLandingOf`): `writeFiles` takes every path's lock BEFORE
+        // touching disk, deletes inside those locks and commits the set as a
+        // single change (fail-closed: a refusal commits nothing). A folder
         // therefore never half-disappears, and its own `access.md` needs no
         // ordering trick to keep the rest governed on the way — nothing lands
         // until all of it does. The placeholders go too: this is the one
-        // operation that removes a folder. Structural cast, as `write_files`
-        // does, to avoid importing the version-control-internal class here.
+        // operation that removes a folder.
         if (files.length > 0) {
-          const batch = fs as unknown as {
-            writeFiles(
-              writes: { path: string; content: string }[],
-              summary: string,
-              deletes: string[],
-            ): Promise<unknown>;
-          };
+          const batch = await batchLandingOf(ctx, branch);
           await batch.writeFiles([], `Delete ${path} and its ${content.length} file(s)`, files);
         }
         // Git tracks no folders: once the files are gone, the shells left on
@@ -4066,6 +4089,7 @@ export function registerWorkspaceTools(
       // answered, which is exactly the oracle.
       const blockedDest = await writeBlocked(branch, ctx, [dest]);
       if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0]);
+      await assertCopySourceReadable(branch, ctx, src);
       const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
       if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
       // The copy itself lands exclusively (`COPYFILE_EXCL`, under the
@@ -4156,7 +4180,9 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const zipPath = a.path as string;
       // Opening the archive is a read of the archive, so the read hook hears
-      // about it before a single entry is extracted out of it.
+      // about it before a single entry is extracted out of it. Whether the
+      // caller may read it is the judge's `archive`, which the extraction
+      // asks before it reads a byte.
       await notifyAgentRead(agentAccessGate, ctx, a.branch as string, zipPath);
       const branch = a.branch as string;
       // The landing is the filesystem's batch: every entry's lock, then one
@@ -4199,8 +4225,10 @@ export function registerWorkspaceTools(
    * Each path is put to the archive judge `unzip` uses too (`archiveEntryJudge`:
    * the path rules, the platform's rule files, the run's write policy and the
    * deployment's write hook, and — through each path's lock — the write rule
-   * and read-before-write), then to the link rule and the `mode`, which is
-   * asked again under the lock, as `write_files` asks it. A path that fails one
+   * and read-before-write), then to the link rule. The `mode` is asked only
+   * under the lock, after the lock's gates (unlike `write_files`, which also
+   * asks it before), so a path those gates refuse is never answered `exists`
+   * or `missing`. A path that fails one
    * is that path's outcome and no more, with one exception the judge decides:
    * when one of the upload's own access rules (`access.md`, `.bevelignore`)
    * will not land, or the upload would land a `roles.yaml` or a groups file at
@@ -4250,14 +4278,6 @@ export function registerWorkspaceTools(
 
       const planned = await planUpload(upload, destination, kbDirName);
       const judge = agentArchiveJudge(ctx, branch);
-      // One batched access read for every path, before any is judged further:
-      // on a protected branch a path the caller may not write is refused as
-      // `write-denied` before its mode is, so an `exists` never tells them of a
-      // file there. Empty on a draft. The lock's own gates still decide each
-      // path that gets this far (`refusedAtLock`).
-      const blocked = new Set(
-        await writeBlocked(branch, ctx, planned.filter((p) => p.content !== undefined).map((p) => p.path)),
-      );
 
       const writes: { path: string; content: Buffer }[] = [];
       const outcomes: Record<string, unknown>[] = [];
@@ -4286,7 +4306,6 @@ export function registerWorkspaceTools(
         }
         const wsPathOf = item.path;
         try {
-          if (blocked.has(wsPathOf)) throw await writeRefusal(branch, wsPathOf);
           // The path rules (the git folder in any spelling, which a SINGLE
           // uploaded file's name has not met yet — `.git` is a name the upload
           // route's `validateFilename` accepts), the platform's rule files,
@@ -4303,12 +4322,6 @@ export function registerWorkspaceTools(
               { code: 'symlink' },
             );
           }
-          // An earlier entry of this same upload counts as existing, as it
-          // does in `write_files`: two `create` entries for one path are a
-          // mistake the commit would otherwise hide.
-          const exists =
-            writes.some((w) => w.path === wsPathOf) || (await kindOf(fs, wsPathOf)) !== null;
-          entry.outcome = decideWrite(mode, wsPathOf, exists);
           const write = { path: wsPathOf, content: item.content };
           writes.push(write);
           entryOf.set(write, entry);
@@ -4318,11 +4331,15 @@ export function registerWorkspaceTools(
         }
       }
 
-      // The mode gate again, with every path's lock held — the verdict the
-      // answer carries, for the reason `write_file` states at length. A path
-      // whose verdict changed under the lock is dropped from the batch and
-      // reported refused, leaving the rest to land — unless the judge says it
-      // refuses the upload, which then refuses the batch untouched.
+      // The mode gate, asked only here: with every path's lock held, for the
+      // reason `write_file` states at length, and after the lock's own gates.
+      // A path the lock's gates refuse (the write rule, read-before-write) is
+      // refused there (`refusedAtLock`) and never reaches this, so an
+      // `exists` answers only for a path those gates let the caller change.
+      // A path the mode refuses is dropped from the
+      // batch and reported refused, leaving the rest to land — unless the
+      // judge says it refuses the upload, which then refuses the batch
+      // untouched.
       const recheck = async (
         pending: readonly { path: string; content: Buffer }[],
       ): Promise<{ path: string; content: Buffer }[]> => {
@@ -4330,6 +4347,9 @@ export function registerWorkspaceTools(
         for (const write of pending) {
           const entry = entryOf.get(write) as Record<string, unknown>;
           try {
+            // An earlier entry of this same upload counts as existing, as it
+            // does in `write_files`: two `create` entries for one path are a
+            // mistake the commit would otherwise hide.
             const exists =
               kept.some((k) => k.path === write.path) || (await kindOf(fs, write.path)) !== null;
             entry.outcome = decideWrite(mode, write.path, exists);
@@ -4364,14 +4384,26 @@ export function registerWorkspaceTools(
         // recheck and the commit both, and in the same order the delete takes
         // its own (the folder's turn first, then each path's lock), which is
         // what keeps two callers from waiting on each other's half.
-        await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), destination, async () => {
-          await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck, refusedAtLock);
-        });
+        try {
+          await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), destination, async () => {
+            await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck, refusedAtLock);
+          });
+        } catch (err) {
+          // The commit landed and only its push needs resolution, as
+          // `unzipFile` treats it: the upload is landed, so its token is spent
+          // as a landed apply's is, and the caller is told why sharing waits.
+          if (err instanceof PushNeedsAgentResolutionError) {
+            spent = true;
+            await uploads.consume(token);
+          }
+          throw err;
+        }
       }
       // The token is spent once an ANSWER exists, even an answer in which
       // every path was refused: the apply ran and said what happened at each
       // path, and re-running it would say the same. Only a refusal that landed
-      // nothing AND answered nothing (thrown above) gives the token back.
+      // nothing AND answered nothing (thrown above) gives the token back; a
+      // commit that landed with its push pending spends it (above).
       spent = true;
       await uploads.consume(token);
       const listed = a.all === true ? outcomes : outcomes.slice(0, APPLY_ANSWER_CAP);
@@ -4444,8 +4476,8 @@ export function registerWorkspaceTools(
         'Returns `{ destination, count, total, files }`: one entry per path, each `{ path, outcome }` — `created` / ' +
         '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
         '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
-        'Every path is judged one by one as `write_file` judges it (binary is fine); a refused path does not stop the others, ' +
-        'except an `access.md` or `.bevelignore` the upload holds: then nothing lands, as when it holds `roles.yaml` or a groups file at the root. ' +
+        'Every path is judged one by one as `write_file` judges it (binary is fine); a refused path does not stop the others. ' +
+        'An `access.md` or `.bevelignore` lands with its files or nothing lands; `roles.yaml` or a groups file at the root refuses the whole upload. ' +
         'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
         'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
       inputs: {

@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
@@ -11,7 +11,7 @@ import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { GIT_INTERNALS_MESSAGE, GitInternalsError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
-import { LockingFilesystem, ReadOnlyFilesystem, WorkspaceMutex } from '../../kb-fs/index.js';
+import { LockingFilesystem, ReadOnlyFilesystem } from '../../kb-fs/index.js';
 import { ToolRegistry } from '../../tool-registry/index.js';
 import { createToolHandlerFactory, VersionControlHooks } from '../../../__tests__/tool-wiring.js';
 import type { ToolContext } from '../../tool-helpers/index.js';
@@ -30,11 +30,10 @@ import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import { createGitInternalsRouteGuard } from '../git-internals.middleware.js';
 import { hasGitInternalsSegment } from '../../../shared/git-internals.js';
-import { createDiffRoutes } from '../../diff/diff.routes.js';
-import { DiffService } from '../../diff/diff.service.js';
 import { WorkspaceService, type ArchiveLanding } from '../workspace.service.js';
 import { RipgrepPatternMatcher } from '../index.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
+import { gitFolderFileSpellings } from '../../../__tests__/git-folder-spellings.js';
 
 /** The grep matcher this file's harness wires, closed once the file is done. */
 const patternMatcher = new RipgrepPatternMatcher();
@@ -58,50 +57,8 @@ const BRANCH = 'main';
 const WS = workspaceIdForBranch(BRANCH);
 const USER = { id: 'user-1', email: 'alice@example.com', name: 'Alice' };
 
-/** Every spelling of a path INSIDE the git folder. `symlinked` goes through `knowledge-base/gitlink -> .git`. */
-function fileForms(name: string): Record<string, string> {
-  return {
-    plain: `${KB}/.git/${name}`,
-    'leading slash': `/${KB}/.git/${name}`,
-    dotted: `${KB}/Notes/../.git/${name}`,
-    'dot segments': `./${KB}/./.git/${name}`,
-    // The five families production measured answering the path rule's 400
-    // instead of this rule's 403 (parent-climb, dot-segment, backslash,
-    // climb-out, absolute). `dotted`, `dot segments` and `backslashed` above
-    // are three of them; these are the two the set was missing.
-    'climb-out': `../${KB}/.git/${name}`,
-    // Production's own spelling, kept verbatim: it names a directory that
-    // exists on no test machine, so it is the LEXICAL half this covers.
-    absolute: `/app/apps/server/workspaces/main/${KB}/.git/${name}`,
-    // The same family pointed at this run's workspace, so the resolved half
-    // is exercised too — the folder it names is really there.
-    'absolute, in workspace': `{{WORKSPACE_DIR}}/${KB}/.git/${name}`,
-    encoded: `${KB}/%2egit/${name}`,
-    'double-encoded': `${KB}/%252Egit/${name}`,
-    'upper-case': `${KB}/.GIT/${name}`,
-    'mixed-case': `${KB}/.Git/${name}`,
-    backslashed: `${KB}\\.git\\${name}`,
-    symlinked: `${KB}/gitlink/${name}`,
-    // A LINK into the folder, reached through each of those same five
-    // spellings. Nothing in these names is `.git`, so only the resolved half
-    // of the rule sees them — and while that half ran after the normaliser,
-    // every one of them was answered by the path rule instead. This is the
-    // shape that has now broken twice; it is spelled out per family so a
-    // failure names the one that regressed.
-    'symlinked, parent-climb': `${KB}/Notes/../gitlink/${name}`,
-    'symlinked, dot segments': `./${KB}/./gitlink/${name}`,
-    'symlinked, backslashed': `${KB}\\gitlink\\${name}`,
-    'symlinked, climb-out': `../${KB}/gitlink/${name}`,
-    'symlinked, absolute': `{{WORKSPACE_DIR}}/${KB}/gitlink/${name}`,
-    'symlinked, chained link': `${KB}/Notes/../chained/${name}`,
-    // A link named `..link` sitting in the WORKSPACE root: relative to the
-    // root this rule judges against, the spelling begins with `..`, which is
-    // the one shape a `startsWith('..')` climb test swallows. Spelled from
-    // anywhere else (`knowledge-base/..link/…`) it never begins with `..` and
-    // pins nothing.
-    'symlinked, dotted name at the root': `..link/${name}`,
-  };
-}
+/** Every spelling of a path INSIDE the git folder (see `gitFolderFileSpellings`). `symlinked` goes through `knowledge-base/gitlink -> .git`. */
+const fileForms = (name: string): Record<string, string> => gitFolderFileSpellings(KB, name);
 
 /**
  * The absolute forms name the workspace on disk, which only exists once the
@@ -439,10 +396,9 @@ describe('workspace routes refuse the git folder', () => {
       (req as unknown as { userId: string }).userId = USER.id;
       next();
     });
-    const diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, realDisk());
     // Exactly the production mounting: ONE guard for the whole prefix, ahead
-    // of every router under it — so the review routes are covered by the fact
-    // of their path, not by their own guard.
+    // of every router under it. (The review routes under the same prefix are
+    // held to it in `diff/__tests__/git-internals.security.test.ts`.)
     app.use('/api/workspace/:id', createGitInternalsRouteGuard(service));
     app.use(
       '/api',
@@ -456,16 +412,6 @@ describe('workspace routes refuse the git folder', () => {
         stubCreatorAccess,
         { isAdmin: async () => true } as unknown as IAdminAccessService,
         realDisk(),
-      ),
-    );
-    app.use(
-      '/api',
-      createDiffRoutes(
-        diffService,
-        { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
-        versionControl as unknown as IVersionControlService,
-        allowAll,
-        KB,
       ),
     );
     ({ server, baseUrl } = await listen(app));
@@ -497,9 +443,6 @@ describe('workspace routes refuse the git folder', () => {
         body: Buffer.from('payload'),
       })],
     ['unzip archive (POST /unzip)', (p) => json('POST', `${baseUrl}/api/workspace/${WS}/unzip`, { path: zipForm(p) })],
-    ['review diff (GET /review/file)', (p) => fetch(`${baseUrl}/api/workspace/${WS}/review/file?path=${q(p)}`)],
-    ['review accept (POST /review/accept)', (p) => json('POST', `${baseUrl}/api/workspace/${WS}/review/accept`, { path: p })],
-    ['review reject (POST /review/reject)', (p) => json('POST', `${baseUrl}/api/workspace/${WS}/review/reject`, { path: p })],
   ];
   const dirRoutes: Array<[string, (p: string) => Promise<Response>]> = [
     ['mkdir (POST /directory)', (p) => json('POST', `${baseUrl}/api/workspace/${WS}/directory`, { path: `${p}/new-dir` })],
@@ -794,60 +737,6 @@ describe('the route guard on its own', () => {
     const res = await fetch(`${baseUrl}/api/workspace/${WS}/anything?path=${encodeURIComponent(`${KB}/Notes/a.md`)}`);
     expect(res.status).toBe(200);
     expect(reached).toBe(1);
-  });
-});
-
-describe('DiffService refuses the git folder on its own', () => {
-  let diffService: DiffService;
-
-  beforeEach(() => {
-    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), realDisk());
-    diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, realDisk());
-  });
-
-  afterEach(async () => {
-    expect(await snapshotGit()).toBe(gitSnapshot);
-  });
-
-  const ops: Array<[string, (p: string) => Promise<unknown>]> = [
-    ['fileDiff', (p) => diffService.fileDiff(WS, p)],
-    ['acceptOne', (p) => diffService.acceptOne(WS, p)],
-    ['rejectOne', (p) => diffService.rejectOne(WS, p)],
-    ['syncFromDisk', (p) => diffService.syncFromDisk(WS, p)],
-    ['markUserDeleted', (p) => diffService.markUserDeleted(WS, p)],
-    ['revertPlan', (p) => diffService.revertPlan(WS, [p])],
-  ];
-
-  for (const [name, run] of ops) {
-    it.each(Object.entries(FILE_FORMS))(`${name} — %s form`, async (_form, raw) => {
-      const p = resolved(raw);
-      await expect(run(p)).rejects.toBeInstanceOf(GitInternalsError);
-    });
-  }
-
-  it('a refused fileDiff on a fresh workspace seeds nothing — the refusal comes before the ledger', async () => {
-    await expect(diffService.fileDiff(WS, `${KB}/.git/config`)).rejects.toMatchObject({ status: 403 });
-    // Through a link as well: the resolved form is judged before the seed too.
-    await symlink('.git', join(workspaceDir, KB, 'gitlink-diff'));
-    await expect(diffService.fileDiff(WS, `${KB}/gitlink-diff/config`)).rejects.toMatchObject({ status: 403 });
-    await expect(stat(join(root, 'backups'))).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-
-  it('a legacy git entry in the backup ledger is not listed, and its content never comes back', async () => {
-    // A ledger seeded before the rule existed: the backup side holds the git
-    // folder. Listing must not pair it with the workspace path and read it out.
-    const backupKb = join(root, 'backups', WS, KB);
-    await mkdir(join(backupKb, '.GIT'), { recursive: true });
-    await writeFile(join(backupKb, '.GIT', 'config'), '[credential]\n\thelper = store\n');
-    await mkdir(join(backupKb, 'Notes'), { recursive: true });
-    await writeFile(join(backupKb, 'Notes', 'a.md'), '# A\nhelper\n');
-
-    const session = await diffService.currentSession(WS);
-    expect(JSON.stringify(session ?? {})).not.toMatch(/\.GIT|credential/);
-  });
-
-  it('an ordinary file still diffs', async () => {
-    await expect(diffService.fileDiff(WS, `${KB}/Notes/a.md`)).resolves.toMatchObject({ path: `${KB}/Notes/a.md` });
   });
 });
 

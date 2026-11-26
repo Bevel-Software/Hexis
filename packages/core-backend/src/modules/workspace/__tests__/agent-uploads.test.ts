@@ -14,7 +14,8 @@ import type { ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import { AccessDeniedError, toKbRelative } from '../../access-model/index.js';
-import { normalizeWorkspacePath } from '../../kb-fs/index.js';
+import { normalizeWorkspacePath, PathHeldError } from '../../kb-fs/index.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
@@ -107,6 +108,10 @@ let folderTurnGate: Promise<void> | undefined;
  */
 let folderTurnAsked: Promise<void>;
 let announceFolderTurnAsked: () => void;
+/** When set, someone of this name holds a lock the next batch needs: it is refused whole, nothing written. */
+let lockHeldBy: string | undefined;
+/** When set, the next batch's commit lands and its push needs resolution. */
+let pushNeedsResolution = false;
 
 interface StartOptions {
   access?: IAccessControl;
@@ -145,6 +150,8 @@ async function start(options: StartOptions = {}): Promise<string> {
     turnsHeld = 0;
     folderTurnGate = undefined;
     folderTurnAsked = new Promise<void>((resolve) => (announceFolderTurnAsked = resolve));
+    lockHeldBy = undefined;
+    pushNeedsResolution = false;
   }
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
   // The harness speaks the paths the TOOLS speak: a fixture written here as
@@ -167,6 +174,10 @@ async function start(options: StartOptions = {}): Promise<string> {
    * paths "locked", just before any byte lands) and writes only what the
    * check keeps. Content arrives as a Buffer from an apply, and is written
    * through untouched — which is the property byte-for-byte landing rests on.
+   * As the real batch does, a lock another holds (`lockHeldBy`) refuses it
+   * with `PathHeldError` before anything is written, and a commit whose push
+   * needs resolution (`pushNeedsResolution`) throws that error once the files
+   * are written.
    */
   const batchOn = (branch: string) => async (
     writes: { path: string; content: string | Buffer }[],
@@ -192,6 +203,7 @@ async function start(options: StartOptions = {}): Promise<string> {
       if (await access.canRead(ws, userEmail, rel)) return null;
       return new AccessDeniedError({ path: wsPath, eligibleRoles: [], eligibleUsers: [], unreadable: rel });
     };
+    if (lockHeldBy !== undefined) throw new PathHeldError([...writes.map((w) => w.path), ...deletes].sort()[0], lockHeldBy);
     let locked = writes;
     for (const w of [...writes].sort((x, y) => (x.path < y.path ? -1 : 1))) {
       const refusal = await lockRefusal(w.path);
@@ -205,6 +217,9 @@ async function start(options: StartOptions = {}): Promise<string> {
     batchTurnDepth.push(turnsHeld);
     for (const w of landing) await plainWriteFile(w.path, w.content as never);
     for (const p of deletes) await fs.deleteFile(p);
+    if (pushNeedsResolution && landing.length > 0) {
+      throw new PushNeedsAgentResolutionError(branch, landing[0].path, 'rejected', 'retry later', 'refused');
+    }
   };
   /** The filesystem a tool on `branch` writes through: this one, with the batch for that branch. */
   const filesystemOn = (branch: string): LocalFilesystem =>
@@ -1081,6 +1096,21 @@ describe('apply_file_upload', () => {
     expect(batches).toEqual([[`${KB_DIR}/open.md`]]);
   });
 
+  // Scenario: on a draft, the path in the folder the caller cannot read already holds a file, and `mode` is left out.
+  it('refuses a path in a folder the caller cannot read as `write-denied`, not `exists`, when a file is there, and lands the others', async () => {
+    const sealed = { ...allowAll, canRead: async (_w: string, _u: string, rel: string) => !rel.startsWith('Sealed/') } as unknown as IAccessControl;
+    const base = await start({ access: sealed });
+    await mkdir(join(tempDir, KB_DIR, 'Sealed'), { recursive: true });
+    await writeFile(join(tempDir, KB_DIR, 'Sealed/peek.md'), 'theirs\n');
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'open.md': 'open', 'Sealed/peek.md': 'mine' }));
+    const answer = await apply(base, { branch: DRAFT, token, destination: KB_DIR });
+    expect(outcomeAt(answer, `${KB_DIR}/Sealed/peek.md`)).toMatchObject({ outcome: 'refused', error: 'write-denied' });
+    expect(outcomeAt(answer, `${KB_DIR}/open.md`)).toMatchObject({ outcome: 'created' });
+    expect(answer.count).toBe(1);
+    expect(await readFile(join(tempDir, KB_DIR, 'Sealed/peek.md'), 'utf8')).toBe('theirs\n');
+  });
+
   it('refuses the whole upload when its access.md is in a folder the caller cannot read, and lands nothing', async () => {
     const sealed = { ...allowAll, canRead: async (_w: string, _u: string, rel: string) => !rel.startsWith('Sealed/') } as unknown as IAccessControl;
     const base = await start({ access: sealed });
@@ -1360,6 +1390,37 @@ describe('a token is good once, for one user, for a limited time', () => {
     expect(second.status).toBe(404);
     expect((await json<{ error: string }>(second)).error).toBe(UPLOAD_TOKEN_REFUSAL);
     expect(await readdir(join(tempDir, KB_DIR))).toEqual(['One']);
+  });
+
+  it('is spent by an apply whose commit lands and whose push needs resolution', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'a.md', Buffer.from('a'));
+    pushNeedsResolution = true;
+    const first = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: `${KB_DIR}/One` });
+    expect(first.status).toBe(409);
+    expect((await json<{ kind?: string }>(first)).kind).toBe('push-needs-resolution');
+    expect(await readFile(join(tempDir, KB_DIR, 'One/a.md'), 'utf8')).toBe('a');
+    pushNeedsResolution = false;
+    // Landed, so a retry is the token used twice, not a second landing elsewhere.
+    const second = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: `${KB_DIR}/Two` });
+    expect(second.status).toBe(404);
+    expect((await json<{ error: string }>(second)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    expect(await readdir(join(tempDir, KB_DIR))).toEqual(['One']);
+  });
+
+  it('survives an apply refused because someone else holds one of its paths: a 409 naming it, nothing landed', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'a.md': 'a', 'b.md': 'b' }));
+    lockHeldBy = 'Bo';
+    const held = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: `${KB_DIR}/Held` });
+    expect(held.status).toBe(409);
+    expect(await json<{ kind?: string; path?: string }>(held)).toMatchObject({ kind: 'path-held', path: `${KB_DIR}/Held/a.md` });
+    expect(batches).toEqual([]);
+    await expect(readdir(join(tempDir, KB_DIR, 'Held'))).rejects.toThrow();
+    lockHeldBy = undefined;
+    expect((await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Held` })).count).toBe(2);
   });
 
   it('deletes the stored bytes once it has been applied', async () => {

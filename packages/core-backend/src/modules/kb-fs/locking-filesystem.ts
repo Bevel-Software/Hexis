@@ -48,7 +48,7 @@ import {
   type WriteOptions,
 } from '@mastra/core/workspace';
 import type { AuthUser, Change, IVersionControlService } from '@bevel-software/platform-shared';
-import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
+import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../shared/no-link-below.js';
@@ -69,11 +69,14 @@ const FALLBACK_LEASE_MS = 60_000;
 
 /**
  * A write could not take `path`'s lock: another holder kept it past the
- * retries, and nothing of that write was written. The message is the sentence
- * the agent tools have always relayed; a caller that answers in its own words
- * reads `path` and `holderName` rather than the message.
+ * retries, and nothing of that write was written. A 409 whose payload is
+ * `{ kind: 'path-held', path }`, so a route or tool that passes it on answers
+ * it as the conflict it is. The message is the sentence the agent tools have
+ * always relayed; a caller that answers in its own words reads `path` and
+ * `holderName` rather than the message.
  */
-export class PathHeldError extends Error {
+export class PathHeldError extends VersionControlDomainError {
+  readonly kind = 'path-held' as const;
   constructor(
     readonly path: string,
     readonly holderName: string | null,
@@ -81,6 +84,8 @@ export class PathHeldError extends Error {
     super(
       `Skipped editing "${path}" — locked by ${holderName ?? 'another user'}. ` +
         'Continuing with other edits; try this one again later.',
+      409,
+      { kind: 'path-held', path },
     );
     this.name = 'PathHeldError';
   }
@@ -714,8 +719,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * Every lock the batch holds is renewed (`heartbeatLock`) every third of the
    * lease it was granted until the batch gives it back, so a batch that runs
    * past one lease — thousands of acquires, a large write, the commit and its
-   * push — still holds its paths when it commits and releases. A renewal that
-   * fails is logged, and the next one is tried a third of a lease later.
+   * push — keeps renewing its paths' leases while it holds them. A renewal
+   * that fails is only logged, and the next one is tried a third of a lease
+   * later: a lease that lapses meanwhile is not detected, and the batch
+   * commits and releases as it would have.
    *
    * `writes[].path` is workspace-relative (like `writeFile`). We do the disk
    * write here; `commitChanges` only stages + commits what's on disk (the git

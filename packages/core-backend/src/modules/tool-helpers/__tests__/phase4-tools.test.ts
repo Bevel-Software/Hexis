@@ -119,7 +119,7 @@ describe('Phase 4 tools (core subset)', () => {
     expect(recorded).toContainEqual(['unzip', WS, 'knowledge-base/a.zip', undefined]);
   });
 
-  it('unzip refuses an archive carrying a roles.yaml whole — extraction bypasses the filesystem gate that checks it', async () => {
+  it('unzip refuses an archive carrying a root roles.yaml whole: the archive judge never lands one from an archive', async () => {
     archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/roles.yaml'];
     const base = await start();
     const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
