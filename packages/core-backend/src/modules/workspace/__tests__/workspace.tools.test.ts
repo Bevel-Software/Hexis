@@ -4605,6 +4605,24 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(json.error).toContain('you cannot read this path');
   });
 
+  // The QA finding behind this: on a draft the branch sentence masked the
+  // no-read one, sending the agent to another branch for the same refusal.
+  // A move must read what it moves, so an unreadable source is a read
+  // refusal before any write is judged: it has no write-denied answer.
+  it.each(CALLS.filter(([tool]) => tool !== 'move_file'))('%s: without read access the no-read sentence wins on a branch that takes no change requests too', async (tool, body) => {
+    const { ac } = readVerdict(false);
+    const base = await start('write', ac);
+    await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
+    await fs.writeFile(DENIED, 'old text\n');
+    await freeDestinationFor(tool);
+    denyWrites();
+    const { status, json } = await call(base, tool, { ...body, branch: 'someone/draft' });
+    expect(status).toBe(403);
+    expect(json).toMatchObject({ kind: 'write-denied', canPropose: false });
+    expect(json.proposal).toBeUndefined();
+    expect(json.cannotProposeReason).toBe('Proposing is not available: you cannot read this path.');
+  });
+
   it('on a branch that takes no change requests the denial says the branch is not proposable', async () => {
     const { ac } = readVerdict(true);
     const base = await start('write', ac);
