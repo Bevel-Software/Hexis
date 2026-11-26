@@ -1186,12 +1186,13 @@ export async function createHexisMcpServer(
    * instructions route is not asked, because its unknown `/api/*` path answers
    * 401 to every key, which would read as a revocation.
    */
-  const confirmKeyBeforeServing = async (): Promise<void> => {
+  const confirmKeyBeforeServing = (): Promise<void> | undefined => {
     if (keyRejected) throw new McpError(ErrorCode.InternalError, REVOKED_KEY_SENTENCE);
-    if (!agentInstructions) return;
-    try {
-      await confirmConnectionKey(config);
-    } catch (err) {
+    // Nothing to ask, so nothing to await: a server going away serves nothing
+    // either way and each caller says so itself, and even one extra tick would
+    // let a closing transport answer a parked request first.
+    if (closed || !agentInstructions) return undefined;
+    return confirmConnectionKey(config).catch((err: unknown) => {
       if (err instanceof ConnectionKeyRejectedError) {
         if (!keyRejected) {
           keyRejected = true;
@@ -1207,7 +1208,7 @@ export async function createHexisMcpServer(
       // through renewal.ts, and each caller answers it right after this gate,
       // in the words it uses for that case. Anything else is unconfirmed, not
       // refused (see above). Either way there is nothing more to say here.
-    }
+    });
   };
 
   try {
@@ -1248,7 +1249,8 @@ export async function createHexisMcpServer(
       // Before anything that could ask the workspace: nothing is left to ask it with.
       if (signInRefused !== null) return answered({ tools: [] });
       await ready;
-      await confirmKeyBeforeServing();
+      const confirmingForList = confirmKeyBeforeServing();
+      if (confirmingForList) await confirmingForList;
       if (signInRefused !== null) return answered({ tools: [] });
       // A listing is the one moment a stale toolset is answered out loud, so
       // the check is AWAITED here: the list handed back is the current one, a
@@ -1335,7 +1337,8 @@ export async function createHexisMcpServer(
       while (reregisterInProgress) await reregisterInProgress;
       // Asked after every wait above, so nothing between the answer and the
       // dispatch below can outlast a revocation.
-      await confirmKeyBeforeServing();
+      const confirming = confirmKeyBeforeServing();
+      if (confirming) await confirming;
       // The sign-in may have ended while this call waited.
       if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       // Shutdown can land while a call waits here, and `shutdown` waits only

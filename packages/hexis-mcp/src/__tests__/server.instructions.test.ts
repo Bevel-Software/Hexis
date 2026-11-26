@@ -102,6 +102,8 @@ afterAll(async () => {
  */
 async function handshake(): Promise<{
   instructions: string | undefined;
+  /** Reads of the instructions route made by the handshake, before any request. */
+  handshakeReads: number;
   toolNames: string[];
   stderr: string[];
   shutdown: () => Promise<void>;
@@ -121,8 +123,11 @@ async function handshake(): Promise<{
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await handle.server.connect(serverTransport);
     await client.connect(clientTransport);
+    // Counted before the listing, which reads the same route once more to
+    // confirm the connection key is still live (see server.revoked-key.test.ts).
+    const handshakeReads = instructionsRequests;
     const { tools } = await client.listTools();
-    return { instructions: client.getInstructions(), toolNames: tools.map((t) => t.name), stderr, shutdown };
+    return { instructions: client.getInstructions(), handshakeReads, toolNames: tools.map((t) => t.name), stderr, shutdown };
   } catch (err) {
     await shutdown();
     throw err;
@@ -134,7 +139,7 @@ describe('agent instructions at the bridge handshake', () => {
     const h = await handshake();
     try {
       expect(h.instructions).toBe(INSTRUCTIONS);
-      expect(instructionsRequests).toBe(1);
+      expect(h.handshakeReads).toBe(1);
       expect(h.stderr.some((l) => l.includes('predates agent instructions'))).toBe(false);
     } finally {
       await h.shutdown();
@@ -158,7 +163,7 @@ describe('agent instructions at the bridge handshake', () => {
     const h = await handshake();
     try {
       expect(h.instructions).toBeUndefined();
-      expect(instructionsRequests).toBe(1);
+      expect(h.handshakeReads).toBe(1);
       expect(h.stderr.some((l) => l.includes('could not fetch the agent instructions'))).toBe(true);
       // "Still serves": a real tools/list round-trip answers with the toolset.
       expect(h.toolNames).toEqual(expect.arrayContaining(['call_tool_chain', 'list_tools', 'tools_info']));
