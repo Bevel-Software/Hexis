@@ -25,25 +25,18 @@ export class DownstreamToolError extends Error {
   }
 
   /**
-   * The same failure with every secret `redactor` holds taken out of its words:
-   * every string anywhere in every content block, and the message. Then the
-   * fields the MCP spec defines as something other than text the server wrote
-   * are put back as they came: a block's `type`, `mimeType` and binary `data`
-   * (an image, audio), and an embedded resource's `mimeType` and binary
-   * `blob`. By position, so a field of the same name elsewhere (`_meta.data`)
-   * is redacted like any other string.
+   * The same failure with every secret `redactor` holds taken out of it. Each
+   * content block is rebuilt from the fields the MCP spec gives its kind
+   * ({@link BLOCK_FIELDS}), so no key the server chose (`_meta`, an extension)
+   * is passed on, and a block of a kind the spec does not name is left out.
+   * Every string in those fields is redacted, except what is not text the
+   * server wrote ({@link AS_SENT}: a kind, a MIME type, binary data, a size, a
+   * priority). The message is redacted too.
    */
   redactedWith(redactor: SecretRedactor): DownstreamToolError {
-    const content = this.content.map((block) => {
-      const redacted = redactStrings(block, redactor) as Record<string, unknown>;
-      const original = block as Record<string, unknown>;
-      for (const key of ['type', 'mimeType', 'data']) if (key in original) redacted[key] = original[key];
-      const resource = original.resource as Record<string, unknown> | undefined;
-      if (block.type === 'resource' && resource && typeof resource === 'object') {
-        const kept = redacted.resource as Record<string, unknown>;
-        for (const key of ['mimeType', 'blob']) if (key in resource) kept[key] = resource[key];
-      }
-      return redacted as typeof block;
+    const content = this.content.flatMap((block) => {
+      const fields = BLOCK_FIELDS[block.type];
+      return fields ? [specFields(block, fields, redactor) as typeof block] : [];
     });
     return new DownstreamToolError(redactor.redact(this.message), content);
   }
@@ -60,12 +53,34 @@ export class DownstreamToolError extends Error {
   }
 }
 
-/** `value` with `redactor` applied to every string in it, at any depth. */
-function redactStrings(value: unknown, redactor: SecretRedactor): unknown {
-  if (typeof value === 'string') return redactor.redact(value);
-  if (Array.isArray(value)) return value.map((item) => redactStrings(item, redactor));
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, redactStrings(field, redactor)]));
+/** The fields the MCP spec gives each kind of content block, and the nested objects within them. */
+const BLOCK_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  text: ['type', 'text', 'annotations'],
+  image: ['type', 'data', 'mimeType', 'annotations'],
+  audio: ['type', 'data', 'mimeType', 'annotations'],
+  resource_link: ['type', 'uri', 'name', 'title', 'description', 'mimeType', 'size', 'annotations'],
+  resource: ['type', 'resource', 'annotations'],
+};
+const NESTED_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  resource: ['uri', 'mimeType', 'text', 'blob'],
+  annotations: ['audience', 'priority', 'lastModified'],
+};
+/** Fields passed on as they came: not text the server wrote. */
+const AS_SENT = new Set(['type', 'mimeType', 'data', 'blob', 'size', 'priority']);
+
+/** `object` reduced to `fields`, each string redacted unless it is {@link AS_SENT}. */
+function specFields(object: object, fields: readonly string[], redactor: SecretRedactor): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (!(field in object)) continue;
+    const value = (object as Record<string, unknown>)[field];
+    const nested = NESTED_FIELDS[field];
+    if (AS_SENT.has(field)) out[field] = value;
+    else if (nested && value && typeof value === 'object' && !Array.isArray(value)) out[field] = specFields(value, nested, redactor);
+    else if (typeof value === 'string') out[field] = redactor.redact(value);
+    else if (Array.isArray(value)) out[field] = value.filter((item) => typeof item === 'string').map((item) => redactor.redact(item));
+  }
+  return out;
 }
 
 /** What a result says when it reports its own failure, or null when it does not. */

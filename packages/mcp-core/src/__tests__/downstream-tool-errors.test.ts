@@ -68,27 +68,36 @@ describe('downstreamErrorText', () => {
 });
 
 describe('DownstreamToolError.redactedWith', () => {
-  it('takes the secret out of every string the server wrote, and leaves only the binary and typed fields', () => {
+  it('passes on only the fields the spec names, the secret out of every string the server wrote', () => {
     const KEY = 'sk-live-1234567890abcdef';
     const redactor = new SecretRedactor();
     redactor.remember(KEY);
     // A binary payload that happens to spell the key is not text: it passes as it came.
     const failure = new DownstreamToolError(`refused ${KEY}`, [
-      { type: 'text', text: `key ${KEY}`, annotations: { audience: ['user'] }, _meta: { data: KEY } },
+      {
+        type: 'text',
+        text: `key ${KEY}`,
+        annotations: { audience: ['user'], priority: 1, [KEY]: 'x' },
+        _meta: { data: KEY, [KEY]: 'x' },
+        [`x-${KEY}`]: 'an extension key',
+      },
       { type: 'resource_link', uri: `https://x.example/?k=${KEY}`, name: 'link', description: `uses ${KEY}` },
-      { type: 'resource', resource: { uri: `https://x.example/${KEY}`, text: KEY } },
+      { type: 'resource', resource: { uri: `https://x.example/${KEY}`, text: KEY, [KEY]: 'x' } },
       { type: 'resource', resource: { uri: 'file:///a', mimeType: 'application/octet-stream', blob: KEY } },
       { type: 'image', data: KEY, mimeType: 'image/png' },
-    ] as CallToolResult['content']);
+      { type: `kind-${KEY}`, note: KEY },
+    ] as unknown as CallToolResult['content']);
     const redacted = failure.redactedWith(redactor);
     expect(redacted.message).toBe('refused [redacted]');
     expect(redacted.content).toEqual([
-      { type: 'text', text: 'key [redacted]', annotations: { audience: ['user'] }, _meta: { data: '[redacted]' } },
+      { type: 'text', text: 'key [redacted]', annotations: { audience: ['user'], priority: 1 } },
       { type: 'resource_link', uri: 'https://x.example/?k=[redacted]', name: 'link', description: 'uses [redacted]' },
       { type: 'resource', resource: { uri: 'https://x.example/[redacted]', text: '[redacted]' } },
       { type: 'resource', resource: { uri: 'file:///a', mimeType: 'application/octet-stream', blob: KEY } },
       { type: 'image', data: KEY, mimeType: 'image/png' },
     ]);
+    // The key is left only in the two binary payloads, nowhere a server-chosen key could carry it.
+    expect(JSON.stringify(redacted.content).split(KEY)).toHaveLength(3);
   });
 });
 
