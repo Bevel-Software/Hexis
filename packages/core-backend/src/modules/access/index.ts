@@ -16,3 +16,6 @@ export { accessRoster, resolveAccessView } from './access-view.js';
 export { sendError } from './admin-route-helpers.js';
 export { DIRECTORY_SYNC_BOT_EMAIL } from './directory-sync-bot.js';
 export type { UserAccessRemovalService } from './user-access-removal.service.js';
+// The start of a file up to its frontmatter's end, as the access gate reads a
+// file's own entries: for a module that must tell whether those entries changed.
+export { frontmatterHead, frontmatterHeadOfBytes } from './frontmatter-head.js';

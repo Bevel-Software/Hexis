@@ -26,8 +26,8 @@ import { FolderTooLargeError, type ReadTreeFilter, EntryExistsError, type Worksp
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { AuthService } from '../auth/index.js';
-import type { IAccessControl } from '../access/index.js';
-import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable, decidesListing, fencedHead, hasAccessFrontmatterExtension } from '../access-model/index.js';
+import { frontmatterHead, type IAccessControl } from '../access/index.js';
+import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable, decidesListing, fencedHead } from '../access-model/index.js';
 import type { ICreatorAccess, IChangeReadGate } from '../access-model/index.js';
 import type { VersionControlEventBus } from '../version-control/index.js';
 import { PathTraversalError, VersionControlDomainError } from '../../shared/domain-errors.js';
@@ -402,16 +402,18 @@ export function createWorkspaceRoutes(
   /**
    * What a listing depends on at `targetPath` as it is on disk now: `null`
    * when there is no file there (nothing, a folder, a link, a path outside
-   * the repository), otherwise the file's leading `---` block when its kind
-   * can carry access entries, and `''` when it cannot. Two equal answers
-   * around a write mean the write added and removed nothing and changed
-   * nobody's access through this file's own entries.
+   * the repository), otherwise the file's leading `---` block, read as the
+   * access gate reads a file's own entries: for every kind of file, not only
+   * the kinds whose entries the memo keeps, because a `.txt` or `.csv` that
+   * opens with one is enforced too. Two equal answers around a write mean the
+   * write added and removed nothing and changed nobody's access through this
+   * file's own entries.
    */
   async function listingProbe(workspaceId: string, targetPath: string): Promise<string | null> {
     try {
       const absolute = await absoluteInRepo(workspaceId, targetPath);
       if (!(await fs.lstat(absolute)).isFile()) return null;
-      return hasAccessFrontmatterExtension(targetPath) ? fencedHead(await fs.readFile(absolute, 'utf-8')) : '';
+      return fencedHead(await frontmatterHead(absolute));
     } catch {
       return null;
     }

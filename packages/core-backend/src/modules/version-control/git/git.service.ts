@@ -24,8 +24,8 @@ import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
-import type { IAccessControl } from '../../access/index.js';
-import { AccessDeniedError, PushAccessRefusedError, fencedHead, hasAccessFrontmatterExtension } from '../../access-model/index.js';
+import { frontmatterHead, frontmatterHeadOfBytes, type IAccessControl } from '../../access/index.js';
+import { AccessDeniedError, PushAccessRefusedError, fencedHead } from '../../access-model/index.js';
 import { canonicalEmail } from '../../../shared/email-identity.js';
 import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
@@ -1383,9 +1383,11 @@ export class GitService implements IGitService {
    * turned into another kind of entry (`T`). Anything else, or more than one
    * line, answers `undefined`.
    *
-   * For a file whose own frontmatter can carry access entries, the leading
-   * `---` block on disk is compared with the one at HEAD, which costs one
-   * read of the old bytes; a comparison that fails counts as changed.
+   * The file's leading `---` block on disk is compared with the one at HEAD,
+   * each read as the access gate reads a file's own entries (its start, up to
+   * the frontmatter's end). That is for every kind of file: the gate enforces
+   * a `.txt` or `.csv` that opens with one too. A comparison that fails
+   * counts as changed.
    */
   private async contentEditOf(
     cwd: string,
@@ -1396,13 +1398,13 @@ export class GitService implements IGitService {
     if (lines.length !== 1) return undefined;
     const code = lines[0]!.slice(0, 2);
     if (!/^(?: M|M |MM)$/.test(code)) return undefined;
-    if (!hasAccessFrontmatterExtension(repoRelativePath)) return { frontmatterChanged: false };
     try {
-      const [{ stdout: before }, after] = await Promise.all([
-        this.git(cwd, ['show', `HEAD:${repoRelativePath}`]),
-        fs.readFile(path.join(cwd, repoRelativePath), 'utf-8'),
+      const [before, after] = await Promise.all([
+        this.blobAtRef(cwd, 'HEAD', repoRelativePath),
+        frontmatterHead(path.join(cwd, repoRelativePath)),
       ]);
-      return { frontmatterChanged: fencedHead(before) !== fencedHead(after) };
+      if (!before) return { frontmatterChanged: true };
+      return { frontmatterChanged: fencedHead(frontmatterHeadOfBytes(before.bytes)) !== fencedHead(after) };
     } catch {
       return { frontmatterChanged: true };
     }
