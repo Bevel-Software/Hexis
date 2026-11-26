@@ -51,6 +51,7 @@ import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 import {
   callKbTool,
   ConnectionKeyRejectedError,
+  DeploymentError,
   REVOKED_KEY_SENTENCE,
   confirmConnectionKey,
   fetchAllManuals,
@@ -1181,8 +1182,9 @@ export async function createHexisMcpServer(
    * gets its answer first (the stop waits a turn of the event loop), then
    * every manual, and with it every spawned local server, is closed, and the
    * host is told. A key that merely could not be confirmed (the deployment is
-   * unreachable, or answered 5xx) is not a revoked one: the call goes ahead
-   * and reports whatever it meets. A deployment that does not advertise the
+   * unreachable, did not answer within the confirmation's short timeout, or
+   * answered 5xx) is not a revoked one: the call goes ahead and reports
+   * whatever it meets. A deployment that does not advertise the
    * instructions route is not asked, because its unknown `/api/*` path answers
    * 401 to every key, which would read as a revocation.
    */
@@ -1203,6 +1205,12 @@ export async function createHexisMcpServer(
           });
         }
         throw new McpError(ErrorCode.InternalError, REVOKED_KEY_SENTENCE);
+      }
+      // OAuth mode, refused even after renewing: this request runs nothing and
+      // answers the deployment's sentence. Ending the sign-in stays
+      // renewal.ts's, as it is for every other read that meets this answer.
+      if (err instanceof DeploymentError && err.status === 401) {
+        throw new McpError(ErrorCode.InternalError, err.message);
       }
       // A sign-in refused for good (OAuth mode) has already set `signInRefused`
       // through renewal.ts, and each caller answers it right after this gate,
@@ -1322,6 +1330,17 @@ export async function createHexisMcpServer(
       // arriving. (After the first list this is already settled.)
       await ready;
       if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
+      // Never start a call mid-re-registration — a swap or a recovery may have
+      // the manual between its deregister and its register, where a repository
+      // lookup finds nothing.
+      while (reregisterInProgress) await reregisterInProgress;
+      // Asked after every wait above and before any answer below, so nothing
+      // between the answer and the dispatch can outlast a revocation, and no
+      // call is answered anything but the revocation once the key is refused.
+      const confirming = confirmKeyBeforeServing();
+      if (confirming) await confirming;
+      // The sign-in may have ended while this call waited.
+      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       if (discoveryError !== null) {
         throw new McpError(
           ErrorCode.InternalError,
@@ -1331,16 +1350,6 @@ export async function createHexisMcpServer(
       // Nothing is callable on a connection that loads nothing, meta-tools
       // included: every call is answered with the reason.
       if (connection?.unavailable) return toolError(connection.unavailable);
-      // Never start a call mid-re-registration — a swap or a recovery may have
-      // the manual between its deregister and its register, where a repository
-      // lookup finds nothing.
-      while (reregisterInProgress) await reregisterInProgress;
-      // Asked after every wait above, so nothing between the answer and the
-      // dispatch below can outlast a revocation.
-      const confirming = confirmKeyBeforeServing();
-      if (confirming) await confirming;
-      // The sign-in may have ended while this call waited.
-      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       // Shutdown can land while a call waits here, and `shutdown` waits only
       // for the re-registration, not for callers parked behind it. Dispatching
       // now would run against a client being torn down, so the caller gets the

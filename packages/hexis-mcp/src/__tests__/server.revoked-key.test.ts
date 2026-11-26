@@ -25,12 +25,15 @@ const SECRET = 'vault-value-must-not-leave-after-revoke';
 let httpServer: http.Server | null = null;
 let base = '';
 let revoked = false;
+/** Discovery fails: the manuals route answers 5xx. */
+let discoveryFails = false;
 /** Every invocation the local receiver got, by tool, with the secret header it carried. */
 const received: { tool: string; secret: string | undefined }[] = [];
 
 afterEach(() => {
   vi.restoreAllMocks();
   revoked = false;
+  discoveryFails = false;
   received.length = 0;
 });
 
@@ -84,6 +87,7 @@ beforeAll(async () => {
           return;
         }
         if (pathname === '/api/agent/instructions') return json(200, { instructions: 'Search the knowledge base.' });
+        if (pathname === '/api/agent/all-tools' && discoveryFails) return json(500, {});
         if (pathname === '/api/agent/all-tools') {
           return json(200, {
             manuals: [{ name: 'localbox', call_template_type: 'http', http_method: 'GET', url: `${base}/local/manual` }],
@@ -128,7 +132,7 @@ afterAll(async () => {
   }
 });
 
-async function start(): Promise<{
+async function start(extra: Partial<HexisMcpConfig> = {}): Promise<{
   client: Client;
   stderr: string[];
   rejections: string[];
@@ -145,6 +149,7 @@ async function start(): Promise<{
     baseUrl: base,
     connectionKey: KEY,
     onConnectionKeyRejected: (sentence) => rejections.push(sentence),
+    ...extra,
   };
   const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: false });
   await handle.ready;
@@ -277,6 +282,64 @@ describe('a connection key revoked while the local server holds it', () => {
       expect(result.isError, text(result)).not.toBe(true);
       expect(received).toEqual([{ tool: 'plain', secret: undefined }]);
       expect(s.rejections).toEqual([]);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('goes ahead within seconds when the deployment hangs, which is unconfirmed, not revoked', { timeout: 60_000 }, async () => {
+    const s = await start();
+    try {
+      const plainTool = await s.toolNamed('plain');
+      const realFetch = globalThis.fetch;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (String(input instanceof Request ? input.url : input).endsWith('/api/agent/instructions')) {
+          // Never answers; only the request's own timeout ends it.
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+          });
+        }
+        return realFetch(input, init);
+      });
+      const startedAt = Date.now();
+      const result = await s.client.callTool({ name: plainTool, arguments: {} });
+      expect(result.isError, text(result)).not.toBe(true);
+      // Well under the 15 s every other deployment read may take.
+      expect(Date.now() - startedAt).toBeLessThan(8_000);
+      expect(received).toEqual([{ tool: 'plain', secret: undefined }]);
+      expect(s.rejections).toEqual([]);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('answers the revocation, not the discovery failure, once the key is refused', { timeout: 60_000 }, async () => {
+    discoveryFails = true;
+    const s = await start();
+    try {
+      await expect(s.client.callTool({ name: 'anything', arguments: {} })).rejects.toThrow('could not load');
+      revoked = true;
+      await expect(s.client.callTool({ name: 'anything', arguments: {} })).rejects.toThrow(REVOKED_KEY_SENTENCE);
+      await expectStopped(s);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('runs nothing in browser sign-in mode when the deployment refuses even the renewed token', { timeout: 60_000 }, async () => {
+    let renewals = 0;
+    const s = await start({
+      renewConnectionKey: async () => {
+        renewals += 1;
+        return { token: KEY };
+      },
+    });
+    try {
+      const plainTool = await s.toolNamed('plain');
+      revoked = true;
+      await expect(s.client.callTool({ name: plainTool, arguments: {} })).rejects.toThrow('Your sign-in was rejected');
+      expect(renewals).toBeGreaterThan(0);
+      expect(received).toEqual([]);
     } finally {
       await s.shutdown();
     }

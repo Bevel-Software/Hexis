@@ -140,6 +140,8 @@ describe('agent instructions at the bridge handshake', () => {
     try {
       expect(h.instructions).toBe(INSTRUCTIONS);
       expect(h.handshakeReads).toBe(1);
+      // And one more: the listing confirmed the key before it answered.
+      expect(instructionsRequests).toBe(2);
       expect(h.stderr.some((l) => l.includes('predates agent instructions'))).toBe(false);
     } finally {
       await h.shutdown();

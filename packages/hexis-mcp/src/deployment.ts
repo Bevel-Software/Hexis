@@ -17,6 +17,12 @@ import {
 
 /** Bounded so a wedged deployment fails startup with a message instead of hanging a client. */
 const FETCH_TIMEOUT_MS = 15_000;
+/**
+ * The key confirmation in front of every call: shorter, because a call it
+ * cannot confirm in time goes ahead anyway, so a longer wait would only delay
+ * a local tool behind a hanging deployment.
+ */
+const CONFIRM_TIMEOUT_MS = 3_000;
 
 export class DeploymentError extends Error {
   /**
@@ -73,15 +79,15 @@ export const REVOKED_KEY_SENTENCE = 'Invalid or revoked connection key. Mint a n
 
 async function getJson(
   url: string,
-  init: RequestInit & { label: string; renew?: () => Promise<string> },
+  init: RequestInit & { label: string; renew?: () => Promise<string>; timeoutMs?: number },
 ): Promise<unknown> {
-  const { renew, label, ...request } = init;
+  const { renew, label, timeoutMs = FETCH_TIMEOUT_MS, ...request } = init;
   const attempt = async (freshBearer?: string): Promise<Response> => {
     const headers = freshBearer
       ? { ...(request.headers as Record<string, string>), Authorization: `Bearer ${freshBearer}` }
       : request.headers;
     try {
-      return await fetch(url, { ...request, headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      return await fetch(url, { ...request, headers, signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
       throw new DeploymentError(
         `Could not reach ${label} at ${url}: ${err instanceof Error ? err.message : String(err)}`,
@@ -340,23 +346,27 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
 
 /**
  * Ask the deployment, now, whether the credential is still live: one
- * authenticated read of the agent instructions route, the cheapest read a
+ * authenticated read of the agent instructions route, a route every
  * deployment that advertises `agentInstructions` serves to a connection key.
- * The local server awaits it before every listing and every call, because a
- * local-only tool may never contact the deployment on its own (it declares no
- * variables, or they are cached), and would otherwise keep running on a
- * revoked key.
+ * Its body (the instructions text) is read and discarded. The local server
+ * awaits it before every listing and every call, because a local-only tool may
+ * never contact the deployment on its own (it declares no variables, or they
+ * are cached), and would otherwise keep running on a revoked key. Bounded at
+ * {@link CONFIRM_TIMEOUT_MS} per request.
  *
  * Every failure PROPAGATES unchanged: a {@link ConnectionKeyRejectedError} is
- * the revocation, a `SignInRefusedError` its OAuth-mode counterpart, and
- * anything else (a network failure, a 5xx) means the key could not be
- * confirmed, never that it is dead. Deciding what each means is the caller's.
+ * the key-mode revocation; in OAuth mode a `SignInRefusedError` (the renewal
+ * was refused) or a {@link DeploymentError} with status 401 (refused even
+ * after renewing) is the sign-in's; anything else (a network failure, a
+ * timeout, a 5xx) means the credential could not be confirmed, never that it
+ * is dead. Deciding what each means is the caller's.
  */
 export async function confirmConnectionKey(config: HexisMcpConfig): Promise<void> {
   await getJson(`${config.baseUrl}/api/agent/instructions`, {
     label: 'the agent instructions',
     headers: { Authorization: `Bearer ${config.connectionKey}` },
     renew: renewer(config),
+    timeoutMs: CONFIRM_TIMEOUT_MS,
   });
 }
 
