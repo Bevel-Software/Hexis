@@ -1,11 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
-import {
-  OpenChangeRequestsContext,
-  NO_CHANGE_REQUESTS,
-} from '../../workspace/state/open-change-requests.context';
+import type { useEventBus } from '../../version-control';
+import type { useOpenChangeRequests } from '../../workspace';
 
 /**
  * The file page's proposal boxes. Approval rights come from the FILE, not from
@@ -25,10 +22,38 @@ vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: api.readFileOnBranch,
   readFileAtForkPoint: api.readFileAtForkPoint,
 }));
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: api.fetchPrDetail }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: api.approvePrFile }));
-vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: api.mergePullRequest }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({ cancelPullRequest: api.cancelPullRequest }));
+// The pull-request calls, at the pr module's entry: where the boxes and the
+// apply hook import them from.
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  fetchPrDetail: api.fetchPrDetail,
+  approvePrFile: api.approvePrFile,
+  mergePullRequest: api.mergePullRequest,
+  cancelPullRequest: api.cancelPullRequest,
+}));
+
+type Bus = NonNullable<ReturnType<typeof useEventBus>>;
+type OpenRequests = ReturnType<typeof useOpenChangeRequests>;
+
+/**
+ * What the boxes read of their surroundings, through the entries they read it
+ * from: the server's event bus (version control's `useEventBus`) and the
+ * caller's own open requests (workspace's `useOpenChangeRequests`). Each
+ * render sets both; everything else those modules offer stays their own.
+ */
+const seams = vi.hoisted(() => ({ bus: null as unknown, openRequests: null as unknown }));
+vi.mock('../../version-control', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../version-control')>()),
+  useEventBus: () => seams.bus,
+}));
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
+  useOpenChangeRequests: () => seams.openRequests,
+}));
+
+function openRequests(mineNumbers: number[] = []): OpenRequests {
+  return { paths: new Set(), forPath: () => [], minePaths: new Map(), mineNumbers: new Set(mineNumbers) };
+}
 
 import { FileChangeBoxes } from '../components/FileChangeBoxes';
 import { othersPendingBesides, waitingOnViewerLabel } from '../utils/author';
@@ -51,7 +76,7 @@ const CR: PullRequestSummary = {
 
 function makeFakeBus() {
   const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void } = {
+  const bus: Bus & { emit(e: VersionControlEvent): void } = {
     subscribe(kind, handler) {
       (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
@@ -71,21 +96,17 @@ function makeFakeBus() {
 
 function renderBoxes(opts: { mine: boolean; canDecide: boolean; othersPending?: number }) {
   const bus = makeFakeBus();
+  seams.bus = bus;
+  seams.openRequests = openRequests(opts.mine ? [CR.number] : []);
   render(
-    <EventBusContext.Provider value={bus}>
-      <OpenChangeRequestsContext.Provider
-        value={{ ...NO_CHANGE_REQUESTS, mineNumbers: new Set(opts.mine ? [CR.number] : []) }}
-      >
-        <FileChangeBoxes
-          repoRelativePath={PATH}
-          requests={[CR]}
-          canDecide={opts.canDecide}
-          ownersLabel="Docs"
-          othersPending={opts.othersPending}
-          onApplied={() => {}}
-        />
-      </OpenChangeRequestsContext.Provider>
-    </EventBusContext.Provider>,
+    <FileChangeBoxes
+      repoRelativePath={PATH}
+      requests={[CR]}
+      canDecide={opts.canDecide}
+      ownersLabel="Docs"
+      othersPending={opts.othersPending}
+      onApplied={() => {}}
+    />,
   );
   return bus;
 }
@@ -222,19 +243,16 @@ describe('FileChangeBoxes: Approve binds the file on screen', () => {
   it('keeps the note off another file of the same request', async () => {
     api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, false)]);
     const both = { ...CR, touchedNodePaths: [PATH, OTHER] } as PullRequestSummary;
-    const bus = makeFakeBus();
+    seams.bus = makeFakeBus();
+    seams.openRequests = openRequests();
     const tree = (path: string) => (
-      <EventBusContext.Provider value={bus}>
-        <OpenChangeRequestsContext.Provider value={NO_CHANGE_REQUESTS}>
-          <FileChangeBoxes
-            repoRelativePath={path}
-            requests={[both]}
-            canDecide
-            ownersLabel="Docs"
-            onApplied={() => {}}
-          />
-        </OpenChangeRequestsContext.Provider>
-      </EventBusContext.Provider>
+      <FileChangeBoxes
+        repoRelativePath={path}
+        requests={[both]}
+        canDecide
+        ownersLabel="Docs"
+        onApplied={() => {}}
+      />
     );
     const { rerender } = render(tree(PATH));
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));

@@ -2,16 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } fr
 import { useContext } from 'react';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
-import { GitContext, type GitContextValue } from '../../git/state/git.context';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { AuthContext, type AuthContextValue } from '../../auth';
+import { GitContext, type GitContextValue } from '../../git';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import type { useEventBus } from '../../version-control';
+import type { ToolSecrets } from '../../secrets-vault';
 import type { LibraryContextValue } from '../state/library-data';
 
 // The page's data loading goes through the module's api service (which wraps
@@ -64,12 +61,84 @@ vi.mock('../services/library.api', () => ({
   suggestionBranchFor: (email: string, skill: string) =>
     `suggestions/${email.split('@')[0]}/${skill}`,
 }));
-// The workspace write path — what a writer's in-place Save goes through.
-vi.mock('../../workspace/services/workspace.api', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  getOrCreateWorkspace: apiMock.getOrCreateWorkspace,
-  writeFile: apiMock.writeFile,
-}));
+/**
+ * What the page takes from the workspace module, at its entry; everything
+ * else the entry offers stays its own.
+ *
+ *  - The write path: what a writer's in-place Save goes through.
+ *  - The markdown view: the pipeline (mermaid etc.) stays out of this test.
+ *    The stand-in renders the raw source so assertions can see the body
+ *    text, plus probes for the wiring the page hands the view: a click on a
+ *    link (another file, and a section of this one), where the page says
+ *    such a link leads, and what the image resolver answers for a picture
+ *    beside the file.
+ *  - The HTML renderer: its frame and cards are its own suite's business.
+ *    The stand-in shows what the page hands it: the page-tool bridge, and
+ *    the path a page's calls would be recorded under.
+ */
+vi.mock('../../workspace', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../workspace')>();
+  return {
+    ...real,
+    getOrCreateWorkspace: apiMock.getOrCreateWorkspace,
+    writeFile: apiMock.writeFile,
+    KbMarkdownView: ({
+      source,
+      onOpenFile,
+      fileLinkTarget,
+      onOpenNodeId,
+      nodeIdLinkTarget,
+      resolveImage,
+    }: {
+      source: string;
+      onOpenFile: (href: string) => void;
+      fileLinkTarget?: (href: string) => unknown;
+      onOpenNodeId?: (id: string) => void;
+      nodeIdLinkTarget?: (id: string) => unknown;
+      resolveImage?: (src: string) => unknown;
+    }) => (
+      <div data-testid="md-view">
+        {source}
+        <h2 id="steps">Steps</h2>
+        <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
+          link-probe
+        </button>
+        <button type="button" onClick={() => onOpenFile('SKILL.md#steps')}>
+          section-probe
+        </button>
+        <button type="button" onClick={() => onOpenNodeId?.('newsletter#steps')}>
+          self-id-probe
+        </button>
+        <button type="button" onClick={() => onOpenNodeId?.('plan-node#goal')}>
+          other-id-probe
+        </button>
+        <span data-testid="other-id-target-probe">
+          {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('plan-node#goal') : 'no-target')}
+        </span>
+        <span data-testid="self-id-target-probe">
+          {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('newsletter#steps') : 'no-target')}
+        </span>
+        <span data-testid="link-target-probe">
+          {JSON.stringify(fileLinkTarget ? fileLinkTarget('Some%20File.md') : 'no-target')}
+        </span>
+        <span data-testid="section-target-probe">
+          {JSON.stringify(fileLinkTarget ? fileLinkTarget('SKILL.md#steps') : 'no-target')}
+        </span>
+        <span data-testid="image-probe">
+          {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
+        </span>
+      </div>
+    ),
+    HtmlRenderer: ({ filePath }: { filePath: string }) => {
+      const tools = useContext(real.PageToolsContext);
+      return (
+        <div data-testid="html-view" data-file={filePath}>
+          {tools ? tools.pagePath : 'no tools'}
+        </div>
+      );
+    },
+  };
+});
 // The change-request module's reads — the branch-file read feeds the editor
 // base and the per-request diffs.
 vi.mock('../../change-requests/services/change-requests.api', () => ({
@@ -80,88 +149,17 @@ vi.mock('../../change-requests/services/change-requests.api', () => ({
   // what these tests diff against.
   readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
-vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: apiMock.mergePullRequest }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({
+// The pull-request calls, at the pr module's entry, where the page and the
+// change boxes import them from. Approving is a step of its own before the
+// merge — the gate refuses to merge a markdown file with owners until an
+// eligible approver has approved this head.
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  mergePullRequest: apiMock.mergePullRequest,
   cancelPullRequest: apiMock.cancelPullRequest,
+  fetchPrDetail: apiMock.fetchPrDetail,
+  approvePrFile: apiMock.approvePrFile,
 }));
-// Approving is a step of its own before the merge — the gate refuses to merge a
-// markdown file with owners until an eligible approver has approved this head.
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: apiMock.fetchPrDetail }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.approvePrFile }));
-
-// Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
-// the raw source so assertions can see the body text, plus probes for the
-// wiring the page hands the view: a click on a link (another file, and a
-// section of this one), where the page says such a link leads, and what
-// the image resolver answers for a picture beside the file.
-vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
-  KbMarkdownView: ({
-    source,
-    onOpenFile,
-    fileLinkTarget,
-    onOpenNodeId,
-    nodeIdLinkTarget,
-    resolveImage,
-  }: {
-    source: string;
-    onOpenFile: (href: string) => void;
-    fileLinkTarget?: (href: string) => unknown;
-    onOpenNodeId?: (id: string) => void;
-    nodeIdLinkTarget?: (id: string) => unknown;
-    resolveImage?: (src: string) => unknown;
-  }) => (
-    <div data-testid="md-view">
-      {source}
-      <h2 id="steps">Steps</h2>
-      <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
-        link-probe
-      </button>
-      <button type="button" onClick={() => onOpenFile('SKILL.md#steps')}>
-        section-probe
-      </button>
-      <button type="button" onClick={() => onOpenNodeId?.('newsletter#steps')}>
-        self-id-probe
-      </button>
-      <button type="button" onClick={() => onOpenNodeId?.('plan-node#goal')}>
-        other-id-probe
-      </button>
-      <span data-testid="other-id-target-probe">
-        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('plan-node#goal') : 'no-target')}
-      </span>
-      <span data-testid="self-id-target-probe">
-        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('newsletter#steps') : 'no-target')}
-      </span>
-      <span data-testid="link-target-probe">
-        {JSON.stringify(fileLinkTarget ? fileLinkTarget('Some%20File.md') : 'no-target')}
-      </span>
-      <span data-testid="section-target-probe">
-        {JSON.stringify(fileLinkTarget ? fileLinkTarget('SKILL.md#steps') : 'no-target')}
-      </span>
-      <span data-testid="image-probe">
-        {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
-      </span>
-    </div>
-  ),
-}));
-
-// The HTML renderer's frame and cards are its own suite's business; this
-// stand-in shows what the page hands it — the page-tool bridge, and the path
-// a page's calls would be recorded under.
-// The context is read through the module's entry point at RENDER time: the
-// entry point itself imports this renderer, so importing it inside the
-// factory would wait on its own result.
-vi.mock('../../workspace/components/renderers/HtmlRenderer', () => {
-  return {
-    HtmlRenderer: ({ filePath }: { filePath: string }) => {
-      const tools = useContext(PageToolsContext);
-      return (
-        <div data-testid="html-view" data-file={filePath}>
-          {tools ? tools.pagePath : 'no tools'}
-        </div>
-      );
-    },
-  };
-});
 
 // The file bar's Edit-or-Propose decision asks the per-file access resolver.
 // Default here is the READER's answer (`canWrite: false`) so the proposing
@@ -173,17 +171,49 @@ const accessMock = vi.hoisted(() => ({
     owners: { roles: [], users: [] },
   },
   fetchFileAccess: vi.fn(),
+  fetchFileAccessBatch: vi.fn<(workspaceId: string, paths: string[], verb: string) => Promise<unknown>>(
+    async () => ({ results: {} }),
+  ),
   // The Manage-access dialog's own calls — Share opens the real dialog.
   grantAccess: vi.fn(),
   suggestPrincipals: vi.fn(),
 }));
 accessMock.fetchFileAccess.mockImplementation(async () => accessMock.result);
-vi.mock('../../access/api', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  fetchFileAccess: accessMock.fetchFileAccess,
-  fetchFileAccessBatch: vi.fn(async () => ({ results: {} })),
-  grantAccess: accessMock.grantAccess,
-  suggestPrincipals: accessMock.suggestPrincipals,
+
+/**
+ * The access module's server, answered where the module meets it: its HTTP
+ * endpoints. Each request is handed to the matching recorder above with the
+ * arguments it carries on the wire (`kind` included, defaulted or not), and
+ * its answer goes back as the endpoint's JSON; a recorder that throws is a
+ * refused request. `null` for any other address.
+ */
+async function answerAccess(url: URL, init?: RequestInit): Promise<Response | null> {
+  const route = /^\/api\/workspace\/([^/]+)\/access(\/batch|\/grant|\/suggest)?$/.exec(url.pathname);
+  if (!route) return null;
+  const workspaceId = decodeURIComponent(route[1]);
+  const body = init?.body ? JSON.parse(String(init.body)) : {};
+  const q = url.searchParams;
+  try {
+    const answer =
+      route[2] === undefined
+        ? await accessMock.fetchFileAccess(workspaceId, q.get('path'), q.get('kind'))
+        : route[2] === '/batch'
+          ? await accessMock.fetchFileAccessBatch(workspaceId, body.paths, body.verb ?? 'write')
+          : route[2] === '/grant'
+            ? await accessMock.grantAccess(workspaceId, body)
+            : await accessMock.suggestPrincipals(workspaceId, q.get('q'));
+    return new Response(JSON.stringify(answer ?? null), { status: 200 });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: (err as Error).message }), { status: 403 });
+  }
+}
+
+// The server's event bus, as version control's entry offers it: the double
+// the current `harness` was handed. Everything else the entry offers stays.
+const busSeam = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock('../../version-control', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../version-control')>()),
+  useEventBus: () => busSeam.current,
 }));
 
 // The page reads the catalog through `useLibrary()`. Mocking the hook rather
@@ -195,7 +225,6 @@ vi.mock('../state/library-data', () => ({
 }));
 
 import { SkillPage } from '../components/skill-page/SkillPage';
-import { PageToolsContext } from '../../workspace';
 import { LibraryToastProvider } from '../state/toast';
 import { expectTitleRowSpansTheDocumentColumn } from './title-row-actions';
 import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
@@ -322,15 +351,18 @@ function libraryValue(
   } as unknown as LibraryContextValue;
 }
 
+type Bus = NonNullable<ReturnType<typeof useEventBus>>;
+
 /**
  * A test double for the event bus. The merge outcome only reaches the page this
  * way — the POST that starts it acks 202 and returns long before git has run —
  * so a test that never emits is a test of an apply that never finished, which
- * is itself worth asserting.
+ * is itself worth asserting. The page and the change boxes read it through
+ * version control's entry (`useEventBus`); `harness` hands it there.
  */
 function makeFakeBus() {
   const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void } = {
+  const bus: Bus & { emit(e: VersionControlEvent): void } = {
     subscribe(kind, handler) {
       (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
@@ -352,7 +384,7 @@ function renderPage(
   owned: boolean,
   crs: PullRequestSummary[] = [],
   mine: number[] = [],
-  bus: EventBusContextValue = makeFakeBus(),
+  bus: Bus = makeFakeBus(),
   routerState?: Record<string, unknown>,
   /** Catalog-state overrides — e.g. `{ loading: true }` for the early case. */
   library?: Partial<LibraryContextValue>,
@@ -411,7 +443,7 @@ async function settled() {
  * (`historyOpen`) those tests are about, and pass whatever the page did.
  */
 function harness(
-  bus: EventBusContextValue,
+  bus: Bus,
   gitValue: GitContextValue,
   routerState?: Record<string, unknown>,
   pageProps?: { provisional?: boolean },
@@ -419,6 +451,7 @@ function harness(
   /** The fragment the page's address arrives with, e.g. `#steps`. */
   hash = '',
 ) {
+  busSeam.current = bus;
   return (
     <MemoryRouter
       initialEntries={[
@@ -428,7 +461,6 @@ function harness(
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspaceValue}>
           <GitContext.Provider value={gitValue}>
-          <EventBusContext.Provider value={bus}>
             {/* The real toast provider: the success message IS the page's
                 report that the merge landed, so a stubbed-out toast would
                 leave the one assertion that matters unmakeable. */}
@@ -442,7 +474,6 @@ function harness(
                 <Route path="/skills-and-tools/connect" element={<NavigatedTo />} />
               </Routes>
             </LibraryToastProvider>
-          </EventBusContext.Provider>
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
@@ -464,16 +495,19 @@ Collect the news and draft the letter.`;
 const RAW_BRANCH = RAW_MAIN.replace('draft the letter', 'ship the letter');
 
 /**
- * The node id of the file in the pane, as the backend answers it for the
- * default branch (`resolve-path`): SKILL.md is the node `newsletter`, and
- * no other file of the skill is a node. Every other request goes to the real
- * fetch, as it always has.
+ * The server, where the page's modules meet it. The node id of the file in
+ * the pane, as the backend answers it for the default branch
+ * (`resolve-path`): SKILL.md is the node `newsletter`, and no other file of
+ * the skill is a node. The access endpoints go to `answerAccess`. Every other
+ * request goes to the real fetch, as it always has.
  */
 let resolvePathSpy: MockInstance<typeof fetch>;
 beforeEach(() => {
   const realFetch = globalThis.fetch;
   resolvePathSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
+    const access = await answerAccess(new URL(url, 'http://app.test'), init);
+    if (access) return access;
     if (!url.includes('/resolve-path?')) return realFetch(input, init);
     return url.includes(encodeURIComponent('knowledge-base/Skills/newsletter/SKILL.md'))
       ? new Response(JSON.stringify({ id: 'newsletter' }), { status: 200 })
@@ -795,6 +829,7 @@ describe('SkillPage', () => {
     expect(accessMock.fetchFileAccess).toHaveBeenCalledWith(
       'target-company-state',
       'Skills/newsletter/SKILL.md',
+      'file',
     );
   });
 
