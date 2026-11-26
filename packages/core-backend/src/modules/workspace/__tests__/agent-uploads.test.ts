@@ -1081,6 +1081,21 @@ describe('apply_file_upload', () => {
     expect(batches).toEqual([[`${KB_DIR}/open.md`]]);
   });
 
+  // Scenario: on a draft, the path in the folder the caller cannot read already holds a file, and `mode` is left out.
+  it('refuses a path in a folder the caller cannot read as `write-denied`, not `exists`, when a file is there, and lands the others', async () => {
+    const sealed = { ...allowAll, canRead: async (_w: string, _u: string, rel: string) => !rel.startsWith('Sealed/') } as unknown as IAccessControl;
+    const base = await start({ access: sealed });
+    await mkdir(join(tempDir, KB_DIR, 'Sealed'), { recursive: true });
+    await writeFile(join(tempDir, KB_DIR, 'Sealed/peek.md'), 'theirs\n');
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'open.md': 'open', 'Sealed/peek.md': 'mine' }));
+    const answer = await apply(base, { branch: DRAFT, token, destination: KB_DIR });
+    expect(outcomeAt(answer, `${KB_DIR}/Sealed/peek.md`)).toMatchObject({ outcome: 'refused', error: 'write-denied' });
+    expect(outcomeAt(answer, `${KB_DIR}/open.md`)).toMatchObject({ outcome: 'created' });
+    expect(answer.count).toBe(1);
+    expect(await readFile(join(tempDir, KB_DIR, 'Sealed/peek.md'), 'utf8')).toBe('theirs\n');
+  });
+
   it('refuses the whole upload when its access.md is in a folder the caller cannot read, and lands nothing', async () => {
     const sealed = { ...allowAll, canRead: async (_w: string, _u: string, rel: string) => !rel.startsWith('Sealed/') } as unknown as IAccessControl;
     const base = await start({ access: sealed });

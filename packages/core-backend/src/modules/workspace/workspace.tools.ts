@@ -4232,8 +4232,10 @@ export function registerWorkspaceTools(
    * Each path is put to the archive judge `unzip` uses too (`archiveEntryJudge`:
    * the path rules, the platform's rule files, the run's write policy and the
    * deployment's write hook, and — through each path's lock — the write rule
-   * and read-before-write), then to the link rule and the `mode`, which is
-   * asked again under the lock, as `write_files` asks it. A path that fails one
+   * and read-before-write), then to the link rule. The `mode` is asked only
+   * under the lock, after the lock's gates (unlike `write_files`, which also
+   * asks it before), so a path those gates refuse is never answered `exists`
+   * or `missing`. A path that fails one
    * is that path's outcome and no more, with one exception the judge decides:
    * when one of the upload's own access rules (`access.md`, `.bevelignore`)
    * will not land, or the upload would land a `roles.yaml` or a groups file at
@@ -4283,14 +4285,6 @@ export function registerWorkspaceTools(
 
       const planned = await planUpload(upload, destination, kbDirName);
       const judge = agentArchiveJudge(ctx, branch);
-      // One batched access read for every path, before any is judged further:
-      // on a protected branch a path the caller may not write is refused as
-      // `write-denied` before its mode is, so an `exists` never tells them of a
-      // file there. Empty on a draft. The lock's own gates still decide each
-      // path that gets this far (`refusedAtLock`).
-      const blocked = new Set(
-        await writeBlocked(branch, ctx, planned.filter((p) => p.content !== undefined).map((p) => p.path)),
-      );
 
       const writes: { path: string; content: Buffer }[] = [];
       const outcomes: Record<string, unknown>[] = [];
@@ -4319,7 +4313,6 @@ export function registerWorkspaceTools(
         }
         const wsPathOf = item.path;
         try {
-          if (blocked.has(wsPathOf)) throw await writeRefusal(branch, wsPathOf);
           // The path rules (the git folder in any spelling, which a SINGLE
           // uploaded file's name has not met yet — `.git` is a name the upload
           // route's `validateFilename` accepts), the platform's rule files,
@@ -4336,12 +4329,6 @@ export function registerWorkspaceTools(
               { code: 'symlink' },
             );
           }
-          // An earlier entry of this same upload counts as existing, as it
-          // does in `write_files`: two `create` entries for one path are a
-          // mistake the commit would otherwise hide.
-          const exists =
-            writes.some((w) => w.path === wsPathOf) || (await kindOf(fs, wsPathOf)) !== null;
-          entry.outcome = decideWrite(mode, wsPathOf, exists);
           const write = { path: wsPathOf, content: item.content };
           writes.push(write);
           entryOf.set(write, entry);
@@ -4351,11 +4338,15 @@ export function registerWorkspaceTools(
         }
       }
 
-      // The mode gate again, with every path's lock held — the verdict the
-      // answer carries, for the reason `write_file` states at length. A path
-      // whose verdict changed under the lock is dropped from the batch and
-      // reported refused, leaving the rest to land — unless the judge says it
-      // refuses the upload, which then refuses the batch untouched.
+      // The mode gate, asked only here: with every path's lock held, for the
+      // reason `write_file` states at length, and after the lock's own gates.
+      // A path the lock's gates refuse (the write rule, read-before-write) is
+      // refused there (`refusedAtLock`) and never reaches this, so an
+      // `exists` answers only for a path those gates let the caller change.
+      // A path the mode refuses is dropped from the
+      // batch and reported refused, leaving the rest to land — unless the
+      // judge says it refuses the upload, which then refuses the batch
+      // untouched.
       const recheck = async (
         pending: readonly { path: string; content: Buffer }[],
       ): Promise<{ path: string; content: Buffer }[]> => {
@@ -4363,6 +4354,9 @@ export function registerWorkspaceTools(
         for (const write of pending) {
           const entry = entryOf.get(write) as Record<string, unknown>;
           try {
+            // An earlier entry of this same upload counts as existing, as it
+            // does in `write_files`: two `create` entries for one path are a
+            // mistake the commit would otherwise hide.
             const exists =
               kept.some((k) => k.path === write.path) || (await kindOf(fs, write.path)) !== null;
             entry.outcome = decideWrite(mode, write.path, exists);
