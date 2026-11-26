@@ -108,7 +108,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { ApprovalCarryPendingError } from './approval-carry-pending-error.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, listingUnchangedBy, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
+import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, listingUnchangedBy, pushAccessRefusalSentence, toKbRelative, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -1955,7 +1955,7 @@ export class VersionControlService implements IVersionControlService {
    * open file explorer keeps its tree instead of asking for all of it again.
    */
   private listingMark(change: Change, targetPath: string): { listingUnchanged?: true } {
-    const repoRelative = targetPath.startsWith(`${this.kbDirName}/`) ? targetPath.slice(this.kbDirName.length + 1) : targetPath;
+    const repoRelative = toKbRelative(targetPath, this.kbDirName) ?? targetPath;
     return listingUnchangedBy(change.contentEdit, repoRelative, this.kb.layout.pluginsDir) ? { listingUnchanged: true } : {};
   }
 
