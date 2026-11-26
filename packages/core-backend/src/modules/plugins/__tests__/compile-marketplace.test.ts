@@ -12,6 +12,7 @@ import { SkillService } from '../../skills/skills.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
+import { compileMarketplace } from '../compile/compile-marketplace.js';
 import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
 import express from 'express';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
@@ -32,6 +33,8 @@ describe('compileMarketplace', () => {
   let repo: string;
   let compiler: MarketplaceCompilerService;
   let catalog: SkillService;
+  let source: KbPluginSource;
+  let links: PluginLinkIndex;
 
   const write = async (rel: string, text: string) => {
     const abs = path.join(repo, rel);
@@ -92,11 +95,11 @@ describe('compileMarketplace', () => {
 
     const disk = new NodeFs();
     const kb = testKbContext({ kbDirName: KB_DIR });
-    const source = new KbPluginSource(disk, kb);
+    source = new KbPluginSource(disk, kb);
     const access = new AccessControlService(workspaceService, KB_DIR, disk);
     const skills = new SkillService(workspaceService, access, kb, disk);
     catalog = skills;
-    const links = new PluginLinkIndex(workspaceService, skills, access, kb, source);
+    links = new PluginLinkIndex(workspaceService, skills, access, kb, source);
     compiler = new MarketplaceCompilerService(
       workspaceService,
       access,
@@ -265,14 +268,101 @@ describe('compileMarketplace', () => {
     expect([...tree.files.keys()].some((p) => p.includes('deploy'))).toBe(false);
   });
 
-  it('for a stranger the plugin keeps only its MCP servers, and the public scope is all that ships', async () => {
+  it('for a stranger a plugin they may not read is absent, servers and all, and the public scope is all that ships', async () => {
+    await write('Plugins/GTM/CONVENTIONS.md', '# How we do GTM\n');
     const tree = await compiler.compileFor({ userEmail: 'nobody@elsewhere.io' });
     const paths = [...tree.files.keys()].sort();
-    expect(paths.some((p) => p.startsWith('plugins/gtm/skills/'))).toBe(false);
-    expect(paths).toContain('plugins/gtm/.mcp.json'); // portable servers are not access-gated content
+    // GTM has portable servers, but its mcp.json is GTM's content like any other file.
+    expect(paths.some((p) => p.startsWith('plugins/gtm/'))).toBe(false);
     expect(paths).toContain('plugins/skills-and-knowledge/skills/pitch/SKILL.md');
     expect(paths.some((p) => p.includes('deploy'))).toBe(false);
-    expect(tree.plugins).toEqual(['gtm', 'skills-and-knowledge', 'hexis-all']);
+    expect(tree.plugins).toEqual(['skills-and-knowledge', 'hexis-all']);
+    expect(text(tree, '.claude-plugin/marketplace.json')).not.toContain('gtm');
+    expect(text(tree, '.agents/plugins/marketplace.json')).not.toContain('gtm');
+  });
+
+  it('an Admin-only plugin ships nothing of its own to a person without a role, and everything to an Admin', async () => {
+    // The reported shape: a plugin folder only Admins may read, with a
+    // CONVENTIONS.md, a portable MCP server, an inline skill — and a link to
+    // a public skill, which the person may read wherever it is shipped.
+    await write('Plugins/Ado/access.md', '---\n---\nread:\n  - Admin\n');
+    await write(
+      'Plugins/Ado/plugin.json',
+      JSON.stringify({ name: 'ado', description: 'Azure DevOps', extensions: { 'software.bevel.hexis': { skills: ['Skills/Sales/pitch'] } } }),
+    );
+    await write('Plugins/Ado/CONVENTIONS.md', '# Admin-only conventions\n');
+    await write('Plugins/Ado/mcp.json', JSON.stringify({ mcpServers: { ado: { type: 'streamable-http', url: 'https://ado.example/mcp' } } }));
+    await write('Plugins/Ado/skills/pipelines/SKILL.md', '---\ndescription: Pipelines.\n---\n');
+
+    const person = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const personPaths = [...person.files.keys()];
+    expect(personPaths.some((p) => p.startsWith('plugins/ado/'))).toBe(false);
+    expect(personPaths.some((p) => p.includes('pipelines'))).toBe(false);
+    expect(person.plugins).not.toContain('ado');
+    for (const rel of ['.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json', 'README.md']) {
+      expect(text(person, rel)).not.toContain('ado');
+      expect(text(person, rel)).not.toContain('Azure DevOps');
+    }
+    // No file anywhere carries the plugin's own content.
+    for (const content of person.files.values()) {
+      expect(content.toString('utf-8')).not.toContain('Admin-only conventions');
+      expect(content.toString('utf-8')).not.toContain('ado.example');
+    }
+    // The linked skill is the person's to read: it still ships, as a leftover.
+    expect(personPaths).toContain('plugins/skills-and-knowledge/skills/pitch/SKILL.md');
+
+    const admin = await compiler.compileFor({ userEmail: 'admin@x.io' });
+    expect(admin.plugins).toContain('ado');
+    expect(text(admin, 'plugins/ado/CONVENTIONS.md')).toBe('# Admin-only conventions\n');
+    expect(json(admin, 'plugins/ado/plugin.json')).toMatchObject({ name: 'ado', description: 'Azure DevOps' });
+    expect(json(admin, 'plugins/ado/mcp.json').mcpServers).toEqual({ ado: { type: 'streamable-http', url: 'https://ado.example/mcp' } });
+    expect(json(admin, 'plugins/ado/.mcp.json').mcpServers).toEqual({ ado: { type: 'streamable-http', url: 'https://ado.example/mcp' } });
+    expect([...admin.files.keys()]).toContain('plugins/ado/skills/pipelines/SKILL.md');
+    expect([...admin.files.keys()]).toContain('plugins/ado/skills/pitch/SKILL.md');
+  });
+
+  it('inside a plugin the caller may read, a file they may not read stays behind', async () => {
+    await write('Plugins/GTM/CONVENTIONS.md', '# How we do GTM\n');
+    await write('Plugins/GTM/internal/access.md', '---\n---\nread:\n  - Admin\n');
+    await write('Plugins/GTM/internal/pricing.md', 'floor prices');
+
+    const person = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect(text(person, 'plugins/gtm/CONVENTIONS.md')).toBe('# How we do GTM\n');
+    expect([...person.files.keys()].some((p) => p.startsWith('plugins/gtm/internal/'))).toBe(false);
+
+    const admin = await compiler.compileFor({ userEmail: 'admin@x.io' });
+    expect(text(admin, 'plugins/gtm/internal/pricing.md')).toBe('floor prices');
+  });
+
+  it("a plugin's servers ship only when its mcp.json is readable, each file asked by its own path", async () => {
+    // The pure compiler against the real fixture, with a verdict that
+    // refuses one path at a time — what folder rules alone cannot isolate.
+    await write('Plugins/GTM/CONVENTIONS.md', '# How we do GTM\n');
+    const skills = await catalog.listSkills(undefined);
+    const compileWith = async (refused: string) =>
+      compileMarketplace({
+        disk: new NodeFs(),
+        kbRoot: repo,
+        skills,
+        plugins: (await source.discover(repo)).plugins,
+        membership: await links.membership(),
+        readable: async (p) => p !== refused && !p.startsWith('Skills/Eng/secret/'),
+        options: { name: 'acme-hexis', owner: 'Acme', sourceCommit: 'abc' },
+      });
+
+    const noMcp = await compileWith('Plugins/GTM/mcp.json');
+    expect(noMcp.plugins).toContain('gtm');
+    expect(noMcp.files.has('plugins/gtm/mcp.json')).toBe(false);
+    expect(noMcp.files.has('plugins/gtm/.mcp.json')).toBe(false);
+    expect(noMcp.files.has('plugins/gtm/CONVENTIONS.md')).toBe(true);
+
+    const noConventions = await compileWith('Plugins/GTM/CONVENTIONS.md');
+    expect(noConventions.files.has('plugins/gtm/CONVENTIONS.md')).toBe(false);
+    expect(noConventions.files.has('plugins/gtm/mcp.json')).toBe(true);
+
+    const noManifest = await compileWith('Plugins/GTM/plugin.json');
+    expect(noManifest.plugins).not.toContain('gtm');
+    expect([...noManifest.files.keys()].some((p) => p.startsWith('plugins/gtm/'))).toBe(false);
   });
 
   it('the everyone audience carries the public subset only', async () => {

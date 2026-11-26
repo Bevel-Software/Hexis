@@ -54,10 +54,14 @@ import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
  *   README.md                            names the source commit
  *
  * FAIL CLOSED, per file: a skill is copied only when `readable` says yes for
- * its SKILL.md — the same per-path verdict the catalog filters on — so the
- * compiled tree for a caller holds exactly what that caller may read, and
- * nothing about a skill they may not. Plugins with nothing readable are
- * left out entirely. `access.md` and `.bevelignore` never ship; neither do
+ * its SKILL.md — the same per-path verdict the catalog filters on — and a
+ * plugin's own files the same way, each by its own path: the manifest it is
+ * named and described by, the `mcp.json` its servers come from, every other
+ * file of its folder. So the compiled tree for a caller holds exactly what
+ * that caller may read, and nothing about a skill or a plugin they may not.
+ * A plugin whose manifest the caller may not read is left out entirely (its
+ * name, description and servers are that manifest's and its folder's
+ * content), and so is one left with no readable skill and no readable server. `access.md` and `.bevelignore` never ship; neither do
  * the hexis-only `.tool` manuals (no other client can run them), nor an
  * `mcp.json` header carrying a `${VAR}` vault reference (the extension block
  * that resolves it is ours, and a header a client would send verbatim must
@@ -101,7 +105,7 @@ export interface CompileInput {
   plugins: DiscoveredPlugin[];
   /** Which plugins hold which skills, from the link index. */
   membership: LinkMembership;
-  /** The caller's read verdict on a repo-relative path (`<skillFolder>/SKILL.md`). */
+  /** The caller's read verdict on a repo-relative path: a `<skillFolder>/SKILL.md`, or any file of a plugin folder. */
   readable: (repoPath: string) => Promise<boolean>;
   options: MarketplaceOptions;
 }
@@ -160,6 +164,10 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   for (const [name, links] of [...membership.byPlugin.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const plugin = byName.get(name);
     if (!plugin || plugin.personal || !plugin.exists) continue;
+    // The plugin itself is its manifest: a caller who may not read it sees
+    // nothing of the plugin, not its name, its servers or its files. The
+    // linked skills they may read still ship, in the leftovers plugin.
+    if (!(await readable(`${plugin.folder}/${PLUGIN_MANIFEST_FILE}`))) continue;
     const manifest = plugin.manifest;
     const inline = [...readableSkills.values()].filter((s) => s.path.startsWith(`${plugin.folder}/`));
     const linked = links.linkedSkills
@@ -170,9 +178,11 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
         `${name}: skill "${s.name}" at ${s.path} shares its name with ${other.path} — the second is left out`,
       ),
     );
-    const mcp = portableMcp(plugin.mcpServers, (name, reason) =>
-      warnings.push(`${plugin.folder}: mcp server "${name}" not shipped — ${reason}`),
-    );
+    const mcp = (await readable(`${plugin.folder}/${PLUGIN_MCP_FILE}`))
+      ? portableMcp(plugin.mcpServers, (name, reason) =>
+          warnings.push(`${plugin.folder}: mcp server "${name}" not shipped — ${reason}`),
+        )
+      : null;
     if (dedup.length === 0 && mcp === null) continue; // nothing this caller may see
     // The plugin's identity IS the marketplace slug. Folded once more here
     // all the same: it becomes a path segment in the compiled tree, and a
@@ -248,11 +258,12 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   for (const p of out) {
     const base = `plugins/${p.slug}`;
     // The folder's own files — a CONVENTIONS.md the skills refer to, a
-    // README, reference material — ship beside the skills. What does not:
+    // README, reference material — ship beside the skills, each only when
+    // the caller may read it. What does not:
     // the platform's own files (rules, the source manifests, `mcp.json`, all
     // rewritten below), the inline skills (copied by name below), and the
     // hexis-only `.tool` manuals under their extension folder.
-    if (p.folder) await copyPluginFiles(disk, kbRoot, p.folder, base, put);
+    if (p.folder) await copyPluginFiles(disk, kbRoot, p.folder, base, readable, put);
     for (const s of p.skills) {
       await copySkill(disk, kbRoot, s,`${base}/skills/${s.name}`, put);
     }
@@ -386,13 +397,15 @@ const REWRITTEN_AT_ROOT = new Set([PLUGIN_MANIFEST_FILE, BUNDLE_MANIFEST_FILE, P
  * platform's files (rules, the manifests and `mcp.json` at the root — all
  * rewritten by the compiler), the inline skills under `skills/` (copied by
  * name, so a clash resolves the same way everywhere), the hexis extension
- * folder (`.tool` manuals no other client runs) and `.tool` files anywhere.
+ * folder (`.tool` manuals no other client runs), `.tool` files anywhere,
+ * and every file the caller may not read, asked by its own repo path.
  */
 async function copyPluginFiles(
   disk: ITreeWalker,
   kbRoot: string,
   folder: string,
   dest: string,
+  readable: (repoPath: string) => Promise<boolean>,
   put: (rel: string, content: Buffer) => void,
 ): Promise<void> {
   const abs = path.join(kbRoot, folder);
@@ -400,6 +413,7 @@ async function copyPluginFiles(
     const top = rel.split('/')[0];
     if (top === 'skills' || top === HEXIS_EXTENSION_NS) continue;
     if (!rel.includes('/') && REWRITTEN_AT_ROOT.has(rel)) continue;
+    if (!(await readable(`${folder}/${rel}`))) continue;
     put(`${dest}/${rel}`, await fs.readFile(path.join(abs, rel)));
   }
 }
