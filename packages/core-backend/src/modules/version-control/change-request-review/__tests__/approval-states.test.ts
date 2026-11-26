@@ -176,13 +176,13 @@ function makeAccessControl(byPath: EligibilityByPath): IAccessControl {
   };
 }
 
-function makeService(rows: ApprovalRow[], byPath: EligibilityByPath) {
+function makeService(rows: ApprovalRow[], byPath: EligibilityByPath, access: IAccessControl = makeAccessControl(byPath)) {
   const workspace = {
     ensureRemotesFetched: vi.fn(async () => undefined),
     getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })),
   } as unknown as WorkspaceService;
   const git = { mergeChangeRequest: mergeChangeRequestMock } as unknown as GitService;
-  return new ChangeRequestReviewService(makeDb(rows), makeAccessControl(byPath), workspace, git);
+  return new ChangeRequestReviewService(makeDb(rows), access, workspace, git);
 }
 
 describe('ChangeRequestReviewService.getApprovalStates', () => {
@@ -245,11 +245,13 @@ describe('ChangeRequestReviewService.getApprovalStates', () => {
   });
 
   it('a failed eligibility lookup is marked unresolved, not "outside the gate"', async () => {
-    const svc = makeService([], {});
-    const access = (svc as unknown as { accessControl: IAccessControl }).accessControl;
-    access.eligibleWritersForPathsAtRef = async () => {
-      throw new Error('git show timed out');
+    const failing: IAccessControl = {
+      ...makeAccessControl({}),
+      eligibleWritersForPathsAtRef: async () => {
+        throw new Error('git show timed out');
+      },
     };
+    const svc = makeService([], {}, failing);
     const states = await svc.getApprovalStates(1, [file({ path: 'Knowledge/Foo.md' })], HEAD, BASE, null, 'ws-1');
     expect(states[0].eligibleApprovers.roles).toEqual([]);
     expect(states[0].eligibilityResolved).toBe(false);
