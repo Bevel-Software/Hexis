@@ -4,9 +4,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createInlineManualReader,
   createToolManualsAgentRoutes,
-  InlineManualRefusedError,
   type IToolManualService,
 } from '../index.js';
+// The refusal is the module's own: only its routes and this suite name it.
+import { InlineManualRefusedError } from '../tool-manuals.routes.js';
 import { ConnectionScope, type IAgentScopeResolver } from '../../agent-scope/index.js';
 
 /**
