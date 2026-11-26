@@ -2879,43 +2879,43 @@ export class VersionControlService implements IVersionControlService {
     // request from the target into this branch is open, and that answer holds
     // only while nobody can open one before the push lands.
     const hasUnpushed = await this.runOnBranchPair(detail.branch, detail.base, async () => {
-    const refresh = await this.refreshFromTarget(workspaceId, detail.branch, detail.base, user);
-    if (refresh.blockedBy !== null) {
-      throw new OpenChangeRequestBlocksMergeError(detail.base, detail.branch, refresh.blockedBy);
-    }
-    // Push whenever the CLONE holds a commit origin has not seen — not when
-    // THIS merge authored one. The two differ in exactly the case that keeps
-    // a request behind for good: an earlier update merged, its push failed,
-    // and the merge is sitting in the workspace. That merge already contains
-    // the target, so this call's `mergeFromOrigin` reports
-    // `alreadyUpToDate` and the old gate skipped the push — leaving the
-    // request behind on the remote, and the next open with the same work to
-    // do. Asking git what is unpushed retries it instead.
-    //
-    // A failed probe falls back to the old gate rather than to "push
-    // anyway": a push on a clone with nothing to push is a wasted
-    // round trip on every single update.
-    const unpushed = await this.git
-      .hasUnpushedCommits(workspaceId)
-      .catch((err: unknown) => {
-        log.warn(
-          `could not tell whether change request #${number} has unpushed commits; falling back to whether this merge authored one`,
-          { err },
+      const refresh = await this.refreshFromTarget(workspaceId, detail.branch, detail.base, user);
+      if (refresh.blockedBy !== null) {
+        throw new OpenChangeRequestBlocksMergeError(detail.base, detail.branch, refresh.blockedBy);
+      }
+      // Push whenever the CLONE holds a commit origin has not seen — not when
+      // THIS merge authored one. The two differ in exactly the case that keeps
+      // a request behind for good: an earlier update merged, its push failed,
+      // and the merge is sitting in the workspace. That merge already contains
+      // the target, so this call's `mergeFromOrigin` reports
+      // `alreadyUpToDate` and the old gate skipped the push — leaving the
+      // request behind on the remote, and the next open with the same work to
+      // do. Asking git what is unpushed retries it instead.
+      //
+      // A failed probe falls back to the old gate rather than to "push
+      // anyway": a push on a clone with nothing to push is a wasted
+      // round trip on every single update.
+      const unpushed = await this.git
+        .hasUnpushedCommits(workspaceId)
+        .catch((err: unknown) => {
+          log.warn(
+            `could not tell whether change request #${number} has unpushed commits; falling back to whether this merge authored one`,
+            { err },
+          );
+          return !refresh.alreadyUpToDate;
+        });
+      if (unpushed) {
+        // A refusal answers 409 with the saved-locally sentence and leaves the
+        // merge applied in the clone; the probe above makes the next update
+        // (or any save on the branch) push it.
+        await this.pushWithRecovery(
+          workspaceId,
+          branchForWorkspaceId(workspaceId),
+          `(update from ${detail.base})`,
+          user,
         );
-        return !refresh.alreadyUpToDate;
-      });
-    if (unpushed) {
-      // A refusal answers 409 with the saved-locally sentence and leaves the
-      // merge applied in the clone; the probe above makes the next update
-      // (or any save on the branch) push it.
-      await this.pushWithRecovery(
-        workspaceId,
-        branchForWorkspaceId(workspaceId),
-        `(update from ${detail.base})`,
-        user,
-      );
-    }
-    return unpushed;
+      }
+      return unpushed;
     });
     // Where the branch ended up, as PUBLISHED — two rev-parses, not a second
     // detail read. Everything below needs only the sha, and the detail that
