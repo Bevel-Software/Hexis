@@ -174,13 +174,15 @@ export interface ArchiveEntryJudge {
 
 /**
  * The 409 an extraction answers when another holds a lock its landing needs.
- * Not `PathHeldError`'s own sentence, which says "continuing with other
- * edits": the extraction stopped whole.
+ * It carries `PathHeldError`'s payload, `{ kind: 'path-held', path }`, as the
+ * write tools that pass that error on do; its sentence is the extraction's
+ * own, saying nothing was extracted.
  */
 function extractionHeldRefusal(err: PathHeldError): VersionControlDomainError {
   return new VersionControlDomainError(
     `"${err.path}" is being edited by ${err.holderName ?? 'another user'}, so nothing was extracted. Try again once they are done.`,
     409,
+    { kind: 'path-held', path: err.path },
   );
 }
 
@@ -2435,7 +2437,10 @@ export class WorkspaceService implements IWorkspaceService {
     workspaceId: string,
     zipWsPath: string,
     destDirWsPath: string | undefined,
-    /** How each entry is judged (see {@link ArchiveEntryJudge}); without one, every entry the guards below pass lands. */
+    /**
+     * How the archive's read and each entry are judged (see {@link ArchiveEntryJudge}); without one, the
+     * archive's read is not checked and every entry the guards below pass lands. Both unzip doors pass one.
+     */
     judge: ArchiveEntryJudge | undefined,
     /** Where the files land: one call, for every file that passed. */
     landing: ArchiveLanding,

@@ -372,9 +372,12 @@ describe.each(doors)('an archive extracted through %s', (_door, start) => {
     expect(await commitCount()).toBe(before);
     // Bo's lock is still Bo's; every lock the extraction took went back.
     expect([...lockTable.held]).toEqual([[`${KB}/Finance/Secret/access.md`, 'Bo']]);
-    expect(((await res.json()) as { error: string }).error).toBe(
-      `"${KB}/Finance/Secret/access.md" is being edited by Bo, so nothing was extracted. Try again once they are done.`,
-    );
+    // The payload `PathHeldError` carries, with the extraction's own sentence.
+    expect(await res.json()).toEqual({
+      kind: 'path-held',
+      path: `${KB}/Finance/Secret/access.md`,
+      error: `"${KB}/Finance/Secret/access.md" is being edited by Bo, so nothing was extracted. Try again once they are done.`,
+    });
     // The batch retries a contended lock for a few seconds before it refuses.
   }, 20_000);
 });

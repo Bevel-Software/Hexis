@@ -3472,6 +3472,11 @@ export function registerWorkspaceTools(
       assertTextContent(a.path as string, a.new_string as string, 'new_string');
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, a.path as string);
+      // Its answers ("not found", "appears N times") are read off the file's
+      // bytes, so a caller who may not read the file is refused before the
+      // first read, as `read_file` refuses it.
+      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, a.path as string);
+      await assertCanRead(readGateFor(a.branch as string, ctx), a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);
       const path = a.path as string;
       const oldStr = a.old_string as string;
@@ -3499,8 +3504,8 @@ export function registerWorkspaceTools(
       // no lock cycle. It is a verdict about a file anyone may still change.
       let result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
       // The one the answer carries is taken again with the path's lock HELD,
-      // over the bytes read there (`write: true` guarantees the locking
-      // filesystem): read, verdict and write are one step nobody can get
+      // over the bytes read there (the locking filesystem: see
+      // `batchLandingOf`): read, verdict and write are one step nobody can get
       // between. Taken before the lock only, two callers replacing the same
       // text — two runners claiming a work item by filling its empty owner
       // field — were BOTH told their edit landed, and the second silently
@@ -4042,7 +4047,7 @@ export function registerWorkspaceTools(
     description:
       'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. `src` may be a `__tmp__/<path>` ref to a file you staged in the workspace\'s tmp folder: the copy is how such a file is kept, as a normal repository file. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with the copy\'s own rules counted at its new place. ' +
-      'One exception to that shape: when the destination is one you may not write, the answer is the refusal (`allowed: false` with `reason`, and the access figures) with no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
+      'Two exceptions to that shape: a destination you may not write gets the refusal (`allowed: false` with `reason`, and the access figures) with no `kind` and no `descendants`, because nothing about the source is read before that verdict; a source you may not read is refused as `read_file` refuses it.',
     inputs: {
       type: 'object',
       properties: {
@@ -4239,10 +4244,10 @@ export function registerWorkspaceTools(
    * Each path is put to the archive judge `unzip` uses too (`archiveEntryJudge`:
    * the path rules, the platform's rule files, the run's write policy and the
    * deployment's write hook, and — through each path's lock — the write rule
-   * and read-before-write), then to the link rule. The `mode` is asked only
-   * under the lock, after the lock's gates (unlike `write_files`, which also
-   * asks it before), so a path those gates refuse is never answered `exists`
-   * or `missing`. A path that fails one
+   * and read-before-write). The link rule and the `mode` are asked only under
+   * the lock, after the lock's gates (unlike `write_files`, which also asks
+   * the mode before), so a path those gates refuse is never answered
+   * `symlink`, `exists` or `missing`. A path that fails one
    * is that path's outcome and no more, with one exception the judge decides:
    * when one of the upload's own access rules (`access.md`, `.bevelignore`)
    * will not land, or the upload would land a `roles.yaml` or a groups file at
@@ -4325,17 +4330,6 @@ export function registerWorkspaceTools(
           // route's `validateFilename` accepts), the platform's rule files,
           // the write policy and the write hook.
           await judge.entry(wsPathOf, 'file');
-          // A link already on disk under the destination must not redirect
-          // these bytes — the rule `unzip` applies per entry, applied here on
-          // the path the write will take.
-          const link = await symlinkOnPath(root, wsPathOf);
-          if (link !== undefined) {
-            throw new ToolError(
-              `"${wsPathOf}" goes through the symbolic link "${link}"; an upload never follows links.`,
-              400,
-              { code: 'symlink' },
-            );
-          }
           const write = { path: wsPathOf, content: item.content };
           writes.push(write);
           entryOf.set(write, entry);
@@ -4345,12 +4339,13 @@ export function registerWorkspaceTools(
         }
       }
 
-      // The mode gate, asked only here: with every path's lock held, for the
-      // reason `write_file` states at length, and after the lock's own gates.
-      // A path the lock's gates refuse (the write rule, read-before-write) is
-      // refused there (`refusedAtLock`) and never reaches this, so an
-      // `exists` answers only for a path those gates let the caller change.
-      // A path the mode refuses is dropped from the
+      // The link rule and the mode gate, asked only here: with every path's
+      // lock held (for the mode, the reason `write_file` states at length),
+      // and after the lock's own gates. A path the lock's gates refuse (the
+      // write rule, read-before-write) is refused there (`refusedAtLock`) and
+      // never reaches this, so a `symlink` or an `exists` answers only for a
+      // path those gates let the caller change.
+      // A path either refuses is dropped from the
       // batch and reported refused, leaving the rest to land — unless the
       // judge says it refuses the upload, which then refuses the batch
       // untouched.
@@ -4361,6 +4356,17 @@ export function registerWorkspaceTools(
         for (const write of pending) {
           const entry = entryOf.get(write) as Record<string, unknown>;
           try {
+            // A link already on disk under the destination must not redirect
+            // these bytes — the rule `unzip` applies per entry, applied here on
+            // the path the write will take, before anything follows it.
+            const link = await symlinkOnPath(root, write.path);
+            if (link !== undefined) {
+              throw new ToolError(
+                `"${write.path}" goes through the symbolic link "${link}"; an upload never follows links.`,
+                400,
+                { code: 'symlink' },
+              );
+            }
             // An earlier entry of this same upload counts as existing, as it
             // does in `write_files`: two `create` entries for one path are a
             // mistake the commit would otherwise hide.
@@ -4488,12 +4494,12 @@ export function registerWorkspaceTools(
         'Land a file you have already uploaded (see `request_file_upload`) in a folder on a branch, in ONE commit, as you. ' +
         'A single file lands under the name it was sent with; a zip lands as its entries, keeping their folder structure. ' +
         'Returns `{ destination, count, total, files }`: one entry per path, each `{ path, outcome }` — `created` / ' +
-        '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
-        '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
-        'Every path is judged one by one as `write_file` judges it (binary is fine); a refused path does not stop the others. ' +
-        'An `access.md` or `.bevelignore` lands with its files or nothing lands; `roles.yaml` or a groups file at the root refuses the whole upload. ' +
-        'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
-        'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
+        '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many of the ' +
+        '`total` paths landed; `files` is cut to the first 25 unless you pass `all: true`. ' +
+        'A refused path does not stop the others, except: an `access.md` or `.bevelignore` lands with its files or nothing lands; ' +
+        '`roles.yaml` or a groups file at the root refuses the whole upload; and if someone is editing any of the paths, nothing lands. ' +
+        'The token is single-use, spent by an apply that answers `files` (even with every path refused) or lands a commit, ' +
+        'and refused if used twice, expired, or issued to somebody else. `mode` means what it means on `write_file`.',
       inputs: {
         type: 'object',
         properties: {
