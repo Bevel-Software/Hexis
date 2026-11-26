@@ -30,7 +30,7 @@ import { frontmatterHead, type IAccessControl } from '../access/index.js';
 import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable, decidesListing, fencedHead } from '../access-model/index.js';
 import type { ICreatorAccess, IChangeReadGate } from '../access-model/index.js';
 import type { VersionControlEventBus } from '../version-control/index.js';
-import { PathTraversalError, VersionControlDomainError } from '../../shared/domain-errors.js';
+import { PathTraversalError, PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { LockingFilesystem, normalizeWorkspacePath } from '../kb-fs/index.js';
@@ -38,7 +38,7 @@ import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/index.js'; // Express Request augmentation
-import { assertArchiveEntryWritable, type SkillSaveCheck } from './workspace.tools.js';
+import { archiveEntryJudge, type SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
 import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';
 
@@ -1541,28 +1541,36 @@ export function createWorkspaceRoutes(
       const destDir = destination ?? path.posix.dirname(zipPath);
       await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
       const branch = branchForWorkspaceId(id);
-      // The archive lands as the agent `unzip` tool lands it: every entry is
-      // judged before anything is written, each against the lock's own gates
-      // (an archive can carry a path into a nested folder the caller cannot
-      // read, which the destination check above cannot see), and the files
-      // that pass go through the lock-aware filesystem's batch as this
-      // person: every lock, then one commit. A path whose lock is held
-      // refuses the whole extraction, with nothing written. Where the
-      // creator's read grant is planned for a new folder (`creatorAccess`),
-      // the batch lands it in that same commit.
+      // The archive is judged by the judge the agent `unzip` tool hands the
+      // extraction (`archiveEntryJudge`, without the agent's own write hook
+      // and policy, which a person in the app never meets): the path rules
+      // and the platform's rule files before anything is written, and each
+      // file's write rule and read-before-write at its lock (an archive can
+      // carry a path into a nested folder the caller cannot read, which the
+      // destination check above cannot see). The files that pass go through
+      // the lock-aware filesystem's batch as this person: every lock, then
+      // one commit. A path whose lock is held refuses the whole extraction,
+      // with nothing written. Where the creator's read grant is planned for a
+      // new folder (`creatorAccess`), the batch lands it in that same commit.
       const landing = new LockingFilesystem(
         { basePath: await workspaceService.getWorkspacePath(id), contained: true },
         { versionControl: versionControlService, workspaceId: id, branch, user, kbDirName, creatorAccess },
       );
-      const result = await workspaceService.unzipFile(
-        id,
-        zipPath,
-        destination,
-        (entryPath) => assertArchiveEntryWritable({ accessControl, kb, changeGate }, branch, user.email, entryPath),
-        landing,
-      );
-      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
-      res.json(result);
+      try {
+        const result = await workspaceService.unzipFile(
+          id,
+          zipPath,
+          destination,
+          archiveEntryJudge({ accessControl, kb, changeGate }, branch, user.email),
+          landing,
+        );
+        eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+        res.json(result);
+      } catch (err) {
+        // Committed, and only the sharing is pending: the tree changed.
+        if (err instanceof PushNeedsAgentResolutionError) eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+        throw err;
+      }
     } catch (err) {
       sendError(res, err);
     }
