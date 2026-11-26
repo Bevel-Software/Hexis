@@ -36,6 +36,8 @@ describe('AccessControlService: reads answered from the map of the head commit',
   let plain: string;
   let gitLog: string[];
   let opened: string[];
+  /** What each `git cat-file --batch` was asked for, one line per object. */
+  let catFiled: string[];
 
   const USERS = ['admin@x.io', 'mem@x.io', 'sal@x.io', 'zoe@x.io', 'pat@x.io', 'nobody@x.io'];
   const DENY_ALL = '---\nread:\n  - deny everyone\n---\n# restricted\n';
@@ -115,6 +117,9 @@ describe('AccessControlService: reads answered from the map of the head commit',
       credentials: real.credentials,
       run: (async (cwd: string, args: string[], runOpts?: unknown) => {
         gitLog.push(args[0]!);
+        if (args[0] === 'cat-file') {
+          catFiled.push(...String((runOpts as { input?: unknown } | undefined)?.input ?? '').split('\n').filter(Boolean));
+        }
         await opts.beforeGit?.(args);
         if (opts.failGit?.(args)) throw new Error('git timed out (simulated)');
         return (real.run as (...a: unknown[]) => unknown)(cwd, args, runOpts);
@@ -149,6 +154,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
   const reset = () => {
     gitLog.length = 0;
     opened.length = 0;
+    catFiled.length = 0;
   };
 
   beforeEach(async () => {
@@ -157,6 +163,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
     plain = path.join(root, 'plain', KB);
     gitLog = [];
     opened = [];
+    catFiled = [];
     await fs.mkdir(repo, { recursive: true });
     await execFileAsync('git', ['init', '-q', '-b', 'main', repo]);
     await git('config', 'user.email', 'test@example.com');
@@ -460,6 +467,95 @@ describe('AccessControlService: reads answered from the map of the head commit',
     // Not its version's size: not worth reading from the checkout.
     expect(opened).not.toContain('Notes.txt');
     expect(opened).toContain('Top.md');
+  }, 120_000);
+
+  it('hashes a SHA-256 repository with SHA-256: a copy that is its version is taken, another is read through git', async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+    await fs.mkdir(repo, { recursive: true });
+    await execFileAsync('git', ['init', '-q', '-b', 'main', '--object-format=sha256', repo]);
+    await git('config', 'user.email', 'test@example.com');
+    await git('config', 'user.name', 'Test');
+    await commit('seed', FILES);
+    expect(await git('rev-parse', 'HEAD')).toHaveLength(64);
+    // The page on disk opened, at its version's size, and git told to take the file as it is without reading it.
+    await fs.writeFile(path.join(repo, 'Team', 'Own.md'), FILES['Team/Own.md']!.replace(/^---$/gm, '+++'));
+    await git('update-index', '--assume-unchanged', '--', 'Team/Own.md');
+    expect(await git('diff-index', '--name-only', 'HEAD', '--')).toBe('');
+    const [top, own] = [await git('rev-parse', 'HEAD:Top.md'), await git('rev-parse', 'HEAD:Team/Own.md')];
+    reset();
+
+    expect(await service().canReadBatch('ws', 'mem@x.io', ['Team/Own.md', 'Top.md'])).toEqual(
+      new Map([
+        ['Team/Own.md', false],
+        ['Top.md', true],
+      ]),
+    );
+    // The page went through git; the file whose bytes hash to its version was taken from the checkout.
+    expect(catFiled).toContain(own);
+    expect(catFiled).not.toContain(top);
+    expect(opened).toContain('Top.md');
+  }, 120_000);
+
+  it('reads through git a file written while it is read, and remembers what the version declares, not what was read', async () => {
+    // Same size, its frontmatter opened: written after git's stat cache was asked and the file opened, before
+    // a byte of it is read.
+    const openPage = FILES['Team/Own.md']!.replace(/^---$/gm, '+++');
+    const page = path.join(repo, 'Team', 'Own.md');
+    const opening = vi.mocked(fs.open).getMockImplementation()!;
+    let written = false;
+    vi.mocked(fs.open).mockImplementation((async (file: unknown, ...rest: unknown[]) => {
+      const handle = await (opening as (...a: unknown[]) => Promise<unknown>)(file, ...rest);
+      if (!written && String(file) === page) {
+        written = true;
+        await fs.writeFile(page, openPage);
+      }
+      return handle;
+    }) as typeof fs.open);
+    const svc = service();
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
+    expect(written).toBe(true);
+
+    // Another checkout of the same commit, whose page is the version, finds the version remembered.
+    await execFileAsync('git', ['clone', '-q', repo, path.join(root, 'ws2', KB)]);
+    reset();
+    expect((await svc.canReadBatch('ws2', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
+    expect(opened).toEqual([]);
+  }, 120_000);
+
+  it('counts each version at its whole size against the wait budget: a map of more is read in the background', async () => {
+    const paths = Object.keys(FILES);
+    // The versions a first map reads (every file but the roles file), whole, and as the old estimate counted them:
+    // a file's start, at most 64 KB, and an `access.md` whole.
+    const sizes = Object.entries(FILES)
+      .filter(([p]) => p !== 'roles.yaml')
+      .map(([p, text]) => [p, Buffer.byteLength(text)] as const);
+    const whole = sizes.reduce((n, [, s]) => n + s, 0);
+    const starts = sizes.reduce((n, [p, s]) => n + (p.endsWith('access.md') ? s : Math.min(s, 64 * 1024)), 0);
+    const waitBytes = Math.floor((starts + whole) / 2);
+    expect(starts).toBeLessThan(waitBytes);
+    expect(whole).toBeGreaterThan(waitBytes);
+    // Reading the versions waits on this gate: a map the first caller waited for would hold its answer back.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const svc = service({ waitBytes }, undefined, { beforeGit: (args) => (args[0] === 'diff-index' ? gate : Promise.resolve()) });
+    const first = await Promise.race([
+      svc.canReadBatch('ws', 'nobody@x.io', paths),
+      new Promise<'held back'>((resolve) => setTimeout(() => resolve('held back'), 5_000)),
+    ]);
+    expect(first).not.toBe('held back');
+    expect((first as Map<string, boolean>).get('Team/Own.md')).toBe(false);
+
+    release();
+    await vi.waitFor(
+      async () => {
+        reset();
+        await svc.canReadBatch('ws', 'nobody@x.io', paths);
+        expect(opened).toEqual([]);
+      },
+      { timeout: 30_000, interval: 100 },
+    );
   }, 120_000);
 
   it('takes no member from a roles or groups file changed on disk and not committed, where the checkout alone would', async () => {
