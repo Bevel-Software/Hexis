@@ -675,6 +675,93 @@ describe('AuthService.changePassword — the sessions opened before it', () => {
   });
 });
 
+/**
+ * The deployment admin's password lives in `ADMIN_PASSWORD`, not on its row,
+ * so rotating it moves no session generation. A restart is a new service on
+ * the same rows with the new environment; the real-Postgres half
+ * (`password-change-sessions.pg.test.ts`) crosses the routes and middleware.
+ */
+describe('AuthService.resolveSession — the deployment admin across an ADMIN_PASSWORD rotation', () => {
+  const ADMIN_ROW = { ...ROW, id: 'user-root', email: 'root@example.com', name: 'root', deactivatedAt: null };
+  const envAdmin = (adminPassword: string) => makeConfig({ adminEmail: 'root@example.com', adminPassword });
+
+  /** A sign-in with the environment password: the lookup every login performs, then the upsert. */
+  async function signInUnder(adminPassword: string): Promise<string> {
+    const { db } = makeFakeDb([[], [ADMIN_ROW]]);
+    return (await new AuthService(db, envAdmin(adminPassword)).loginWithPassword('root@example.com', adminPassword))
+      .token;
+  }
+
+  /** A freshly started service under `config`, resolving `token` against the admin's row. */
+  function resolveAfterRestart(config: CoreConfig, token: string) {
+    const { db } = makeFakeDb([[ADMIN_ROW]]);
+    return new AuthService(db, config).resolveSession(token);
+  }
+
+  it('ends, in words, a session issued under the old password once the deployment restarts with a new one', async () => {
+    const old = await signInUnder('original-password');
+    const ended = resolveAfterRestart(envAdmin('rotated-password'), old);
+    await expect(ended).rejects.toBeInstanceOf(SessionEndedError);
+    await expect(ended).rejects.toThrow(/password was changed after this session was opened/);
+    // ...and the way back is the new password, whose session is honoured.
+    const fresh = await signInUnder('rotated-password');
+    await expect(resolveAfterRestart(envAdmin('rotated-password'), fresh)).resolves.toEqual({
+      userId: ADMIN_ROW.id,
+      email: ADMIN_ROW.email,
+    });
+    // Rotating back does not revive the newer session either.
+    await expect(resolveAfterRestart(envAdmin('original-password'), fresh)).rejects.toBeInstanceOf(SessionEndedError);
+  });
+
+  it('keeps the session across a restart that leaves ADMIN_PASSWORD as it was', async () => {
+    const token = await signInUnder('original-password');
+    await expect(resolveAfterRestart(envAdmin('original-password'), token)).resolves.toEqual({
+      userId: ADMIN_ROW.id,
+      email: ADMIN_ROW.email,
+    });
+  });
+
+  it('refuses a deployment admin session that carries no stamp of the current password', async () => {
+    // Issued before sessions were stamped, or while the address was an
+    // ordinary account: nothing says which password it was opened under.
+    const unstamped = jwt.sign({ userId: ADMIN_ROW.id, email: ADMIN_ROW.email, sv: 0 }, 'test-jwt-secret', {
+      expiresIn: '7d',
+    });
+    await expect(resolveAfterRestart(envAdmin('original-password'), unstamped)).rejects.toBeInstanceOf(
+      SessionEndedError,
+    );
+  });
+
+  it('refuses a stamped session once ADMIN_PASSWORD is unset and the address is an ordinary account again', async () => {
+    const token = await signInUnder('original-password');
+    await expect(resolveAfterRestart(envAdmin(''), token)).rejects.toBeInstanceOf(SessionEndedError);
+  });
+
+  it('carries neither the password nor an unkeyed digest of it in the token', async () => {
+    const token = await signInUnder('original-password');
+    const payload = jwt.decode(token) as Record<string, unknown>;
+    expect(typeof payload.ap).toBe('string');
+    expect(JSON.stringify(payload)).not.toContain('original-password');
+    // Keyed with the JWT secret: the same password under another secret
+    // stamps differently, so a stamp cannot be tested against guesses.
+    const { db } = makeFakeDb([[], [ADMIN_ROW]]);
+    const other = await new AuthService(db, {
+      ...envAdmin('original-password'),
+      jwtSecret: 'another-jwt-secret',
+    } as CoreConfig).loginWithPassword('root@example.com', 'original-password');
+    expect((jwt.decode(other.token) as Record<string, unknown>).ap).not.toBe(payload.ap);
+  });
+
+  it('leaves every other account's sessions alone in a deployment with an environment admin', async () => {
+    const token = jwt.sign({ userId: ROW.id, email: ROW.email, sv: 0 }, 'test-jwt-secret', { expiresIn: '7d' });
+    const { db } = makeFakeDb([[{ ...ROW, deactivatedAt: null }]]);
+    await expect(new AuthService(db, envAdmin('rotated-password')).resolveSession(token)).resolves.toEqual({
+      userId: ROW.id,
+      email: ROW.email,
+    });
+  });
+});
+
 describe('AuthService.listAccounts', () => {
   it('reports hasPassword without ever exposing the hash', async () => {
     const passwordHash = await hashPassword('pw-longer-than-8');

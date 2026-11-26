@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { and, eq, getTableColumns, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Database } from '../database/index.js';
@@ -736,11 +737,31 @@ export class AuthService implements IAccountSwitchGuard {
   /**
    * A session token for `user`, stamped with the session generation its row
    * is at (`sv`): {@link resolveSession} refuses it once the row moves on.
+   * The deployment admin's token also carries the stamp of the environment
+   * password it was issued under (`ap`, see {@link envAdminStamp}): that
+   * password lives in no row a generation could follow.
    */
   private signToken(user: { id: string; email: string; sessionVersion: number }): string {
-    return jwt.sign({ userId: user.id, email: user.email, sv: user.sessionVersion }, this.config.jwtSecret, {
-      expiresIn: '7d',
-    });
+    const ap = this.isEnvAdminEmail(user.email) ? this.envAdminStamp() : undefined;
+    return jwt.sign(
+      { userId: user.id, email: user.email, sv: user.sessionVersion, ...(ap ? { ap } : {}) },
+      this.config.jwtSecret,
+      { expiresIn: '7d' },
+    );
+  }
+
+  /**
+   * What names the current `ADMIN_PASSWORD` in a deployment admin's session:
+   * an HMAC of it keyed with the JWT secret. Whoever holds a token can
+   * decode it, so it carries neither the password nor anything a guess of
+   * the password can be tested against without the secret. Rotating `ADMIN_PASSWORD`
+   * changes the stamp, and {@link resolveSession} then refuses every session
+   * issued under the old one, as a password change does for a stored one.
+   */
+  private envAdminStamp(): string {
+    return createHmac('sha256', this.config.jwtSecret)
+      .update(`hexis-env-admin-session:${this.config.adminPassword}`)
+      .digest('base64url');
   }
 
   /**
@@ -784,21 +805,40 @@ export class AuthService implements IAccountSwitchGuard {
     return { userId, email };
   }
 
-  /** {@link verifyToken} plus the session generation the token was issued at. */
-  private decodeSession(token: string): { userId: string; email: string; sessionVersion: number } {
+  /**
+   * {@link verifyToken} plus the session generation the token was issued at
+   * and, for the deployment admin, the environment password's stamp.
+   */
+  private decodeSession(token: string): {
+    userId: string;
+    email: string;
+    sessionVersion: number;
+    adminStamp: string | undefined;
+  } {
     const decoded = jwt.verify(token, this.config.jwtSecret) as {
       userId: string;
       email: string;
       sv?: number;
+      ap?: unknown;
     };
     // A token issued before sessions had generations carries none: it is of
     // the first one, which is where every row started.
-    return { userId: decoded.userId, email: decoded.email, sessionVersion: decoded.sv ?? 0 };
+    return {
+      userId: decoded.userId,
+      email: decoded.email,
+      sessionVersion: decoded.sv ?? 0,
+      adminStamp: typeof decoded.ap === 'string' ? decoded.ap : undefined,
+    };
   }
 
   /**
    * A session token that may still be used: signed by us, not expired, its
    * account still on, and issued since the account's password last changed.
+   * For the deployment admin that password is `ADMIN_PASSWORD`, so its
+   * session must carry the stamp of the current one: after a rotation and
+   * restart every earlier session is refused, and so is one issued while
+   * the account was not the deployment admin (no stamp) or one kept after
+   * `ADMIN_PASSWORD` was unset (a stamp nothing current matches).
    * A token outlives a deactivation or a password change by up to seven
    * days, so the signature alone no longer says the bearer may enter.
    * Throws for an invalid token, {@link SessionEndedError} for one a
@@ -806,8 +846,8 @@ export class AuthService implements IAccountSwitchGuard {
    * account was switched off.
    */
   async resolveSession(token: string): Promise<{ userId: string; email: string }> {
-    const { sessionVersion, ...claim } = this.decodeSession(token);
-    let account: { active: boolean; sessionVersion: number };
+    const { sessionVersion, adminStamp, ...claim } = this.decodeSession(token);
+    let account: { active: boolean; sessionVersion: number; envAdmin: boolean };
     try {
       // Read fresh, never from the cache: a password changed on another
       // replica must end this token at its very next request, and only the
@@ -820,10 +860,16 @@ export class AuthService implements IAccountSwitchGuard {
     }
     if (!account.active) throw new AccountDeactivatedError();
     if (sessionVersion !== account.sessionVersion) throw new SessionEndedError();
+    // A stamp is never empty, so '' stands for "none" on both sides.
+    const currentStamp = account.envAdmin ? this.envAdminStamp() : '';
+    if (!timingSafeStringEqual(adminStamp ?? '', currentStamp)) throw new SessionEndedError();
     return claim;
   }
 
-  private readonly activeCache = new Map<string, { active: boolean; sessionVersion: number; at: number }>();
+  private readonly activeCache = new Map<
+    string,
+    { active: boolean; sessionVersion: number; envAdmin: boolean; at: number }
+  >();
 
   /**
    * Whether the account behind a credential is on: it exists and no admin
@@ -856,7 +902,7 @@ export class AuthService implements IAccountSwitchGuard {
   private async accountState(
     userId: string,
     { fresh = false }: { fresh?: boolean } = {},
-  ): Promise<{ active: boolean; sessionVersion: number }> {
+  ): Promise<{ active: boolean; sessionVersion: number; envAdmin: boolean }> {
     const now = Date.now();
     const hit = this.activeCache.get(userId);
     if (!fresh && hit && now - hit.at < ACTIVE_CACHE_MS) return hit;
@@ -871,8 +917,9 @@ export class AuthService implements IAccountSwitchGuard {
       .where(eq(users.id, userId))
       .limit(1);
     const row = found && (await this.clearOwnerSwitchOff(found));
-    const active = row !== undefined && (!row.deactivatedAt || this.isEnvAdminEmail(row.email ?? ''));
-    const entry = { active, sessionVersion: row?.sessionVersion ?? 0, at: now };
+    const envAdmin = row !== undefined && this.isEnvAdminEmail(row.email ?? '');
+    const active = row !== undefined && (!row.deactivatedAt || envAdmin);
+    const entry = { active, sessionVersion: row?.sessionVersion ?? 0, envAdmin, at: now };
     this.activeCache.set(userId, entry);
     return entry;
   }
