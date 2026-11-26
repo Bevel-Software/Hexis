@@ -1209,7 +1209,7 @@ export async function createHexisMcpServer(
         throw new McpError(ErrorCode.InternalError, keyRejected);
       }
       // OAuth mode, refused even after renewing: this request runs nothing and
-      // answers the deployment's sentence. Ending the sign-in stays
+      // answers hexis-mcp's own re-authorize message. Ending the sign-in stays
       // renewal.ts's, as it is for every other read that meets this answer.
       if (err instanceof DeploymentError && err.status === 401) {
         throw new McpError(ErrorCode.InternalError, err.message);

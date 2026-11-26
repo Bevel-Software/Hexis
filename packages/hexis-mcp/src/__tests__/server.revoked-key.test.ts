@@ -27,8 +27,15 @@ let base = '';
 let revoked = false;
 /** The sentence the deployment's 401 carries (a switched-off account gets its own). */
 let refusalSentence = REVOKED_KEY_SENTENCE;
-/** Held, the manuals route answers only once it settles. */
+/** Held, the manuals route answers only once it settles. Set it with holdDiscovery() only. */
 let holdManuals: Promise<void> | null = null;
+/** Settles holdManuals. afterEach calls it, so a failed test never leaves a request held. */
+let releaseManuals: () => void = () => {};
+/** Holds discovery mid-download until the returned release (or afterEach) lets it go. */
+function holdDiscovery(): () => void {
+  holdManuals = new Promise<void>((resolve) => (releaseManuals = resolve));
+  return releaseManuals;
+}
 /** How long the deployment's MCP endpoint takes to answer. */
 let mcpDelayMs = 0;
 /** Discovery fails: the manuals route answers 5xx. */
@@ -41,6 +48,7 @@ afterEach(() => {
   revoked = false;
   discoveryFails = false;
   refusalSentence = REVOKED_KEY_SENTENCE;
+  releaseManuals();
   holdManuals = null;
   mcpDelayMs = 0;
   received.length = 0;
@@ -440,21 +448,25 @@ describe('a connection key revoked while the local server holds it', () => {
   });
 
   it('hands a second shutdown caller the teardown already in progress', { timeout: 60_000 }, async () => {
-    let releaseManuals!: () => void;
-    holdManuals = new Promise<void>((resolve) => (releaseManuals = resolve));
+    const release = holdDiscovery();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     // Discovery is held mid-download, so teardown waits on it (up to its grace).
     const handle = await createHexisMcpServer({ baseUrl: base, connectionKey: KEY }, '0.0.0', { catalogCheck: false });
-    const first = handle.shutdown();
-    const second = handle.shutdown();
-    expect(second).toBe(first);
-    let secondSettled = false;
-    void second.then(() => (secondSettled = true));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    // The teardown is still held open, and the second caller is still waiting for it.
-    expect(secondSettled).toBe(false);
-    releaseManuals();
-    await second;
-    expect(secondSettled).toBe(true);
+    try {
+      const first = handle.shutdown();
+      const second = handle.shutdown();
+      expect(second).toBe(first);
+      let secondSettled = false;
+      void second.then(() => (secondSettled = true));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // The teardown is still held open, and the second caller is still waiting for it.
+      expect(secondSettled).toBe(false);
+      release();
+      await second;
+      expect(secondSettled).toBe(true);
+    } finally {
+      release();
+      await handle.shutdown();
+    }
   });
 });
