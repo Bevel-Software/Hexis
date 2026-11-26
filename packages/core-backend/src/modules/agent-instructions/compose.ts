@@ -38,9 +38,9 @@ export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
 /**
  * The one tool that returns the platform's guide (see `modules/agent-guide`).
  * Named here, where the text that sends an agent to it is composed, and read
- * from here by tool-registry's guide-first sentence: that module already
- * imports this one (`PREFIXED_TOOLS`), and this one imports none of its
- * modules, so neither import closes a cycle.
+ * from here by tool-registry's guide-first sentence: tool-registry already
+ * imports this module (`PREFIXED_TOOLS`), and this module imports no value
+ * from any other module, so neither import closes a cycle.
  */
 export const GET_AGENT_GUIDE_TOOL = 'get_agent_guide';
 
