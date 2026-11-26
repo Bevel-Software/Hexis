@@ -300,9 +300,11 @@ export function createToolAuthMiddleware(
  * ({@link createManualAuthMiddleware}): a `bevel_…` connection key or an
  * internal token goes through {@link createTokenVerifier}, and any other
  * bearer is read as a browser session, resolving to `source: 'session'`. A
- * session that is not valid is refused (401). A session whose account cannot
- * be looked up throws the `AuthBackendError`: an outage, not a verdict on the
- * session. A failure of the connection-key store is thrown on as it is.
+ * session that is not valid, or whose account is off, is refused (401). An
+ * outage is not a verdict on the bearer, so it is thrown: a session whose
+ * account cannot be looked up throws the `AuthBackendError`, and what the key
+ * store or the account check behind a key or token throws is thrown on as it
+ * is.
  */
 export function createManualTokenVerifier(
   externalApiKeyService: IExternalApiKeyService,
