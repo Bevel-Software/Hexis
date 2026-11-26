@@ -24,13 +24,25 @@ export class DownstreamToolError extends Error {
 
   /**
    * The same failure with every secret `redactor` holds taken out of its words:
-   * every string in every content block (a text, a resource's text and uri, a
-   * link's uri, name and description, annotations), and the message. Only a
-   * block's `type`, its `mimeType` and its base64 `data` pass as they are:
-   * they are not text the server wrote.
+   * every string anywhere in every content block, and the message. Then the
+   * fields the MCP spec defines as something other than text the server wrote
+   * are put back as they came: a block's `type`, `mimeType` and binary `data`
+   * (an image, audio), and an embedded resource's `mimeType` and binary
+   * `blob`. By position, so a field of the same name elsewhere (`_meta.data`)
+   * is redacted like any other string.
    */
   redactedWith(redactor: SecretRedactor): DownstreamToolError {
-    const content = this.content.map((block) => redactStrings(block, redactor) as typeof block);
+    const content = this.content.map((block) => {
+      const redacted = redactStrings(block, redactor) as Record<string, unknown>;
+      const original = block as Record<string, unknown>;
+      for (const key of ['type', 'mimeType', 'data']) if (key in original) redacted[key] = original[key];
+      const resource = original.resource as Record<string, unknown> | undefined;
+      if (block.type === 'resource' && resource && typeof resource === 'object') {
+        const kept = redacted.resource as Record<string, unknown>;
+        for (const key of ['mimeType', 'blob']) if (key in resource) kept[key] = resource[key];
+      }
+      return redacted as typeof block;
+    });
     return new DownstreamToolError(redactor.redact(this.message), content);
   }
 
@@ -46,17 +58,12 @@ export class DownstreamToolError extends Error {
   }
 }
 
-/** Fields of a content block that are not text the server wrote. */
-const NOT_QUOTED = new Set(['type', 'mimeType', 'data']);
-
-/** `value` with `redactor` applied to every string in it, at any depth, except the {@link NOT_QUOTED} fields. */
+/** `value` with `redactor` applied to every string in it, at any depth. */
 function redactStrings(value: unknown, redactor: SecretRedactor): unknown {
   if (typeof value === 'string') return redactor.redact(value);
   if (Array.isArray(value)) return value.map((item) => redactStrings(item, redactor));
   if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, field]) => [key, NOT_QUOTED.has(key) ? field : redactStrings(field, redactor)]),
-  );
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, redactStrings(field, redactor)]));
 }
 
 /** What a result says when it reports its own failure, or null when it does not. */

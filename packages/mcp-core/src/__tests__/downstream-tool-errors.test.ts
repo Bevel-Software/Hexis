@@ -3,6 +3,7 @@ import '@utcp/mcp'; // side effect: registers the stock 'mcp' protocol, which th
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { DownstreamToolError, downstreamErrorText, installDownstreamToolErrors } from '../downstream-tool-errors.js';
 import { SecretRedactor } from '../secret-redactor.js';
 import { registerManual, dispatchToolCall } from '../dispatch.js';
@@ -67,20 +68,26 @@ describe('downstreamErrorText', () => {
 });
 
 describe('DownstreamToolError.redactedWith', () => {
-  it("takes the secret out of every string the server wrote, a resource's uri included", () => {
+  it('takes the secret out of every string the server wrote, and leaves only the binary and typed fields', () => {
+    const KEY = 'sk-live-1234567890abcdef';
     const redactor = new SecretRedactor();
-    redactor.remember('sk-live-1234567890abcdef');
-    const failure = new DownstreamToolError('refused sk-live-1234567890abcdef', [
-      { type: 'text', text: 'key sk-live-1234567890abcdef' },
-      { type: 'resource', resource: { uri: 'https://x.example/?k=sk-live-1234567890abcdef', text: 'sk-live-1234567890abcdef' } },
-      { type: 'image', data: 'c2stbGl2ZQ==', mimeType: 'image/png' },
-    ]);
+    redactor.remember(KEY);
+    // A binary payload that happens to spell the key is not text: it passes as it came.
+    const failure = new DownstreamToolError(`refused ${KEY}`, [
+      { type: 'text', text: `key ${KEY}`, annotations: { audience: ['user'] }, _meta: { data: KEY } },
+      { type: 'resource_link', uri: `https://x.example/?k=${KEY}`, name: 'link', description: `uses ${KEY}` },
+      { type: 'resource', resource: { uri: `https://x.example/${KEY}`, text: KEY } },
+      { type: 'resource', resource: { uri: 'file:///a', mimeType: 'application/octet-stream', blob: KEY } },
+      { type: 'image', data: KEY, mimeType: 'image/png' },
+    ] as CallToolResult['content']);
     const redacted = failure.redactedWith(redactor);
     expect(redacted.message).toBe('refused [redacted]');
     expect(redacted.content).toEqual([
-      { type: 'text', text: 'key [redacted]' },
-      { type: 'resource', resource: { uri: 'https://x.example/?k=[redacted]', text: '[redacted]' } },
-      { type: 'image', data: 'c2stbGl2ZQ==', mimeType: 'image/png' },
+      { type: 'text', text: 'key [redacted]', annotations: { audience: ['user'] }, _meta: { data: '[redacted]' } },
+      { type: 'resource_link', uri: 'https://x.example/?k=[redacted]', name: 'link', description: 'uses [redacted]' },
+      { type: 'resource', resource: { uri: 'https://x.example/[redacted]', text: '[redacted]' } },
+      { type: 'resource', resource: { uri: 'file:///a', mimeType: 'application/octet-stream', blob: KEY } },
+      { type: 'image', data: KEY, mimeType: 'image/png' },
     ]);
   });
 });
