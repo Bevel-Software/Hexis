@@ -79,11 +79,11 @@ describe('ChangeReadGate', () => {
     expect(await judge(ALICE, `${KB}/KnowledgeBase/Sales/deal.md`)).toEqual({ allowed: true, via: 'readable' });
   });
 
-  it('a new file in a folder the caller cannot read is refused, naming the folder', async () => {
+  it('a new file in a folder the caller cannot read is refused, naming the file', async () => {
     await fs.mkdir(path.join(repo, 'KnowledgeBase/Sealed'), { recursive: true });
     expect(await judge(ALICE, `${KB}/KnowledgeBase/Sealed/brief.pdf`)).toEqual({
       allowed: false,
-      unreadable: 'KnowledgeBase/Sealed',
+      unreadable: 'KnowledgeBase/Sealed/brief.pdf',
     });
   });
 
@@ -95,6 +95,27 @@ describe('ChangeReadGate', () => {
     });
   });
 
+  it('answers a file that is there and one that is not alike, so a refusal lists nothing of a folder', async () => {
+    // `deal.md` is there and `guess.md` is not. Alice may read neither, and
+    // nothing in the two answers may tell her which one exists.
+    await write(repo, 'KnowledgeBase/Sealed/deal.md', 'x');
+    const answerFor = async (rel: string) => {
+      const wsPath = `${KB}/${rel}`;
+      const verdict = await judge(ALICE, wsPath);
+      const err = (await gate.assertMayChange(WS, ALICE, wsPath, 'file').then(
+        () => null,
+        (e: unknown) => e,
+      )) as { status?: number; access?: unknown; message?: string } | null;
+      // The path is the caller's own text: masked, the two answers compare whole.
+      const answer = JSON.stringify({ verdict, status: err?.status, access: err?.access, message: err?.message });
+      return JSON.parse(answer.split(rel).join('<path>')) as Record<string, unknown>;
+    };
+    const there = await answerFor('KnowledgeBase/Sealed/deal.md');
+    const absent = await answerFor('KnowledgeBase/Sealed/guess.md');
+    expect(there).toEqual(absent);
+    expect(there).toMatchObject({ verdict: { allowed: false, unreadable: '<path>' }, status: 403 });
+  });
+
   it('a write grant does not stand in for read: a nearer deny read still refuses', async () => {
     await write(repo, 'KnowledgeBase/access.md', `---\nwrite:\n  - Alice <${ALICE}>\n---\n`);
     await write(repo, 'KnowledgeBase/Board/access.md', `---\nread:\n  - deny Alice <${ALICE}>\n---\n`);
@@ -103,16 +124,16 @@ describe('ChangeReadGate', () => {
     // …but the nearer folder takes the read away, and the write with it.
     expect(await judge(ALICE, `${KB}/KnowledgeBase/Board/memo.md`)).toEqual({
       allowed: false,
-      unreadable: 'KnowledgeBase/Board',
+      unreadable: 'KnowledgeBase/Board/memo.md',
     });
   });
 
-  it('a loose file directly at an unreadable root is refused, naming the root', async () => {
+  it('a loose file directly at an unreadable root is refused, naming the file', async () => {
     expect(await judge(ALICE, `${KB}/KnowledgeBase/notes.md`)).toEqual({
       allowed: false,
-      unreadable: 'KnowledgeBase',
+      unreadable: 'KnowledgeBase/notes.md',
     });
-    expect(await judge(ALICE, `${KB}/AGENTS.md`)).toEqual({ allowed: false, unreadable: '' });
+    expect(await judge(ALICE, `${KB}/AGENTS.md`)).toEqual({ allowed: false, unreadable: 'AGENTS.md' });
   });
 
   describe('the exception: a new folder directly under one of the three roots', () => {
@@ -140,18 +161,18 @@ describe('ChangeReadGate', () => {
       await fs.mkdir(path.join(repo, 'KnowledgeBase/Projects'), { recursive: true });
       expect(await judge(ALICE, `${KB}/KnowledgeBase/Projects/plan.md`)).toEqual({
         allowed: false,
-        unreadable: 'KnowledgeBase/Projects',
+        unreadable: 'KnowledgeBase/Projects/plan.md',
       });
     });
 
     it('does not cover a new folder under any other root', async () => {
       expect(await judge(ALICE, `${KB}/Data/Engineering/plan.md`)).toEqual({
         allowed: false,
-        unreadable: 'Data/Engineering',
+        unreadable: 'Data/Engineering/plan.md',
       });
       expect(await judge(ALICE, `${KB}/Data/Engineering`, 'dir')).toEqual({
         allowed: false,
-        unreadable: 'Data',
+        unreadable: 'Data/Engineering',
       });
     });
 
@@ -159,7 +180,7 @@ describe('ChangeReadGate', () => {
       // `KnowledgeBase/Projects` as a FILE is a loose file at the root, not a folder.
       expect(await judge(ALICE, `${KB}/KnowledgeBase/Projects`, 'file')).toEqual({
         allowed: false,
-        unreadable: 'KnowledgeBase',
+        unreadable: 'KnowledgeBase/Projects',
       });
     });
   });
@@ -180,7 +201,7 @@ describe('ChangeReadGate', () => {
     });
 
     it('a non-admin gets no rescue on root files', async () => {
-      expect(await judge(ALICE, `${KB}/groups.yaml`)).toEqual({ allowed: false, unreadable: '' });
+      expect(await judge(ALICE, `${KB}/groups.yaml`)).toEqual({ allowed: false, unreadable: 'groups.yaml' });
     });
 
     it('the rescues name FILES: a folder target at the root is judged as a folder, even for an admin', async () => {
@@ -219,10 +240,13 @@ describe('ChangeReadGate', () => {
       // Excluded exactly where the Admin role is.
       expect(await owned.judge(WS, OWNER, `${KB}/KnowledgeBase/Board/memo.md`, 'file')).toEqual({
         allowed: false,
-        unreadable: 'KnowledgeBase/Board',
+        unreadable: 'KnowledgeBase/Board/memo.md',
       });
       // Not an owner on the gate's own service: no floor, no read.
-      expect(await judge(OWNER, `${KB}/KnowledgeBase/notes.md`)).toEqual({ allowed: false, unreadable: 'KnowledgeBase' });
+      expect(await judge(OWNER, `${KB}/KnowledgeBase/notes.md`)).toEqual({
+        allowed: false,
+        unreadable: 'KnowledgeBase/notes.md',
+      });
     });
 
     it('a roles.yaml that is there but unusable is not an open door', async () => {
@@ -235,7 +259,7 @@ describe('ChangeReadGate', () => {
       await fs.symlink(path.join(root, 'elsewhere'), path.join(repo, 'KnowledgeBase/Linked'));
       expect(await judge(ALICE, `${KB}/KnowledgeBase/Linked/a.md`)).toEqual({
         allowed: false,
-        unreadable: 'KnowledgeBase/Linked',
+        unreadable: 'KnowledgeBase/Linked/a.md',
       });
     });
 
@@ -251,7 +275,7 @@ describe('ChangeReadGate', () => {
   });
 
   describe('assertMayChange', () => {
-    it('throws an AccessDeniedError that names the unreadable place and carries no eligible lists', async () => {
+    it('throws an AccessDeniedError that names the unreadable path and carries no eligible lists', async () => {
       await fs.mkdir(path.join(repo, 'KnowledgeBase/Sealed'), { recursive: true });
       const err = await gate
         .assertMayChange(WS, ALICE, `${KB}/KnowledgeBase/Sealed/brief.pdf`, 'file')
@@ -262,18 +286,16 @@ describe('ChangeReadGate', () => {
         path: `${KB}/KnowledgeBase/Sealed/brief.pdf`,
         eligibleRoles: [],
         eligibleUsers: [],
-        unreadable: 'KnowledgeBase/Sealed',
+        unreadable: 'KnowledgeBase/Sealed/brief.pdf',
       });
       expect(denied.message).toBe(
-        `You don't have permission to write to "${KB}/KnowledgeBase/Sealed/brief.pdf". You don't have read access to "KnowledgeBase/Sealed"; only what you can read can be created, changed or removed.`,
+        `You don't have permission to write to "${KB}/KnowledgeBase/Sealed/brief.pdf". You don't have read access to "KnowledgeBase/Sealed/brief.pdf"; only what you can read can be created, changed or removed.`,
       );
       expect(denied.status).toBe(403);
     });
 
-    it('names the top level when the root itself is the unreadable place', async () => {
-      const err = await gate
-        .assertMayChange(WS, ALICE, `${KB}/notes.md`, 'file')
-        .then(() => null, (e: unknown) => e);
+    it('names the top level when the repository root itself is the target', async () => {
+      const err = await gate.assertMayChange(WS, ALICE, KB, 'dir').then(() => null, (e: unknown) => e);
       expect((err as AccessDeniedError).message).toContain("You don't have read access to the top level;");
     });
 

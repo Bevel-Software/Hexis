@@ -93,7 +93,7 @@ describe('acquireLock asks the read-before-write gate', () => {
   const PATH = `${KB}/KnowledgeBase/Sealed/brief.pdf`;
 
   it('on a DRAFT branch, where no write gate runs: a refusal means no lock', async () => {
-    const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed' });
+    const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
     const { svc, acquire, accessControl } = makeService({ gate });
 
     await expect(svc.acquireLock(WS, DRAFT, PATH, USER)).rejects.toBeInstanceOf(AccessDeniedError);
@@ -113,7 +113,7 @@ describe('acquireLock asks the read-before-write gate', () => {
   });
 
   it('on a PROTECTED branch, after the write gate: a write grant without read is refused', async () => {
-    const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed' });
+    const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
     const { svc, acquire, accessControl } = makeService({ gate, writable: true });
 
     await expect(svc.acquireLock(WS, PROTECTED, PATH, USER)).rejects.toBeInstanceOf(AccessDeniedError);
@@ -131,13 +131,13 @@ describe('acquireLock asks the read-before-write gate', () => {
     expect(acquire).not.toHaveBeenCalled();
   });
 
-  it('the refusal carries the unreadable place, so the route and the tools can say why', async () => {
-    const { gate } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed' });
+  it('the refusal carries the unreadable path, so the route and the tools can say why', async () => {
+    const { gate } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
     const { svc } = makeService({ gate });
 
     const err = await svc.acquireLock(WS, DRAFT, PATH, USER).then(() => null, (e: unknown) => e);
-    expect((err as AccessDeniedError).access.unreadable).toBe('KnowledgeBase/Sealed');
-    expect((err as AccessDeniedError).message).toContain('You don\'t have read access to "KnowledgeBase/Sealed"');
+    expect((err as AccessDeniedError).access.unreadable).toBe('KnowledgeBase/Sealed/brief.pdf');
+    expect((err as AccessDeniedError).message).toContain('You don\'t have read access to "KnowledgeBase/Sealed/brief.pdf"');
   });
 
   it('a platform-file restore that the write gate let through is not asked — the rescue is for a denying destination', async () => {

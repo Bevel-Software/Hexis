@@ -190,7 +190,7 @@ async function start(options: StartOptions = {}): Promise<string> {
         }
       }
       if (await access.canRead(ws, userEmail, rel)) return null;
-      return new AccessDeniedError({ path: wsPath, eligibleRoles: [], eligibleUsers: [], unreadable: rel.slice(0, rel.lastIndexOf('/')) });
+      return new AccessDeniedError({ path: wsPath, eligibleRoles: [], eligibleUsers: [], unreadable: rel });
     };
     let locked = writes;
     for (const w of [...writes].sort((x, y) => (x.path < y.path ? -1 : 1))) {
@@ -1076,7 +1076,7 @@ describe('apply_file_upload', () => {
     await send(base, token, 'drop.zip', zipOf({ 'open.md': 'open', 'Sealed/peek.md': 'peek' }));
     const answer = await apply(base, { branch: DRAFT, token, destination: KB_DIR });
     expect(outcomeAt(answer, `${KB_DIR}/Sealed/peek.md`)).toMatchObject({ outcome: 'refused', error: 'write-denied' });
-    expect(outcomeAt(answer, `${KB_DIR}/Sealed/peek.md`)?.message).toContain('read access to "Sealed"');
+    expect(outcomeAt(answer, `${KB_DIR}/Sealed/peek.md`)?.message).toContain('read access to "Sealed/peek.md"');
     expect(outcomeAt(answer, `${KB_DIR}/open.md`)).toMatchObject({ outcome: 'created' });
     expect(batches).toEqual([[`${KB_DIR}/open.md`]]);
   });
