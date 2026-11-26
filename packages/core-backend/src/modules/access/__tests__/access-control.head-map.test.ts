@@ -245,6 +245,22 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect(opened).toEqual([]);
   }, 120_000);
 
+  // A plugin is a folder below the plugins root that holds a manifest. One
+  // test of what the model is read from serves the checkout and the commit,
+  // so a manifest in the plugins root itself makes no plugin in either.
+  it('makes no plugin of a manifest at the plugins root, at the commit as on the checkout', async () => {
+    await commit('a manifest at the root of the plugins', {
+      'Plugins/plugin.json': '{ "name": "everything" }\n',
+      'Plugins/access.md': '---\nread:\n  - Sales\n---\n',
+      'ForPlugin.md': '---\nread:\n  - deny everyone\n  - plugin/everything/read\n---\n# for a plugin\n',
+    });
+    await copyToPlain();
+    const paths = [...Object.keys(FILES), 'ForPlugin.md'];
+    const svc = service();
+    expect(await svc.canRead('ws', 'sal@x.io', 'ForPlugin.md')).toBe(false);
+    expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
+  }, 120_000);
+
   it('reads a file the commit does not hold from the checkout', async () => {
     const svc = service();
     await svc.canReadBatch('ws', 'nobody@x.io', Object.keys(FILES));

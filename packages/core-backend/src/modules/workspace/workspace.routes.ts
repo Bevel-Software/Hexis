@@ -286,9 +286,12 @@ export function createWorkspaceRoutes(
     // one atomic step the user explicitly triggered).
     // What a listing depends on at this path, before the op and after it: an
     // op that only edited a file that was already there leaves every open
-    // file explorer's tree right, and the events below say so.
-    const before = await listingProbe(workspaceId, targetPath);
-    const mark = async (): Promise<{ listingUnchanged?: true }> => {
+    // file explorer's tree right, and the events below say so. `before` is
+    // read once the caller holds the lock, on both paths below: read ahead of
+    // it, another holder's save could land in between, and an op that put
+    // back what was there before that save would be announced as changing
+    // nothing.
+    const mark = async (before: string | null): Promise<{ listingUnchanged?: true }> => {
       // Bytes that were on disk before this call cannot be compared with what
       // they replaced: nothing is said, so the tree is asked for.
       if (options?.alreadyOnDisk) return {};
@@ -297,8 +300,9 @@ export function createWorkspaceRoutes(
     };
     const existing = await versionControlService.getLock(workspaceId, branch, targetPath);
     if (existing && existing.holderUserId === user.id) {
+      const before = await listingProbe(workspaceId, targetPath);
       const result = await op();
-      const listing = await mark();
+      const listing = await mark(before);
       // Disk write landed but no commit yet (caller will release later,
       // at which point releaseLock fires its own `file-changed` with a
       // real `newSha`). Emit a null-sha file-changed now so any other
@@ -354,6 +358,7 @@ export function createWorkspaceRoutes(
     //     return success once disk + lock + enqueue are all done —
     //     the user-visible "save = share" guarantee is satisfied by
     //     the shared per-branch workspace, not by waiting on git.
+    const before = await listingProbe(workspaceId, targetPath);
     let opSucceeded = false;
     let result: T;
     try {
@@ -382,7 +387,7 @@ export function createWorkspaceRoutes(
       throw new Error('unreachable: opSucceeded false after try');
     }
     // Read before the release: after it another writer may hold the path.
-    const listing = await mark();
+    const listing = await mark(before);
     await versionControlService.releaseLock(workspaceId, branch, targetPath, user);
     // Signal sidebar / explorer to refresh even when no open tab matched
     // the changed path (e.g. someone else just created a new file).

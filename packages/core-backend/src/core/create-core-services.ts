@@ -86,7 +86,7 @@ import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modul
 import { AccessControlService, loadActiveGroups, type AccessModel } from '../modules/access/access-control.service.js';
 import { OwnEntriesMemo, OWN_ENTRIES_LIMITS } from '../modules/access/own-entries-memo.js';
 import { TreeIndexer } from '../modules/access/tree-index.js';
-import { HEAD_MAP_LIMITS, HeadMaps } from '../modules/access/head-access-map.js';
+import { ACCESS_READING_VERSION, HEAD_MAP_LIMITS, HeadMaps } from '../modules/access/head-access-map.js';
 import { DbHeadSeedStore } from '../modules/access/head-seed-store.js';
 import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
@@ -195,7 +195,7 @@ import { alwaysWritable, type IWriteAccess } from '../modules/write-access/write
 import { createInProcessToolCaller, createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
-import { resolveAppVersion } from '../version.js';
+import { GIT_SHA, resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
 import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.js';
 import { createCatalogRevisionReader, type CatalogRevisionReader } from './catalog-revision.js';
@@ -898,12 +898,12 @@ export async function createCoreServices(
     new OwnEntriesMemo(Date.now, OWN_ENTRIES_LIMITS),
     // The maps a branch's reads are answered from: their own tree indexer
     // (a map keeps its commit's whole tree), the deployment's bounds, and
-    // the row a restart begins from, read only by the release that wrote it.
+    // the row a restart begins from, read only by the build that wrote it.
     new HeadMaps<AccessModel>(
       gitRunner,
       new TreeIndexer(),
       HEAD_MAP_LIMITS,
-      new DbHeadSeedStore(db, resolveAppVersion()),
+      new DbHeadSeedStore(db, { reading: ACCESS_READING_VERSION, sha: GIT_SHA }),
       Date.now,
     ),
   );

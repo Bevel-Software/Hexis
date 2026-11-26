@@ -530,6 +530,12 @@ describe('mergeChangeRequest — roles.yaml preservation guard', () => {
       expect((err as ApprovalCarryPendingError).payload).not.toHaveProperty('mergeBlockedReasons');
     });
 
+    // The carry still owed may be an earlier update's from the target, not this Apply's restore.
+    it('names both ways the server updates a draft, since either may be the carry still owed', () => {
+      const message = new ApprovalCarryPendingError(['Sales/Deal.md']).message;
+      expect(message).toMatch(/^The server updated this draft \(an update from its target, or while applying it\)/);
+    });
+
     it('a long list of waiting files is cut with a count, so the whole refusal fits the stored one', () => {
       const paths = Array.from({ length: 40 }, (_, i) => `Sales/Deals/${'very-long-folder-name-'.repeat(3)}${i}.md`);
       const message = new ApprovalCarryPendingError(paths).message;

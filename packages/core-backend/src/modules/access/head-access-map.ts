@@ -2,7 +2,7 @@ import { logger } from '../../shared/logging.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { readRevSha } from '../kb-fs/index.js';
 import { accessMdSelfEntries, isAccessMdPath, parseOwnAccessEntries, type OwnEntries } from '../access-model/index.js';
-import { catFileBatchBytes } from './cat-file-batch.js';
+import { catFileBatchBytes } from '../../shared/cat-file-batch.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -80,10 +80,22 @@ export interface HeadSeed {
 
 /** Where the seed is kept between starts. */
 export interface IHeadSeedStore {
-  /** The seed last saved, or null when there is none this release may read. */
+  /** The seed last saved, or null when there is none this build may read. */
   load(): Promise<HeadSeed | null>;
   save(seed: HeadSeed): Promise<void>;
 }
+
+/**
+ * Which reading of a file version a seed records: what `read` and
+ * `readDeclaredOnDisk` take a version to declare, through `blobKey`,
+ * `parseOwnAccessEntries`, `accessMdSelfEntries`, `frontmatterHeadOfBytes`,
+ * `frontmatterHeadOfWholeFile` and `detachEntries`. A seed lists only the
+ * versions that declare something, so a version it leaves out is taken to
+ * declare nothing; `DbHeadSeedStore` reads a seed only under the number it
+ * was saved with. Raise it with any change to what a version is read to
+ * declare.
+ */
+export const ACCESS_READING_VERSION = 1;
 
 /**
  * What {@link HeadMaps} asks of the access service: the access model of a
@@ -160,10 +172,11 @@ export class HeadMaps<M> implements IHeadMaps<M> {
   /** Commits being read in the background (see `HeadMapLimits.waitBytes`). */
   private readonly warming = new Set<string>();
   /**
-   * Commits no map is made from, each until a time: forever for a commit
-   * that cannot have one (a symbolic link, no roles file; a commit does not
-   * change), and `RETRY_MS` for one whose read failed, which may succeed
-   * next time. Either way they are not tried on every call.
+   * Commits no map is made from, each until a time: forever for one that
+   * lists a symbolic link or a submodule and has a model (a commit does not
+   * change), and `RETRY_MS` for any other: no model read from it (no roles
+   * file, one that does not parse, a git read that failed), or a read of its
+   * files that failed. Either way they are not tried on every call.
    */
   private readonly without = new Map<string, number>();
   private static readonly WITHOUT_MAX = 256;
@@ -203,6 +216,8 @@ export class HeadMaps<M> implements IHeadMaps<M> {
     const seed = await store.load();
     if (!seed) return;
     const declared = new Map(seed.declaring);
+    // Outside the workspace's git turn, on purpose: it reads the objects of a
+    // commit, which no write to the checkout changes.
     const { stdout } = await this.git.run(repoDir, ['ls-tree', '-r', '-z', seed.commit], { encoding: 'buffer' });
     const nothing: string[] = [];
     const toRead = new Map<string, Unseen>();
@@ -346,6 +361,10 @@ export class HeadMaps<M> implements IHeadMaps<M> {
 
   /** The files whose state on disk differs from `commit` (staged or not), from git's stat cache: no file is read. */
   private async changedOnDisk(repoDir: string, commit: string): Promise<Set<string>> {
+    // Outside the workspace's git turn, on purpose: it reads `commit`'s objects and git's stat cache of the checkout,
+    // and a write racing it can make its answer stale. A stale answer is safe: it only decides where a version is read
+    // from. A copy on disk is used only when its bytes hash to the version's object id (`readDeclaredOnDisk`), and
+    // every other version is read through git.
     const { stdout } = await this.git.run(repoDir, ['diff-index', '--name-only', '-z', commit, '--'], { encoding: 'buffer' });
     const changed = new Set<string>();
     for (let off = 0; off < stdout.length; ) {
@@ -367,6 +386,8 @@ export class HeadMaps<M> implements IHeadMaps<M> {
         to++;
       } while (to < unseen.length && bytes + unseen[to]!.size <= this.limits.chunkBytes);
       const chunk = unseen.slice(from, to);
+      // Outside the workspace's git turn, on purpose: objects read by their
+      // ids, which no write to the checkout changes.
       const outcomes = await catFileBatchBytes(
         this.git,
         repoDir,
@@ -462,8 +483,8 @@ export class HeadMaps<M> implements IHeadMaps<M> {
   }
 }
 
-/** Files read from the checkout at once. */
-const DISK_READS_AT_ONCE = 16;
+/** Files read from the checkout at once (`mapPooled`) by a head map, for its versions, and by a batch check, for its own entries. */
+export const DISK_READS_AT_ONCE = 16;
 /** A file the checkout does not hold as its version's bytes: gone, or other bytes. */
 const UNVOUCHED = Symbol('unvouched');
 

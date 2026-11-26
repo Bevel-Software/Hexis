@@ -7,7 +7,7 @@ const log = logger('access');
 
 import { isAbsence, isSkippedEntry, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import { isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
-import { catFileBatchBytes } from './cat-file-batch.js';
+import { catFileBatchBytes } from '../../shared/cat-file-batch.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../version-control/index.js';
 import { readRevSha } from '../kb-fs/index.js';
@@ -48,9 +48,11 @@ import {
   EVERYONE_DISPLAY,
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
+  FIXED_NAME_SOURCES,
   GROUP_TOKEN_PREFIX,
   splitPrincipalToken,
   accessMdSelfEntries,
+  accessSourceOf,
   canonicalEmail,
   canonicalRoleName,
   hasAccessFrontmatterExtension,
@@ -76,7 +78,8 @@ import { OwnEntriesMemo, type IOwnEntriesMemo, type WorkspaceOwnEntries } from '
 import { TreeIndexer, type CommitPaths, type ITreeIndexer } from './tree-index.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import { frontmatterHead } from './frontmatter-head.js';
-import { HEAD_MAP_LIMITS, HeadMaps, type HeadMap, type HeadModelSource, type IHeadMaps } from './head-access-map.js';
+import { DISK_READS_AT_ONCE, HEAD_MAP_LIMITS, HeadMaps, type HeadMap, type HeadModelSource, type IHeadMaps } from './head-access-map.js';
+import { mapPooled } from '../../shared/map-pooled.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -122,9 +125,6 @@ async function catFileBatch(
   return outcomes.map((o) => (o.kind === 'blob' ? o.text : null));
 }
 
-
-/** The sources of a model that are read by a fixed name at the root, whatever else the tree holds. */
-const FIXED_NAME_SOURCES = ['roles.yaml', SYNCED_GROUPS_YAML, GROUPS_YAML] as const;
 
 /** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
 export interface AccessModel {
@@ -320,12 +320,14 @@ function accessFileListener(
   return {
     async onFile(dir, name) {
       const rel = dir ? `${dir}/${name}` : name;
-      if (name === PLUGIN_MANIFEST_FILE && dir.startsWith(`${pluginsDir}/`)) {
+      const source = accessSourceOf(rel, pluginsDir);
+      if (source === 'manifest') {
         const text = await fs.readFile(path.join(repoDir, rel), 'utf-8').catch(() => null);
         pluginDirs.set(dir, pluginIdentityOf(parseManifestText(text), path.posix.basename(dir)));
         return;
       }
-      if (name !== 'access.md') return;
+      // The fixed-name sources are read by name (`loadCheckoutModel`).
+      if (source !== 'rules') return;
       const text = await fs.readFile(path.join(repoDir, rel), 'utf-8');
       const parsed = parseAccessFile(text, rel);
       if (!parsed.ok) {
@@ -1517,6 +1519,13 @@ export class AccessControlService implements IAccessControl {
    */
   private readonly deploymentOwners: ReadonlySet<string>;
 
+  /**
+   * Four collaborators below have defaults this constructor builds itself
+   * (`gitRunner`, `treeIndexer`, `ownEntriesMemo`, `headMaps`): an exception
+   * to constructor injection, kept because many suites construct this service
+   * without them. The composition root passes every one, so in this
+   * repository only those suites run the defaults.
+   */
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly kbDirName: string,
@@ -1615,14 +1624,17 @@ export class AccessControlService implements IAccessControl {
 
   /**
    * Workspaces whose checkout was just reported changed (`invalidate`), with
-   * the commit it stood on then. Until its head moves off that commit, the
-   * change may be on disk and in no commit yet, so the workspace is answered
-   * from the checkout, as before the maps. `SUSPECT_MS` ends the wait for a
-   * change that never became a commit. The wait is short because every write
-   * path commits moments after it lands on disk (the agent tools, the app's
-   * routes, `unzip` included); only a file someone saves by hand later
-   * (`save_file`, e.g. one `unzip` reports `unsaved`) stays outside the
-   * commit longer, and until then the commit's rules answer for it.
+   * the commit a map last answered them at (or, when none is known, the one
+   * the checkout stands on at the next read). Until the head moves off that
+   * commit, and for `SUSPECT_MS` at most, the workspace is answered from the
+   * checkout, as before the maps. That covers a caller that reports its write
+   * once the bytes are on disk and before their commit, as the grant, revoke
+   * and deny edits of `AccessMutationService` do. The commit, pull and reset
+   * paths report once the head has moved. A write that reports nothing when
+   * its bytes land (a save, an agent's file write) is not covered: wherever
+   * a map answers, the head commit's rules (its `access.md` files, roles,
+   * groups and plugin manifests) answer for it until its commit lands,
+   * however long that takes.
    */
   private readonly suspects = new Map<string, { at: number; commit: string | undefined }>();
   private static readonly SUSPECT_MS = 10_000;
@@ -1756,12 +1768,12 @@ export class AccessControlService implements IAccessControl {
     const model = head ? head.model : await this.loadCheckoutModel(workspaceId, repoDir);
     if (!needsPaths(model)) return { model, owns: [], head };
     const memo = fresh ? null : this.ownEntriesMemo.open(workspaceId);
-    const owns = await Promise.all(
-      relativePaths.map((p) => {
-        const own = head?.ownEntries(p);
-        return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
-      }),
-    );
+    // A few files at a time: a batch may name thousands of paths, and each
+    // path no map answers for may be a read of the checkout.
+    const owns = await mapPooled(relativePaths, DISK_READS_AT_ONCE, async (p) => {
+      const own = head?.ownEntries(p);
+      return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
+    });
     return { model, owns, head };
   }
 
@@ -3067,6 +3079,9 @@ export class AccessControlService implements IAccessControl {
       // for them makes git open every object, so one lost object anywhere
       // would fail the listing; a gate at a ref must not depend on that.
       const args = opts.checkout ? ['ls-tree', '-r', '-t', '-z', '-l', ref] : ['ls-tree', '-r', '-t', '-z', ref];
+      // Outside the workspace's git turn, on purpose, in both modes: `ref` is
+      // the commit id `buildModelAtCommit` was given, and this reads its
+      // objects, which no write to the checkout changes.
       const { stdout } = await this.gitRunner.run(repoDir, args, { encoding: 'buffer' });
       const walked = (p: string) => !opts.checkout || !p.split('/').some(isSkippedEntry);
       const out: string[] = [];
@@ -3091,21 +3106,19 @@ export class AccessControlService implements IAccessControl {
       // seen by its name even when it is an empty folder object with no
       // file beneath it.
       visitTreeListing(stdout, (p, file) => {
+        const source = accessSourceOf(p, pluginsDir);
         if (file.folder) {
-          if ((FIXED_NAME_SOURCES as readonly string[]).includes(p)) sources.update(`${p}/\0folder\n`);
+          if (source === 'fixed-name') sources.update(`${p}/\0folder\n`);
           return;
         }
         opts.visit?.(p, file);
         // One past the cap is enough to know the tree is not kept.
         if (all.length <= this.treeIndexMaxPaths) all.push(p);
-        if (p === 'access.md' || p.endsWith('/access.md')) {
-          if (!walked(p)) return;
-          out.push(p);
-        } else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
-        else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
-          if (!walked(p)) return;
-          pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
-        } else return;
+        if (source === null) return;
+        if (source === 'fixed-name') named.add(p);
+        else if (!walked(p)) return;
+        else if (source === 'rules') out.push(p);
+        else pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         sources.update(`${p}\0${file.objectId()}\n`);
       });
       return { accessFiles: out, pluginDirs, named, all, sourcesKey: sources.digest('hex') };
@@ -3309,9 +3322,7 @@ export class AccessControlService implements IAccessControl {
     const shared = this.modelsBySources.get(listed.sourcesKey);
     if (shared) return { model: shared.model, resolvedRef: commit, tree: treeOf(), sourcesKey: listed.sourcesKey };
     const wanted = [
-      'roles.yaml',
-      SYNCED_GROUPS_YAML,
-      GROUPS_YAML,
+      ...FIXED_NAME_SOURCES,
       ...listed.accessFiles,
       ...listed.pluginDirs.map((dir) => `${dir}/${PLUGIN_MANIFEST_FILE}`),
     ];
