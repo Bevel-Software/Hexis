@@ -69,11 +69,14 @@ const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
  *
  * 7,900 since the conventions rule names the default branch: the guide's start
  * names it too, but only to an agent that calls `get_agent_guide`, and the
- * sentence is ~165 characters plus the name. A CEILING, not a sample: measured
- * with the longest branch name the platform accepts (255 characters, the
- * bound `kb-fs` enforces), so no deployment's name can push the rules past it.
+ * sentence is ~165 characters plus the name.
+ *
+ * 8,400 since the measurement takes the name that RENDERS longest, not the
+ * longest plain one: 255 characters (the bound `kb-fs` enforces) of
+ * backticks, which the code span triples (8,315 in all). A CEILING, not a
+ * sample, so no deployment's name can push the rules past it.
  */
-export const SHARED_FILE_RULES_CAP = 7_900;
+export const SHARED_FILE_RULES_CAP = 8_400;
 
 /** One shared rule: how the guide heads it, and the rule itself. */
 export interface SharedFileRule {

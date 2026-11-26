@@ -65,7 +65,9 @@ describe('the shared file rules are one text, in the guide, and the handshake po
     ]);
     for (const rule of rules) {
       expect(guide, rule.id).toContain(rule.body);
-      expect(instructions, rule.id).not.toContain(rule.body.split('\n\n')[0]);
+      for (const paragraph of rule.body.split('\n\n')) {
+        expect(instructions, rule.id).not.toContain(paragraph);
+      }
     }
     // Once, not twice: the rule used to arrive on a dozen tools at a time.
     const contentRule = rules.find((r) => r.id === 'content-kinds')!.body.split('\n\n')[0];
@@ -227,14 +229,16 @@ describe('the delete rule for platform files', () => {
 });
 
 describe('the handshake text stays inside the length it pins', () => {
-  it('holds the shared section under its own cap', () => {
-    // With a default branch named, as on every deployment past setup — the
-    // sentence naming it counts against the cap like any rule.
-    const section = sharedFileRulesSection(DEFAULT_KB_LAYOUT, 'target-company-state');
-    expect(
-      section.length,
-      `the shared rules are ${section.length} characters (cap ${SHARED_FILE_RULES_CAP})`,
-    ).toBeLessThanOrEqual(SHARED_FILE_RULES_CAP);
+  it('holds the shared section under its own cap, whatever the branch name', () => {
+    // The sentence naming the default branch counts against the cap like any
+    // rule; a 255-character name of backticks renders longest.
+    for (const branch of ['', 'target-company-state', 'b'.repeat(255), '`'.repeat(255)]) {
+      const section = sharedFileRulesSection(DEFAULT_KB_LAYOUT, branch);
+      expect(
+        section.length,
+        `branch of ${branch.length}: the shared rules are ${section.length} characters (cap ${SHARED_FILE_RULES_CAP})`,
+      ).toBeLessThanOrEqual(SHARED_FILE_RULES_CAP);
+    }
   });
 
   it('is the length Claude Code keeps of a server\'s instructions', () => {
