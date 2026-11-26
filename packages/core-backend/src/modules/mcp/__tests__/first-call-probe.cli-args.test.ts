@@ -6,7 +6,7 @@ import { ConfigError, count, FLAG_NAMES, parseArgs, parseCliRequest, USAGE } fro
  *
  * Two things are pinned here. First, that a flag the probe cannot honour is
  * REFUSED rather than reinterpreted: `--concurrency 0` would otherwise reach
- * `runPooled`'s `Math.max(1, …)` and produce a one-at-a-time run reported as
+ * `mapPooled`'s `Math.max(1, …)` and produce a one-at-a-time run reported as
  * the fifty-wide burst that was asked for — a wrong number in a ticket log is
  * worse than no number. Second, that a flag value cannot forge the output: the
  * refusal is printed straight to a terminal or a CI log, and the value quoted

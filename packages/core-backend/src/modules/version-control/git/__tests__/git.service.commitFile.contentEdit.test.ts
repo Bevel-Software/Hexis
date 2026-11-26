@@ -1,7 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -9,6 +7,7 @@ import type { WorkspaceService } from '../../../workspace/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { GitService } from '../git.service.js';
 import { NodeGitRunner } from '../node-git-runner.js';
+import { gitOut, runGit } from './git-test-helpers.js';
 import type { IGitRunner } from '../../../../shared/git.contract.js';
 
 /**
@@ -19,16 +18,8 @@ import type { IGitRunner } from '../../../../shared/git.contract.js';
  * not ask for the whole tree after a save that cannot have changed it.
  */
 
-const execFileAsync = promisify(execFile);
 const USER = { id: 'u-alice', name: 'Alice', email: 'alice@bevel.software' };
 const WS = 'ws-content-edit';
-
-async function runGit(cwd: string, args: string[]): Promise<void> {
-  await execFileAsync('git', args, {
-    cwd,
-    env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 't@x.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 't@x.com' },
-  });
-}
 
 const PAGE = '---\nread: [Sales]\n---\n\n# Name\nA page\n';
 
@@ -155,6 +146,16 @@ describe('GitService.commitFile — what kind of change it was', () => {
     await fs.mkdir(path.join(repo, 'Folder'));
     await fs.writeFile(path.join(repo, 'Folder', 'new.md'), '# Name\nNew\n');
     expect((await commit('Folder/new.md'))?.contentEdit).toBeUndefined();
+  });
+
+  // The workspace is shared: an entry something else left staged is not this save's.
+  it('commits only its own path, leaving an entry staged by something else staged and out of the commit', async () => {
+    await fs.writeFile(path.join(repo, 'data.csv'), 'a,b\n1,2\n5,6\n');
+    await runGit(repo, ['add', '--', 'data.csv']);
+    await fs.writeFile(path.join(repo, 'page.md'), `${PAGE}\n# Log\n- a line\n`);
+    expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: false });
+    expect(await gitOut(repo, ['show', '--name-only', '--pretty=format:', 'HEAD'])).toBe('page.md');
+    expect(await gitOut(repo, ['diff', '--cached', '--name-only'])).toBe('data.csv');
   });
 
   it('a deleted file is not a content edit', async () => {

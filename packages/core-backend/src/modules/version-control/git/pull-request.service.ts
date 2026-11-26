@@ -21,6 +21,7 @@ import type { IAccessControl } from '../../access/index.js';
 import { AccessUnreadableError } from '../../access-model/index.js';
 import { AppliedChangeMismatchError, VersionControlValidationError } from '../../../shared/domain-errors.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
+import { mapPooled } from '../../../shared/map-pooled.js';
 import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
 
 /**
@@ -56,20 +57,6 @@ const MAX_MISMATCHED_APPLIED_CHANGES = 5_000;
 /** How many rows a listing reads from git at once. */
 const SUMMARY_CONCURRENCY = 8;
 
-/** `fn` over `items`, at most `limit` in flight, results in order. */
-async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      results[index] = await fn(items[index]!);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
-  return results;
-}
 const DETAIL_CACHE_TTL_MS = 30_000;
 
 type ChangeRequestRow = typeof changeRequests.$inferSelect;
@@ -523,7 +510,7 @@ export class PullRequestService implements IPullRequestService {
     // Bounded fan-out: an applied row's read takes the workspace mutex for
     // its git calls, so a hundred rows launched at once would only queue on
     // it while holding a hundred pending promises.
-    return mapWithLimit(rows, SUMMARY_CONCURRENCY, (row) => this.summaryOf(row, workspaceId, { fetch: false }));
+    return mapPooled(rows, SUMMARY_CONCURRENCY, (row) => this.summaryOf(row, workspaceId, { fetch: false }));
   }
 
   async listPrsAuthoredBy(
