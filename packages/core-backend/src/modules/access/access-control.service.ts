@@ -3070,6 +3070,9 @@ export class AccessControlService implements IAccessControl {
       // for them makes git open every object, so one lost object anywhere
       // would fail the listing; a gate at a ref must not depend on that.
       const args = opts.checkout ? ['ls-tree', '-r', '-t', '-z', '-l', ref] : ['ls-tree', '-r', '-t', '-z', ref];
+      // Outside the workspace's git turn, on purpose, in both modes: `ref` is
+      // the commit id `buildModelAtCommit` was given, and this reads its
+      // objects, which no write to the checkout changes.
       const { stdout } = await this.gitRunner.run(repoDir, args, { encoding: 'buffer' });
       const walked = (p: string) => !opts.checkout || !p.split('/').some(isSkippedEntry);
       const out: string[] = [];
