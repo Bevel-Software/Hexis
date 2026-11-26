@@ -65,13 +65,13 @@ describe('a removed tool takes its stored keys with it', () => {
     canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as unknown as IAccessControl;
 
-  const svc = () => {
+  const svc = (source = new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR }))) => {
     const service = new ToolManualService(
       workspaceService,
       allowAll,
       testKbContext({ kbDirName: KB_DIR }),
       disk,
-      new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR })),
+      source,
       () => clock,
     );
     service.setNamespaceRetirement(removeNamespace);
@@ -193,6 +193,40 @@ describe('a removed tool takes its stored keys with it', () => {
     await list(service);
     expect(retired).toEqual([utcpNamespacePrefix('srv')]);
     expect(rows.has(serverKey)).toBe(false);
+  });
+
+  test('a slow scan of an older tree never reports a tool added since as removed', async () => {
+    // The plugin discovery runs after the `.tool` walk; holding it holds a
+    // scan that has already listed the older tree.
+    const real = new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR }));
+    let hold: Promise<void> | null = null;
+    const source = Object.assign(Object.create(real) as KbPluginSource, {
+      discover: async (kbRoot: string) => {
+        const gate = hold;
+        hold = null;
+        if (gate) await gate;
+        return real.discover(kbRoot);
+      },
+    });
+    const service = svc(source);
+    await list(service);
+
+    let release!: () => void;
+    hold = new Promise<void>((r) => (release = r));
+    service.invalidate(); // scan A: walks the tree without late.tool, then waits
+    await vi.waitFor(() => expect(hold).toBeNull());
+    await write('late.tool', `---\nid: late\ntype: http\nurl: https://l.example.com/utcp\n---\n`);
+    service.invalidate(); // scan B: sees late.tool, finishes first
+    expect((await service.listAllSummaries()).map((m) => m.name)).toContain('late');
+    const lateKey = utcpNamespacedKey('late', 'API_KEY');
+    rows.set(lateKey, 'sk-late');
+
+    release();
+    // A finishes its read and its retirement pass; nothing else is reading.
+    await new Promise((r) => setTimeout(r, 200));
+    await list(service);
+    expect(retired).toEqual([]);
+    expect(rows.get(lateKey)).toBe('sk-late');
   });
 
   test('a wipe that fails is retried, and still lands before a reuse can resolve the old key', async () => {
