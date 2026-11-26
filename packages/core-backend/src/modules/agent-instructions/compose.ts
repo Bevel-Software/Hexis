@@ -31,6 +31,7 @@ import {
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { splitCallLine } from '@bevel-software/platform-mcp-core';
+import { GET_AGENT_GUIDE_TOOL } from '../tool-registry/index.js';
 import { sharedFileRulesSection } from './shared-file-rules.js';
 
 export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
@@ -91,7 +92,7 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * agent configuration's rule, not this text's, and is left as it is.
  */
 export const GUIDE_FIRST_LINE =
-  'Before anything else, call `get_agent_guide` and read the guide: it says what this deployment is and what this connection loads.';
+  `Before anything else, call \`${GET_AGENT_GUIDE_TOOL}\` and read the guide: it says what this deployment is and what this connection loads.`;
 
 /**
  * The whole platform-owned part of the handshake text: the guide-first line,
