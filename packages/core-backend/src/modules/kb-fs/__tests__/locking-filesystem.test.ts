@@ -1189,7 +1189,9 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
   /** Refused under the lock (the gate is asked only there), every lock released untouched. */
   async function expectRefused(op: Promise<unknown>, versionControl: IVersionControlService): Promise<void> {
     await expect(op).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-new-role' } });
-    expect(versionControl.acquireLock).toHaveBeenCalled();
+    const locks = (versionControl.acquireLock as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(locks).toBeGreaterThan(0);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(locks);
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
     expect(versionControl.commitChanges).not.toHaveBeenCalled();
