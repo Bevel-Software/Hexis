@@ -52,7 +52,6 @@ import {
   callKbTool,
   ConnectionKeyRejectedError,
   DeploymentError,
-  REVOKED_KEY_SENTENCE,
   confirmConnectionKey,
   fetchAllManuals,
   fetchCatalogState,
@@ -1165,11 +1164,11 @@ export async function createHexisMcpServer(
   };
 
   /**
-   * REVOKED KEY. Set once the deployment refuses this process's connection key
-   * mid-run; from then on nothing is listed or run, and the server is going
-   * away.
+   * REFUSED KEY: the deployment's sentence, once it refuses this process's
+   * connection key mid-run; from then on nothing is listed or run, every
+   * request is answered that sentence, and the server is going away.
    */
-  let keyRejected = false;
+  let keyRejected: string | null = null;
   const hostKeyRejected = config.onConnectionKeyRejected;
   /**
    * The gate in front of every listing and every call, local-only tools and
@@ -1178,33 +1177,36 @@ export async function createHexisMcpServer(
    * deployment (no variables, or variables cached), and the catalog check runs
    * throttled and after the call, so a previous success authorizes nothing.
    *
-   * A refusal answers the sentence and stops the server: the call that met it
+   * A refusal answers the deployment's own sentence (a revoked key is told to
+   * mint a new one, a switched-off account to ask its admin, exactly as a
+   * remote call would be) and stops the server: the call that met it
    * gets its answer first (the stop waits a turn of the event loop), then
    * every manual, and with it every spawned local server, is closed, and the
    * host is told. A key that merely could not be confirmed (the deployment is
-   * unreachable, did not answer within the confirmation's short timeout, or
+   * unreachable, did not answer within the confirmation's short deadline, or
    * answered 5xx) is not a revoked one: the call goes ahead and reports
    * whatever it meets. A deployment that does not advertise the
    * instructions route is not asked, because its unknown `/api/*` path answers
    * 401 to every key, which would read as a revocation.
    */
   const confirmKeyBeforeServing = (): Promise<void> | undefined => {
-    if (keyRejected) throw new McpError(ErrorCode.InternalError, REVOKED_KEY_SENTENCE);
+    if (keyRejected !== null) throw new McpError(ErrorCode.InternalError, keyRejected);
     // Nothing to ask, so nothing to await: a server going away serves nothing
     // either way and each caller says so itself, and even one extra tick would
     // let a closing transport answer a parked request first.
     if (closed || !agentInstructions) return undefined;
     return confirmConnectionKey(config).catch((err: unknown) => {
       if (err instanceof ConnectionKeyRejectedError) {
-        if (!keyRejected) {
-          keyRejected = true;
+        if (keyRejected === null) {
+          const sentence = err.sentence;
+          keyRejected = sentence;
           console.error(`[hexis-mcp] ${printable(err.message)} hexis-mcp has stopped serving.`);
           setImmediate(() => {
             void shutdown();
-            hostKeyRejected?.(REVOKED_KEY_SENTENCE);
+            hostKeyRejected?.(sentence);
           });
         }
-        throw new McpError(ErrorCode.InternalError, REVOKED_KEY_SENTENCE);
+        throw new McpError(ErrorCode.InternalError, keyRejected);
       }
       // OAuth mode, refused even after renewing: this request runs nothing and
       // answers the deployment's sentence. Ending the sign-in stays
@@ -1330,15 +1332,21 @@ export async function createHexisMcpServer(
       // arriving. (After the first list this is already settled.)
       await ready;
       if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
-      // Never start a call mid-re-registration — a swap or a recovery may have
-      // the manual between its deregister and its register, where a repository
-      // lookup finds nothing.
-      while (reregisterInProgress) await reregisterInProgress;
-      // Asked after every wait above and before any answer below, so nothing
-      // between the answer and the dispatch can outlast a revocation, and no
-      // call is answered anything but the revocation once the key is refused.
-      const confirming = confirmKeyBeforeServing();
-      if (confirming) await confirming;
+      // Two conditions must hold together when the code below starts, which
+      // runs to the dispatch without another await: no re-registration is in
+      // progress (a swap or a recovery may have the manual between its
+      // deregister and its register, where a repository lookup finds nothing),
+      // and the key was just confirmed. The confirmation is a network read, so
+      // a re-registration can start while it is asked: then wait it out and
+      // ask again, until a confirmation ends with none in progress. Before
+      // any answer below, too, so once the key is refused no call is answered
+      // anything but the refusal.
+      for (;;) {
+        while (reregisterInProgress) await reregisterInProgress;
+        const confirming = confirmKeyBeforeServing();
+        if (confirming) await confirming;
+        if (!reregisterInProgress) break;
+      }
       // The sign-in may have ended while this call waited.
       if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       if (discoveryError !== null) {

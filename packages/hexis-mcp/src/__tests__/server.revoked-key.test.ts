@@ -4,7 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { REVOKED_KEY_SENTENCE, createHexisMcpServer, type HexisMcpConfig } from '../index.js';
 
 /**
@@ -25,6 +25,12 @@ const SECRET = 'vault-value-must-not-leave-after-revoke';
 let httpServer: http.Server | null = null;
 let base = '';
 let revoked = false;
+/** The sentence the deployment's 401 carries (a switched-off account gets its own). */
+let refusalSentence = REVOKED_KEY_SENTENCE;
+/** Held, the manuals route answers only once it settles. */
+let holdManuals: Promise<void> | null = null;
+/** How long the deployment's MCP endpoint takes to answer. */
+let mcpDelayMs = 0;
 /** Discovery fails: the manuals route answers 5xx. */
 let discoveryFails = false;
 /** Every invocation the local receiver got, by tool, with the secret header it carried. */
@@ -34,6 +40,9 @@ afterEach(() => {
   vi.restoreAllMocks();
   revoked = false;
   discoveryFails = false;
+  refusalSentence = REVOKED_KEY_SENTENCE;
+  holdManuals = null;
+  mcpDelayMs = 0;
   received.length = 0;
 });
 
@@ -83,10 +92,11 @@ beforeAll(async () => {
             'Content-Type': 'application/json',
             'WWW-Authenticate': 'Bearer error="invalid_token", error_description="Invalid or revoked connection key"',
           });
-          res.end(JSON.stringify({ error: REVOKED_KEY_SENTENCE }));
+          res.end(JSON.stringify({ error: refusalSentence }));
           return;
         }
         if (pathname === '/api/agent/instructions') return json(200, { instructions: 'Search the knowledge base.' });
+        if (pathname === '/api/agent/all-tools' && holdManuals) await holdManuals;
         if (pathname === '/api/agent/all-tools' && discoveryFails) return json(500, {});
         if (pathname === '/api/agent/all-tools') {
           return json(200, {
@@ -100,11 +110,13 @@ beforeAll(async () => {
           return json(200, { variables: { SECRET } });
         }
         if (pathname === '/api/mcp') {
+          if (mcpDelayMs) await new Promise((resolve) => setTimeout(resolve, mcpDelayMs));
           const parsed = body ? (JSON.parse(body) as unknown) : undefined;
           const mcp = new Server({ name: 'stub-deployment', version: '0.0.0' }, { capabilities: { tools: {} } });
           mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             tools: [{ name: 'list_files', description: 'List files.', inputSchema: { type: 'object' as const } }],
           }));
+          mcp.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type: 'text' as const, text: 'listed' }] }));
           const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
           res.on('close', () => {
             void transport.close();
@@ -139,6 +151,7 @@ async function start(extra: Partial<HexisMcpConfig> = {}): Promise<{
   closed: Promise<void>;
   toolNamed: (suffix: string) => Promise<string>;
   shutdown: () => Promise<void>;
+  config: HexisMcpConfig;
 }> {
   const stderr: string[] = [];
   vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
@@ -164,6 +177,7 @@ async function start(extra: Partial<HexisMcpConfig> = {}): Promise<{
     client,
     stderr,
     rejections,
+    config,
     closed,
     toolNamed: async (suffix) => {
       const names = (await client.listTools()).tools.map((t) => t.name);
@@ -182,13 +196,13 @@ const text = (result: unknown): string =>
   ((result as { content?: { type: string; text?: string }[] }).content ?? []).map((c) => c.text ?? '').join('');
 
 /** The server stopped serving: the transport it answered on is closed. */
-async function expectStopped(s: Awaited<ReturnType<typeof start>>): Promise<void> {
+async function expectStopped(s: Awaited<ReturnType<typeof start>>, sentence = REVOKED_KEY_SENTENCE): Promise<void> {
   await Promise.race([
     s.closed,
     new Promise((_, reject) => setTimeout(() => reject(new Error('the server kept serving after the key was revoked')), 10_000)),
   ]);
   await expect(s.client.listTools()).rejects.toThrow();
-  expect(s.rejections).toEqual([REVOKED_KEY_SENTENCE]);
+  expect(s.rejections).toEqual([sentence]);
   expect(s.stderr.some((line) => line.includes('hexis-mcp has stopped serving'))).toBe(true);
   expect(s.stderr.join('\n')).not.toContain(KEY);
 }
@@ -343,5 +357,104 @@ describe('a connection key revoked while the local server holds it', () => {
     } finally {
       await s.shutdown();
     }
+  });
+
+  it("answers a switched-off account's own sentence, not the mint-a-new-key one", { timeout: 60_000 }, async () => {
+    const SWITCHED_OFF = 'Your account on this workspace is switched off. Ask its admin to turn it back on.';
+    const s = await start();
+    try {
+      const plainTool = await s.toolNamed('plain');
+      refusalSentence = SWITCHED_OFF;
+      revoked = true;
+      const refused = s.client.callTool({ name: plainTool, arguments: {} });
+      await expect(refused).rejects.toThrow(SWITCHED_OFF);
+      await expect(refused).rejects.not.toThrow('Mint a new one');
+      expect(received).toEqual([]);
+      await expectStopped(s, SWITCHED_OFF);
+      expect(s.stderr.some((line) => line.includes('switched off') && !line.includes('Mint a new one'))).toBe(true);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('goes ahead within seconds when the renewal the confirmation needs hangs', { timeout: 60_000 }, async () => {
+    let hangRenewal = false;
+    const s = await start({
+      renewConnectionKey: () => (hangRenewal ? new Promise<never>(() => {}) : Promise.resolve({ token: KEY })),
+    });
+    try {
+      const plainTool = await s.toolNamed('plain');
+      const realFetch = globalThis.fetch;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (String(input instanceof Request ? input.url : input).endsWith('/api/agent/instructions')) {
+          // The token expired: the confirmation must renew, and the renewal never ends.
+          return new Response(JSON.stringify({ error: 'expired' }), { status: 401 });
+        }
+        return realFetch(input, init);
+      });
+      hangRenewal = true;
+      const startedAt = Date.now();
+      const result = await s.client.callTool({ name: plainTool, arguments: {} });
+      expect(result.isError, text(result)).not.toBe(true);
+      expect(Date.now() - startedAt).toBeLessThan(8_000);
+      expect(received).toEqual([{ tool: 'plain', secret: undefined }]);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('never dispatches into a re-registration that started while the key was being confirmed', { timeout: 60_000 }, async () => {
+    const s = await start({ renewConnectionKey: async () => ({ token: KEY }) });
+    try {
+      const names = (await s.client.listTools()).tools.map((t) => t.name);
+      const remote = names.find((n) => n.endsWith('list_files'));
+      expect(remote, names.join(', ')).toBeDefined();
+      const realFetch = globalThis.fetch;
+      let confirmations = 0;
+      let confirmationStarted!: () => void;
+      const firstConfirmation = new Promise<void>((resolve) => (confirmationStarted = resolve));
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (String(input instanceof Request ? input.url : input).endsWith('/api/agent/instructions')) {
+          confirmations += 1;
+          confirmationStarted();
+          // Slow enough that the swap below starts while this is asked.
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        return realFetch(input, init);
+      });
+      const call = s.client.callTool({ name: remote!, arguments: {} });
+      await firstConfirmation;
+      // A credential swap lands mid-confirmation: it deregisters the remote
+      // manual at once and registers it again only once the slow deployment answers.
+      mcpDelayMs = 1_500;
+      const swap = s.config.onConnectionKeyRenewed!(KEY);
+      const result = await call;
+      await swap;
+      expect(result.isError, text(result)).not.toBe(true);
+      expect(text(result)).toBe('listed');
+      // Asked again after the swap: the dispatch rests on a confirmation with no re-registration in progress.
+      expect(confirmations).toBeGreaterThanOrEqual(2);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('hands a second shutdown caller the teardown already in progress', { timeout: 60_000 }, async () => {
+    let releaseManuals!: () => void;
+    holdManuals = new Promise<void>((resolve) => (releaseManuals = resolve));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Discovery is held mid-download, so teardown waits on it (up to its grace).
+    const handle = await createHexisMcpServer({ baseUrl: base, connectionKey: KEY }, '0.0.0', { catalogCheck: false });
+    const first = handle.shutdown();
+    const second = handle.shutdown();
+    expect(second).toBe(first);
+    let secondSettled = false;
+    void second.then(() => (secondSettled = true));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The teardown is still held open, and the second caller is still waiting for it.
+    expect(secondSettled).toBe(false);
+    releaseManuals();
+    await second;
+    expect(secondSettled).toBe(true);
   });
 });
