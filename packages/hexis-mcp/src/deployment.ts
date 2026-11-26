@@ -110,25 +110,30 @@ async function getJson(
     res = await attempt(await renew());
     retried = true;
   }
+  // Every answer that is not a 2xx is consumed HERE, once, before any branch
+  // below throws: an unread body pins its connection, and the key check makes
+  // one of these reads before every request. Only an authenticated 403 is
+  // read, because its JSON may name the refusal; every other one is drained.
+  type Refusal = { error?: unknown; code?: unknown } | null;
+  let refusal: Refusal = null;
+  if (!res.ok) {
+    if (res.status === 403 && authed) {
+      refusal = (await res.json().catch(() => null)) as Refusal;
+    } else {
+      await res.body?.cancel().catch(() => {});
+    }
+  }
   if (res.status === 401 && authed && !renew) {
-    await res.body?.cancel().catch(() => {});
     // The deployment, not the endpoint label: the key is the deployment's to
     // reject. Every URL here is `<baseUrl>/api/…`, and nothing after the base
     // adds another `/api/`.
     throw new ConnectionKeyRejectedError(url.slice(0, url.lastIndexOf('/api/')));
   }
-  if (res.status === 403 && authed) {
-    // A refusal of what the connection does not load — a connection made as
-    // an agent configuration that cannot be used — is the deployment's own answer,
-    // with its code and sentence, not a permission problem with the credential.
-    const refusal = (await res
-      .clone()
-      .json()
-      .catch(() => null)) as { error?: unknown; code?: unknown } | null;
-    if (refusal?.code === NOT_AVAILABLE_TO_CONNECTION && typeof refusal.error === 'string') {
-      await res.body?.cancel().catch(() => {});
-      throw new NotAvailableToConnectionError(refusal.error);
-    }
+  // A refusal of what the connection does not load — a connection made as
+  // an agent configuration that cannot be used — is the deployment's own answer,
+  // with its code and sentence, not a permission problem with the credential.
+  if (refusal?.code === NOT_AVAILABLE_TO_CONNECTION && typeof refusal.error === 'string') {
+    throw new NotAvailableToConnectionError(refusal.error);
   }
   if (res.status === 401 || res.status === 403) {
     // Only a request that actually carried the credential can blame it: the
@@ -156,11 +161,6 @@ async function getJson(
     );
   }
   if (!res.ok) {
-    // Drained before it is thrown away, exactly as the 401 paths above do. The
-    // catalog check asks again on every call while it fails, so a deployment that is
-    // 502-ing through a redeploy would otherwise leave one undrained body —
-    // and the connection it pins — behind on every poll for the duration.
-    await res.body?.cancel().catch(() => {});
     throw new DeploymentError(`${label} returned HTTP ${res.status} from ${url}.`, res.status);
   }
   // A 200 that is not JSON is a proxy or SPA fallback answering in the
