@@ -156,10 +156,13 @@ export interface LockingFilesystemContext {
   /**
    * Optional pre-disk write validator. Invoked with the (workspace-relative
    * path, full content) of every WHOLE-FILE write BEFORE the bytes land. Throw
-   * to refuse the write — nothing hits disk. It runs before the lock (so an
-   * ordinary refusal takes none) and again once the lock is held, on exactly
-   * the bytes that land, so a validator reading the current file judges the
-   * state it replaces; a refusal there releases the lock untouched. Used to
+   * to refuse the write — nothing hits disk. It runs ONLY once the lock is
+   * held, on exactly the bytes that land, so a validator reading the current
+   * file judges the state it replaces; a refusal releases the lock untouched.
+   * Never before the lock: `acquireLock` is where the caller's read gate is
+   * asked, and a verdict that depends on the current file (the agent's
+   * roles/groups gate) is a read of it, so its 422 must not reach a caller
+   * that gate refuses (A Guard's Answer Is a Disclosure). Used to
    * reject a `roles.yaml` edit that would lock out admins (and, for agents,
    * one that creates a role); see `roles-yaml-guard.ts`. `appendFile`,
    * `copyFile` and `moveFile` are validated too, with the resulting content,
@@ -207,11 +210,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
   ): Promise<void> {
     await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
-    // Pre-disk gate (e.g. reject a roles.yaml edit that would lock out admins).
-    // Runs OUTSIDE the lock first so an ordinary refusal never acquires one,
-    // then again under the lock on the bytes that land (see withLock's check).
+    // Pre-disk gate (e.g. reject a roles.yaml edit that would lock out admins):
+    // asked only under the lock, on the bytes that land (see withLock's check).
     const validate = this.lockContext.validateWrite;
-    await validate?.(inputPath, content);
     // Creator read grant (see LockingFilesystemContext.creatorAccess): planned
     // BEFORE the write so the new-folder detection sees the pre-creation
     // tree. The seed lands first in its own lock+commit cycle so the grant is
@@ -280,9 +281,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     this.assertInsideRepo(inputPath);
     const candidate = async () =>
       Buffer.concat([asBuffer((await this.readIfExists(inputPath)) ?? ''), asBuffer(content)]);
-    await this.validateResultingWrite(inputPath, candidate);
-    // Under the lock the resulting file is judged again and, when a validator
-    // claims the path, written whole — so the bytes that land are the ones judged.
+    // Under the lock the resulting file is judged and, when a validator claims
+    // the path, written whole — so the bytes that land are the ones judged.
     let checked: Buffer | null = null;
     return this.withLock(
       inputPath,
@@ -302,7 +302,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     await this.assertNotGitInternals(src);
     await this.assertNotGitInternals(dest);
     this.assertInsideRepo(dest);
-    await this.validateResultingWrite(dest, () => this.readFile(src));
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
     // creates a new file at dest without disturbing src on disk. Because `src`
     // is not locked, a claimed destination gets the source bytes read and
@@ -367,7 +366,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Only the destination is gated: moving a stray INTO the repository is how
     // a file the old behaviour left beside the clone gets rescued.
     this.assertInsideRepo(dest);
-    await this.validateResultingWrite(dest, () => this.readFile(src));
     // A move mutates two paths: the source is deleted and the destination
     // is created. Only locking `dest` would let a concurrent writer hold
     // the source's lock and mutate it under us, and would also leave the
@@ -381,8 +379,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // single-file changes (one delete, one create). Git's rename
     // detection on log/blame still groups them visually after the fact.
     //
-    // The destination is judged again once BOTH locks are held (the inner
-    // lock's check): the source cannot change under its lock, so the bytes
+    // The destination is judged once BOTH locks are held (the inner lock's
+    // check): the source cannot change under its lock, so the bytes
     // judged there are the bytes the move lands.
     const check = async () => {
       await this.validateResultingWrite(dest, () => this.readFile(src));
@@ -476,10 +474,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       await this.assertNotGitInternals(e.path);
       this.assertInsideRepo(e.path);
     }
-    await this.validateResultingWrite(dest, () => this.readFile(src));
-    if (this.lockContext.validateWrite) {
-      for (const e of edits) await this.lockContext.validateWrite(e.path, e.content);
-    }
     // A folder's files are locked one by one at both ends: a save to one of
     // them mid-move would otherwise recreate the old path, or ride this
     // move's commit, whose scope names every one of them.
@@ -539,8 +533,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       }
       acquired.push(p);
     }
-    // Judged again under the locks, on the bytes that land: a validator that
-    // reads the current file must see the state each edit replaces.
+    // Judged under the locks only, on the bytes that land: a validator that
+    // reads the current file must see the state each edit replaces, and must
+    // not answer before the locks' read gate has (see `validateWrite`).
     try {
       // The folder's files, listed again now that every lock is held: a file
       // saved into it between the listing above and the locks would ride
@@ -729,11 +724,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         seedOrigins.set(plan.wsRelPath, [...(seedOrigins.get(plan.wsRelPath) ?? []), w.path]);
       }
     }
-    // Pre-disk gate every file BEFORE acquiring any lock (fail-closed): a
-    // refusal must not leave a lock held or a partial batch on disk.
-    if (this.lockContext.validateWrite) {
-      for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
-    }
     // Deterministic lock order (string sort) so two concurrent batch writes
     // can't deadlock by acquiring the same paths in opposite orders — the same
     // discipline `moveFile` uses for its two paths, generalized to N. Deletes are
@@ -812,9 +802,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       acquired.push(p);
     }
 
-    // Judge every file again now that its lock is held: a validator that reads
-    // the current file (the agent roles.yaml gate) must see the bytes this
-    // batch replaces, not the ones before the locks. Nothing is written yet,
+    // Judge every file now that its lock is held, and only now: a validator
+    // that reads the current file (the agent roles.yaml gate) must see the
+    // bytes this batch replaces, and must not answer before the locks' read
+    // gate has (see `validateWrite`). Nothing is written yet,
     // so a refusal leaves every locked path exactly as it was.
     if (this.lockContext.validateWrite) {
       try {
@@ -1088,8 +1079,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
   /**
    * Validate an op whose resulting bytes at `dest` are not in hand (append,
    * copy, move): `candidate` is read only when the validator claims `dest`.
-   * Runs before the lock, like `writeFile`'s gate, and again under it. Returns
-   * the bytes judged, or null when no validator claims `dest`.
+   * Runs under the lock only, like `writeFile`'s gate. Returns the bytes
+   * judged, or null when no validator claims `dest`.
    */
   private async validateResultingWrite<C extends FileContent>(
     dest: string,

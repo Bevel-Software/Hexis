@@ -310,17 +310,20 @@ describe('LockingFilesystem.moveWithEdits', () => {
     expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
   });
 
-  it('every edit is judged again once the locks are held, and a refusal there changes nothing', async () => {
+  it('every edit is judged once every lock is held, never before, and a refusal there changes nothing', async () => {
     const acquire = versionControl.acquireLock as ReturnType<typeof vi.fn>;
-    // A validator whose verdict depends on the state under the locks.
+    // Every lock is taken before the validator hears a single edit.
+    let locksAtFirstCall = -1;
     const validateWrite = vi.fn(async (p: string) => {
-      if (acquire.mock.calls.length > 0 && p.endsWith('Index.md')) throw new Error('refused under lock');
+      if (locksAtFirstCall < 0) locksAtFirstCall = acquire.mock.calls.length;
+      if (p.endsWith('Index.md')) throw new Error('refused under lock');
     });
     const head = await git(repo, ['rev-parse', 'HEAD']);
     await expect(
       fsLayer(validateWrite).moveWithEdits(`${KB}/Projects/A`, `${KB}/Topics/Deep/A`, edits(), 'Move A'),
     ).rejects.toThrow('refused under lock');
-    expect(validateWrite.mock.calls.filter((c) => c[0] === `${KB}/Index.md`)).toHaveLength(2);
+    expect(validateWrite.mock.calls.filter((c) => c[0] === `${KB}/Index.md`)).toHaveLength(1);
+    expect(locksAtFirstCall).toBe(acquire.mock.calls.length);
     expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
     expect((await git(repo, ['status', '--porcelain'])).trim()).toBe('');
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();

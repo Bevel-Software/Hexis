@@ -343,11 +343,13 @@ function isGroupsYamlPath(workspaceRelPath: string, kbDirName: string): boolean 
  * type is checked — decoded as UTF-8 — so bytes cannot slip past.
  *
  * `readCurrent` is read afresh on every call, never cached: `LockingFilesystem`
- * calls this validator before taking the lock (a cheap early refusal) and again
- * once the file's lock is held, on the bytes that land. That second call is the
- * decisive one — it compares against the file as the other writers, which
- * coordinate on the same lock, left it — so a role deleted while the write
- * waited cannot be reinstated, and one added meanwhile is not refused.
+ * calls this validator only once the file's lock is held, on the bytes that
+ * land, so it compares against the file as the other writers, which
+ * coordinate on the same lock, left it — a role deleted while the write
+ * waited cannot be reinstated, and one added meanwhile is not refused. Only
+ * there, because its verdict depends on the current file: asked before the
+ * lock's read gate, a 422 where that gate would answer 403 would tell a
+ * caller who may not read the file what it holds.
  */
 export function makeAgentAccessYamlWriteValidator(
   kbDirName: string,
