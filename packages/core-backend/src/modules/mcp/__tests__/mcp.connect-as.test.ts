@@ -112,11 +112,11 @@ async function harness(opts: { revisionInProcess?: boolean } = {}) {
     publicFrontendUrl: 'http://localhost:5173',
     // As the composition root wires it: the revision, and the agent the
     // connection is narrowed to, answered by a function for the caller the
-    // request's credential resolved to.
+    // request's bearer resolves to (each key here names its connection).
     ...(opts.revisionInProcess
       ? {
-          readCatalogRevision: async (who: { userId: string; agentPath: string | null }) => {
-            const connection = [NARROW, GONE].find((c) => c.agent.path === who.agentPath);
+          readCatalogRevision: async (bearer: string) => {
+            const connection = CONNECTIONS[bearer];
             return { revision: 'rev-1', ...(connection ? { connection } : {}) };
           },
         }

@@ -18,6 +18,7 @@ import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../agent-scope/ind
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
 import type { ToolAuth } from '../tool-auth/index.js';
+import { declaresWrite, type IToolRegistry, type UtcpTool } from '../tool-registry/index.js';
 
 function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
   return (
@@ -197,14 +198,28 @@ export type InProcessRead = (auth: ToolAuth, args?: Record<string, unknown>) => 
  * the `ToolError` the route answers as a 403, and whatever the handler throws
  * is thrown on.
  *
- * Only for a read that takes no branch of the handler's resolving and is
- * called with arguments this process built: the route's argument check, its
- * branch resolution and its write gates do not run here, so a tool that needs
- * any of them must be called through its route.
+ * Only for a read. The route's write gates do not run here, so a tool the
+ * catalog declares a write ({@link declaresWrite} on its external def, or on
+ * its internal def when it has no external one), or does not list at all, is
+ * refused with a `ToolError` before anything else runs. The catalog is listed
+ * to find out until it confirms the tool a read, and then not again. The
+ * route's argument check and branch resolution do not run here either: the
+ * read must take no branch of the handler's resolving and be called with
+ * arguments this process built, and a tool that needs either is called
+ * through its route.
  */
-export function createInProcessToolCaller(resolve: ResolveToolContext) {
+export function createInProcessToolCaller(
+  resolve: ResolveToolContext,
+  /** The tool catalog, whose defs say which tools write. */
+  catalog: Pick<IToolRegistry, 'listExternal' | 'listInternal'>,
+) {
+  const confirmedReads = new Set<string>();
   return function inProcess(tool: HostedRead): InProcessRead {
     return async (auth, args = {}) => {
+      if (!confirmedReads.has(tool.name)) {
+        await assertDeclaredRead(catalog, tool.name);
+        confirmedReads.add(tool.name);
+      }
       // Nobody can go away mid-call: the signal is never aborted.
       const admitted = await admitToolCall(
         resolve,
@@ -220,6 +235,28 @@ export function createInProcessToolCaller(resolve: ResolveToolContext) {
       return await handlerResult(tool.handler(args, admitted.ctx));
     };
   };
+}
+
+/**
+ * Refuse a tool the catalog does not declare a read. A tool is judged by its
+ * external def, the one its read-only hint is read from, and by its internal
+ * def only when it has no external one; a tool the catalog lists under
+ * neither is refused too. Listed with no caller context, as the read-only
+ * hints list the external tools.
+ */
+async function assertDeclaredRead(
+  catalog: Pick<IToolRegistry, 'listExternal' | 'listInternal'>,
+  name: string,
+): Promise<void> {
+  const named = (defs: UtcpTool[]) => defs.filter((def) => def.name === name);
+  let defs = named(await catalog.listExternal({}));
+  if (defs.length === 0) defs = named(await catalog.listInternal({}));
+  if (defs.length === 0) {
+    throw new ToolError(`The tool ${name} is not in the tool catalog and cannot be called in process.`, 500);
+  }
+  if (defs.some(declaresWrite)) {
+    throw new ToolError(`The tool ${name} declares a write and cannot be called in process; call it at its route.`, 500);
+  }
 }
 
 /** A read answers a value; a stream is a tool this caller is not for. */

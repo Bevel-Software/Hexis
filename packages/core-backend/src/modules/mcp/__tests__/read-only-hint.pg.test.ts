@@ -158,7 +158,7 @@ async function startPlatform(opts: PlatformOptions = {}) {
     });
     expect(response.status).toBe(200);
   };
-  return { baseUrl, key, setHint, core, userId: user.id, hits, manualLists };
+  return { baseUrl, key, session: token, setHint, core, userId: user.id, hits, manualLists };
 }
 
 /** An inline `.tool` with one tool that calls another service. Nothing here calls it. */
@@ -503,6 +503,64 @@ describe.skipIf(!PG_ADMIN_URL)('the hosted MCP endpoint reads the manual list an
     // where they are discovered, which is the answer the request gets.
     await expect(client.listTools()).rejects.toThrow(/tool discovery failed: HTTP 401 .*Invalid or revoked connection key/);
     // All of it without a request to the list or skill routes.
+    expect(hits).toEqual(routeHits);
+  });
+
+  // The revision is read on every request, and picks the cached surface. It
+  // resolves the bearer too: a key revoked after its surface was built and
+  // after its request was admitted is not served that surface.
+  it('serves a key revoked after its request was admitted no cached surface', async () => {
+    const { baseUrl, core, userId, manualLists } = await startPlatform();
+    const { plaintext: key, summary } = await core.externalApiKeyService.mint(userId, 'revoked-after-a-build');
+    await (await connect(baseUrl, key)).listTools();
+    expect(manualLists).toHaveLength(1);
+    await core.externalApiKeyService.revoke(summary.id, userId);
+
+    const server = await core.mcpService.createRequestServer(
+      { userId, tokenId: summary.id, connectionId: null, bearer: key },
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: 'admitted-before-the-revoke', version: '0.0.0' }, { capabilities: {} });
+    await client.connect(clientTransport);
+    stops.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    await expect(client.listTools()).rejects.toThrow(/tool discovery failed: HTTP 401 .*Invalid or revoked connection key/);
+  });
+
+  // The manual routes (`all-tools`, the revision, the two manuals) accept an
+  // app session; the tool routes do not. Each read in process resolves the
+  // bearer as the route it replaces does. The endpoint hands a read the
+  // request's own bearer when the request carries a key id, so a session is
+  // handed over that way here, to put the reads to the one bearer the two
+  // auths answer differently.
+  it('resolves the bearer as the manual routes do: an app session is served what those routes serve it', async () => {
+    const { baseUrl, session, core, userId, hits, manualLists } = await startPlatform();
+    expect((await fetch(`${baseUrl}/api/agent/all-tools`, { headers: { Authorization: `Bearer ${session}` } })).status).toBe(200);
+    expect((await fetch(`${baseUrl}/api/agent/utcp`, { headers: { Authorization: `Bearer ${session}` } })).status).toBe(200);
+    const routeHits = { ...hits };
+    manualLists.length = 0;
+
+    const server = await core.mcpService.createRequestServer(
+      { userId, tokenId: 'a-key-id', connectionId: null, bearer: session },
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: 'session-bearer', version: '0.0.0' }, { capabilities: {} });
+    await client.connect(clientTransport);
+    stops.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    expect((await client.listTools()).tools.map((t) => t.name)).toContain('read_file');
+    // The list was read for the person, and nothing was asked of the routes.
+    expect(manualLists).toEqual([{ email: 'admin@example.com', remoteOnly: true, narrowed: false }]);
     expect(hits).toEqual(routeHits);
   });
 });

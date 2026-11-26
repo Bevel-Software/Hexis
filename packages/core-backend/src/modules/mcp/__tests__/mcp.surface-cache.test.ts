@@ -55,10 +55,12 @@ interface HarnessOptions {
   /**
    * How the service learns the revision: `'in-process'` hands it a reader that
    * answers the harness's revision as a function call, as the composition root
-   * does; `'throws'` hands it one that fails; `'stalls'` hands it one that
-   * never answers; `'slow'` hands it one that waits 50 ms and then needs the
-   * event loop a few more times, as a read of a disk or a database does.
-   * Absent, it asks the loopback.
+   * does, and refuses a bearer in `refused` with a 401, as the composition
+   * root's reader resolves the bearer and refuses a revoked key; `'throws'`
+   * hands it one that fails; `'stalls'` hands it one that never answers;
+   * `'slow'` hands it one that waits 50 ms and then needs the event loop a few
+   * more times, as a read of a disk or a database does. Absent, it asks the
+   * loopback.
    */
   revisionReader?: 'in-process' | 'throws' | 'stalls' | 'slow';
   /** The limit on an in-process read. Absent, the service's own. */
@@ -116,8 +118,8 @@ async function harness(opts: HarnessOptions = {}) {
     calls: [] as { tool: string; bearer: string; path?: string }[],
     /** Requests the loopback's revision route received. */
     revisionRouteHits: 0,
-    /** Calls the in-process reader answered, and who each was for. */
-    revisionReads: [] as { userId: string; agentPath: string | null }[],
+    /** Calls the in-process reader answered: the bearer each was handed. */
+    revisionReads: [] as string[],
     /** The loopback's manual list answers 503, as a server too busy to serve itself does. */
     catalogFails: false,
     base: '',
@@ -190,8 +192,11 @@ async function harness(opts: HarnessOptions = {}) {
         surfaceCache: opts.surfaceCache,
         ...(opts.revisionReader
           ? {
-              readCatalogRevision: async (who: { userId: string; agentPath: string | null }) => {
-                state.revisionReads.push(who);
+              readCatalogRevision: async (bearer: string) => {
+                state.revisionReads.push(bearer);
+                if (state.refused.has(bearer)) {
+                  throw Object.assign(new Error('This connection key was revoked.'), { status: 401 });
+                }
                 if (opts.revisionReader === 'throws') throw new Error('the catalog could not be read');
                 if (opts.revisionReader === 'stalls') await new Promise<never>(() => {});
                 if (opts.revisionReader === 'slow') {
@@ -480,11 +485,37 @@ describe('McpService — the revision is read in process', () => {
     expect(warmList).toEqual(coldList);
     expect(state.builds).toBe(1);
     expect(state.revisionRouteHits).toBe(0);
-    // Asked once per request, for the caller the request's credential resolved to.
-    expect(state.revisionReads).toEqual([
-      { userId: 'user-A', agentPath: null },
-      { userId: 'user-A', agentPath: null },
-    ]);
+    // Asked once per request, with the bearer the request's loopback identity carries.
+    expect(state.revisionReads).toEqual(['bevel_key_1', 'bevel_key_1']);
+  });
+
+  // The reader resolves the bearer when it reads, as the route did over
+  // loopback. A key revoked since its surface was built is then a revision
+  // that could not be read: the request builds a surface of its own, which
+  // its tool calls cannot use either, and keeps nothing.
+  it('serves no cached surface to a bearer the reader refuses: revoked since the surface was built', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+    await (await connect(mcp)).listTools();
+    expect(state.builds).toBe(1);
+
+    state.refused.add('bevel_key_1');
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await (await connect(mcp)).listTools();
+    await (await connect(mcp)).listTools();
+
+    expect(state.revisionReads).toEqual(['bevel_key_1', 'bevel_key_1', 'bevel_key_1']);
+    expect(state.builds).toBe(3);
+    // A refusal is one line, as the route's 401 was over loopback.
+    const lines = errors.mock.calls.map((c) => c.map(String).join(' '));
+    expect(lines.filter((l) => l.includes('catalog-revision refused: HTTP 401 This connection key was revoked.'))).toHaveLength(2);
+    expect(lines.join('\n')).not.toContain('    at ');
+  });
+
+  it('hands the reader, for a caller with no key, the token minted for this request', async () => {
+    let minted = 0;
+    const { state, mcp } = await harness({ revisionReader: 'in-process', mint: () => `minted-${++minted}` });
+    await (await connect(mcp, { tokenId: null, bearer: 'an-oauth-token' })).listTools();
+    expect(state.revisionReads).toEqual(['minted-1']);
   });
 
   it('builds anew when the revision the reader answers moves', async () => {
@@ -501,15 +532,15 @@ describe('McpService — the revision is read in process', () => {
     expect(state.revisionRouteHits).toBe(0);
   });
 
-  it('reads the revision for the agent a narrowed connection was made as', async () => {
+  it('reads the revision with the key of a narrowed connection, which names its agent', async () => {
     const { state, mcp } = await harness({ revisionReader: 'in-process' });
-    await (await connect(mcp, { agentPath: 'Agents/support.agent' })).listTools();
-    expect(state.revisionReads.at(-1)).toEqual({ userId: 'user-A', agentPath: 'Agents/support.agent' });
+    await (await connect(mcp, { tokenId: 'key-support', bearer: 'bevel_key_support', agentPath: 'Agents/support.agent' })).listTools();
+    expect(state.revisionReads.at(-1)).toBe('bevel_key_support');
   });
 
   it('builds per request when the reader fails, never serving a surface it cannot tell is current', async () => {
     const { state, mcp } = await harness({ revisionReader: 'throws' });
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const first = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
     const second = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
@@ -529,7 +560,7 @@ describe('McpService — a revision read that never answers', () => {
   // use up (`shared/loop-time-limit.ts`).
   it('ends at its limit, and the request is served a surface of its own', async () => {
     const { state, mcp } = await harness({ revisionReader: 'stalls', inProcessReadLimitMs: 150 });
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const started = performance.now();
     const names = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
@@ -539,7 +570,7 @@ describe('McpService — a revision read that never answers', () => {
     await (await connect(mcp)).listTools();
     expect(state.builds).toBe(2);
     expect(state.revisionRouteHits).toBe(0);
-    expect(warn.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain('the catalog revision could not be read');
+    expect(errors.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain('catalog-revision could not be read');
   });
 
   it('a held event loop does not use the limit up: the read is waited for and the surface is kept', async () => {

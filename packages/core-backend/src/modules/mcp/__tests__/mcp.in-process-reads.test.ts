@@ -11,7 +11,6 @@ import { SpillStore } from '../../workspace/index.js';
 import { createManualRoutes, ToolRegistry } from '../../tool-registry/index.js';
 import { toolDef, ToolError } from '../../tool-helpers/index.js';
 import type { AgentEventInput } from '../../audit/index.js';
-import { BearerRefusedError } from '../../tool-auth/index.js';
 
 /**
  * The hosted MCP endpoint reads a caller's manual list and their skills by
@@ -28,6 +27,9 @@ import { BearerRefusedError } from '../../tool-auth/index.js';
  * own connection key, or for a caller with no key the token the endpoint mints
  * for them. The token here spells its claim, so a test can read who it is for.
  */
+
+/** What a read throws for a bearer refused since its request was admitted: the route's words, with its status. */
+const refusedBearer = () => Object.assign(new Error('Invalid or revoked connection key.'), { status: 401 });
 
 /** The token the endpoint mints for a caller with no key, as this file's stand-in mints it. */
 const mintedFor = (claim: Record<string, unknown>) => `minted:${JSON.stringify(claim)}`;
@@ -137,7 +139,7 @@ async function harness(opts: HarnessOptions = {}) {
       readManualList: async (bearer, { remoteOnly }) => {
         state.manualListReads.push({ bearer, remoteOnly });
         if (opts.manualList === 'throws') throw new Error('the manual catalog could not be read');
-        if (opts.manualList === 'refuses') throw new BearerRefusedError('Invalid or revoked connection key.', 401);
+        if (opts.manualList === 'refuses') throw refusedBearer();
         if (opts.manualList === 'stalls') await new Promise<never>(() => {});
         return { manuals: [kbManual, ...state.manuals] };
       },
@@ -324,7 +326,7 @@ describe('McpService — the skills behind the prompts are read in process', () 
     const { state, mcp } = await harness();
     state.listSkills = async () => ({ skills: [rfi] });
     state.getSkill = async () => {
-      throw new BearerRefusedError('Invalid or revoked connection key.', 401);
+      throw refusedBearer();
     };
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     await expect((await connect(mcp)).getPrompt({ name: 'rfi' })).rejects.toThrow('Unknown skill "rfi".');
