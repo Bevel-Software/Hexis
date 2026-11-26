@@ -66,6 +66,33 @@ describe('writeDenial asks the read gate about the refused path as the refuser s
     expect(out.details).toMatchObject({ kind: 'write-denied', canPropose: true });
   });
 
+  describe('the reason given when proposing is refused: read first, branch second', () => {
+    const DRAFT = { ...INPUT, branch: 'someone/draft' };
+    const err = () => new AccessDeniedError({ path: `${KB}/KnowledgeBase/Sales/deal.md`, eligibleRoles: [], eligibleUsers: [] });
+    const NO_READ = 'Proposing is not available: you cannot read this path.';
+    const NOT_PROPOSABLE = 'Proposing is not available: "someone/draft" is not a branch that accepts change requests.';
+    const failing = (): IChangeReadGate => ({ judge: vi.fn(async () => { throw new Error('git down'); }), assertMayChange: vi.fn() });
+
+    it.each([
+      ['read denied, protected branch', INPUT, gateThat({ allowed: false, unreadable: 'KnowledgeBase' }).gate, NO_READ],
+      ['read denied, unprotected branch', DRAFT, gateThat({ allowed: false, unreadable: 'KnowledgeBase' }).gate, NO_READ],
+      ['read allowed, unprotected branch', DRAFT, gateThat({ allowed: true, via: 'readable' }).gate, NOT_PROPOSABLE],
+      ['read indeterminate, unprotected branch', DRAFT, failing(), NOT_PROPOSABLE],
+    ] as const)('%s', async (_name, input, gate, expected) => {
+      const out = await writeDenial(err(), input, noAccess, testKbContext({ kbDirName: KB }), gate);
+      expect(out.status).toBe(403);
+      expect(out.details).toMatchObject({ kind: 'write-denied', canPropose: false, cannotProposeReason: expected });
+      expect(out.details?.proposal).toBeUndefined();
+    });
+
+    it('without a gate, no read on an unprotected branch also names the read', async () => {
+      const accessControl = { canRead: vi.fn(async () => false) } as unknown as IAccessControl;
+      const out = await writeDenial(err(), DRAFT, accessControl, testKbContext({ kbDirName: KB }));
+      expect(accessControl.canRead).toHaveBeenCalledWith('someone/draft', 'alice@example.com', 'KnowledgeBase/Sales/deal.md');
+      expect(out.details).toMatchObject({ canPropose: false, cannotProposeReason: NO_READ });
+    });
+  });
+
   it('a gate that cannot answer refuses to offer the route', async () => {
     const gate: IChangeReadGate = { judge: vi.fn(async () => { throw new Error('git down'); }), assertMayChange: vi.fn() };
     const err = new AccessDeniedError({ path: `${KB}/KnowledgeBase/Sales/deal.md`, eligibleRoles: [], eligibleUsers: [] });
