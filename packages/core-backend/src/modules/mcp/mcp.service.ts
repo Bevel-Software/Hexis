@@ -419,6 +419,16 @@ function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
 }
 
 /**
+ * A `catalog-revision` answer, read at the boundary as the loopback and the
+ * in-process read both hand it over: its revision, null when it carries
+ * none, and its connection.
+ */
+function revisionOf(body: unknown): { revision: string | null; connection?: ConnectionScopeWire } {
+  const revision = (body as { revision?: unknown } | null)?.revision;
+  return { revision: typeof revision === 'string' && revision ? revision : null, ...connectionOf(body) };
+}
+
+/**
  * How long a surface missing a manual that failed is kept (see
  * {@link RequestSurface.degraded}): the refresh policy's window, so the
  * manual is retried as soon as a refresh may have settled.
@@ -1177,18 +1187,41 @@ export class McpService {
   ): Promise<{ revision: string | null; connection?: ConnectionScopeWire }> {
     const read = this.opts.readCatalogRevision;
     if (!read) return this.fetchCatalogRevision(loopbackBearer);
-    try {
-      const { revision, connection } = await this.inProcess(read(loopbackBearer));
-      return { revision: revision || null, ...(connection ? { connection } : {}) };
-    } catch (err) {
-      log.warn("the catalog revision could not be read; building this request's surface uncached:", { err });
-      return { revision: null };
-    }
+    const answer = await this.readInProcess('catalog-revision', () => read(loopbackBearer));
+    return answer.ok ? revisionOf(answer.value) : { revision: null };
   }
 
-  /** A read made in process, held to {@link IN_PROCESS_READ_LIMIT_MS} (a limit a held event loop cannot use up). */
-  private inProcess<T>(read: Promise<T>): Promise<T> {
-    return withinLoopTime(read, this.opts.inProcessReadLimitMs ?? IN_PROCESS_READ_LIMIT_MS);
+  /**
+   * A read made in process, made as the loopback request it replaces was:
+   * held to {@link IN_PROCESS_READ_LIMIT_MS} (a limit a held event loop cannot
+   * use up), and its answer passed through JSON, as the route's answer was on
+   * its way here, so the code that reads it is handed what it was always
+   * handed, and a copy of its own: nothing it changes is the reader's.
+   *
+   * The ONE policy for the four reads this service makes in process (the
+   * catalog revision, the manual list, a skill read, a hosted manual). A read
+   * that fails, is refused or passes the limit answers the failure and is
+   * logged under `label`: one line when it was refused with the status its
+   * route answers (a key revoked since the request was admitted, a connection
+   * that loads nothing), as the loopback's refusal was; the error with its
+   * stack otherwise. It never throws.
+   */
+  private async readInProcess(
+    label: string,
+    read: () => Promise<unknown>,
+  ): Promise<{ ok: true; value: unknown } | { ok: false; status?: number; message: string }> {
+    try {
+      const value = await withinLoopTime(read(), this.opts.inProcessReadLimitMs ?? IN_PROCESS_READ_LIMIT_MS);
+      return { ok: true, value: JSON.parse(JSON.stringify(value ?? null)) as unknown };
+    } catch (err) {
+      const status = (err as { status?: unknown } | null)?.status;
+      if (typeof status === 'number' && err instanceof Error) {
+        log.error(`${label} refused: HTTP ${status} ${err.message}`);
+        return { ok: false, status, message: err.message };
+      }
+      log.error(`${label} could not be read:`, { err });
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /**
@@ -1210,11 +1243,7 @@ export class McpService {
         if (res.status !== 404) log.warn(`catalog-revision loopback failed: HTTP ${res.status}; building this request's surface uncached`);
         return { revision: null };
       }
-      const body = (await res.json()) as { revision?: unknown; connection?: unknown };
-      return {
-        revision: typeof body.revision === 'string' && body.revision ? body.revision : null,
-        ...connectionOf(body),
-      };
+      return revisionOf(await res.json());
     } catch (err) {
       log.warn("catalog-revision loopback threw; building this request's surface uncached:", { err });
       return { revision: null };
@@ -1310,11 +1339,7 @@ export class McpService {
    * when the composition handed over the reads (`readSkillsWith`), over
    * loopback otherwise. A failure is logged under the tool's name and degrades
    * to null either way — a skill read must not throw into the MCP request. A
-   * read in process is held to {@link IN_PROCESS_READ_LIMIT_MS}, as the
-   * loopback request was to its limit.
-   *
-   * The in-process answer is passed through JSON, as the route's answer was on
-   * its way here, so what the handlers below read is what they always read.
+   * read in process is made as every one is ({@link readInProcess}).
    */
   private async skillRead(
     bearer: string,
@@ -1324,20 +1349,8 @@ export class McpService {
   ): Promise<unknown> {
     const reads = this.skillReads;
     if (!reads) return this.loopbackTool(bearer, tool, body);
-    try {
-      return JSON.parse(JSON.stringify((await this.inProcess(read(reads))) ?? null)) as unknown;
-    } catch (err) {
-      // A refusal the route answers with a status (a connection that loads
-      // nothing is refused the skills on every `prompts/list`) is one line,
-      // as it was over loopback, and carries no stack.
-      const status = (err as { status?: unknown } | null)?.status;
-      if (typeof status === 'number' && err instanceof Error) {
-        log.error(`skill ${tool} refused: HTTP ${status} ${err.message}`);
-      } else {
-        log.error(`skill ${tool} could not be read:`, { err });
-      }
-      return null;
-    }
+    const answer = await this.readInProcess(`skill ${tool}`, () => read(reads));
+    return answer.ok ? answer.value : null;
   }
 
   /**
@@ -1381,11 +1394,11 @@ export class McpService {
    * the read ends at a limit, and a list not read by then is one that could
    * not be read.
    *
-   * The in-process answer is passed through JSON, as the route's answer was on
-   * its way here, so the validation that follows is handed exactly what it
-   * was always handed. It also makes the list this build's own: discovery
-   * renames each template in place, and nothing the reader handed out may
-   * change under the catalog every caller is served from.
+   * The in-process answer comes through JSON ({@link readInProcess}), so the
+   * validation that follows is handed exactly what it was always handed, and
+   * the list is this build's own: discovery renames each template in place,
+   * and nothing the reader handed out may change under the catalog every
+   * caller is served from.
    */
   private async manualListOf(bearer: string): Promise<{ manuals?: unknown; connection?: unknown } | null> {
     // This is the REMOTE proxy, so ask for remote-capable manuals only — local-only
@@ -1396,20 +1409,8 @@ export class McpService {
         | { manuals?: unknown; connection?: unknown }
         | null;
     }
-    try {
-      const answer = await this.inProcess(read(bearer, { remoteOnly: true }));
-      return JSON.parse(JSON.stringify(answer)) as { manuals?: unknown; connection?: unknown };
-    } catch (err) {
-      // A bearer refused since the request was admitted is one line, as the
-      // loopback's 401 was; anything else is a failed read, with its stack.
-      const status = (err as { status?: unknown } | null)?.status;
-      if (typeof status === 'number' && err instanceof Error) {
-        log.error(`all-tools refused: HTTP ${status} ${err.message}`);
-      } else {
-        log.error('the manual list could not be read:', { err });
-      }
-      return null;
-    }
+    const answer = await this.readInProcess('all-tools', () => read(bearer, { remoteOnly: true }));
+    return answer.ok ? (answer.value as { manuals?: unknown; connection?: unknown } | null) : null;
   }
 
   /**
@@ -1673,9 +1674,9 @@ export class McpService {
    * `m` once the surface is built (`SharedDefinitions.share`), so calls are
    * judged against the manual as the catalog declares it.
    *
-   * A read that fails or is refused is a registration that failed, worded as
-   * the HTTP discovery worded it. The read is held to the limit every read in
-   * process is, and its answer is passed through JSON as the route's was.
+   * The read is made as every read in process is ({@link readInProcess}). One
+   * that fails or is refused is a registration that failed, worded as the HTTP
+   * discovery worded it.
    */
   private async registerInHand(
     client: CodeModeUtcpClient,
@@ -1683,17 +1684,12 @@ export class McpService {
     read: () => Promise<unknown>,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const name = String(m.name);
-    let manual: unknown;
-    try {
-      manual = JSON.parse(JSON.stringify((await this.inProcess(read())) ?? null)) as unknown;
-    } catch (err) {
-      const status = (err as { status?: unknown } | null)?.status;
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false,
-        error: `${typeof status === 'number' ? `HTTP ${status} ` : ''}discovering tools from '${name}': ${message}`,
-      };
+    const answer = await this.readInProcess(`manual '${name}'`, read);
+    if (!answer.ok) {
+      const status = answer.status !== undefined ? `HTTP ${answer.status} ` : '';
+      return { ok: false, error: `${status}discovering tools from '${name}': ${answer.message}` };
     }
+    const manual = answer.value;
     const inHand = callTemplateSerializer.validateDict({
       name,
       call_template_type: 'direct-call',

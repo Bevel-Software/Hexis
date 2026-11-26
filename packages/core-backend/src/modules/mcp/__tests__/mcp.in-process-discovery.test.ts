@@ -291,16 +291,23 @@ describe("McpService — an inline `.tool`'s manual is discovered in process", (
   });
 
   // An inline manual that cannot be read costs its own tools and nothing else:
-  // the request is served, as it was when that manual's discovery failed.
+  // the request is served, as it was when that manual's discovery failed. The
+  // refusal is logged as every read in process logs one: one line, no stack.
   it('serves the request without the manual when its reader refuses it', async () => {
     const { state, mcp } = await harness();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     state.manuals = [inlineManual('acme')];
     state.readInline = async () => {
       throw Object.assign(new Error('Not found'), { status: 404 });
     };
     expect(withoutMeta(await toolNames(await connect(mcp)))).toEqual(['read_file']);
+    const lines = errors.mock.calls.map((c) => c.map(String).join(' '));
+    expect(lines.filter((l) => l.includes("manual 'acme' refused: HTTP 404 Not found"))).toHaveLength(1);
+    expect(lines.join('\n')).not.toContain('    at ');
+    expect(warnings.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain(
+      "skipping manual \"acme\": HTTP 404 discovering tools from 'acme': Not found",
+    );
   });
 
   // Only a manual at one of this server's two discovery addresses is read in

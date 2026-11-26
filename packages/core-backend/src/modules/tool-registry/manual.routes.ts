@@ -1,8 +1,8 @@
 import express, { type Request, type RequestHandler } from 'express';
 import { UtcpManualSerializer } from '@utcp/sdk';
 import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
-import { requireInternalSource } from '../tool-auth/index.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { createCallerScope, requireInternalSource, type ReadCaller } from '../tool-auth/index.js';
+import type { IAgentScopeResolver } from '../agent-scope/index.js';
 import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */
@@ -51,35 +51,22 @@ function toManual(tools: UtcpTool[]) {
  * on top of it. (External callers are always write-scoped, so the external
  * manual needs no variant.)
  */
-/** Who a manual is built for: what a request's credential resolved to. */
-export interface ManualCaller {
-  userId?: string | null;
-  /** The agent configuration the credential connects as; absent or null for Everything. */
-  agentPath?: string | null;
-}
-
 /** Builds the per-caller context a `ToolProvider` words its def from. */
 function contextBuilder(resolveUserEmail?: ResolveUserEmail, agentScope?: Pick<IAgentScopeResolver, 'resolve'>) {
   // Resolve the caller's email so a `ToolProvider` (e.g. the skill tools) can
-  // tailor its def to who's asking. Best-effort — a failure just yields an
-  // empty (global) context.
-  return async function context(caller: ManualCaller): Promise<ToolManualContext> {
+  // tailor its def to who's asking. Best-effort — a failure just yields a
+  // context without one.
+  const callerScope = createCallerScope({ resolveUserEmail: resolveUserEmail ?? (async () => undefined), agentScope });
+  return async function context(caller: ReadCaller): Promise<ToolManualContext> {
     const userId = caller.userId;
     if (!userId) return {};
-    let userEmail: string | undefined;
-    try {
-      userEmail = resolveUserEmail ? await resolveUserEmail(userId) : undefined;
-    } catch {
-      userEmail = undefined;
-    }
+    const { email: userEmail, scope } = await callerScope(caller);
     // Everything adds nothing to the context, so its providers are asked
     // exactly what they were asked before connections could be narrowed.
-    const agentPath = caller.agentPath;
-    const connectionScope = agentPath ? await resolveConnectionScope(agentScope, userEmail, agentPath) : undefined;
     return {
       userId,
       ...(userEmail !== undefined ? { userEmail } : {}),
-      ...(connectionScope ? { connectionScope } : {}),
+      ...(caller.agentPath ? { connectionScope: scope } : {}),
     };
   };
 }
@@ -101,7 +88,7 @@ export function createExternalManualReader(
   resolveUserEmail?: ResolveUserEmail,
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
-): (caller: ManualCaller) => Promise<ReturnType<typeof toManual>> {
+): (caller: ReadCaller) => Promise<ReturnType<typeof toManual>> {
   const context = contextBuilder(resolveUserEmail, agentScope);
   return async (caller) => {
     const ctx = await context(caller);

@@ -499,12 +499,16 @@ describe('McpService — the revision is read in process', () => {
     expect(state.builds).toBe(1);
 
     state.refused.add('bevel_key_1');
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     await (await connect(mcp)).listTools();
     await (await connect(mcp)).listTools();
 
     expect(state.revisionReads).toEqual(['bevel_key_1', 'bevel_key_1', 'bevel_key_1']);
     expect(state.builds).toBe(3);
+    // A refusal is one line, as the route's 401 was over loopback.
+    const lines = errors.mock.calls.map((c) => c.map(String).join(' '));
+    expect(lines.filter((l) => l.includes('catalog-revision refused: HTTP 401 This connection key was revoked.'))).toHaveLength(2);
+    expect(lines.join('\n')).not.toContain('    at ');
   });
 
   it('hands the reader, for a caller with no key, the token minted for this request', async () => {
@@ -536,7 +540,7 @@ describe('McpService — the revision is read in process', () => {
 
   it('builds per request when the reader fails, never serving a surface it cannot tell is current', async () => {
     const { state, mcp } = await harness({ revisionReader: 'throws' });
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const first = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
     const second = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
@@ -556,7 +560,7 @@ describe('McpService — a revision read that never answers', () => {
   // use up (`shared/loop-time-limit.ts`).
   it('ends at its limit, and the request is served a surface of its own', async () => {
     const { state, mcp } = await harness({ revisionReader: 'stalls', inProcessReadLimitMs: 150 });
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const started = performance.now();
     const names = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
@@ -566,7 +570,7 @@ describe('McpService — a revision read that never answers', () => {
     await (await connect(mcp)).listTools();
     expect(state.builds).toBe(2);
     expect(state.revisionRouteHits).toBe(0);
-    expect(warn.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain('the catalog revision could not be read');
+    expect(errors.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain('catalog-revision could not be read');
   });
 
   it('a held event loop does not use the limit up: the read is waited for and the surface is kept', async () => {

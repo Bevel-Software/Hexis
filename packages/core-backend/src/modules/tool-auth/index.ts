@@ -17,4 +17,5 @@ export {
   requireInternalSource,
 } from './tool-auth.middleware.js';
 export type { ConnectionChoices, ToolAuth } from './tool-auth.middleware.js';
+export { createCallerScope, type CallerScopeSources, type ReadCaller } from './caller-scope.js';
 import './tool-auth.middleware.js';
