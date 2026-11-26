@@ -976,6 +976,9 @@ export async function createCoreServices(
     },
     ports.accountAdmission,
   );
+  // Before anything can serve a request: a restart with a new ADMIN_PASSWORD
+  // ends the sessions the deployment admin opened with the old one.
+  await authService.endSessionsOfAnotherAdminPassword();
   const authMiddleware = createAuthMiddleware(authService);
   // Who tells an invited person: the composition root of a distribution
   // registers its listener here, after this returns (see `AccountHooks`).

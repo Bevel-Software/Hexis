@@ -4,7 +4,8 @@
  * handler factory and context resolver, the tool-auth middleware, the two
  * registrars that take their dependencies by hand, the session sink, the
  * routine write policy, the access resolver, the version-control hooks, the
- * manual auth middleware and the auth cookie reader, and the MCP routes and service.
+ * manual auth middleware and the auth cookie reader, and the MCP routes, auth
+ * middleware and service.
  *
  * A module's entry holds its contracts, and a suite asserts through entries.
  * These are not contracts: they are what the root composes, so a suite that
@@ -28,4 +29,5 @@ export { createManualAuthMiddleware } from '../modules/tool-auth/tool-auth.middl
 export { readAuthCookie } from '../modules/auth/auth.middleware.js';
 export type { ToolBranchPort } from '../modules/tool-helpers/tool-handler.js';
 export { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
+export { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
 export { McpService } from '../modules/mcp/mcp.service.js';

@@ -1,14 +1,12 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
 import { InternalTokenService } from '../internal-token.service.js';
 import { createManualAuthMiddleware } from '../tool-auth.middleware.js';
 import type { IExternalApiKeyService } from '../external-api-key.interface.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import { AuthBackendError, SESSION_ENDED_MESSAGE, SessionEndedError } from '../../auth/account-admission.js';
+import { AuthBackendError, SESSION_ENDED_MESSAGE, SessionEndedError, type AuthService } from '../../auth/index.js';
 
 /**
  * The manual endpoints (`/agent/utcp`, `/agent/internal/utcp`) accept a browser

@@ -4,7 +4,7 @@ import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createKbSyncRoutes, isSyncRawBodyPath } from '../kb-sync.routes.js';
 import type { IKbSyncService, SyncResult } from '../kb-sync.interface.js';
-import { AuthBackendError, SESSION_ENDED_MESSAGE, SessionEndedError } from '../../auth/account-admission.js';
+import { AuthBackendError, SESSION_ENDED_MESSAGE, SessionEndedError } from '../../auth/index.js';
 
 const SECRET = 'a-very-long-and-random-sync-secret';
 
