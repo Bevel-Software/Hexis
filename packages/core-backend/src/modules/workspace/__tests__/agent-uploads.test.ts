@@ -14,7 +14,7 @@ import type { ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import { AccessDeniedError, toKbRelative } from '../../access-model/index.js';
-import { normalizeWorkspacePath } from '../../kb-fs/index.js';
+import { normalizeWorkspacePath, PathHeldError } from '../../kb-fs/index.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
@@ -107,6 +107,8 @@ let folderTurnGate: Promise<void> | undefined;
  */
 let folderTurnAsked: Promise<void>;
 let announceFolderTurnAsked: () => void;
+/** When set, someone of this name holds a lock the next batch needs: it is refused whole, nothing written. */
+let lockHeldBy: string | undefined;
 
 interface StartOptions {
   access?: IAccessControl;
@@ -145,6 +147,7 @@ async function start(options: StartOptions = {}): Promise<string> {
     turnsHeld = 0;
     folderTurnGate = undefined;
     folderTurnAsked = new Promise<void>((resolve) => (announceFolderTurnAsked = resolve));
+    lockHeldBy = undefined;
   }
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
   // The harness speaks the paths the TOOLS speak: a fixture written here as
@@ -167,6 +170,8 @@ async function start(options: StartOptions = {}): Promise<string> {
    * paths "locked", just before any byte lands) and writes only what the
    * check keeps. Content arrives as a Buffer from an apply, and is written
    * through untouched — which is the property byte-for-byte landing rests on.
+   * As the real batch does, a lock another holds (`lockHeldBy`) refuses it
+   * with `PathHeldError` before anything is written.
    */
   const batchOn = (branch: string) => async (
     writes: { path: string; content: string | Buffer }[],
@@ -192,6 +197,7 @@ async function start(options: StartOptions = {}): Promise<string> {
       if (await access.canRead(ws, userEmail, rel)) return null;
       return new AccessDeniedError({ path: wsPath, eligibleRoles: [], eligibleUsers: [], unreadable: rel.slice(0, rel.lastIndexOf('/')) });
     };
+    if (lockHeldBy !== undefined) throw new PathHeldError([...writes.map((w) => w.path), ...deletes].sort()[0], lockHeldBy);
     let locked = writes;
     for (const w of [...writes].sort((x, y) => (x.path < y.path ? -1 : 1))) {
       const refusal = await lockRefusal(w.path);
@@ -1375,6 +1381,20 @@ describe('a token is good once, for one user, for a limited time', () => {
     expect(second.status).toBe(404);
     expect((await json<{ error: string }>(second)).error).toBe(UPLOAD_TOKEN_REFUSAL);
     expect(await readdir(join(tempDir, KB_DIR))).toEqual(['One']);
+  });
+
+  it('survives an apply refused because someone else holds one of its paths: a 409 naming it, nothing landed', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'a.md': 'a', 'b.md': 'b' }));
+    lockHeldBy = 'Bo';
+    const held = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: `${KB_DIR}/Held` });
+    expect(held.status).toBe(409);
+    expect(await json<{ kind?: string; path?: string }>(held)).toMatchObject({ kind: 'path-held', path: `${KB_DIR}/Held/a.md` });
+    expect(batches).toEqual([]);
+    await expect(readdir(join(tempDir, KB_DIR, 'Held'))).rejects.toThrow();
+    lockHeldBy = undefined;
+    expect((await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Held` })).count).toBe(2);
   });
 
   it('deletes the stored bytes once it has been applied', async () => {
