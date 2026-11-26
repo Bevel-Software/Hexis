@@ -289,6 +289,27 @@ describe('KbPluginSource — one walk, both shapes', () => {
     ]);
   });
 
+  it('names the file each plugin was read from, and a server source only when it holds servers', async () => {
+    await write('Plugins/Full/plugin.json', '{"name":"full"}');
+    await write('Plugins/Full/mcp.json', JSON.stringify({ mcpServers: { s: { command: 'npx' } } }));
+    // An empty map is no servers, exactly as an empty bundle profile is.
+    await write('Plugins/Empty/plugin.json', '{"name":"empty"}');
+    await write('Plugins/Empty/mcp.json', '{"mcpServers":{}}');
+    await write('Plugins/None/plugin.json', '{"name":"none"}');
+    await write('configs/mcp/registry.json', JSON.stringify(REGISTRY));
+    await write('Plugins/b/close/plugin.bundle.json', JSON.stringify({ name: 'close', mcpProfile: 'empty', sourceSkillRoots: ['Skills/x'] }));
+    await write('Plugins/b/ex/plugin.bundle.json', JSON.stringify({ name: 'ex', mcpProfile: 'base', sourceSkillRoots: ['Skills/x'] }));
+    const { plugins } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const at = (n: string) => plugins.find((p) => p.name === n)!;
+    expect([at('full'), at('empty'), at('none'), at('close'), at('ex')].map((p) => [p.manifestPath, p.mcpServersPath, p.mcpServers === null])).toEqual([
+      ['Plugins/Full/plugin.json', 'Plugins/Full/mcp.json', false],
+      ['Plugins/Empty/plugin.json', null, true],
+      ['Plugins/None/plugin.json', null, true],
+      ['Plugins/b/close/plugin.bundle.json', null, true],
+      ['Plugins/b/ex/plugin.bundle.json', 'configs/mcp/registry.json', false],
+    ]);
+  });
+
   it('counts what exists but could not be read — a folder, a manifest — so a writer can tell a hole from an absence', async () => {
     await write('Plugins/GTM/plugin.json', '{"name":"gtm"}');
     // An optional file that cannot be read carries no identity: a warning, never a hole.
