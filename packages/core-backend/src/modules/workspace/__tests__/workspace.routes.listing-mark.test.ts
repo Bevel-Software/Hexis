@@ -43,6 +43,7 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
     await fs.writeFile(path.join(root, KB, 'Data', 'page.md'), PAGE);
     await fs.writeFile(path.join(root, KB, 'Data', 'access.md'), 'read: [Sales]\n');
     await fs.writeFile(path.join(root, KB, 'Data', 'table.csv'), 'a,b\n');
+    await fs.writeFile(path.join(root, KB, 'Data', 'notes.txt'), '---\nread: [Sales]\n---\nA note\n');
     emitted = [];
     heldBy = null;
     const workspaceService = {
@@ -133,6 +134,28 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
   it('a save of an existing file of another kind says so too', async () => {
     await save('Data/table.csv', 'a,b\n1,2\n');
     expect(treeEvents()).toEqual([expect.objectContaining({ listingUnchanged: true })]);
+  });
+
+  it('a save of the body of a file of another kind with its own access entries says the listing is unchanged', async () => {
+    await save('Data/notes.txt', '---\nread: [Sales]\n---\nA note, longer\n');
+    expect(treeEvents()).toEqual([expect.objectContaining({ listingUnchanged: true })]);
+  });
+
+  // The access gate reads a file's own entries whatever its kind: a .txt whose `---` block
+  // changes may now be hidden from someone who could read it, so the tree must be asked for.
+  it('a save that changed the own access entries of a file of another kind says nothing', async () => {
+    await save('Data/notes.txt', '---\nread: [Finance]\n---\nA note\n');
+    expectOneUnmarked();
+  });
+
+  it('a save that added access entries to a file of another kind that had none says nothing', async () => {
+    await save('Data/table.csv', '---\nread: [Finance]\n---\na,b\n');
+    expectOneUnmarked();
+  });
+
+  it('a save that removed the access entries of a file of another kind says nothing', async () => {
+    await save('Data/notes.txt', 'A note\n');
+    expectOneUnmarked();
   });
 
   it('a new file says nothing, so the tree is asked for', async () => {
