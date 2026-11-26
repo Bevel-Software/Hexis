@@ -31,9 +31,9 @@ are entered in the app and nowhere else; see the *retired* rows below.
 | `DOMAIN` | with the `https` profile | Public host name served by the bundled Caddy; also derives the public origins (`https://<DOMAIN>`) and `TRUST_PROXY=1` unless set explicitly |
 | `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | production | Public origins for OAuth redirects + post-login bounces (derived from `DOMAIN` when set) |
 | `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the login rate limit see the real client (defaults to `1` when `DOMAIN` is set) |
-| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC SSO; the login method appears once all three are set |
-| `OIDC_SCOPES` / `OIDC_PROVIDER_LABEL` | no | Scopes requested from the issuer (default `openid profile email`) and the name of the SSO button on the login screen |
-| `ALLOWED_EMAIL_DOMAINS` | with multi-tenant SSO | Signup allow-list for SSO auto-provisioning |
+| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | setup screen | Generic OIDC SSO; the login method appears once all three are set |
+| `OIDC_SCOPES` / `OIDC_PROVIDER_LABEL` | setup screen | Scopes requested from the issuer (default `openid profile email`) and the name of the SSO button on the login screen |
+| `ALLOWED_EMAIL_DOMAINS` | setup screen; needed with multi-tenant SSO | Signup allow-list for SSO auto-provisioning |
 | `LOGIN_PASSWORD` | no | `false` hides password login and rejects the endpoint |
 | `PORT` | no | Backend port (default 3001) |
 | `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
@@ -78,7 +78,8 @@ at boot, so if you run more than one, restart the others after changing SSO
   `ALLOWED_EMAIL_DOMAINS`. SSO auto-provisions accounts, and that list is the
   **only** signup boundary. Without it, anyone with an account at the issuer
   can sign in. You can also set the list on the setup screen's Single sign-on
-  card, where the environment variable does not set it. A save there applies
+  card; the card's value applies only while the environment variable is
+  unset. A save there applies
   like the provider settings: at the next sign-in on the replica that served
   it, and on the others after they restart.
 
