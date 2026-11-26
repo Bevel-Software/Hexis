@@ -585,6 +585,8 @@ export async function createCoreServer(
     async (userId) => (await core.authService.getUserById(userId))?.email,
     readOnlyHints,
     core.agentScopeService,
+    // The reader the MCP endpoint calls in process: one reader, two callers.
+    core.readExternalManual,
   ));
   toolsRouter.use(createToolHintsAgentRoutes(readOnlyHints, core.manualAuthMiddleware));
   // The aggregated manual list (KB + the caller's accessible `.tool`s) + inline
@@ -602,8 +604,9 @@ export async function createCoreServer(
       pluginIndex: core.pluginIndexService,
     },
     core.agentScopeService,
-    // The reader the MCP endpoint calls in process: one computation, two callers.
+    // The readers the MCP endpoint calls in process: one each, two callers.
     core.readManualList,
+    core.readInlineManual,
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the

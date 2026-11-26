@@ -10,4 +10,4 @@ Each read is handed the bearer the discovery request carried and resolves it wit
 
 Tool calls are unchanged: a discovered tool is still called at its route, with the bearer of the request that calls it. The two routes are unchanged for the local server and for scripts. A third-party `.tool` is discovered at its own address as before. A composition that hands the endpoint no reader keeps discovering over loopback. Nothing an agent can observe changes.
 
-A minor release for the new exports. `CoreServices` gains no member in this step.
+A minor release, not a patch: the exported `CoreServices` gains two required members, `readExternalManual` and `readInlineManual`, the readers the routes and the endpoint share; code that builds or mocks a `CoreServices` by hand must add them.

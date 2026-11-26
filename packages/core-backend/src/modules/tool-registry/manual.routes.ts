@@ -73,10 +73,11 @@ function contextBuilder(resolveUserEmail?: ResolveUserEmail, agentScope?: Pick<I
 
 /**
  * Reads one caller's external manual: the platform's own tools as
- * `GET /agent/utcp` serves them. The ONE place it is built: the route below
- * answers with it, and the hosted MCP endpoint calls it directly
+ * `GET /agent/utcp` serves them. The composition root builds one and hands it
+ * to the route below and to the hosted MCP endpoint, which calls it directly
  * (`McpProxyOptions.readPlatformManual`) when it discovers the platform's
- * tools for a caller's surface.
+ * tools for a caller's surface: one reader, so the two cannot answer
+ * differently.
  *
  * Called directly, and not over HTTP, for the reason the catalog revision is
  * (`core/catalog-revision.ts`): the endpoint and this code are one process, and
@@ -119,6 +120,17 @@ export function createManualRoutes(
    * their descriptions for it (`modules/agent-scope`).
    */
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
+  /**
+   * The reader `GET /agent/utcp` answers with. The composition root passes the
+   * one it also hands the MCP endpoint, so the route and the endpoint cannot
+   * answer differently. Absent, the route reads through the services above.
+   */
+  readExternalManual: ReturnType<typeof createExternalManualReader> = createExternalManualReader(
+    registry,
+    resolveUserEmail,
+    readOnlyHints,
+    agentScope,
+  ),
 ): express.Router {
   const router = express.Router();
 
@@ -126,7 +138,6 @@ export function createManualRoutes(
   const contextOf = contextBuilder(resolveUserEmail, agentScope);
   const context = (req: Request): Promise<ToolManualContext> =>
     contextOf({ userId: req.toolAuth?.userId, agentPath: req.toolAuth?.agentPath });
-  const readExternalManual = createExternalManualReader(registry, resolveUserEmail, readOnlyHints, agentScope);
 
   router.get('/agent/utcp', manualAuth, async (req, res) => {
     res.json(await readExternalManual({ userId: req.toolAuth?.userId, agentPath: req.toolAuth?.agentPath }));

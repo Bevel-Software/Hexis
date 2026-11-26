@@ -4,7 +4,8 @@ import { logger } from '../shared/logging.js';
 import type { ISkillService, SkillSummary } from '../modules/skills/index.js';
 import type { IToolManualService } from '../modules/tool-manuals/index.js';
 import '../modules/tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
-import { resolveConnectionScope, type ConnectionScopeWire, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { type ConnectionScopeWire, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { createCallerScope } from '../modules/tool-auth/index.js';
 
 const log = logger('catalog-revision');
 
@@ -129,15 +130,15 @@ export type CatalogRevisionReader = (caller: CatalogRevisionCaller) => Promise<C
  * the route's `manualAuth` resolves the same bearer to.
  */
 export function createCatalogRevisionReader(deps: CatalogRevisionSources): CatalogRevisionReader {
+  // The caller's email and connection scope, derived as the manual readers derive them.
+  const callerScope = createCallerScope(deps);
   return async (caller) => {
-    const userId = caller.userId;
-    const email = userId ? await deps.resolveUserEmail(userId).catch(() => undefined) : undefined;
     // No resolvable caller is an EMPTY catalog, not a failure: that is what
     // both list surfaces answer such a caller, so the fingerprint agrees
     // with them rather than inventing a third verdict.
     // A connection made as an agent configuration is fingerprinted over what IT
     // loads, plus the file itself; Everything asks exactly what it always did.
-    const scope = await resolveConnectionScope(deps.agentScope, email, caller.agentPath);
+    const { email, scope } = await callerScope(caller);
     const connectors = scope.connectorFilter();
     const within = scope.skillFilter();
     const [manuals, skills] = email

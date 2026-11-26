@@ -114,10 +114,11 @@ export type InlineManualReader = (caller: ReadCaller, slug: string) => Promise<R
 
 /**
  * Reads the tools an inline `.tool` embeds, as `GET /tools/:slug/manual`
- * serves them. The ONE place it is decided: the route below answers with it,
- * and the hosted MCP endpoint calls it directly
+ * serves them. The composition root builds one and hands it to the route
+ * below and to the hosted MCP endpoint, which calls it directly
  * (`McpProxyOptions.readInlineManual`) when it discovers such a manual's tools,
- * for the reason the manual list is read that way ({@link createManualListReader}).
+ * for the reason the manual list is read that way ({@link createManualListReader}):
+ * one reader, so the two cannot answer differently.
  *
  * A caller with no account is refused (403). A manual that does not exist,
  * that the caller cannot read or that their connection does not load is not
@@ -179,6 +180,15 @@ export function createToolManualsAgentRoutes(
    * differently. Absent, the route reads through the services above.
    */
   readManualList: ManualListReader = createManualListReader({ toolManuals: toolManualService, resolveUserEmail, agentScope }),
+  /**
+   * The reader `GET /tools/:slug/manual` answers with, passed by the
+   * composition root as `readManualList` is, for the same reason.
+   */
+  readInlineManual: ReturnType<typeof createInlineManualReader> = createInlineManualReader({
+    toolManuals: toolManualService,
+    resolveUserEmail,
+    agentScope,
+  }),
 ): express.Router {
   const router = express.Router();
 
@@ -396,7 +406,6 @@ export function createToolManualsAgentRoutes(
     }
   });
 
-  const readInlineManual = createInlineManualReader({ toolManuals: toolManualService, resolveUserEmail, agentScope });
   router.get('/tools/:slug/manual', manualAuth, async (req, res) => {
     try {
       const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;

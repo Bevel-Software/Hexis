@@ -444,6 +444,14 @@ export interface CoreServices {
    * tool surface, so the two cannot answer differently.
    */
   readManualList: ManualListReader;
+  /**
+   * Reads one caller's platform manual and one inline `.tool`'s manual: the
+   * routes `GET /agent/utcp` and `GET /tools/:slug/manual` answer with these,
+   * and the MCP endpoint calls them directly, so the two cannot answer
+   * differently.
+   */
+  readExternalManual: ReturnType<typeof createExternalManualReader>;
+  readInlineManual: ReturnType<typeof createInlineManualReader>;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -1940,6 +1948,8 @@ export async function createCoreServices(
     mcpAppService,
     readCatalogRevision,
     readManualList,
+    readExternalManual,
+    readInlineManual,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,
