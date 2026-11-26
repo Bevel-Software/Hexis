@@ -167,16 +167,18 @@ export interface McpProxyOptions {
    * the caller's cached surface, so over loopback it was a request the server
    * sent itself on every request: it waited on the event loop it was already
    * running on, behind `LOOPBACK_TIMEOUT_MS`, and a busy server failed its own
-   * callers. The caller is the one the request's credential resolved to, which
-   * is what the route's auth resolves the loopback bearer to.
+   * callers.
+   *
+   * It is handed the bearer the loopback request carried, and resolves it as
+   * the route's auth did, when it reads: a bearer refused by then (a key
+   * revoked, an account switched off) is refused here too, by throwing, and
+   * the request then builds a surface of its own and keeps it to itself, as
+   * when the route answered it 401.
    *
    * Absent (a test, or a composition that serves the route elsewhere), the
    * revision is read over loopback as before.
    */
-  readCatalogRevision?: (caller: {
-    userId: string;
-    agentPath: string | null;
-  }) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
+  readCatalogRevision?: (bearer: string) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
   /**
    * Reads a caller's manual list in process: the same computation
    * `GET /api/agent/all-tools` answers with (`createManualListReader` in
@@ -720,7 +722,7 @@ export class McpService {
     // revision (cheap), not the surface (a full discovery). Everything is
     // told nothing new, so its handshake is exactly what it was.
     const connectionLine = async (): Promise<string | null> =>
-      agentPath ? describeConnection((await this.catalogRevisionOf(caller, loopbackBearer)).connection) : null;
+      agentPath ? describeConnection((await this.catalogRevisionOf(loopbackBearer)).connection) : null;
     // The Audit log's view of this request — only when the request can be
     // attributed to a key, an agent connection or a page. The catalog names
     // it classifies pooled tools by are the surface's, which is looked up
@@ -1138,7 +1140,7 @@ export class McpService {
    */
   private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
     const { userId, tokenId } = caller;
-    const { revision } = await this.catalogRevisionOf(caller, loopbackBearer);
+    const { revision } = await this.catalogRevisionOf(loopbackBearer);
     if (revision === null) return this.buildSurface(caller, loopbackBearer, 'uncached');
     // The agent the connection was made as is part of the key: two
     // connections of one person made as different agents are two surfaces.
@@ -1171,15 +1173,12 @@ export class McpService {
    * its own and keeps it to itself.
    */
   private async catalogRevisionOf(
-    caller: Pick<McpCaller, 'userId' | 'agentPath'>,
     loopbackBearer: string,
   ): Promise<{ revision: string | null; connection?: ConnectionScopeWire }> {
     const read = this.opts.readCatalogRevision;
     if (!read) return this.fetchCatalogRevision(loopbackBearer);
     try {
-      const { revision, connection } = await this.inProcess(
-        read({ userId: caller.userId, agentPath: caller.agentPath || null }),
-      );
+      const { revision, connection } = await this.inProcess(read(loopbackBearer));
       return { revision: revision || null, ...(connection ? { connection } : {}) };
     } catch (err) {
       log.warn("the catalog revision could not be read; building this request's surface uncached:", { err });

@@ -234,19 +234,22 @@ export class BearerRefusedError extends Error {
 }
 
 /**
- * Resolves a bearer to its caller, for code in this process that calls a
- * hosted read as a function where it used to send the bearer to the read's
- * route: the hosted MCP endpoint's manual list and skill reads.
+ * Resolves a bearer to its caller with `verify`, for code in this process that
+ * calls a hosted read as a function where it used to send the bearer to the
+ * read's route: the hosted MCP endpoint's reads. Handed the verifier that
+ * route's auth runs ({@link createTokenVerifier} behind a tool route,
+ * {@link createManualTokenVerifier} behind a manual route), it answers what
+ * the route's auth answers, at the moment of the read.
  *
- * It runs the verifier the routes' auth runs, at the moment of the read. So
- * the read is made for whoever the bearer names now, and a bearer refused
+ * So the read is made for whoever the bearer names now, and a bearer refused
  * since the request was admitted (a key revoked, an account switched off, an
  * agent connection revoked) is refused here as it was at the route, with the
- * route's status and words in a {@link BearerRefusedError}. A failure of the
- * key store is thrown on as it is.
+ * route's status and words in a {@link BearerRefusedError}. What the verifier
+ * throws (the key store or the account lookup did not answer) is thrown on as
+ * it is.
  */
 export function createCallerResolver(
-  verify: (token: string | undefined) => Promise<VerifyResult>,
+  verify: (token: string) => Promise<VerifyResult>,
 ): (bearer: string) => Promise<ToolAuth> {
   return async (bearer) => {
     const result = await verify(bearer);
@@ -293,6 +296,36 @@ export function createToolAuthMiddleware(
 }
 
 /**
+ * The verify core of the READ-ONLY manual endpoints' auth
+ * ({@link createManualAuthMiddleware}): a `bevel_…` connection key or an
+ * internal token goes through {@link createTokenVerifier}, and any other
+ * bearer is read as a browser session, resolving to `source: 'session'`. A
+ * session that is not valid is refused (401). A session whose account cannot
+ * be looked up throws the `AuthBackendError`: an outage, not a verdict on the
+ * session. A failure of the connection-key store is thrown on as it is.
+ */
+export function createManualTokenVerifier(
+  externalApiKeyService: IExternalApiKeyService,
+  internalTokenService: InternalTokenService,
+  authService: Pick<AuthService, 'isActive' | 'resolveSession'>,
+  connections?: ConnectionChoices,
+): (token: string) => Promise<VerifyResult> {
+  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, authService, connections);
+  return async (token) => {
+    if (internalTokenService.looksLikeInternalToken(token) || externalApiKeyService.looksLikeExternalApiKey(token)) {
+      return verify(token);
+    }
+    try {
+      const { userId } = await authService.resolveSession(token);
+      return { ok: true, auth: { source: 'session', userId, scope: 'write' } };
+    } catch (err) {
+      if (err instanceof AuthBackendError) throw err;
+      return { ok: false, status: 401, message: 'Invalid or expired token' };
+    }
+  };
+}
+
+/**
  * Auth gate for the READ-ONLY discovery manuals (`GET /agent/utcp` +
  * `/agent/internal/utcp`) ONLY. Superset of `createToolAuthMiddleware`: it
  * accepts a `bevel_…` connection key, an internal token, OR a browser JWT —
@@ -302,6 +335,9 @@ export function createToolAuthMiddleware(
  * parallel route). It is deliberately NOT used on tool-execution routes, so a
  * JWT can read the manual but can never invoke a tool. The internal manual stays
  * `requireInternalSource`-gated downstream, so a session/key is 403'd there.
+ *
+ * A THIN Express adapter over {@link createManualTokenVerifier}, as
+ * `createToolAuthMiddleware` is over `createTokenVerifier`.
  */
 export function createManualAuthMiddleware(
   externalApiKeyService: IExternalApiKeyService,
@@ -309,7 +345,7 @@ export function createManualAuthMiddleware(
   authService: Pick<AuthService, 'isActive' | 'resolveSession'>,
   connections?: ConnectionChoices,
 ): RequestHandler {
-  const verify = createTokenVerifier(externalApiKeyService, internalTokenService, authService, connections);
+  const verify = createManualTokenVerifier(externalApiKeyService, internalTokenService, authService, connections);
   return async (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization;
     if (!header || !header.toLowerCase().startsWith('bearer ')) {
@@ -318,42 +354,24 @@ export function createManualAuthMiddleware(
       return;
     }
     const token = header.slice(header.indexOf(' ') + 1).trim();
-
-    // An external API key / internal token goes through the shared verify core.
-    if (internalTokenService.looksLikeInternalToken(token) || externalApiKeyService.looksLikeExternalApiKey(token)) {
-      try {
-        const result = await verify(token);
-        if (!result.ok) {
-          if (result.status === 401) res.setHeader('WWW-Authenticate', result.challenge ?? WWW_AUTH);
-          res.status(result.status).json({ error: result.message });
-          return;
-        }
-        req.toolAuth = result.auth;
-        next();
-      } catch (err) {
-        log.error('connection-key verification failed:', { err });
-        res.status(500).json({ error: 'Authentication backend unavailable' });
-      }
-      return;
-    }
-
-    // Otherwise treat the bearer as a browser session JWT.
-    let userId: string;
+    let result: VerifyResult;
     try {
-      ({ userId } = await authService.resolveSession(token));
+      result = await verify(token);
     } catch (err) {
-      // The account could not be looked up: an outage, not a verdict on the
-      // session, and a 401 would sign a valid caller out over it.
-      if (err instanceof AuthBackendError) {
-        log.error('session account lookup failed:', { err: err.cause });
-        res.status(500).json({ error: 'Authentication backend unavailable' });
-        return;
-      }
-      res.setHeader('WWW-Authenticate', WWW_AUTH);
-      res.status(401).json({ error: 'Invalid or expired token' });
+      // The account could not be looked up, or the key store did not answer:
+      // an outage, not a verdict on the bearer, and a 401 would sign a valid
+      // caller out over it.
+      if (err instanceof AuthBackendError) log.error('session account lookup failed:', { err: err.cause });
+      else log.error('connection-key verification failed:', { err });
+      res.status(500).json({ error: 'Authentication backend unavailable' });
       return;
     }
-    req.toolAuth = { source: 'session', userId, scope: 'write' };
+    if (!result.ok) {
+      if (result.status === 401) res.setHeader('WWW-Authenticate', result.challenge ?? WWW_AUTH);
+      res.status(result.status).json({ error: result.message });
+      return;
+    }
+    req.toolAuth = result.auth;
     next();
   };
 }

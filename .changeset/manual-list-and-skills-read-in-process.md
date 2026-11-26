@@ -8,7 +8,7 @@ The manual list has one reader, `createManualListReader` in `modules/tool-manual
 
 The skills are read by the handlers the two skill routes run. `registerSkillsTools` now returns the two reads, and `createInProcessToolCaller` in `modules/tool-helpers` calls a hosted read as a function with what its route runs once its auth has passed: the caller's context, the connection's scope, then the handler. A connection the route refuses is refused in process with the same words. `createCoreServer` hands the reads to the endpoint with `McpService.readSkillsWith`.
 
-Each read is handed the bearer the loopback request carried, and resolves it with the verifier the routes' auth runs (`createCallerResolver` in `modules/tool-auth`) at the moment of the read. So a key revoked or an account switched off after the request was admitted is refused the read, as it was at the route.
+Each read is handed the bearer the loopback request carried, and resolves it at the moment of the read with the verifier its route's auth runs (`createCallerResolver` in `modules/tool-auth`, handed `createManualTokenVerifier` for the manual list, whose route runs `manualAuth`, and `createTokenVerifier` for the skills, whose routes run `toolAuth`). So a key revoked or an account switched off after the request was admitted is refused the read, as it was at the route.
 
 Each read in process is held to the 15 second limit the catalog revision read has (`withinLoopTime`). A stretch the event loop is held for spends one tick of it, however long. A read that never answers ends there, and the request is then served as it was when the loopback request passed its limit: the platform tools alone, not kept, or no skills.
 
