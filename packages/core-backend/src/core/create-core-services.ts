@@ -1682,8 +1682,10 @@ export async function createCoreServices(
     isMissing: (branch) => workspaceService.isBranchMissing(branch),
   });
   // The same context and connection scope, for a hosted read this process
-  // calls as a function (the MCP endpoint's skill reads).
-  const inProcessTool = createInProcessToolCaller(resolveToolContext);
+  // calls as a function (the MCP endpoint's skill reads). The catalog says
+  // which tools write: those are refused, as the route's write gates do not
+  // run there.
+  const inProcessTool = createInProcessToolCaller(resolveToolContext, toolRegistry);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   // The same verifier, for a read of a tool route (the skill reads) this

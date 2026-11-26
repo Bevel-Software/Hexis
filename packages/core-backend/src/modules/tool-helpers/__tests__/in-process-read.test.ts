@@ -4,15 +4,37 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createInProcessToolCaller, createToolHandlerFactory, type HostedRead } from '../tool-handler.js';
 import { ToolError, type ToolContext } from '../tool.contract.js';
 import type { ResolveToolContext } from '../tool-context.js';
+import { toolDef } from '../tool-def.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../../agent-scope/index.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
 
 /**
  * A hosted discovery read called as a function runs what its route runs once
  * the route's auth has passed: the caller's context, the connection's scope,
  * then the handler. Each test puts the route and the in-process call side by
- * side, on one handler and one context resolver.
+ * side, on one handler and one context resolver. The tool catalog holds the
+ * read's def, as the composition registers it, since the caller refuses a tool
+ * the catalog declares a write.
  */
+
+/** A catalog holding the def of each named tool: a read, unless named in `writes`. */
+function catalogOf(reads: string[], writes: string[] = []): ToolRegistry {
+  const catalog = new ToolRegistry();
+  for (const name of [...reads, ...writes]) {
+    catalog.registerExternalTool(
+      toolDef({
+        name,
+        description: name,
+        path: `/api/agent/tools/${name}`,
+        inputs: { type: 'object', properties: {} },
+        ...(writes.includes(name) ? { write: true } : {}),
+      }),
+    );
+  }
+  return catalog;
+}
+const CATALOG = catalogOf(['list_things']);
 
 let server: HttpServer | undefined;
 afterEach(async () => {
@@ -82,19 +104,19 @@ async function start(opts: { scopeOf?: (auth: ToolAuth) => ConnectionScope | und
     });
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
-  return { seen, overHttp, inProcess: createInProcessToolCaller(resolve)(read) };
+  return { seen, overHttp, inProcess: createInProcessToolCaller(resolve, CATALOG)(read) };
 }
 
 const caller = (over: Partial<ToolAuth> = {}): ToolAuth => ({ source: 'external', userId: 'ada', scope: 'write', ...over });
 
-/** What an in-process call threw, as the route would have answered it. */
+/** What an in-process call threw, as the route would have answered it: its status, and its words beside its details. */
 const refusalOf = async (call: Promise<unknown>) => {
   const err = await call.then(
     () => null,
     (e: unknown) => e,
   );
-  expect(err).toBeInstanceOf(ToolError);
-  const refusal = err as ToolError;
+  const refusal = err as { status?: unknown; details?: Record<string, unknown>; message?: unknown };
+  expect(typeof refusal?.status).toBe('number');
   return { status: refusal.status, body: { ...refusal.details, error: refusal.message } };
 };
 
@@ -178,14 +200,14 @@ describe('a hosted read called in process', () => {
       },
     };
     const resolve = (async () => ({ user: { email: 'ada@example.com' } })) as unknown as ResolveToolContext;
-    await expect(createInProcessToolCaller(resolve)(failing)(caller())).rejects.toBe(boom);
+    await expect(createInProcessToolCaller(resolve, CATALOG)(failing)(caller())).rejects.toBe(boom);
 
     const gone = new ToolError('Your account is no longer available.', 401);
     const noAccount = (async () => {
       throw gone;
     }) as unknown as ResolveToolContext;
     const never: HostedRead = { name: 'list_things', options: {}, handler: async () => ({ ran: true }) };
-    await expect(createInProcessToolCaller(noAccount)(never)(caller())).rejects.toBe(gone);
+    await expect(createInProcessToolCaller(noAccount, CATALOG)(never)(caller())).rejects.toBe(gone);
   });
 
   it('refuses a tool that streams its answer: it is for reads that answer a value', async () => {
@@ -197,6 +219,77 @@ describe('a hosted read called in process', () => {
       },
     };
     const resolve = (async () => ({ user: { email: 'ada@example.com' } })) as unknown as ResolveToolContext;
-    await expect(createInProcessToolCaller(resolve)(streaming)(caller())).rejects.toThrow('streams its answer');
+    await expect(createInProcessToolCaller(resolve, CATALOG)(streaming)(caller())).rejects.toThrow('streams its answer');
+  });
+});
+
+describe('a tool the catalog does not declare a read, called in process', () => {
+  /** A resolver that records each context it built: a refused tool builds none. */
+  const recording = () => {
+    const built: string[] = [];
+    const resolve = (async (auth: ToolAuth) => {
+      built.push(auth.userId);
+      return { user: { email: `${auth.userId}@example.com` } };
+    }) as unknown as ResolveToolContext;
+    return { built, resolve };
+  };
+  /** A hosted read named `name` that records in `ran` each time it runs. */
+  const hosted = (name: string, ran: string[] = []): HostedRead => ({
+    name,
+    options: {},
+    handler: async () => {
+      ran.push(name);
+      return { ran: name };
+    },
+  });
+
+  // The route's write gates (a read-scoped credential, a read-only
+  // deployment) do not run in process, so a write is refused outright.
+  it('refuses a tool the catalog declares a write, before its context is built or it runs', async () => {
+    const { built, resolve } = recording();
+    const ran: string[] = [];
+    const refused = await refusalOf(createInProcessToolCaller(resolve, catalogOf([], ['change_things']))(hosted('change_things', ran))(caller()));
+    expect(refused).toEqual({
+      status: 500,
+      body: { error: 'The tool change_things declares a write and cannot be called in process; call it at its route.' },
+    });
+    expect(built).toEqual([]);
+    expect(ran).toEqual([]);
+  });
+
+  it('refuses a tool whose internal def declares a write, though its external def does not', async () => {
+    const catalog = catalogOf(['change_things']);
+    catalog.registerInternalTool(
+      toolDef({ name: 'change_things', description: 'd', path: '/api/agent/tools/change_things', write: true, inputs: { type: 'object', properties: {} } }),
+    );
+    const { resolve } = recording();
+    const ran: string[] = [];
+    expect((await refusalOf(createInProcessToolCaller(resolve, catalog)(hosted('change_things', ran))(caller()))).status).toBe(500);
+    expect(ran).toEqual([]);
+  });
+
+  // A tool the catalog does not list cannot be told a read: it is refused, never assumed one.
+  it('refuses a tool the catalog does not list', async () => {
+    const { built, resolve } = recording();
+    const refused = await refusalOf(createInProcessToolCaller(resolve, catalogOf(['list_things']))(hosted('unlisted'))(caller()));
+    expect(refused).toEqual({ status: 500, body: { error: 'The tool unlisted is not in the tool catalog and cannot be called in process.' } });
+    expect(built).toEqual([]);
+  });
+
+  it('lists the catalog until it confirms a read, and then not again', async () => {
+    const catalog = catalogOf(['list_things']);
+    let listings = 0;
+    const listExternal = catalog.listExternal.bind(catalog);
+    catalog.listExternal = (ctx) => {
+      listings += 1;
+      return listExternal(ctx);
+    };
+    const { built, resolve } = recording();
+    const read = createInProcessToolCaller(resolve, catalog)(hosted('list_things'));
+    await read(caller());
+    await read(caller());
+    await read(caller({ userId: 'bob' }));
+    expect(listings).toBe(1);
+    expect(built).toEqual(['ada', 'ada', 'bob']);
   });
 });
