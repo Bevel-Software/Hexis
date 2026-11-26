@@ -79,9 +79,11 @@ at boot, so if you run more than one, restart the others after changing SSO
   **only** signup boundary. Without it, anyone with an account at the issuer
   can sign in. You can also set the list on the setup screen's Single sign-on
   card; the card's value applies only while the environment variable is
-  unset. A save there applies
-  like the provider settings: at the next sign-in on the replica that served
-  it, and on the others after they restart.
+  unset. A save there applies like the provider settings: at the next sign-in
+  on the replica that served it, and on the others after they restart. It
+  applies to existing accounts too: after you narrow the list, an account
+  outside it is refused at its next SSO sign-in. Sessions that are already
+  signed in are not ended.
 
 ## The agent guide
 

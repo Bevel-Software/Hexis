@@ -8,6 +8,7 @@ import { DEFAULT_DB_SCHEMA, assertSchemaName } from './modules/database/connecti
 import { logger } from './shared/logging.js';
 import { hasControlCharacter } from './modules/kb-fs/repo-path.js';
 import { sanitizedPath } from './shared/printable.js';
+import { parseEmailDomainList } from './shared/email-domains.js';
 
 const log = logger('config');
 
@@ -501,10 +502,7 @@ export class CoreConfig implements TenantConfig, ProcessConfig {
     this.starterPacksDir = process.env.STARTER_PACKS_DIR || defaultStarterPacksDir();
     this.updateCheckEnabled =
       (process.env.UPDATE_CHECK ?? 'true').trim().toLowerCase() !== 'false';
-    this.allowedEmailDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
-      .split(/[\s,]+/)
-      .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
-      .filter((d) => d.length > 0);
+    this.allowedEmailDomains = parseEmailDomainList(process.env.ALLOWED_EMAIL_DOMAINS || '');
     // Which variable actually supplied the key decides whose name a bad key
     // is reported under: a legacy deploy still on the fallback chain must be
     // told to fix the variable it set, not one it never heard of.

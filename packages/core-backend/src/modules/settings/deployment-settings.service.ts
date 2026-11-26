@@ -13,6 +13,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
+import { parseEmailDomainList } from '../../shared/email-domains.js';
 import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/index.js';
 import { parseRetentionWindow } from '../audit/index.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
@@ -140,14 +141,6 @@ export function parseToolReadOnlyOverrides(raw: string): Record<string, boolean>
   // Built with `fromEntries`, which defines own properties: assigning into a
   // plain object would send a valid name like `__proto__` to its prototype.
   return Object.fromEntries(entries) as Record<string, boolean>;
-}
-
-/** `a.com, @B.com` → `['a.com', 'b.com']`, tolerating a leading `@` or `.`. */
-function parseAllowedEmailDomains(raw: string): string[] {
-  return raw
-    .split(/[\s,]+/)
-    .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
-    .filter((d) => d.length > 0);
 }
 
 /** A lower-case DNS name: dot-separated labels of letters, digits and inner hyphens. */
@@ -421,7 +414,7 @@ export const CORE_SETTINGS: SettingDef[] = [
     // Judged by the parser the check reads it with, so a saved value that
     // names no domain cannot pass for a guard while the check reads none.
     validate: (v) => {
-      const domains = parseAllowedEmailDomains(v);
+      const domains = parseEmailDomainList(v);
       if (domains.length === 0) return 'Name at least one domain, or leave the field empty to allow every domain.';
       const bad = domains.find((d) => !EMAIL_DOMAIN.test(d));
       return bad ? `"${bad}" is not a domain.` : null;
@@ -1045,11 +1038,12 @@ export class DeploymentSettingsService {
 
   /**
    * The SSO domain allow-list in effect, as domains (see
-   * `parseAllowedEmailDomains`). Empty means no guard. Answers from the environment, else the stored row, at the moment
-   * it is asked, so a save is in effect for the next sign-in.
+   * `parseEmailDomainList`). Empty means no guard. Answers from the
+   * environment, else the stored row, at the moment it is asked, so a save
+   * is in effect for the next sign-in.
    */
   resolveAllowedEmailDomains(): string[] {
-    return parseAllowedEmailDomains(this.resolve('allowedEmailDomains'));
+    return parseEmailDomainList(this.resolve('allowedEmailDomains'));
   }
 
   /**

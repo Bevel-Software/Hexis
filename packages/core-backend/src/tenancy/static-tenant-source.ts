@@ -5,6 +5,7 @@ import { DEFAULT_DB_SCHEMA, assertSchemaName } from '../modules/database/connect
 import { DEFAULT_GIT_TIMEOUT_MS } from '../modules/version-control/git/node-git-runner.js';
 import { defaultKbTemplateDir, defaultStarterPacksDir } from '../assets.js';
 import { DEFAULT_GIT_USERNAME } from '../shared/git.contract.js';
+import { parseEmailDomainList } from '../shared/email-domains.js';
 import { deriveTenantSecrets } from './tenant-secrets.js';
 import { loopbackTenantBaseUrl } from './tenant-host.js';
 import { assertTenantSlug, normalizeHost, type TenantDescriptor, type TenantSource } from './tenant-source.contract.js';
@@ -124,9 +125,7 @@ export function tenantConfigFrom(record: TenantRecord, settings: TenantHostSetti
   }
   const secrets = deriveTenantSecrets(settings.masterKey, slug);
   const besideWorkspaces = (name: string) => path.resolve(settings.workspacesRoot, '..', name, slug);
-  const allowedEmailDomains = (record.allowedEmailDomains ?? [])
-    .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
-    .filter((d) => d.length > 0);
+  const allowedEmailDomains = parseEmailDomainList((record.allowedEmailDomains ?? []).join(','));
   const protectedBranches = Array.isArray(record.protectedBranches)
     ? record.protectedBranches.join(',')
     : (record.protectedBranches ?? '');
