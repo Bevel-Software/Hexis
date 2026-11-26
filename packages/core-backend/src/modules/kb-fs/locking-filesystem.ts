@@ -719,8 +719,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * Every lock the batch holds is renewed (`heartbeatLock`) every third of the
    * lease it was granted until the batch gives it back, so a batch that runs
    * past one lease — thousands of acquires, a large write, the commit and its
-   * push — still holds its paths when it commits and releases. A renewal that
-   * fails is logged, and the next one is tried a third of a lease later.
+   * push — keeps renewing its paths' leases while it holds them. A renewal
+   * that fails is only logged, and the next one is tried a third of a lease
+   * later: a lease that lapses meanwhile is not detected, and the batch
+   * commits and releases as it would have.
    *
    * `writes[].path` is workspace-relative (like `writeFile`). We do the disk
    * write here; `commitChanges` only stages + commits what's on disk (the git

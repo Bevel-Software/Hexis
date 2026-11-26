@@ -692,7 +692,7 @@ async function planUpload(
 /**
  * Record on `entry` that this path was refused, saying what the gate that
  * refused it said. Four kinds of refusal count as one path's outcome: a
- * typed tool refusal (`exists`, `platform_file`, the mode gate), a permission
+ * typed tool refusal (`exists`, the mode gate), a permission
  * refusal (the caller may not write this path, where the DESTINATION was
  * writable), the git folder in any spelling, and a path-shape refusal from the
  * repository rules. Anything else
@@ -3226,8 +3226,8 @@ export function registerWorkspaceTools(
       // before any lock so an ordinary refusal never contends for one — but it
       // is a verdict about a path anyone may still change. The one the answer
       // carries is taken again inside `writeFile`, with the path's lock HELD
-      // (`write: true` guarantees the locking filesystem, as the batch cast
-      // below does): only there can `create` be sure it is not about to
+      // (`write: true` guarantees the locking filesystem; see
+      // `batchLandingOf`): only there can `create` be sure it is not about to
       // replace a file a human editor saved a moment ago, and `update` sure it
       // is not recreating one somebody just deleted. A filesystem without the
       // hook runs no second verdict, so the preflight one stands.
@@ -3663,23 +3663,16 @@ export function registerWorkspaceTools(
             message: `Nothing was deleted: "${path}" holds ${content.length} ${content.length === 1 ? 'file' : 'files'}, so deleting it requires confirm: true.`,
           };
         }
-        // ONE commit for the whole folder. `write: true` guarantees a
-        // LockingFilesystem here, and its `writeFiles` takes every path's lock
-        // BEFORE touching disk, deletes inside those locks and commits the set
-        // as a single change (fail-closed: a refusal commits nothing). A folder
+        // ONE commit for the whole folder, through the branch's batch
+        // (`batchLandingOf`): `writeFiles` takes every path's lock BEFORE
+        // touching disk, deletes inside those locks and commits the set as a
+        // single change (fail-closed: a refusal commits nothing). A folder
         // therefore never half-disappears, and its own `access.md` needs no
         // ordering trick to keep the rest governed on the way — nothing lands
         // until all of it does. The placeholders go too: this is the one
-        // operation that removes a folder. Structural cast, as `write_files`
-        // does, to avoid importing the version-control-internal class here.
+        // operation that removes a folder.
         if (files.length > 0) {
-          const batch = fs as unknown as {
-            writeFiles(
-              writes: { path: string; content: string }[],
-              summary: string,
-              deletes: string[],
-            ): Promise<unknown>;
-          };
+          const batch = await batchLandingOf(ctx, branch);
           await batch.writeFiles([], `Delete ${path} and its ${content.length} file(s)`, files);
         }
         // Git tracks no folders: once the files are gone, the shells left on
@@ -4483,8 +4476,8 @@ export function registerWorkspaceTools(
         'Returns `{ destination, count, total, files }`: one entry per path, each `{ path, outcome }` — `created` / ' +
         '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
         '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
-        'Every path is judged one by one as `write_file` judges it (binary is fine); a refused path does not stop the others, ' +
-        'except an `access.md` or `.bevelignore` the upload holds: then nothing lands, as when it holds `roles.yaml` or a groups file at the root. ' +
+        'Every path is judged one by one as `write_file` judges it (binary is fine); a refused path does not stop the others. ' +
+        'An `access.md` or `.bevelignore` lands with its files or nothing lands; `roles.yaml` or a groups file at the root refuses the whole upload. ' +
         'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
         'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
       inputs: {
