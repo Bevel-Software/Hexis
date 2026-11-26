@@ -4,7 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('mcp-auth');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthService } from '../auth/index.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE, AccountDeactivatedError, AuthBackendError } from '../auth/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError, sessionRefusalMessage } from '../auth/index.js';
 import type { IExternalApiKeyService, InternalTokenService } from '../tool-auth/index.js';
 import { rejectConnectionKey } from '../tool-auth/index.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
@@ -267,7 +267,7 @@ export function createMcpAuthMiddleware(
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }
-      unauthorized(res, err instanceof AccountDeactivatedError ? err.message : 'Invalid or expired token');
+      unauthorized(res, sessionRefusalMessage(err));
       return;
     }
     req.userId = session.userId;

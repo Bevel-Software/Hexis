@@ -4,7 +4,7 @@ import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createKbSyncRoutes, isSyncRawBodyPath } from '../kb-sync.routes.js';
 import type { IKbSyncService, SyncResult } from '../kb-sync.interface.js';
-import { AuthBackendError } from '../../auth/account-admission.js';
+import { AuthBackendError, SESSION_ENDED_MESSAGE, SessionEndedError } from '../../auth/account-admission.js';
 
 const SECRET = 'a-very-long-and-random-sync-secret';
 
@@ -49,6 +49,7 @@ async function mount(opts: {
       authService: {
         resolveSession: async (token: string) => {
           if (opts.outage) throw new AuthBackendError(new Error('the database is down'));
+          if (token === 'jwt-ended') throw new SessionEndedError();
           if (token !== 'jwt-ok') throw new Error('bad token');
           return { userId: 'u1', email: 'person@example.com' };
         },
@@ -96,6 +97,20 @@ describe('POST /api/sync — credentials', () => {
     expect((await post(admin.base, { headers: { authorization: 'Bearer jwt-ok' } })).status).toBe(200);
     const person = await mount({ admin: false });
     expect((await post(person.base, { headers: { authorization: 'Bearer jwt-ok' } })).status).toBe(401);
+  });
+
+  it('401, in words, for an admin session a password change ended — configured secret or not', async () => {
+    for (const secret of [SECRET, '']) {
+      const { base, sync } = await mount({ admin: true, secret });
+      const res = await post(base, { headers: { authorization: 'Bearer jwt-ended' } });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: SESSION_ENDED_MESSAGE });
+      expect(sync).not.toHaveBeenCalled();
+    }
+    // A bearer that is no session at all still reads as a wrong credential.
+    const { base } = await mount({});
+    const wrong = await post(base, { headers: { authorization: 'Bearer wrong' } });
+    expect(((await wrong.json()) as { error: string }).error).not.toBe(SESSION_ENDED_MESSAGE);
   });
 
   it('500, not 401, when the session’s account cannot be looked up', async () => {

@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { AuthService } from './auth.service.js';
-import { AccountDeactivatedError, AuthBackendError, SessionEndedError } from './account-admission.js';
+import { AuthBackendError, sessionRefusalMessage } from './account-admission.js';
 
 // Augment Express Request so userId/userEmail are available after auth middleware
 declare global {
@@ -119,8 +119,7 @@ export function createAuthMiddleware(authService: Pick<AuthService, 'resolveSess
       // A 401 otherwise, so the app drops the session and shows the login
       // page; a switched-off account, and a session a password change
       // ended, are told why there.
-      const worded = err instanceof AccountDeactivatedError || err instanceof SessionEndedError;
-      res.status(401).json({ error: worded ? err.message : 'Invalid or expired token' });
+      res.status(401).json({ error: sessionRefusalMessage(err) });
       return;
     }
     req.userId = session.userId;

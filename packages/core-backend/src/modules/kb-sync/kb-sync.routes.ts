@@ -7,7 +7,7 @@ import { assertValidBranchName } from '../kb-fs/index.js';
 import type { IKbSyncService, SyncResult } from './kb-sync.interface.js';
 import { parseSyncPayload, type SyncPayloadSource } from './sync-payload.js';
 import { verifySyncCredential } from './sync-auth.js';
-import { AuthBackendError } from '../auth/index.js';
+import { AuthBackendError, INVALID_SESSION_MESSAGE, sessionRefusalMessage } from '../auth/index.js';
 
 /**
  * Remote sync — a git host or a pipeline tells Hexis the repository changed.
@@ -109,6 +109,9 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
     res.setHeader(SYNC_RESPONSE_HEADER, SYNC_RESPONSE_MARKER);
     const raw: Buffer | undefined = Buffer.isBuffer(req.body) ? req.body : undefined;
     let lookupFailed: AuthBackendError | null = null as AuthBackendError | null;
+    // Why a session bearer was refused, when that has words for the person
+    // (their password changed, their account was switched off).
+    let sessionRefusal: string | null = null as string | null;
 
     const auth = await verifySyncCredential(
       {
@@ -124,6 +127,9 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
             return { email: (await deps.authService.resolveSession(token)).email };
           } catch (err) {
             if (err instanceof AuthBackendError) lookupFailed = err;
+            else if (sessionRefusalMessage(err) !== INVALID_SESSION_MESSAGE) {
+              sessionRefusal = sessionRefusalMessage(err);
+            }
             return null;
           }
         },
@@ -136,6 +142,13 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
       if (lookupFailed) {
         log.error('session account lookup failed:', { err: lookupFailed.cause });
         res.status(500).json({ error: 'Authentication backend unavailable' });
+        return;
+      }
+      // A session that verifies but was ended: told why, as every other route
+      // that checks a session tells it, whatever else the bearer failed as.
+      if (sessionRefusal) {
+        res.setHeader('WWW-Authenticate', 'Bearer realm="hexis-sync"');
+        res.status(401).json({ error: sessionRefusal });
         return;
       }
       if (auth.status === 401) res.setHeader('WWW-Authenticate', 'Bearer realm="hexis-sync"');

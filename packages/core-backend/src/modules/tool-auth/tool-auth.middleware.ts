@@ -4,7 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('tools');
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import type { AuthService } from '../auth/index.js';
-import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError } from '../auth/index.js';
+import { ACCOUNT_DEACTIVATED_MESSAGE, AuthBackendError, sessionRefusalMessage } from '../auth/index.js';
 import type { InternalTokenService } from './internal-token.service.js';
 import {
   INVALID_CONNECTION_KEY_CHALLENGE,
@@ -350,7 +350,7 @@ export function createManualAuthMiddleware(
         return;
       }
       res.setHeader('WWW-Authenticate', WWW_AUTH);
-      res.status(401).json({ error: 'Invalid or expired token' });
+      res.status(401).json({ error: sessionRefusalMessage(err) });
       return;
     }
     req.toolAuth = { source: 'session', userId, scope: 'write' };
