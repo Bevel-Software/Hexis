@@ -76,16 +76,29 @@ async function makeHarness(): Promise<Harness> {
   } as unknown as IAccessControl;
 
   const locked: string[] = [];
+  // A lock is held from its acquire to its release, and a heartbeat answers
+  // that same acquisition.
+  const held = new Map<string, { acquiredAt: string; holderName: string }>();
+  const release = vi.fn(async (_w: string, _b: string, p: string) => {
+    held.delete(p);
+  });
   const versionControlService = {
     getLock: vi.fn(async () => null),
     holdsEditLock: vi.fn(async () => false),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       locked.push(p);
-      return { acquired: true, lock: {} as never };
+      const lock = { acquiredAt: `acquisition-${locked.length}`, holderName: 'Business User' };
+      held.set(p, lock);
+      return { acquired: true, lock };
     }),
-    releaseLock: vi.fn(async () => undefined as never),
-    releaseLockNoCommit: vi.fn(async () => undefined as never),
-    releaseLockUntouched: vi.fn(async () => undefined as never),
+    heartbeatLock: vi.fn(async (_w: string, _b: string, p: string) => {
+      const lock = held.get(p);
+      if (!lock) throw new Error(`Cannot heartbeat lock on "${p}": not held by you (or no longer exists).`);
+      return lock;
+    }),
+    releaseLock: release,
+    releaseLockNoCommit: release,
+    releaseLockUntouched: release,
   } as unknown as IVersionControlService;
 
   const stubCreatorAccess: ICreatorAccess = {

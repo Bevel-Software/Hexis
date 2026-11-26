@@ -43,12 +43,15 @@ let baseUrl: string;
 let writable: boolean;
 let svc: VersionControlService;
 let enqueue: ReturnType<typeof vi.fn>;
+/** Runs inside the extraction, after the archive's bytes have landed. */
+let afterWrite: (() => Promise<void>) | undefined;
 
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-held-lock-revoked-'));
   await fs.mkdir(path.join(root, KB, 'QA-Edit'), { recursive: true });
   await fs.writeFile(path.join(root, FILE), ORIGINAL);
   writable = true;
+  afterWrite = undefined;
   const { locks } = realFileLocks();
   enqueue = vi.fn(async () => undefined);
   const gate: IChangeReadGate = { judge: vi.fn(), assertMayChange: vi.fn(async () => undefined) };
@@ -73,14 +76,23 @@ beforeEach(async () => {
     },
     // The extraction's contract (`WorkspaceService.unzipFile`): each entry
     // meets the guard before its bytes land, and a refused entry is skipped
-    // and reported, never written. The archive here carries the edited file.
-    unzipFile: async (_id: string, _zip: string, _dest: string | undefined, guard: (p: string) => Promise<void>) => {
+    // and reported, never written; a written file is reported once its
+    // bytes are on disk. The archive here carries the edited file.
+    unzipFile: async (
+      _id: string,
+      _zip: string,
+      _dest: string | undefined,
+      guard: (p: string) => Promise<void>,
+      onWritten?: (p: string) => void,
+    ) => {
       try {
         await guard(FILE);
       } catch (err) {
         return { extracted: [], skipped: [{ path: FILE, reason: (err as Error).message }] };
       }
       await fs.writeFile(path.join(root, FILE), FROM_ARCHIVE);
+      onWritten?.(FILE);
+      await afterWrite?.();
       return { extracted: [FILE], skipped: [] };
     },
   } as unknown as WorkspaceService;
@@ -236,6 +248,38 @@ describe('an archive extracted over a file the caller holds the editor lock on',
     expect(await onDisk()).toBe(FROM_ARCHIVE);
     expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ path: FILE, authorEmail: USER.email }));
     expect(await svc.getLock(WS, WS, FILE)).toBeNull();
+  });
+
+  // A file written before the extraction fails part-way is still committed,
+  // not handed back untouched and left outside every commit.
+  it('commits the file written before the extraction failed part-way', async () => {
+    afterWrite = async () => {
+      throw new Error('the archive is truncated');
+    };
+
+    const res = await unzip();
+
+    expect(res.status).toBe(500);
+    expect(await onDisk()).toBe(FROM_ARCHIVE);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ path: FILE, authorEmail: USER.email }));
+    expect(await svc.getLock(WS, WS, FILE)).toBeNull();
+  });
+
+  // A long archive can outlast the lease of a lock it took. A lock on the
+  // entry taken anew by then, here by the same person's editor, is not this
+  // call's: it is neither released nor committed under it.
+  it('leaves a lock taken anew during the extraction alone, even by the same user', async () => {
+    afterWrite = async () => {
+      await svc.releaseLockUntouched(WS, WS, FILE, USER);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect((await svc.acquireLock(WS, WS, FILE, USER)).acquired).toBe(true);
+    };
+
+    const res = await unzip();
+
+    expect(res.status).toBe(409);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect((await svc.getLock(WS, WS, FILE))?.holderUserId).toBe(USER.id);
   });
 
   it('skips that file under somebody else lock: its bytes never land and their lock stays', async () => {
