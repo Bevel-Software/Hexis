@@ -20,6 +20,19 @@ describe('mapPooled', () => {
     expect(most).toBe(3);
   });
 
+  it('rejects with the first failure and starts no call after it', async () => {
+    const started: number[] = [];
+    const run = mapPooled([0, 1, 2, 3, 4, 5], 2, async (i) => {
+      started.push(i);
+      await new Promise((resolve) => setTimeout(resolve, i === 0 ? 1 : 20));
+      if (i === 0) throw new Error('read failed');
+      return i;
+    });
+    await expect(run).rejects.toThrow('read failed');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(started).toEqual([0, 1]);
+  });
+
   it('answers every item even at a limit below one', async () => {
     expect(await mapPooled([1, 2, 3], 0, async (n) => n * 2)).toEqual([2, 4, 6]);
   });
