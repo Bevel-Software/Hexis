@@ -5,6 +5,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { createOnboardingRoutes } from '../onboarding.routes.js';
 import type { IStarterPackService } from '../onboarding.contract.js';
 import { StarterPackError } from '../starter-pack.service.js';
+import { PathHeldError } from '../../kb-fs/index.js';
 
 /**
  * The two starter-pack routes: the caller is the session's, the GET is never
@@ -152,12 +153,25 @@ describe('POST /onboarding/starter-pack', () => {
     const svc = {
       status: vi.fn(),
       choose: vi.fn(async () => {
-        throw new Error('Skipped editing "kb/KnowledgeBase/About us.md" — locked by Bo. Continuing with other edits; try this one again later.');
+        throw new PathHeldError('kb/KnowledgeBase/About us.md', 'Bo');
       }),
     };
     const base = await listen(svc);
     const res = await post(`${base}/api/onboarding/starter-pack`, { id: 'sales' });
     expect(res.status).toBe(409);
     expect((await res.json()).error).toMatch(/try again/i);
+  });
+
+  it('answers a failure that only reads like a held lock as the failure it is', async () => {
+    const svc = {
+      status: vi.fn(),
+      choose: vi.fn(async () => {
+        throw new Error('Skipped editing "kb/KnowledgeBase/About us.md" — locked by Bo. Continuing with other edits; try this one again later.');
+      }),
+    };
+    const base = await listen(svc);
+    const res = await post(`${base}/api/onboarding/starter-pack`, { id: 'sales' });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Could not add the starter pages. Nothing was changed.' });
   });
 });

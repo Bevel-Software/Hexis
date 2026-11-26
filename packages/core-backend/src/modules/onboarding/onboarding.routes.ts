@@ -2,6 +2,7 @@ import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { PathHeldError } from '../kb-fs/index.js';
 import type { IStarterPackService } from './onboarding.contract.js';
 import '../auth/index.js'; // Express Request augmentation (req.userId)
 
@@ -70,9 +71,9 @@ export function createOnboardingRoutes(
         res.status(err.status).json({ error: err.message });
         return;
       }
-      // The batch write's status-less refusal: one of the pack's paths is
+      // The batch write's held-lock refusal: one of the pack's paths is
       // being written by someone else right now. Nothing was committed.
-      if (err instanceof Error && /locked by /.test(err.message)) {
+      if (err instanceof PathHeldError) {
         res.status(409).json({ error: 'Someone is editing the knowledge base right now. Try again in a moment.' });
         return;
       }

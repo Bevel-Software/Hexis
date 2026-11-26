@@ -4250,6 +4250,14 @@ export function registerWorkspaceTools(
 
       const planned = await planUpload(upload, destination, kbDirName);
       const judge = agentArchiveJudge(ctx, branch);
+      // One batched access read for every path, before any is judged further:
+      // on a protected branch a path the caller may not write is refused as
+      // `write-denied` before its mode is, so an `exists` never tells them of a
+      // file there. Empty on a draft. The lock's own gates still decide each
+      // path that gets this far (`refusedAtLock`).
+      const blocked = new Set(
+        await writeBlocked(branch, ctx, planned.filter((p) => p.content !== undefined).map((p) => p.path)),
+      );
 
       const writes: { path: string; content: Buffer }[] = [];
       const outcomes: Record<string, unknown>[] = [];
@@ -4278,6 +4286,7 @@ export function registerWorkspaceTools(
         }
         const wsPathOf = item.path;
         try {
+          if (blocked.has(wsPathOf)) throw await writeRefusal(branch, wsPathOf);
           // The path rules (the git folder in any spelling, which a SINGLE
           // uploaded file's name has not met yet — `.git` is a name the upload
           // route's `validateFilename` accepts), the platform's rule files,

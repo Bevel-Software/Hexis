@@ -984,6 +984,19 @@ describe('apply_file_upload', () => {
     expect(answer.count).toBe(1);
   });
 
+  // Scenario: the denied path already holds a file, and `mode` is left out.
+  it('refuses a path the caller may not write as `write-denied`, not `exists`, so the answer says nothing of a file there', async () => {
+    const base = await start({ access: denyWritesAtHead((rel) => rel.startsWith('Locked/')) });
+    await mkdir(join(tempDir, KB_DIR, 'Locked'), { recursive: true });
+    await writeFile(join(tempDir, KB_DIR, 'Locked/secret.md'), 'theirs\n');
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'open.md': 'open', 'Locked/secret.md': 'mine' }));
+    const answer = await apply(base, { branch: PROTECTED, token, destination: KB_DIR });
+    expect(outcomeAt(answer, `${KB_DIR}/Locked/secret.md`)).toMatchObject({ outcome: 'refused', error: 'write-denied' });
+    expect(outcomeAt(answer, `${KB_DIR}/open.md`)).toMatchObject({ outcome: 'created' });
+    expect(await readFile(join(tempDir, KB_DIR, 'Locked/secret.md'), 'utf8')).toBe('theirs\n');
+  });
+
   // Scenario: a zip that carries a folder's access rules beside its files.
   it('lands an access.md and a .bevelignore in the same batch as the files beside them', async () => {
     const base = await start();
