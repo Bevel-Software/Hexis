@@ -30,6 +30,10 @@ async function runGit(cwd: string, args: string[]): Promise<void> {
   });
 }
 
+async function gitOut(cwd: string, args: string[]): Promise<string> {
+  return (await execFileAsync('git', args, { cwd })).stdout.trim();
+}
+
 const PAGE = '---\nread: [Sales]\n---\n\n# Name\nA page\n';
 
 describe('GitService.commitFile — what kind of change it was', () => {
@@ -155,6 +159,16 @@ describe('GitService.commitFile — what kind of change it was', () => {
     await fs.mkdir(path.join(repo, 'Folder'));
     await fs.writeFile(path.join(repo, 'Folder', 'new.md'), '# Name\nNew\n');
     expect((await commit('Folder/new.md'))?.contentEdit).toBeUndefined();
+  });
+
+  // The workspace is shared: an entry something else left staged is not this save's.
+  it('commits only its own path, leaving an entry staged by something else staged and out of the commit', async () => {
+    await fs.writeFile(path.join(repo, 'data.csv'), 'a,b\n1,2\n5,6\n');
+    await runGit(repo, ['add', '--', 'data.csv']);
+    await fs.writeFile(path.join(repo, 'page.md'), `${PAGE}\n# Log\n- a line\n`);
+    expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: false });
+    expect(await gitOut(repo, ['show', '--name-only', '--pretty=format:', 'HEAD'])).toBe('page.md');
+    expect(await gitOut(repo, ['diff', '--cached', '--name-only'])).toBe('data.csv');
   });
 
   it('a deleted file is not a content edit', async () => {

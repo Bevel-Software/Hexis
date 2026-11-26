@@ -1346,10 +1346,15 @@ export class GitService implements IGitService {
         throw new VersionControlValidationError('commit summary must be a single line');
       }
 
+      // Committed WITH the pathspec, as a scoped `commitChanges` is: it records
+      // this one path, so an entry something else left staged neither rides
+      // along under this user's name nor makes `contentEdit` (told from this
+      // path's status alone) describe a commit that holds more.
       await this.git(cwd, [
         'commit',
         `--author=${user.name} <${user.email}>`,
         '-m', subject,
+        '--', repoRelativePath,
       ]);
       // The commit exists from here on: reported now, before the attribution
       // read, which can fail without unmaking it — with the files the commit

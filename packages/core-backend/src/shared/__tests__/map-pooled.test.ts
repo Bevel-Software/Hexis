@@ -20,6 +20,10 @@ describe('mapPooled', () => {
     expect(most).toBe(3);
   });
 
+  it('answers every item even at a limit below one', async () => {
+    expect(await mapPooled([1, 2, 3], 0, async (n) => n * 2)).toEqual([2, 4, 6]);
+  });
+
   it('answers nothing for nothing', async () => {
     expect(await mapPooled([], 4, async () => 1)).toEqual([]);
   });

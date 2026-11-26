@@ -7,7 +7,7 @@ import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import path from 'node:path';
 import { frontmatterHead, frontmatterHeadOfBytes } from './frontmatter-head.js';
 import { detachEntries } from './own-entries-memo.js';
-import { mapPooled } from './map-pooled.js';
+import { mapPooled } from '../../shared/map-pooled.js';
 import type { CommitPaths, ITreeIndexer } from './tree-index.js';
 
 const log = logger('access');
