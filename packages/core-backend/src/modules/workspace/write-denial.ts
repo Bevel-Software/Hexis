@@ -95,8 +95,9 @@ export function proposalTitleFor(path: string): string {
  * read-before-write gate's question (`IChangeReadGate`): they can READ the
  * path, or it starts a new folder directly under one of the three roots.
  * Nothing is created here — the agent decides whether to follow the steps.
- * When the caller cannot read the path, that is the reason given, whatever
- * the branch.
+ * When the gate refuses — the caller cannot read the path, and it starts no
+ * new folder directly under a root — that is the reason given, whatever the
+ * branch.
  *
  * Without a gate the read verdict alone decides, which is the same answer
  * everywhere but at a root.

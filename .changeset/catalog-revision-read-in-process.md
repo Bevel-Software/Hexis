@@ -10,6 +10,4 @@ A surface built while the manual list could not be read is no longer kept. Befor
 
 `createCatalogRevisionRoutes` takes either a reader (`read`) or the sources to make one from, not both.
 
-The manual list, the skills and tool discovery are still read over loopback; those are the next steps of hx-tool-surface-is-built-without-a-loopback-call.
-
 A minor release, not a patch: the exported `CoreServices` gains a required member, `readCatalogRevision`. Code that builds or mocks a `CoreServices` by hand must add it.

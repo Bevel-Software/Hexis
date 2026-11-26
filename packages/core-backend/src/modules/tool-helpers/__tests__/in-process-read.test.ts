@@ -10,9 +10,10 @@ import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../../agent-scope/
 import { ToolRegistry } from '../../tool-registry/index.js';
 
 /**
- * A hosted discovery read called as a function runs what its route runs once
- * the route's auth has passed: the caller's context, the connection's scope,
- * then the handler. Each test puts the route and the in-process call side by
+ * A hosted discovery read called as a function runs, of what its route runs
+ * once the route's auth has passed, the caller's context, the connection's
+ * scope, then the handler; the route's argument check and branch resolution
+ * stay at the route. Each test puts the route and the in-process call side by
  * side, on one handler and one context resolver. The tool catalog holds the
  * read's def, as the composition registers it, since the caller refuses a tool
  * the catalog declares a write.

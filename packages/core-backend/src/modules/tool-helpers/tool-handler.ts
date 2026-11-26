@@ -174,8 +174,8 @@ async function admitToolCall(
  * A hosted discovery read, as the pieces its route is mounted from: the name
  * the connection's scope judges it by, the handler, and the options the route
  * passes `toolHandler`. A module that returns one lets this process call the
- * read as a function (see {@link createInProcessToolCaller}) with exactly what
- * its route runs.
+ * read as a function (see {@link createInProcessToolCaller}) through the
+ * route's own context, scope check and handler.
  */
 export interface HostedRead {
   name: string;
@@ -193,8 +193,9 @@ export type InProcessRead = (auth: ToolAuth, args?: Record<string, unknown>) => 
  * the server sent itself, which waited on the event loop it was already
  * running on, behind a limit of its own.
  *
- * It runs what the route runs once its auth has passed: the caller's context,
- * the connection's scope, then the handler. A connection refused the tool gets
+ * Of what the route runs once its auth has passed, it runs the caller's
+ * context, the connection's scope, then the handler (not the argument check or
+ * the branch resolution: see below). A connection refused the tool gets
  * the `ToolError` the route answers as a 403, and whatever the handler throws
  * is thrown on.
  *

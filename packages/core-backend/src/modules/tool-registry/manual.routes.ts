@@ -110,14 +110,16 @@ export function createManualRoutes(
    * The read-only hints (`read-only-hints.ts`), put on the AGENT manual's tools
    * as the `read-only` tag the hosted MCP endpoint turns into
    * `annotations.readOnlyHint` — the built-in value; the endpoint joins an
-   * admin's override on at listing time.
-   * Absent, the manual carries the tools' own tags only.
+   * admin's override on at listing time. Read only by the reader the route
+   * makes when it is handed none (`readExternalManual`): absent then, the
+   * manual carries the tools' own tags only. A reader handed in applies its own.
    */
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
   /**
-   * Resolves the scope of a connection made as an agent configuration: the external
-   * manual then lists only the platform tools it loads, and the providers word
-   * their descriptions for it (`modules/agent-scope`).
+   * Resolves the scope of a connection made as an agent configuration: the
+   * providers word their descriptions for it, and the reader the route makes
+   * when it is handed none lists only the platform tools it loads
+   * (`modules/agent-scope`). A reader handed in narrows by its own.
    */
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
   /**
