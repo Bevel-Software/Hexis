@@ -767,39 +767,47 @@ export function registerVersionControlTools(
         if (!detail) throw new ToolError(`Change request #${number} not found.`, 404);
         return detail;
       };
-      let detail = await load();
       // The gate judges every file of the request; the ANSWER names only what
       // the caller may read at the request's base, by the rule
       // `get_change_request` lists files with. A refusal quotes the paths it
       // waits on, so its words go only to a caller who may read every file:
       // the rule the app applies to the same reason (`scopeApplyFailures`).
-      const readable = await readablePathsAt(
-        accessControl,
-        workspaceId,
-        ctx.user.email,
-        detail.base,
-        detail.files.flatMap(pathsOf),
-      );
-      const mayRead = (path: string) => readable.has(path);
-      const readsEveryFile = detail.files.length > 0 && detail.files.every((f) => fileIsReadable(f, mayRead));
+      // Judged with each reading of the request, so the answer is scoped to
+      // the reading the merge is asked with, files added since the first
+      // reading included.
+      const read = async () => {
+        const detail = await load();
+        const readable = await readablePathsAt(
+          accessControl,
+          workspaceId,
+          ctx.user.email,
+          detail.base,
+          detail.files.flatMap(pathsOf),
+        );
+        const mayRead = (path: string) => readable.has(path);
+        const readsEveryFile = detail.files.length > 0 && detail.files.every((f) => fileIsReadable(f, mayRead));
+        return { detail, mayRead, readsEveryFile };
+      };
+      let request = await read();
       const approved: string[] = [];
       let outcome: Awaited<ReturnType<ToolContext['versionControlService']['mergeChangeRequest']>>;
       try {
         // The app's Apply, step for step: approve what the caller may, then
         // let the gate say whether that is enough. A refused approval is "not
         // your file" and is the gate's to report.
-        if (detail.state === 'open') {
-          for (const a of detail.approvals) {
+        const first = request.detail;
+        if (first.state === 'open') {
+          for (const a of first.approvals) {
             if (a.isApproved || !a.inMergeGate || !a.viewerCanApprove) continue;
             try {
               await ctx.versionControlService.approveFile(
                 number,
                 a.path,
                 ctx.user,
-                detail.files,
-                detail.headSha,
-                detail.base,
-                detail.authorId ?? null,
+                first.files,
+                first.headSha,
+                first.base,
+                first.authorId ?? null,
                 workspaceId,
               );
               approved.push(a.path);
@@ -807,8 +815,9 @@ export function registerVersionControlTools(
               if (!(hasHttpStatus(err) && err.status === 403)) throw err;
             }
           }
-          if (approved.length > 0) detail = await load();
+          if (approved.length > 0) request = await read();
         }
+        const { detail } = request;
         outcome = await ctx.versionControlService.mergeChangeRequest(
           number,
           ctx.user,
@@ -825,12 +834,14 @@ export function registerVersionControlTools(
         // its words when the caller may read them, and the approvals this
         // call recorded, which a refused merge leaves in place.
         if (!hasHttpStatus(err)) throw err;
+        const { readsEveryFile, mayRead } = request;
         const payload = readsEveryFile && err instanceof VersionControlDomainError ? err.payload : undefined;
         throw new ToolError(readsEveryFile ? err.message : APPLY_FAILURE_REASON_WITHHELD, err.status, {
           ...payload,
           approved: approved.filter(mayRead),
         });
       }
+      const { detail, mayRead } = request;
       return {
         ...linkOf(detail),
         outcome:

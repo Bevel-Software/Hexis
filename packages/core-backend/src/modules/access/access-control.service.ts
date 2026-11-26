@@ -1761,6 +1761,26 @@ export class AccessControlService implements IAccessControl {
     return { model, owns };
   }
 
+  /**
+   * The model and `relativePath`'s own entries for a single-file gate, read
+   * as a batch reads them (`batchRules`): the head commit's where its map
+   * answers (a path the commit does not hold has its entries read from the
+   * checkout, as nothing in the commit says them), the checkout's for both
+   * where no map answers. A gate that took the model from the commit and a
+   * committed file's entries from the checkout could pair a restriction's old
+   * place with its new one, and keep it nowhere. `needsOwn` false (a folder
+   * target, whose own rules are in the model) reads no entries, and `own` is
+   * null.
+   */
+  private async rulesOf(
+    workspaceId: string,
+    relativePath: string,
+    needsOwn = true,
+  ): Promise<{ model: AccessModel; own: OwnEntries | null }> {
+    const { model, owns } = await this.batchRules(workspaceId, [relativePath], () => needsOwn);
+    return { model, own: owns[0] ?? null };
+  }
+
   private async cachedOwnEntries(
     memo: WorkspaceOwnEntries,
     repoDir: string,
@@ -1799,8 +1819,7 @@ export class AccessControlService implements IAccessControl {
   ): Promise<boolean> {
     const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
     if (machineOwned !== null) return machineOwned;
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return hasPermissionResolved(model, 'write', userEmail, relativePath, own);
   }
 
@@ -1809,8 +1828,7 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return canReadResolved(model, userEmail, relativePath, own);
   }
 
@@ -1904,8 +1922,7 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return hasPermissionResolved(model, 'download', userEmail, relativePath, own);
   }
 
@@ -1942,8 +1959,7 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return hasPermissionResolved(model, 'owner', userEmail, relativePath, own);
   }
 
@@ -1955,8 +1971,7 @@ export class AccessControlService implements IAccessControl {
     roles: string[];
     users: { name: string; email: string }[];
   }> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return eligibleHoldersResolved(model, 'owner', relativePath, own);
   }
 
@@ -1968,8 +1983,7 @@ export class AccessControlService implements IAccessControl {
     roles: string[];
     users: { name: string; email: string }[];
   }> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return eligibleHoldersResolved(model, 'write', relativePath, own);
   }
 
@@ -1983,8 +1997,7 @@ export class AccessControlService implements IAccessControl {
     users: { name: string; email: string }[];
     publicVia: string[];
   }> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     // `restricted` is the verdict — whether `read: everyone` applies cleanly —
     // and the lists are the GRANTS that exist regardless: on a public node
     // they name what makes it public (`everyone`, and a public plugin
@@ -2015,8 +2028,7 @@ export class AccessControlService implements IAccessControl {
     roles: string[];
     users: { name: string; email: string }[];
   }> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return eligibleHoldersResolved(model, 'download', relativePath, own);
   }
 
@@ -2046,8 +2058,11 @@ export class AccessControlService implements IAccessControl {
     fromPath: string,
     toPath: string,
   ): Promise<ProspectiveHolders> {
-    const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
+    // The thing moved is read from the checkout (`relocationSubject`), parsed
+    // under the name it lands under, which no head map holds: the model is
+    // read from the checkout too, so both come from one reading.
+    const model = await this.loadCheckoutModel(workspaceId, repoDir);
     const { isFolder, ownHere, ownThere, landing } =
       await this.relocationSubject(repoDir, fromPath, toPath);
     const after = withRelocatedAccessFiles(model, fromPath, toPath, {
@@ -2071,8 +2086,9 @@ export class AccessControlService implements IAccessControl {
     fromPath: string,
     toPath: string,
   ): Promise<HolderChanges> {
-    const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
+    // One reading, the checkout's, for the model and the thing moved (see `prospectiveHolders`).
+    const model = await this.loadCheckoutModel(workspaceId, repoDir);
     const { isFolder, ownHere, ownThere, landing } =
       await this.relocationSubject(repoDir, fromPath, toPath);
     const here: MoveSide = { model, path: fromPath, own: ownHere };
@@ -2119,8 +2135,10 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     const { isFolder, ownThere: own, landing } =
       await this.relocationSubject(repoDir, fromPath, toPath, opts?.sourceContent);
+    // The model from the same reading as the source's entries: the checkout
+    // (see `prospectiveHolders`).
     const model = withRelocatedAccessFiles(
-      await this.loadModel(workspaceId),
+      await this.loadCheckoutModel(workspaceId, repoDir),
       fromPath,
       toPath,
       { sourceRemains: opts?.sourceRemains === true, sourceIsFolder: isFolder, landing },
@@ -2138,8 +2156,7 @@ export class AccessControlService implements IAccessControl {
     workspaceId: string,
     relativePath: string,
   ): Promise<Map<string, { name: string; email: string }>> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return eligibleHolderEmailsResolved(model, 'write', relativePath, own);
   }
 
@@ -2147,8 +2164,7 @@ export class AccessControlService implements IAccessControl {
     workspaceId: string,
     relativePath: string,
   ): Promise<Map<string, { name: string; email: string }>> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     return eligibleHolderEmailsResolved(model, 'owner', relativePath, own);
   }
 
@@ -2159,14 +2175,10 @@ export class AccessControlService implements IAccessControl {
     principal: GrantPrincipal,
     opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<GrantSources> {
-    const model = await this.loadModel(workspaceId);
     // A file target consults its own frontmatter as the most-specific scope; a
     // folder target's most-specific scope is its own access.md (in the dir
     // chain), so it passes no fileOwn.
-    const own =
-      kind === 'file'
-        ? await this.readOwnEntries(await this.repoDir(workspaceId), relativePath)
-        : null;
+    const { model, own } = await this.rulesOf(workspaceId, relativePath, kind === 'file');
     const out: GrantSources = {};
     for (const verb of KNOWN_VERBS) {
       const sources = resolveGrantSourcesForVerb(
@@ -2190,13 +2202,9 @@ export class AccessControlService implements IAccessControl {
     principal: GrantPrincipal,
     opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<DenialSources> {
-    const model = await this.loadModel(workspaceId);
     // Same own-scope rule as `grantSources`: a file target consults its own
     // frontmatter, a folder target's own access.md is already in the dir chain.
-    const own =
-      kind === 'file'
-        ? await this.readOwnEntries(await this.repoDir(workspaceId), relativePath)
-        : null;
+    const { model, own } = await this.rulesOf(workspaceId, relativePath, kind === 'file');
     const out: DenialSources = {};
     for (const verb of KNOWN_VERBS) {
       const sources = resolveDenialSourcesForVerb(
@@ -2218,14 +2226,12 @@ export class AccessControlService implements IAccessControl {
     kind: AccessTargetKind,
     relativePath: string,
   ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }> {
-    const model = await this.loadModel(workspaceId);
     // The target's OWN entries, and only those — the one scope whose rules a
     // restriction made here is written into. A folder's are its `access.md` in
     // the dir model; a file node's are its own frontmatter.
+    const { model, own: fileOwn } = await this.rulesOf(workspaceId, relativePath, kind !== 'folder');
     const own: OwnEntries | null =
-      kind === 'folder'
-        ? (model.accessFilesByDir.get(relativePath)?.entries ?? null)
-        : await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+      kind === 'folder' ? (model.accessFilesByDir.get(relativePath)?.entries ?? null) : fileOwn;
     if (!own) return { principals: [], users: [] };
 
     const byIdentity = new Map<string, ResolvedPrincipal>();
@@ -2273,10 +2279,9 @@ export class AccessControlService implements IAccessControl {
     kind: AccessTargetKind,
     relativePath: string,
   ): Promise<Record<Verb, AccessDecision>> {
-    const model = await this.loadModel(workspaceId);
-    // The same own-entries read `canRead`/`canWrite`/… make, whatever the
-    // kind: a directory simply has none.
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    // The same reading `canRead`/`canWrite`/… make, whatever the kind: a
+    // directory simply has no own entries.
+    const { model, own } = await this.rulesOf(workspaceId, relativePath);
     const out = {} as Record<Verb, AccessDecision>;
     for (const verb of KNOWN_VERBS) {
       const machineOwned = verb === 'write' ? this.machineOwnedWriteRule(userEmail, relativePath) : null;

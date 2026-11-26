@@ -158,6 +158,8 @@ const versionControlService = {
     calls.push(['approveFile', number, path, user.id, headSha]);
     if (path === 'Raced.md') throw new ToolError("You don't have write access on this file's path", 403);
     if (path === 'Broken.md') throw new ToolError('approval store down', 503);
+    // A request updated meanwhile: read again, it holds a file nobody may read.
+    if (path === 'Grows.md') mergeApprovals.push({ path: 'Secret/Late.md', isApproved: false, inMergeGate: true, viewerCanApprove: false });
     approvedPaths.add(path);
     return [];
   },
@@ -548,6 +550,23 @@ describe('registerVersionControlTools', () => {
       expect(body).toEqual({
         error: 'The reason names files you do not have access to read.',
         approved: ['Mine.md'],
+      });
+      expect(JSON.stringify(body)).not.toMatch(/Secret|Ada/);
+    });
+
+    it('merge_change_request scopes its answer to the request it merges, read again after its approvals', async () => {
+      // Readable when first read; approving `Grows.md` stands for an update that adds `Secret/Late.md` meanwhile.
+      mergeApprovals = [file('Grows.md')];
+      mergeFails = new VersionControlDomainError('Waiting on approval for Secret/Late.md from Ada', 409, {
+        mergeBlockedReasons: ['Secret/Late.md is not approved'],
+      });
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toEqual({
+        error: 'The reason names files you do not have access to read.',
+        approved: ['Grows.md'],
       });
       expect(JSON.stringify(body)).not.toMatch(/Secret|Ada/);
     });

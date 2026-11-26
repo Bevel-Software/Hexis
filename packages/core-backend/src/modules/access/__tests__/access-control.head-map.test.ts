@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IGitRunner } from '../../../shared/git.contract.js';
@@ -574,6 +575,50 @@ describe('AccessControlService: reads answered from the map of the head commit',
       { timeout: 30_000, interval: 100 },
     );
   }, 120_000);
+
+  // A page's restriction moved, on disk only, to its folder: the commit restricts the page, the checkout its folder.
+  // Rules from one and the page's own entries from the other would restrict it nowhere.
+  const MOVED_TO_FOLDER = {
+    'Team/Own.md': '# own, now plain\n',
+    'Team/access.md': '---\nread:\n  - deny everyone\n  - Sales\n---\n',
+  };
+
+  it('answers a single-file gate from the reading a batch answers from, so a restriction moved on disk still holds', async () => {
+    const svc = service();
+    await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md']);
+    await write(repo, MOVED_TO_FOLDER);
+    // Nothing reported: the map's reading, the commit's, where the page denies members, whichever gate asks.
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
+    expect(await svc.canRead('ws', 'mem@x.io', 'Team/Own.md')).toBe(false);
+    expect((await svc.explainAccess('ws', 'mem@x.io', 'file', 'Team/Own.md')).read.allowed).toBe(false);
+    // Reported: the checkout's reading, where the folder denies members.
+    svc.invalidate('ws');
+    expect(await svc.canRead('ws', 'mem@x.io', 'Team/Own.md')).toBe(false);
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
+  }, 120_000);
+
+  it('previews a move from one reading as well: the checkout, which the moved file is read from', async () => {
+    const svc = service();
+    await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md']);
+    await write(repo, MOVED_TO_FOLDER);
+    expect((await svc.previewAccessAfterRelocation('ws', 'mem@x.io', 'Team/Own.md', 'Team/Moved.md')).read).toBe(false);
+    expect((await svc.prospectiveHolders('ws', 'Team/Own.md', 'Team/Moved.md')).after.read.roles).not.toContain('Member');
+  }, 120_000);
+
+  it('reads a file\'s own entries from the checkout in one place, behind the reading batches and single-file gates share', async () => {
+    const src = await fs.readFile(fileURLToPath(new URL('../access-control.service.ts', import.meta.url)), 'utf-8');
+    const reader = src.indexOf('private async cachedOwnEntries(');
+    const readerEnd = src.indexOf('\n  }\n', reader);
+    const calls = [...src.matchAll(/this\.readOwnEntries\(/g)].map((m) => m.index!);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.filter((at) => at < reader || at > readerEnd)).toEqual([]);
+    // A relocation reads the moved thing from the checkout, so it takes the checkout's model, never the map's.
+    for (const m of src.matchAll(/await this\.relocationSubject\(/g)) {
+      const start = Math.max(src.lastIndexOf('\n  async ', m.index!), src.lastIndexOf('\n  private async ', m.index!));
+      const body = src.slice(start, src.indexOf('\n  }\n', m.index!));
+      expect(body).not.toMatch(/this\.loadModel\(/);
+    }
+  });
 
   it('takes no member from a roles or groups file changed on disk and not committed, where the checkout alone would', async () => {
     await commit('a page for the platform group', { 'Team/Plat.md': '---\nread:\n  - deny everyone\n  - Platform\n---\n# plat\n' });
