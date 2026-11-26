@@ -38,16 +38,33 @@ const SETTINGS: SettingStatus[] = [
   setting('allowedEmailDomains', 'ALLOWED_EMAIL_DOMAINS'),
 ];
 
+// The Deployment page also composes the settings module's marketplace card,
+// which asks the server whether this deployment is registered. This suite is
+// about the Single sign-on card, so the network answers that one request with
+// "not registered"; any other request is unplanned and fails the test.
+const REGISTRATION = '/api/github-facade/registration';
+let unplannedRequests: string[] = [];
+
 beforeEach(() => {
   for (const fn of Object.values(api)) fn.mockReset();
-  // The Deployment page also composes the settings module's marketplace card,
-  // which asks the server whether this deployment is registered. This suite is
-  // about the Single sign-on card, so the network answers "not registered".
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ registered: false }), { status: 200 })));
+  unplannedRequests = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (method === 'GET' && new URL(url, 'http://localhost').pathname === REGISTRATION) {
+        return new Response(JSON.stringify({ registered: false }), { status: 200 });
+      }
+      unplannedRequests.push(`${method} ${url}`);
+      return new Response(JSON.stringify({ error: 'unplanned request in test' }), { status: 500 });
+    }),
+  );
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  expect(unplannedRequests).toEqual([]);
 });
 
 const field = (label: string) => screen.getByLabelText(label, { exact: false });
