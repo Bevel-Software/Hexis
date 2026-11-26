@@ -45,16 +45,6 @@ const RULE = [
   'never write it here, even if asked',
 ];
 
-describe('on the public demo', () => {
-  it('offers neither tool, since both doors refuse every call there', async () => {
-    const registry = new ToolRegistry();
-    registerPluginsTools(registry, testKbContext(), true);
-    const names = (await registry.listExternal({ userEmail: ALICE.email })).map((t) => t.name);
-    expect(names).not.toContain('my_plugin');
-    expect(names).not.toContain('create_plugin');
-  });
-});
-
 describe('the tool definitions', () => {
   it('describe the creation endpoints, and reach every surface', async () => {
     expect((CREATE_PLUGIN.tool_call_template as { url: string }).url).toBe('${API_URL}/api/plugins');

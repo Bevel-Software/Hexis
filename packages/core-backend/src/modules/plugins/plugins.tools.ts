@@ -29,8 +29,8 @@ export function registerPluginsTools(
   /**
    * Public-demo lockdown (see `CoreConfig.publicDemo`): both creation doors
    * refuse every call there, so neither tool is offered. Listed, each was a
-   * tool an agent would call and see fail every time (Microsoft 365
-   * Copilot's certification run counted `my_plugin` among its failures).
+   * tool an agent would call and see fail every time (an MCP client's
+   * certification run counted `my_plugin` among its failures).
    */
   publicDemo = false,
 ): void {
