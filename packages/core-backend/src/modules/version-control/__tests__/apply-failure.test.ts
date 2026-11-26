@@ -325,6 +325,8 @@ function holds(condition: SQL, row: Row): boolean {
 function rowDb(seed: Partial<Row> = {}) {
   const row: Row = {
     number: 7,
+    source_branch: 'bo/suggestions',
+    target_branch: 'main',
     state: 'open',
     apply_failure_reason: null,
     apply_failure_conflicts: null,
@@ -337,6 +339,11 @@ function rowDb(seed: Partial<Row> = {}) {
   let pendingSet: Row = {};
   let pendingWhere: SQL | undefined;
   const chain = {
+    // A read (the open-request guard Update asks) answers the row when the
+    // condition holds for it, as the table would.
+    select: () => chain,
+    from: () => chain,
+    limit: async () => (pendingWhere && holds(pendingWhere, row) ? [{ number: row.number }] : []),
     update: () => chain,
     set: (values: Row) => {
       pendingSet = values;

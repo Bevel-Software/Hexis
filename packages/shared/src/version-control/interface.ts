@@ -541,7 +541,10 @@ export interface IVersionControlService {
    * advanced since the request was opened. Only the request's author or
    * someone who may apply it (`viewerCanUpdate`) may run it (403 otherwise).
    * A conflicting merge is aborted, leaving the branch exactly as it was, and
-   * surfaces as `ChangeRequestConflictsError` (409).
+   * surfaces as `ChangeRequestConflictsError` (409). While a request from the
+   * target into this request's branch is open, nothing is merged and it is
+   * refused with `OpenChangeRequestBlocksMergeError` (409): that merge belongs
+   * to the open request.
    *
    * Answers the refreshed detail plus `updatedPaths`: which files the merge
    * changed on the branch, so a caller showing the pre-update files can

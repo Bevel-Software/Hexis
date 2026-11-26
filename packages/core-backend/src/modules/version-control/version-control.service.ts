@@ -2527,32 +2527,11 @@ export class VersionControlService implements IVersionControlService {
       );
     }
 
-    // Auto-merge target → source — unless a request from the target into the
-    // source is open. That refresh IS the merge `mergeBranch` refuses while
-    // the request is open: it would land the request's unreviewed commits on
-    // its own target, emptying it. So the request opens without the refresh,
-    // and the open one keeps its files. Asked here, under both branches'
-    // lifecycle keys, which every open of that request also takes: none can
-    // land between this answer and the merge.
-    //
-    // `mergeFromOrigin` enforces "current branch == source" and "clean
-    // working tree" before attempting; both failures surface as structured
-    // version-control errors that pass straight through to the caller.
-    if ((await this.openRequestBlockingMerge(input.targetBranch, input.sourceBranch)) === null) {
-      const mergeOutcome = await this.git.mergeFromOrigin(
-        workspaceId,
-        input.sourceBranch,
-        input.targetBranch,
-        user,
-      );
-      if (mergeOutcome.kind === 'conflicts') {
-        throw new ChangeRequestConflictsError(
-          input.sourceBranch,
-          input.targetBranch,
-          mergeOutcome.paths,
-        );
-      }
-    } else {
+    // Auto-merge target → source (`refreshFromTarget`). While a request from
+    // the target into the source is open the refresh is skipped and the
+    // request opens without it: the open one keeps its files.
+    const refresh = await this.refreshFromTarget(workspaceId, input.sourceBranch, input.targetBranch, user);
+    if (refresh.blockedBy !== null) {
       // The refresh is this path's only fetch of `origin/<target>`; the
       // touched paths and approvers below are read from it.
       await this.git.fetch(workspaceId);
@@ -2805,7 +2784,9 @@ export class VersionControlService implements IVersionControlService {
    * detail's `viewerCanUpdate`, computed for THIS caller, so the button and
    * the enforcement read one predicate. A conflicting merge is aborted
    * inside `mergeFromOrigin`: nothing is committed or pushed, and the branch
-   * is exactly what it was.
+   * is exactly what it was. While a request from the target into this branch
+   * is open, `refreshFromTarget` merges nothing and the update is refused
+   * (`OpenChangeRequestBlocksMergeError`).
    *
    * ONE detail read after the merge. The read before it exists only to
    * decide authority and to name the two branches, so it asks for no patches
@@ -2893,14 +2874,14 @@ export class VersionControlService implements IVersionControlService {
         { err },
       );
     }
-    const outcome = await this.git.mergeFromOrigin(
-      workspaceId,
-      detail.branch,
-      detail.base,
-      user,
-    );
-    if (outcome.kind === 'conflicts') {
-      throw new ChangeRequestConflictsError(detail.branch, detail.base, outcome.paths);
+    // The merge and its push run under both branches' lifecycle keys, as
+    // `openChangeRequest` runs them: `refreshFromTarget` refuses while a
+    // request from the target into this branch is open, and that answer holds
+    // only while nobody can open one before the push lands.
+    const hasUnpushed = await this.runOnBranchPair(detail.branch, detail.base, async () => {
+    const refresh = await this.refreshFromTarget(workspaceId, detail.branch, detail.base, user);
+    if (refresh.blockedBy !== null) {
+      throw new OpenChangeRequestBlocksMergeError(detail.base, detail.branch, refresh.blockedBy);
     }
     // Push whenever the CLONE holds a commit origin has not seen — not when
     // THIS merge authored one. The two differ in exactly the case that keeps
@@ -2914,16 +2895,16 @@ export class VersionControlService implements IVersionControlService {
     // A failed probe falls back to the old gate rather than to "push
     // anyway": a push on a clone with nothing to push is a wasted
     // round trip on every single update.
-    const hasUnpushed = await this.git
+    const unpushed = await this.git
       .hasUnpushedCommits(workspaceId)
       .catch((err: unknown) => {
         log.warn(
           `could not tell whether change request #${number} has unpushed commits; falling back to whether this merge authored one`,
           { err },
         );
-        return !outcome.alreadyUpToDate;
+        return !refresh.alreadyUpToDate;
       });
-    if (hasUnpushed) {
+    if (unpushed) {
       // A refusal answers 409 with the saved-locally sentence and leaves the
       // merge applied in the clone; the probe above makes the next update
       // (or any save on the branch) push it.
@@ -2934,6 +2915,8 @@ export class VersionControlService implements IVersionControlService {
         user,
       );
     }
+    return unpushed;
+    });
     // Where the branch ended up, as PUBLISHED — two rev-parses, not a second
     // detail read. Everything below needs only the sha, and the detail that
     // goes back to the caller is read once, at the end, after the approvals
@@ -4663,6 +4646,36 @@ export class VersionControlService implements IVersionControlService {
       if (Date.now() >= deadline) return { ok: false, pending: queued };
       await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
     }
+  }
+
+  /**
+   * The one target → source refresh: `origin/<target>` merged into the
+   * source's checkout, as opening a request and Update both run it. The only
+   * caller of `git.mergeFromOrigin` (a source-level test pins that).
+   *
+   * Not while a request from the target into the source is open
+   * (`blockedBy` names it, and nothing is merged): that merge IS the one
+   * `mergeBranch` refuses, landing the open request's unreviewed commits on
+   * its own target and emptying it. Only applying the request makes it. The
+   * caller holds both branches' lifecycle keys (`runOnBranchPair`), which
+   * every open of that request also takes, so none can land between this
+   * answer and the merge.
+   *
+   * A conflict aborts the merge and surfaces as `ChangeRequestConflictsError`.
+   */
+  private async refreshFromTarget(
+    workspaceId: string,
+    sourceBranch: string,
+    targetBranch: string,
+    user: AuthUser,
+  ): Promise<{ blockedBy: number; alreadyUpToDate?: undefined } | { blockedBy: null; alreadyUpToDate: boolean }> {
+    const blockedBy = await this.openRequestBlockingMerge(targetBranch, sourceBranch);
+    if (blockedBy !== null) return { blockedBy };
+    const outcome = await this.git.mergeFromOrigin(workspaceId, sourceBranch, targetBranch, user);
+    if (outcome.kind === 'conflicts') {
+      throw new ChangeRequestConflictsError(sourceBranch, targetBranch, outcome.paths);
+    }
+    return { blockedBy: null, alreadyUpToDate: outcome.alreadyUpToDate };
   }
 
   /** The one question `mergeBranch` refuses on: is a request from `source` into `target` open? */

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, PullRequestDetail } from '@bevel-software/platform-shared';
@@ -9,6 +10,8 @@ import type { IAccessControl } from '../../access/index.js';
 import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/index.js';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { VersionControlService } from '../version-control.service.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import type { VersionControlEventBus } from '../event-bus.js';
@@ -58,6 +61,35 @@ function detail(overrides: Partial<PullRequestDetail> = {}): PullRequestDetail {
   } as unknown as PullRequestDetail;
 }
 
+/**
+ * A `change_requests` table for the open-request guard's one read
+ * (`source = $1 and target = $2 and state = $3`): it answers the rows that
+ * condition holds for, as the table would. Any other read fails the test
+ * rather than matching silently.
+ */
+function requestsDb(rows: Array<{ number: number; sourceBranch: string; targetBranch: string; state: string }>): Database {
+  let where: SQL | undefined;
+  const chain = {
+    select: () => chain,
+    from: () => chain,
+    where: (condition: SQL) => {
+      where = condition;
+      return chain;
+    },
+    limit: async () => {
+      const { sql, params } = new PgDialect().sqlToQuery(where!);
+      const expected =
+        '("change_requests"."source_branch" = $1 and "change_requests"."target_branch" = $2 and "change_requests"."state" = $3)';
+      if (sql !== expected) throw new Error(`requestsDb: unsupported read: ${sql}`);
+      const [source, target, state] = params;
+      return rows
+        .filter((r) => r.sourceBranch === source && r.targetBranch === target && r.state === state)
+        .map((r) => ({ number: r.number }));
+    },
+  };
+  return chain as unknown as Database;
+}
+
 function harness(opts: {
   first?: PullRequestDetail | null;
   /** The published head of the proposal branch as resolved just before the merge. */
@@ -80,6 +112,8 @@ function harness(opts: {
   unpushedError?: Error;
   /** Each push answers the next of these in turn: an Error rejects, undefined lands. */
   pushes?: Array<Error | undefined>;
+  /** The `change_requests` rows the open-request guard reads (#7 itself guards nothing). */
+  requests?: Array<{ number: number; sourceBranch: string; targetBranch: string; state: string }>;
 }) {
   // Two resolves per update: once after the pull (where the branch IS), once
   // after the merge (where it ended up). One mock that answers in order, so a
@@ -123,7 +157,8 @@ function harness(opts: {
   };
   const emit = vi.fn();
   const svc = new VersionControlService(
-    {} as unknown as Database,
+    // The caller's array itself, so a row it adds mid-test is one the next read finds.
+    requestsDb(opts.requests ?? []),
     git as unknown as GitService,
     prs as unknown as PullRequestService,
     changeRequestReview as unknown as IChangeRequestReviewService,
@@ -137,6 +172,21 @@ function harness(opts: {
   );
   return { svc, git, prs, pendingCommits, changeRequestReview, refreshed, emit };
 }
+
+describe('the target → source refresh has one door', () => {
+  it('only `refreshFromTarget`, which asks the open-request guard, calls `git.mergeFromOrigin`', () => {
+    // Opening a request and Update both refresh through it. A new caller of
+    // the git primitive would be a refresh the guard never sees.
+    const src = readFileSync(new URL('../version-control.service.ts', import.meta.url), 'utf8');
+    const calls = [...src.matchAll(/\.mergeFromOrigin\(/g)].map((m) => m.index);
+    expect(calls).toHaveLength(1);
+    const door = src.indexOf('private async refreshFromTarget(');
+    expect(door).toBeGreaterThan(-1);
+    expect(calls[0]).toBeGreaterThan(door);
+    expect(src.slice(door, calls[0])).toContain('this.openRequestBlockingMerge(targetBranch, sourceBranch)');
+    expect(src.slice(door, calls[0])).not.toMatch(/\n {2}(private |async |public )/);
+  });
+});
 
 describe('VersionControlService.updateFromTarget', () => {
   it('merges the target into the proposal, pushes, and returns the refreshed detail', async () => {
@@ -199,6 +249,55 @@ describe('VersionControlService.updateFromTarget', () => {
     expect((err as ChangeRequestConflictsError).status).toBe(409);
     expect((err as ChangeRequestConflictsError).conflictedPaths).toEqual(['Sales/Deal.md']);
     expect(h.git.push).not.toHaveBeenCalled();
+  });
+
+  it('refuses while a request from the target into this branch is open: nothing is merged or pushed', async () => {
+    // #7 is alice/deal → current-company-state. #9 proposes the other way and
+    // is open: merging current-company-state into alice/deal is #9's own
+    // merge, and would land its unreviewed commits on its target.
+    const h = harness({
+      requests: [{ number: 9, sourceBranch: 'current-company-state', targetBranch: 'alice/deal', state: 'open' }],
+    });
+    const err = (await h.svc.updateFromTarget(WS, USER, 7).catch((e: unknown) => e)) as VersionControlDomainError;
+    expect(err.status).toBe(409);
+    expect(err.payload).toMatchObject({
+      kind: 'open-change-request-blocks-merge',
+      sourceBranch: 'current-company-state',
+      targetBranch: 'alice/deal',
+      number: 9,
+    });
+    expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
+    expect(h.git.push).not.toHaveBeenCalled();
+  });
+
+  it('asks and merges under the branch lifecycle key every open takes, so a reverse request opened meanwhile is seen', async () => {
+    const requests: Array<{ number: number; sourceBranch: string; targetBranch: string; state: string }> = [];
+    const h = harness({ requests });
+    // An open of current-company-state → alice/deal holds alice/deal's key
+    // while it runs; its row lands before it lets go.
+    const lifecycle = (h.svc as unknown as { branchLifecycle: { run<T>(key: string, fn: () => Promise<T>): Promise<T> } })
+      .branchLifecycle;
+    let land: () => void = () => {};
+    const opening = lifecycle.run('branch:alice/deal', () => new Promise<void>((resolve) => { land = resolve; }));
+    const update = h.svc.updateFromTarget(WS, USER, 7).catch((e: unknown) => e);
+    await new Promise<void>((r) => setImmediate(r));
+    requests.push({ number: 9, sourceBranch: 'current-company-state', targetBranch: 'alice/deal', state: 'open' });
+    land();
+    await opening;
+    expect(((await update) as VersionControlDomainError).payload).toMatchObject({ kind: 'open-change-request-blocks-merge', number: 9 });
+    expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
+  });
+
+  it('merges as before when the reverse request is closed, or open requests share only one end', async () => {
+    const h = harness({
+      requests: [
+        { number: 9, sourceBranch: 'current-company-state', targetBranch: 'alice/deal', state: 'closed' },
+        { number: 10, sourceBranch: 'current-company-state', targetBranch: 'bob/other', state: 'open' },
+        { number: 11, sourceBranch: 'bob/other', targetBranch: 'alice/deal', state: 'open' },
+      ],
+    });
+    await h.svc.updateFromTarget(WS, USER, 7);
+    expect(h.git.mergeFromOrigin).toHaveBeenCalledWith(WS, 'alice/deal', 'current-company-state', USER);
   });
 
   it('refuses a request that is not open', async () => {
