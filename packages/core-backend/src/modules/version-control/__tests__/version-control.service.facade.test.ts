@@ -33,6 +33,7 @@ import { openChangeGate } from '../../../__tests__/open-change-gate.js';
 import { ReadOnBranchDeniedError } from '../read-on-branch.js';
 import { PushAccessRefusedError } from '../../access-model/index.js';
 import { hashEmail } from '../../../shared/email-identity.js';
+import { mergeFromOriginDouble } from './merge-from-origin-double.js';
 
 // `deleteBranch`'s open-request guard is the only DB touch these tests
 // exercise. The stub ANSWERS FROM THE WHERE-CLAUSE rather than returning the
@@ -1724,11 +1725,8 @@ describe('VersionControlService.openChangeRequest — when the repository host r
 
   function makeOpenHarness(push: ReturnType<typeof vi.fn>) {
     const emit = vi.fn();
-    const git = Object.assign(makeGit(), {
-      mergeFromOrigin: vi.fn().mockResolvedValue({ kind: 'clean', alreadyUpToDate: false }),
-      push,
-      pull: vi.fn().mockResolvedValue({ treeChanged: false }),
-    }) as unknown as GitService;
+    const moves = Object.assign(makeGit(), { push, pull: vi.fn().mockResolvedValue({ treeChanged: false }) });
+    const git = Object.assign(moves, { mergeFromOrigin: mergeFromOriginDouble(moves) }) as unknown as GitService;
     const prs = makePrs();
     (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     (prs.getPrDetail as ReturnType<typeof vi.fn>).mockResolvedValue({ number: 12, branch: 'ali/x', base: 'main' });
@@ -1824,12 +1822,13 @@ describe('VersionControlService.openChangeRequest — while a request in the rev
   const INPUT = { sourceBranch: 'ali/y', targetBranch: 'ali/x', title: 'The other way' };
 
   /** A db whose inserted requests are rows the next guard read finds, as the real table's would be. */
-  function makeOpenHarness(rows: Record<string, unknown>[], mergeFromOrigin = vi.fn().mockResolvedValue({ kind: 'clean', alreadyUpToDate: false })) {
-    const git = Object.assign(makeGit(), {
-      mergeFromOrigin,
+  function makeOpenHarness(rows: Record<string, unknown>[]) {
+    const moves = Object.assign(makeGit(), {
       push: vi.fn().mockResolvedValue(undefined),
       pull: vi.fn().mockResolvedValue({ treeChanged: false }),
-    }) as unknown as GitService;
+    });
+    const mergeFromOrigin = mergeFromOriginDouble(moves);
+    const git = Object.assign(moves, { mergeFromOrigin }) as unknown as GitService;
     const prs = makePrs();
     (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     (prs.getPrDetail as ReturnType<typeof vi.fn>).mockImplementation(async (number: number) => ({ number }));
@@ -1844,17 +1843,20 @@ describe('VersionControlService.openChangeRequest — while a request in the rev
       db, git, prs, makeChangeRequestReview(), makeWorkspaceService(), makeAccessControl(),
       makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
     );
-    return { svc, git, values, rows };
+    return { svc, git, mergeFromOrigin, push: moves.push, values, rows };
   }
 
   it('opens y→x without merging x into y, and leaves x→y open and untouched', async () => {
     const rows = [{ number: 7, sourceBranch: 'ali/x', targetBranch: 'ali/y', state: 'open' }];
     const h = makeOpenHarness(rows);
     await expect(h.svc.openChangeRequest('ali%2Fy', makeUser(), INPUT)).resolves.toMatchObject({ number: 20 });
-    // No refresh: x's commits never reach y, so x→y still proposes its files.
-    expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
-    // The refresh was the only fetch of the target; the diff still needs it fresh.
-    expect(h.git.fetch).toHaveBeenCalledWith('ali%2Fy');
+    // No merge: x's commits never reach y, so x→y still proposes its files.
+    // The target is still fetched (the diff and approvers read it), and y's
+    // own commits pushed, in the one refresh.
+    expect(h.mergeFromOrigin).toHaveBeenCalledTimes(1);
+    expect(h.mergeFromOrigin).toHaveBeenCalledWith('ali%2Fy', 'ali/y', 'ali/x', expect.anything(), expect.objectContaining({ merge: false }));
+    expect(h.push).toHaveBeenCalledTimes(1);
+    expect(h.git.fetch).not.toHaveBeenCalled();
     expect(h.values).toHaveBeenCalledWith(expect.objectContaining({ sourceBranch: 'ali/y', targetBranch: 'ali/x' }));
     expect(h.rows).toContainEqual({ number: 7, sourceBranch: 'ali/x', targetBranch: 'ali/y', state: 'open' });
   });
@@ -1868,27 +1870,30 @@ describe('VersionControlService.openChangeRequest — while a request in the rev
     ];
     const h = makeOpenHarness(rows);
     await h.svc.openChangeRequest('ali%2Fy', makeUser(), INPUT);
-    expect(h.git.mergeFromOrigin).toHaveBeenCalledWith('ali%2Fy', 'ali/y', 'ali/x', expect.objectContaining({ email: 'alice@example.com' }));
-    // The merge fetches the target itself; no second fetch.
+    expect(h.mergeFromOrigin).toHaveBeenCalledWith(
+      'ali%2Fy',
+      'ali/y',
+      'ali/x',
+      expect.objectContaining({ email: 'alice@example.com' }),
+      expect.objectContaining({ merge: true }),
+    );
+    expect(h.push).toHaveBeenCalledTimes(1);
     expect(h.git.fetch).not.toHaveBeenCalled();
   });
 
-  it('an x→y opened at the same moment is seen: y→x waits for it, then skips the refresh', async () => {
+  it('an x→y opened at the same moment is seen: y→x waits for it, then skips the merge', async () => {
+    const h = makeOpenHarness([]);
+    // The first refresh is held until released; any later one runs at once.
+    const refresh = h.mergeFromOrigin.getMockImplementation()!;
     let enter: () => void = () => {};
     let release: () => void = () => {};
     const entered = new Promise<void>((resolve) => { enter = resolve; });
-    // The first refresh is held until released; any later one answers at once.
-    const mergeFromOrigin = vi
-      .fn()
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            release = () => resolve({ kind: 'clean', alreadyUpToDate: false });
-            enter();
-          }),
-      )
-      .mockResolvedValue({ kind: 'clean', alreadyUpToDate: false });
-    const h = makeOpenHarness([], mergeFromOrigin);
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    h.mergeFromOrigin.mockImplementationOnce(async (...args) => {
+      enter();
+      await held;
+      return refresh(...args);
+    });
     // x→y is mid-open (inside its own refresh of x from y), its row not yet there.
     const forward = h.svc.openChangeRequest('ali%2Fx', makeUser(), { sourceBranch: 'ali/x', targetBranch: 'ali/y', title: 'Forward' });
     await entered;
@@ -1898,8 +1903,8 @@ describe('VersionControlService.openChangeRequest — while a request in the rev
     release();
     await expect(forward).resolves.toMatchObject({ number: 20 });
     await expect(reverse).resolves.toMatchObject({ number: 21 });
-    expect(mergeFromOrigin).toHaveBeenCalledTimes(1);
-    expect(mergeFromOrigin).toHaveBeenCalledWith('ali%2Fx', 'ali/x', 'ali/y', expect.anything());
+    expect(h.mergeFromOrigin).toHaveBeenNthCalledWith(1, 'ali%2Fx', 'ali/x', 'ali/y', expect.anything(), expect.objectContaining({ merge: true }));
+    expect(h.mergeFromOrigin).toHaveBeenNthCalledWith(2, 'ali%2Fy', 'ali/y', 'ali/x', expect.anything(), expect.objectContaining({ merge: false }));
   });
 });
 
@@ -1958,16 +1963,16 @@ describe('VersionControlService.openChangeRequest — tells the change-request l
   function makeNotifyHarness(opts: {
     eligible?: ReturnType<typeof eligibility> | null;
     push?: ReturnType<typeof vi.fn>;
-    merge?: ReturnType<typeof vi.fn>;
+    merge?: { kind: 'conflicts'; paths: string[] };
     detail?: ReturnType<typeof vi.fn>;
     accounts?: { findActiveAccountsByEmail: ReturnType<typeof vi.fn> } | undefined;
     link?: { url: string; urlNote?: string };
   } = {}) {
-    const git = Object.assign(makeGit(), {
-      mergeFromOrigin: opts.merge ?? vi.fn().mockResolvedValue({ kind: 'clean', alreadyUpToDate: false }),
+    const moves = Object.assign(makeGit(), {
       push: opts.push ?? vi.fn().mockResolvedValue(undefined),
       pull: vi.fn().mockResolvedValue({ treeChanged: false }),
-    }) as unknown as GitService;
+    });
+    const git = Object.assign(moves, { mergeFromOrigin: mergeFromOriginDouble(moves, opts.merge) }) as unknown as GitService;
     const prs = makePrs();
     (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     if (opts.detail) prs.getPrDetail = opts.detail as unknown as PullRequestService['getPrDetail'];
@@ -2139,7 +2144,7 @@ describe('VersionControlService.openChangeRequest — tells the change-request l
     expect(invalid.values).not.toHaveBeenCalled();
 
     const conflicting = makeNotifyHarness({
-      merge: vi.fn().mockResolvedValue({ kind: 'conflicts', paths: ['KnowledgeBase/Sales/Deal.md'] }),
+      merge: { kind: 'conflicts', paths: ['KnowledgeBase/Sales/Deal.md'] },
     });
     await expect(conflicting.svc.openChangeRequest('ali%2Fx', makeUser(), INPUT)).rejects.toBeInstanceOf(ChangeRequestConflictsError);
     expect(conflicting.run).not.toHaveBeenCalled();

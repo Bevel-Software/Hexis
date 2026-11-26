@@ -243,4 +243,62 @@ describe('GitService — fork point, behind, and Update', () => {
     // Still behind — the notice stays until someone resolves it.
     expect((await forkPoint()).behind).toBe(true);
   });
+
+  it('the publish runs over the merge inside its one reservation: a git operation asked meanwhile waits for the push', async () => {
+    await propose(['price: 100', 'price: 120']);
+    await editTargetDirectly(['status: draft', 'status: signed']);
+    let probe: Promise<boolean> | null = null;
+    let probed = false;
+    const outcome = await git.mergeFromOrigin(WS, SOURCE, TARGET, USER, {
+      publish: async (merged, ops) => {
+        expect(merged).toEqual({ kind: 'clean', alreadyUpToDate: false });
+        expect(await ops.hasUnpushedCommits()).toBe(true);
+        // Takes the workspace's reservation: it cannot run before the push.
+        probe = git.hasUnpushedCommits(WS).then((unpushed) => {
+          probed = true;
+          return unpushed;
+        });
+        await new Promise((r) => setTimeout(r, 50));
+        expect(probed).toBe(false);
+        await ops.push();
+      },
+    });
+    expect(outcome).toEqual({ kind: 'clean', alreadyUpToDate: false });
+    // It ran after the push, so it saw nothing left to push.
+    expect(await probe).toBe(false);
+    await runGit(repo, ['fetch', 'origin']);
+    expect(await gitOut(repo, ['rev-parse', `origin/${SOURCE}`])).toBe(await gitOut(repo, ['rev-parse', 'HEAD']));
+  });
+
+  it('merge: false merges nothing, fetches the target, and still publishes the branch as it is', async () => {
+    await propose(['price: 100', 'price: 120']);
+    await editTargetDirectly(['status: draft', 'status: signed']);
+    const headBefore = await gitOut(repo, ['rev-parse', 'HEAD']);
+    const published: unknown[] = [];
+    const outcome = await git.mergeFromOrigin(WS, SOURCE, TARGET, USER, {
+      merge: false,
+      publish: async (merged) => {
+        published.push(merged);
+      },
+    });
+    expect(outcome).toEqual({ kind: 'not-merged' });
+    expect(published).toEqual([{ kind: 'not-merged' }]);
+    expect(await gitOut(repo, ['rev-parse', 'HEAD'])).toBe(headBefore);
+    expect(await fs.readFile(path.join(repo, DEAL), 'utf8')).not.toContain('status: signed');
+    // The target's tracking ref is the published tip, for what the caller reads next.
+    expect(await gitOut(repo, ['rev-parse', `origin/${TARGET}`])).toBe(await gitOut(other, ['rev-parse', 'HEAD']));
+  });
+
+  it('a conflicting refresh publishes nothing', async () => {
+    await propose(['price: 100', 'price: 120']);
+    await editTargetDirectly(['price: 100', 'price: 90']);
+    let published = false;
+    const outcome = await git.mergeFromOrigin(WS, SOURCE, TARGET, USER, {
+      publish: async () => {
+        published = true;
+      },
+    });
+    expect(outcome).toEqual({ kind: 'conflicts', paths: [DEAL] });
+    expect(published).toBe(false);
+  });
 });

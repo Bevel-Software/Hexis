@@ -26,6 +26,7 @@ import { VersionControlService } from '../version-control.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createVersionControlRoutes } from '../version-control.routes.js';
 import { VersionControlDomainError, VersionControlValidationError } from '../../../shared/domain-errors.js';
 import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import { mergeFromOriginDouble } from './merge-from-origin-double.js';
 
 /**
  * A failed apply used to reach ONE person: the merge route answered the user
@@ -586,19 +587,23 @@ describe('VersionControlService — a refusal clears when a change makes it obso
   function movingHead(seed: Partial<Row>, onMerge: (row: Row) => void = () => {}) {
     const store = rowDb(seed);
     const emitted: { kind: string }[] = [];
+    const moves = {
+      pull: vi.fn(async () => ({ treeChanged: false })),
+      push: vi.fn(async () => undefined),
+      hasUnpushedCommits: vi.fn(async () => true),
+    };
+    const refresh = mergeFromOriginDouble(moves);
     const { svc } = service(
       store.db,
       (e) => emitted.push(e as { kind: string }),
       { carryApprovalsForward: vi.fn(async () => 0) },
       {
         git: {
-          pull: vi.fn(async () => ({ treeChanged: false })),
-          mergeFromOrigin: vi.fn(async () => {
+          ...moves,
+          mergeFromOrigin: vi.fn(async (...args: Parameters<typeof refresh>) => {
             onMerge(store.row);
-            return { kind: 'merged', alreadyUpToDate: false };
+            return refresh(...args);
           }),
-          push: vi.fn(async () => undefined),
-          hasUnpushedCommits: vi.fn(async () => true),
           pathsChangedBetween: vi.fn(async () => []),
           // The head this test is named for: one sha before the merge,
           // another after it.
