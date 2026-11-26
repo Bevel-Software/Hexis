@@ -679,10 +679,37 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect((await gates('admin@x.io')).write).toBe(true);
     expect(after.write.roles).toContain('Admin');
     expect(afterEmails.write).toContain('admin@x.io');
-    // One screen: what Manage access shows agrees with itself.
+    // One screen: Manage access refuses members every verb, and none of its four holder lists names them.
     const view = await resolveAccessView(svc, 'ws', page, 'mem@x.io', 'file');
     expect([view.canRead, view.canWrite, view.canOwner, view.canDownload]).toEqual([false, false, false, false]);
     for (const list of [view.readers, view.eligible, view.owners, view.downloaders]) expect(list.roles).not.toContain('Member');
+  }, 120_000);
+
+  it('lists a holder every copy of a file lets hold it, however each copy writes them, with its own entries changed on disk and not yet committed', async () => {
+    const page = 'Team/Spelled.md';
+    await commit('a page members own and Nobody writes', {
+      [page]: '---\nowner:\n  - Member\nwrite:\n  - Nobody <nobody@x.io>\n---\n# spelled\n',
+    });
+    const svc = service();
+    expect(await svc.canOwner('ws', 'mem@x.io', page)).toBe(true);
+
+    // On disk only, and nothing reported: the page names the one member as its owner, and lets everyone write.
+    await write(repo, { [page]: '---\nowner:\n  - Mem <mem@x.io>\nwrite:\n  - everyone\n---\n# spelled\n' });
+    // She owns the page under both copies: the commit's through the role, the disk's by name. So she is its owner on
+    // the list, and the role, which owns nothing under the disk's copy, is not.
+    expect(await svc.canOwner('ws', 'mem@x.io', page)).toBe(true);
+    const owners = await svc.eligibleOwners('ws', page);
+    expect(owners.users.map((u) => u.email)).toEqual(['mem@x.io']);
+    expect(owners.roles).toEqual([]);
+    // Nobody writes under both copies: the commit's names him, the disk's lets everyone. Only the commit's copy names
+    // him, so only its map of emails holds him, and he stays on the writer emails.
+    expect(await svc.canWrite('ws', 'nobody@x.io', page)).toBe(true);
+    expect([...(await svc.eligibleWriterEmails('ws', page)).keys()]).toContain('nobody@x.io');
+    // Who writes under the disk's copy only is kept off: the Sales member its `everyone` lets in, off the writer
+    // emails, and `everyone` itself, off the writers.
+    expect(await svc.canWrite('ws', 'sal@x.io', page)).toBe(false);
+    expect([...(await svc.eligibleWriterEmails('ws', page)).keys()]).not.toContain('sal@x.io');
+    expect((await svc.eligibleWriters('ws', page)).roles).not.toContain('everyone');
   }, 120_000);
 
   it('says where a file\'s access comes from and where it is denied as its gates judge it, with its own entries changed on disk and not yet committed', async () => {
