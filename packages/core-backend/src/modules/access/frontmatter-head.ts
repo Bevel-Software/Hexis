@@ -4,6 +4,8 @@ import { isFrontmatterFence } from '@bevel-software/platform-shared';
 
 const HEAD_FIRST_READ = 1_024;
 const HEAD_LAST_READ = 64 * 1_024;
+/** The largest read when a file is read to its end. */
+const WHOLE_FILE_READ = 1_024 * 1_024;
 
 /**
  * Finds the start of a file that holds everything its frontmatter can say,
@@ -73,6 +75,31 @@ export async function frontmatterHead(file: string): Promise<string> {
       position += bytesRead;
       const head = scanner.feed(chunk.subarray(0, bytesRead));
       if (head !== null) return head;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * The frontmatter head of the file at `file`, as {@link frontmatterHead}
+ * answers it, read to the file's end: each chunk read goes to `eachChunk` in
+ * order, so a caller can hash the whole file in the same pass.
+ */
+export async function frontmatterHeadOfWholeFile(file: string, eachChunk: (chunk: Buffer) => void): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const scanner = new HeadScanner();
+    let head: string | null = null;
+    let position = 0;
+    for (let size = HEAD_FIRST_READ; ; size = Math.min(size * 2, WHOLE_FILE_READ)) {
+      const chunk = Buffer.allocUnsafe(size);
+      const { bytesRead } = await handle.read(chunk, 0, size, position);
+      if (bytesRead === 0) return head ?? scanner.end();
+      position += bytesRead;
+      const read = chunk.subarray(0, bytesRead);
+      eachChunk(read);
+      if (head === null) head = scanner.feed(read);
     }
   } finally {
     await handle.close();

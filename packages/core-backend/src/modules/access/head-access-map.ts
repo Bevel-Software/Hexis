@@ -4,10 +4,12 @@ import { readRevSha } from '../kb-fs/index.js';
 import { accessMdSelfEntries, isAccessMdPath, parseOwnAccessEntries, type OwnEntries } from '../access-model/index.js';
 import { catFileBatchBytes } from './cat-file-batch.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
+import fs from 'node:fs/promises';
 import path from 'node:path';
-import { frontmatterHead, frontmatterHeadOfBytes } from './frontmatter-head.js';
+import { frontmatterHeadOfBytes, frontmatterHeadOfWholeFile } from './frontmatter-head.js';
 import { detachEntries } from './own-entries-memo.js';
 import { mapPooled } from '../../shared/map-pooled.js';
+import { gitBlobHash, objectFormatOf } from '../../shared/git-blob-sha.js';
 import type { CommitPaths, ITreeIndexer } from './tree-index.js';
 
 const log = logger('access');
@@ -139,14 +141,13 @@ interface Unseen {
  * remembered by its object id, so a version is read once for every branch
  * and commit that holds it.
  *
- * Versions are read from the checkout, which costs the start of each file
- * (the frontmatter head) where git would return all of it. Only a file git
- * says is the same on disk as in the commit (`git diff-index <commit>`, from
- * its stat cache, asked before and after the reads) is read from the disk;
- * a file that differs, or changed while it was read, is read through git, so
- * the map, the memo and the seed hold only facts true of the commit's
- * versions. A change on disk counts once it is a commit, whose changed
- * files are read like any other's.
+ * Versions are read from the checkout where its copy is the version's own
+ * bytes: read whole, they hash to the version's object id (`readAtCheckout`).
+ * A file git's stat cache says differs (`git diff-index <commit>`) is not
+ * tried; it and any copy that is other bytes are read through git, so the
+ * map, the memo and the seed hold only facts true of the commit's versions.
+ * A change on disk counts once it is a commit, whose changed files are read
+ * like any other's.
  *
  * A commit that lists a symbolic link or a submodule gets no map: what the
  * checkout holds there is not what the commit holds, and the old way reads
@@ -278,8 +279,8 @@ export class HeadMaps<M> implements IHeadMaps<M> {
         return;
       }
       unseen.set(key, { objectId, key, size: file.size, paths: [path] });
-      // Read from the checkout, a version costs its start, not its size; an `access.md` is read whole, through git.
-      wait += isAccessMdPath(path) ? file.size : Math.min(file.size, DISK_HEAD_COST);
+      // A version is read whole, from the checkout or through git: only its bytes prove a checkout's copy is it.
+      wait += file.size;
     });
     if (!built || irregular) {
       built?.release();
@@ -313,25 +314,27 @@ export class HeadMaps<M> implements IHeadMaps<M> {
 
   /**
    * Read the versions in `unseen` for the map of `commit`, which the checkout at `repoDir` stands on: from the
-   * checkout where git says the file is the same there as in the commit, through git everywhere else. Remembers
-   * what each version declares and notes the ones that declare something in `own`, as `read` does. The map holds
-   * the commit's versions only, never a newer one on disk: its model is the commit's, and a page read as the disk
-   * has it beside rules read as the commit has them could pair a restriction's old place with its new one, and
-   * keep it nowhere.
+   * checkout where its copy is the version's own bytes, through git everywhere else. A copy is read whole, and is
+   * the version when its bytes hash to the version's object id. Git's stat cache (`diff-index`) only spares that
+   * read for a file git already knows differs: it calls a file the same after git's filters, end-of-line conversion
+   * and `working-tree-encoding` have run, under whatever attributes and configuration held when the file was
+   * written out, so it is no proof the bytes are the version's. The hash is, whatever wrote the file and whenever,
+   * a write during the read included. Remembers what each version declares and notes the ones that declare
+   * something in `own`, as `read` does. The map holds the commit's versions only, never a newer one on disk: its
+   * model is the commit's, and a page read as the disk has it beside rules read as the commit has them could pair a
+   * restriction's old place with its new one, and keep it nowhere.
    */
   private async readAtCheckout(repoDir: string, commit: string, unseen: Unseen[], own: Map<string, OwnEntries>): Promise<void> {
-    const before = await this.changedOnDisk(repoDir, commit);
-    const viaGit: Unseen[] = [];
-    const fromDisk: Unseen[] = [];
-    // An `access.md` says what it declares for itself only with its body read too (`accessMdSelfEntries`), so it is
-    // never read from its start alone: it goes through git, in parts, as before. There are few, and they are small.
-    for (const u of unseen) (isAccessMdPath(u.paths[0]!) || u.paths.some((p) => before.has(p)) ? viaGit : fromDisk).push(u);
-    const read = await mapPooled(fromDisk, DISK_READS_AT_ONCE, (u) => readDeclaredOnDisk(repoDir, u.paths[0]!));
-    // A file written while it was read differs now: what was read of it is no fact about its version.
-    const after = await this.changedOnDisk(repoDir, commit);
+    const changed = await this.changedOnDisk(repoDir, commit);
+    // An `access.md` says what it declares for itself only with its body read too (`accessMdSelfEntries`): it goes
+    // through git, in parts, as before. There are few, and they are small.
+    const fromDisk = unseen.filter((u) => !isAccessMdPath(u.paths[0]!) && !u.paths.some((p) => changed.has(p)));
+    const onDisk = new Set(fromDisk);
+    const viaGit = unseen.filter((u) => !onDisk.has(u));
+    const read = await mapPooled(fromDisk, DISK_READS_AT_ONCE, (u) => readDeclaredOnDisk(repoDir, u.paths[0]!, u.size, u.objectId));
     fromDisk.forEach((u, i) => {
       const declared = read[i]!;
-      if (declared === GONE || u.paths.some((p) => after.has(p))) {
+      if (declared === UNVOUCHED) {
         viaGit.push(u);
         return;
       }
@@ -459,26 +462,33 @@ export class HeadMaps<M> implements IHeadMaps<M> {
   }
 }
 
-/** What a version costs to read from the checkout at most: the start of the file, up to its frontmatter's end. */
-const DISK_HEAD_COST = 64 * 1024;
 /** Files read from the checkout at once. */
 const DISK_READS_AT_ONCE = 16;
-/** A file the checkout no longer holds. */
-const GONE = Symbol('gone');
+/** A file the checkout does not hold as its version's bytes: gone, or other bytes. */
+const UNVOUCHED = Symbol('unvouched');
 
 /**
- * What the file at `relativePath` in the checkout declares for itself, read as `read` reads such a version: to the
- * end of its frontmatter, never further. Not for an `access.md`, whose body decides what it declares (it goes
- * through git).
+ * What the file at `relativePath` in the checkout declares for itself, read as `read` reads the version
+ * `objectId` (`size` bytes), or `UNVOUCHED` when the file is not that version's bytes. The file is read to its end
+ * in one pass, which hashes it as git hashes a blob and finds its frontmatter's end. Not for an `access.md`, whose
+ * body decides what it declares (it goes through git).
  */
-async function readDeclaredOnDisk(repoDir: string, relativePath: string): Promise<OwnEntries | null | typeof GONE> {
+async function readDeclaredOnDisk(
+  repoDir: string,
+  relativePath: string,
+  size: number,
+  objectId: string,
+): Promise<OwnEntries | null | typeof UNVOUCHED> {
   const file = path.join(repoDir, relativePath);
   let head: string;
   try {
-    head = await frontmatterHead(file);
+    if ((await fs.stat(file)).size !== size) return UNVOUCHED;
+    const hash = gitBlobHash(size, objectFormatOf(objectId));
+    head = await frontmatterHeadOfWholeFile(file, (chunk) => hash.update(chunk));
+    if (hash.digest('hex') !== objectId) return UNVOUCHED;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return GONE;
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return UNVOUCHED;
     throw err;
   }
   return detachEntries(parseOwnAccessEntries(head));
