@@ -214,6 +214,21 @@ describe('FileChangeBoxes: Approve binds the file on screen', () => {
     expect(api.approvePrFile).toHaveBeenCalledWith(CR.number, PATH);
   });
 
+  it('neither re-approves an approved file nor applies while another file waits', async () => {
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [approval(PATH, true), approval(OTHER, false)],
+    });
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    expect(await screen.findByText('The change applies once 1 other file is approved.')).toBeInTheDocument();
+    expect(api.approvePrFile).not.toHaveBeenCalled();
+    expect(api.mergePullRequest).not.toHaveBeenCalled();
+  });
+
   it('reports a refused approval of this file instead of applying anyway', async () => {
     api.approvePrFile.mockRejectedValue(new Error('You may not approve Docs/guide.md'));
     renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
