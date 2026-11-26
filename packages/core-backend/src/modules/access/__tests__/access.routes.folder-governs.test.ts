@@ -8,15 +8,15 @@ import express from 'express';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { IAccessControl } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { AccessMutationError, AccessMutationService } from '../access-mutation.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * A file that cannot carry frontmatter is never written by an access mutation.
@@ -163,7 +163,7 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
         { emit: vi.fn() } as unknown as VersionControlEventBus,
         usersDbDouble(),
         testKbContext({ kbDirName: KB }),
-        new NodeFs(),
+        realDisk(),
       ),
     );
     server = await new Promise<Server>((resolve) => {

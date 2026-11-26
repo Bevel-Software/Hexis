@@ -10,20 +10,20 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { GIT_INTERNALS_MESSAGE, GitInternalsError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { LockingFilesystem } from '../../kb-fs/locking-filesystem.js';
-import { ReadOnlyFilesystem } from '../../kb-fs/read-only-filesystem.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { LockingFilesystem } from '../../kb-fs/index.js';
+import { ReadOnlyFilesystem } from '../../kb-fs/index.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import { createToolHandlerFactory } from '../../../__tests__/tool-wiring.js';
+import type { ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import { realVersionControlHooks } from '../../../__tests__/real-version-control.js';
+import { ToolDescriptionNotes } from '../agent-access.gate.js';
+import type { AuthService } from '../../auth/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
@@ -32,9 +32,8 @@ import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import { createGitInternalsRouteGuard } from '../git-internals.middleware.js';
 import { hasGitInternalsSegment } from '../../../shared/git-internals.js';
-import { createDiffRoutes } from '../../diff/diff.routes.js';
-import { DiffService } from '../../diff/diff.service.js';
-import { WorkspaceMutex } from '../../kb-fs/mutex.js';
+import { DiffService, createDiffRoutes } from '../../../__tests__/real-diff.js';
+import { WorkspaceMutex } from '../../kb-fs/index.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { RipgrepPatternMatcher } from '../index.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
@@ -252,7 +251,7 @@ describe('workspace tools refuse the git folder', () => {
 
   beforeEach(async () => {
     versionControl = makeVersionControl();
-    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), realDisk());
     unzipSpy = vi.spyOn(service, 'unzipFile');
     bootstrappedSpy = vi.spyOn(service, 'hasBootstrappedWorkspace');
     const lockingFs = new LockingFilesystem(
@@ -287,7 +286,7 @@ describe('workspace tools refuse the git folder', () => {
       new DocExtractService(join(root, 'doc-cache'), new WorkerDocumentExtractor()),
       allowAll,
       testKbContext({ kbDirName: KB }),
-      { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
+      { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: realVersionControlHooks(), notes: new ToolDescriptionNotes() },
       new RoutineWritePolicyService(),
       {} as never,
       // Skill check, change gate, uploads, guide, downloads, starter packs, disk: not this harness's business.
@@ -436,14 +435,14 @@ describe('workspace routes refuse the git folder', () => {
 
   beforeEach(async () => {
     versionControl = makeVersionControl();
-    service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), realDisk());
     const app = express();
     app.use(express.json());
     app.use('/api', (req, _res, next) => {
       (req as unknown as { userId: string }).userId = USER.id;
       next();
     });
-    const diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, new NodeFs());
+    const diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, realDisk());
     // Exactly the production mounting: ONE guard for the whole prefix, ahead
     // of every router under it — so the review routes are covered by the fact
     // of their path, not by their own guard.
@@ -459,7 +458,7 @@ describe('workspace routes refuse the git folder', () => {
         testKbContext({ kbDirName: KB }),
         stubCreatorAccess,
         { isAdmin: async () => true } as unknown as IAdminAccessService,
-        new NodeFs(),
+        realDisk(),
       ),
     );
     app.use(
@@ -583,7 +582,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
   let service: WorkspaceService;
 
   beforeEach(() => {
-    service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), realDisk());
   });
 
   afterEach(async () => {
@@ -640,7 +639,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
         return { stdout: '.git\n', stderr: '', code: 0 };
       }),
     };
-    const refService = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs(), gitRunner as never);
+    const refService = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), realDisk(), gitRunner as never);
 
     for (const [form, raw] of Object.entries(fileForms('config'))) {
       if (!form.startsWith('symlinked')) continue;
@@ -696,7 +695,7 @@ describe('the route guard on its own', () => {
   beforeEach(async () => {
     reached = 0;
     userId = USER.id;
-    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), realDisk());
     const app = express();
     // The server's own order: the guard ahead of the body parser, then again
     // on the parsed body, then again once the caller is known.
@@ -796,8 +795,8 @@ describe('DiffService refuses the git folder on its own', () => {
   let diffService: DiffService;
 
   beforeEach(() => {
-    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
-    diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, new NodeFs());
+    const service = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), realDisk());
+    diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, realDisk());
   });
 
   afterEach(async () => {

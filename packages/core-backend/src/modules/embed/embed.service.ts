@@ -342,12 +342,8 @@ export class EmbedService implements IEmbedService {
     // a lock alive that shuts out the people who still have it. The lock
     // goes HERE, not only when the view hears the refusal: a frame that is
     // gone, or a host that never delivers the 403, would otherwise leave the
-    // file shut to the writers who still have access until the TTL. Letting
-    // go takes no access — the version-control service releases only a lock this user holds.
-    if (!canWrite) {
-      await this.versionControlService.releaseLockNoCommit(workspaceId, this.kb.defaultBranch, wsPath, user);
-      throw new EmbedAccessError();
-    }
+    // file shut to the writers who still have access until the TTL.
+    if (!canWrite) await this.refuseWriter(wsPath, user);
     await this.versionControlService.heartbeatLock(workspaceId, this.kb.defaultBranch, wsPath, user);
   }
 
@@ -569,9 +565,25 @@ export class EmbedService implements IEmbedService {
     const claims = this.verifyToken(token);
     const { user, canWrite } = await this.resolveIdentity(claims);
     if (!user) throw new EmbedAccessError('Link your account to edit');
-    if (!canWrite) throw new EmbedAccessError();
+    const wsPath = this.wsPathFor(claims.repoRelative);
+    if (!canWrite) await this.refuseWriter(wsPath, user);
     await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
-    return { claims, user, wsPath: this.wsPathFor(claims.repoRelative) };
+    return { claims, user, wsPath };
+  }
+
+  /**
+   * Refuse a viewer who may not write, and let go of the lock they hold on
+   * the file: a writer whose grant was removed while editing must not keep
+   * the file shut to the writers who still have it until the TTL. Every door
+   * here that asks for write (Edit, Save, the heartbeat) refuses through this
+   * one. Nothing is committed: the embed writes only inside Save, under the
+   * lock, and releases in the same call, so a held lock has no bytes of its
+   * own on disk. Letting go takes no access — the version-control service
+   * releases only a lock this user holds.
+   */
+  private async refuseWriter(wsPath: string, user: AuthUser): Promise<never> {
+    await this.versionControlService.releaseLockNoCommit(this.defaultWorkspaceId(), this.kb.defaultBranch, wsPath, user);
+    throw new EmbedAccessError();
   }
 
   async viewerOf(token: string): Promise<EmbedViewer> {

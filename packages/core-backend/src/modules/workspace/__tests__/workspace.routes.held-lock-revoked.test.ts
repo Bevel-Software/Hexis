@@ -7,19 +7,13 @@ import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { FileLockService } from '../../version-control/file-lock.service.js';
-import { VersionControlEventBus } from '../../version-control/event-bus.js';
-import { VersionControlService } from '../../version-control/version-control.service.js';
-import { makeFakeLockDb } from '../../version-control/__tests__/fake-file-lock-db.js';
-import type { GitService } from '../../version-control/git/git.service.js';
-import type { PullRequestService } from '../../version-control/git/pull-request.service.js';
-import type { IChangeRequestReviewService } from '../../version-control/change-request-review/change-request-review.interface.js';
-import type { PendingCommitsService } from '../../version-control/pending-commits.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { realFileLocks, realLockingVersionControl } from '../../../__tests__/real-version-control.js';
+import type { VersionControlEventBus, VersionControlService } from '../../version-control/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { IChangeReadGate, ICreatorAccess } from '../../access-model/index.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { AuthService } from '../../auth/index.js';
 import type { WorkspaceService } from '../workspace.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 
@@ -40,13 +34,13 @@ const KB = 'knowledge-base';
 const WS = 'target-company-state';
 const FILE = `${KB}/QA-Edit/notes.md`;
 const ORIGINAL = '# Notes\nAs it was.\n';
+const FROM_ARCHIVE = '# Notes\nFrom the archive.\n';
 const USER: AuthUser = { id: '11111111-1111-4111-8111-111111111111', email: 'user@example.com', name: 'Business User' };
 
 let root: string;
 let server: Server;
 let baseUrl: string;
 let writable: boolean;
-let locks: FileLockService;
 let svc: VersionControlService;
 let enqueue: ReturnType<typeof vi.fn>;
 
@@ -55,33 +49,39 @@ beforeEach(async () => {
   await fs.mkdir(path.join(root, KB, 'QA-Edit'), { recursive: true });
   await fs.writeFile(path.join(root, FILE), ORIGINAL);
   writable = true;
-  locks = new FileLockService(makeFakeLockDb().db);
+  const { locks } = realFileLocks();
   enqueue = vi.fn(async () => undefined);
   const gate: IChangeReadGate = { judge: vi.fn(), assertMayChange: vi.fn(async () => undefined) };
-  svc = new VersionControlService(
-    {} as never,
-    {} as GitService,
-    {} as PullRequestService,
-    {} as IChangeRequestReviewService,
-    {} as WorkspaceService,
-    {
+  svc = realLockingVersionControl({
+    locks,
+    accessControl: {
       canWriteBatchAtRef: vi.fn(async (_w: string, _r: string, _e: string, paths: string[]) =>
         new Map(paths.map((p) => [p, writable])),
       ),
       eligibleWritersAtRef: vi.fn(async () => ({ roles: ['Admin'], users: [] })),
       canRestorePlatformFile: vi.fn(async () => false),
     } as unknown as IAccessControl,
-    locks,
-    { enqueue } as unknown as PendingCommitsService,
-    testKbContext({ kbDirName: KB }),
-    gate,
-    new VersionControlEventBus(),
-  );
+    pendingCommits: { enqueue },
+    kb: testKbContext({ kbDirName: KB }),
+    changeGate: gate,
+  });
   const workspaceService = {
     getWorkspacePath: async () => root,
     withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     writeFile: async (_id: string, p: string, content: string) => {
       await fs.writeFile(path.join(root, p), content);
+    },
+    // The extraction's contract (`WorkspaceService.unzipFile`): each entry
+    // meets the guard before its bytes land, and a refused entry is skipped
+    // and reported, never written. The archive here carries the edited file.
+    unzipFile: async (_id: string, _zip: string, _dest: string | undefined, guard: (p: string) => Promise<void>) => {
+      try {
+        await guard(FILE);
+      } catch (err) {
+        return { extracted: [], skipped: [{ path: FILE, reason: (err as Error).message }] };
+      }
+      await fs.writeFile(path.join(root, FILE), FROM_ARCHIVE);
+      return { extracted: [FILE], skipped: [] };
     },
   } as unknown as WorkspaceService;
   const app = express();
@@ -101,7 +101,7 @@ beforeEach(async () => {
       testKbContext({ kbDirName: KB }),
       { planForCreate: async () => null, noteAccessFileWritten: () => {} } as unknown as ICreatorAccess,
       { isAdmin: async () => false } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
     ),
   );
   server = await new Promise<Server>((resolve) => {
@@ -133,7 +133,7 @@ describe('PUT /file by the holder of the editor lock', () => {
 
     expect(res.status).toBe(200);
     expect(await onDisk()).toBe('# Notes\nEdited.\n');
-    expect((await locks.get(WS, WS, FILE))?.holderUserId).toBe(USER.id);
+    expect((await svc.getLock(WS, WS, FILE))?.holderUserId).toBe(USER.id);
   });
 
   it('is refused with the same 403 as a non-writer once write is revoked, writes nothing, and loses the lock', async () => {
@@ -159,11 +159,60 @@ describe('PUT /file by the holder of the editor lock', () => {
     expect(await onDisk()).toBe('# Notes\nSaved while granted.\n');
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ path: FILE, authorEmail: USER.email }));
-    expect(await locks.get(WS, WS, FILE)).toBeNull();
+    expect(await svc.getLock(WS, WS, FILE)).toBeNull();
 
     // And again, now holding nothing: the plain non-writer refusal.
     const again = await save('# Notes\nStill no.\n');
     expect(again.status).toBe(403);
     expect(await onDisk()).toBe('# Notes\nSaved while granted.\n');
+  });
+});
+
+describe('an archive extracted over a file the caller holds the editor lock on', () => {
+  function unzip(): Promise<Response> {
+    return fetch(`${baseUrl}/api/workspace/${WS}/unzip`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: `${KB}/QA-Edit/drop.zip` }),
+    });
+  }
+
+  it('skips that file once write is revoked: its bytes never land, and the lock goes with only what was there', async () => {
+    expect((await svc.acquireLock(WS, WS, FILE, USER)).acquired).toBe(true);
+    writable = false;
+
+    const res = await unzip();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ extracted: [], skipped: [{ path: FILE }] });
+    // Asked BEFORE the extraction: the archive's text is not what the release
+    // publishes under the holder's name.
+    expect(await onDisk()).toBe(ORIGINAL);
+    expect(await svc.getLock(WS, WS, FILE)).toBeNull();
+  });
+
+  it('extracts it while the holder may still write, and leaves the lock for the editor', async () => {
+    expect((await svc.acquireLock(WS, WS, FILE, USER)).acquired).toBe(true);
+
+    const res = await unzip();
+
+    expect(res.status).toBe(200);
+    expect(await onDisk()).toBe(FROM_ARCHIVE);
+    expect((await svc.getLock(WS, WS, FILE))?.holderUserId).toBe(USER.id);
+  });
+});
+
+describe('PUT /file under the caller own coordination hold', () => {
+  // A coordination hold serialises an agent's writes and grants no write
+  // authority, so it is not the editor's lock: the save goes to the acquire,
+  // which is strict and refuses a live lock even to its own holder.
+  it('is refused as contended and writes nothing', async () => {
+    expect((await svc.acquireLock(WS, WS, FILE, USER, { coordination: true })).acquired).toBe(true);
+
+    const res = await save('# Notes\nThrough a coordination hold.\n');
+
+    expect(res.status).toBe(409);
+    expect(await onDisk()).toBe(ORIGINAL);
+    expect((await svc.getLock(WS, WS, FILE))?.mode).toBe('coordination');
   });
 });

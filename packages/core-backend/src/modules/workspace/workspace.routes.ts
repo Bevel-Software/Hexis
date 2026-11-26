@@ -1566,9 +1566,15 @@ export function createWorkspaceRoutes(
       // Each entry is asked about before it is written, through the same
       // gate: an archive can carry a path into a nested folder the caller
       // cannot read, which the destination check above cannot see. Such an
-      // entry is skipped and reported, never written and then refused.
+      // entry is skipped and reported, never written and then refused. An
+      // entry the caller holds the edit lock on meets `holdsEditLock` here
+      // too, BEFORE its bytes land: once their write is revoked it refuses
+      // (and lets the lock go, committing only what was there before), where
+      // asking after the extraction would publish the archive's bytes.
+      const branch = branchForWorkspaceId(id);
       const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
         await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
+        await versionControlService.holdsEditLock(id, branch, entryPath, user);
       });
       for (const relFile of result.extracted) {
         // The file is already on disk from the unzip; the release commits +

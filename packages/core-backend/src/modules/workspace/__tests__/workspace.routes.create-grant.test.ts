@@ -3,15 +3,15 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/change-gate.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
+import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/index.js';
+import { AccessDeniedError } from '../../access-model/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { WorkspaceService } from '../workspace.service.js';
 
@@ -105,7 +105,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
         creatorAccess as unknown as ICreatorAccess,
       // Not exercised here — only `.bevelignore`'s tree visibility consults it.
       { isAdmin: async () => false } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
       undefined,
       opts.changeGate,
     ),
