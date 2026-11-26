@@ -208,8 +208,9 @@ describe('AccessControlService: reads answered from the map of the head commit',
     const paths = [...Object.keys(FILES), 'Team/New.md'];
     expect((await svc.canReadBatch('ws', 'mem@x.io', paths)).get('Team/New.md')).toBe(true);
     // The access files are the ones already held: only the new file is read, from the checkout, which git's stat
-    // cache says holds the commit's version (asked before and after the read).
-    expect(gitLog).toEqual(['ls-tree', 'diff-index', 'diff-index']);
+    // cache says holds the commit's version (asked before and after the read) and its attributes say git wrote
+    // out unconverted.
+    expect(gitLog).toEqual(['ls-tree', 'diff-index', 'check-attr', 'diff-index']);
     expect(opened).toEqual([path.join('Team', 'New.md')]);
 
     // A commit that changes what a file declares is answered from the new version.
@@ -217,7 +218,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
     await commit('own page opened', { 'Team/Own.md': '# own, now plain\n' });
     reset();
     expect((await svc.canReadBatch('ws', 'nobody@x.io', paths)).get('Team/Own.md')).toBe(true);
-    expect(gitLog).toEqual(['ls-tree', 'diff-index', 'diff-index']);
+    expect(gitLog).toEqual(['ls-tree', 'diff-index', 'check-attr', 'diff-index']);
     expect(opened).toEqual([path.join('Team', 'Own.md')]);
 
     // A commit that changes an access file is read, and its rules decide. An `access.md` is read through git, never
@@ -370,6 +371,38 @@ describe('AccessControlService: reads answered from the map of the head commit',
         ['Team/Own.md', false],
       ]),
     );
+  }, 120_000);
+
+  // Git says a file is the same on disk as in the commit after its filters have run, so the bytes on disk can
+  // differ from the version's; what they declare is then no fact about the version.
+  it('reads through git a file git writes to the checkout as other bytes, by a filter or an end-of-line conversion', async () => {
+    // A filter that hides the page's frontmatter on disk, and puts it back for git: git calls the file unchanged.
+    await git('config', 'filter.fence.smudge', "sed -e 's/^---$/+++/'");
+    await git('config', 'filter.fence.clean', "sed -e 's/^+++$/---/'");
+    await commit('own page filtered, notes converted', {
+      '.gitattributes': 'Team/Own.md filter=fence\nNotes.txt text eol=crlf\n',
+    });
+    await fs.rm(path.join(repo, 'Team', 'Own.md'));
+    await fs.rm(path.join(repo, 'Notes.txt'));
+    await git('checkout', '--', 'Team/Own.md', 'Notes.txt');
+    expect(await fs.readFile(path.join(repo, 'Team', 'Own.md'), 'utf-8')).toMatch(/^\+\+\+\n/);
+    expect(await fs.readFile(path.join(repo, 'Notes.txt'), 'utf-8')).toBe('plain text\r\n');
+    expect(await git('diff-index', '--name-only', 'HEAD', '--')).toBe('');
+    reset();
+
+    const svc = service();
+    // The commit's page denies everyone but Sales, though the page on disk declares nothing.
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md', 'Notes.txt', 'Top.md']))).toEqual(
+      new Map([
+        ['Team/Own.md', false],
+        ['Notes.txt', true],
+        ['Top.md', true],
+      ]),
+    );
+    // Neither was read from the checkout; a file git writes out as it is was.
+    expect(opened).not.toContain(path.join('Team', 'Own.md'));
+    expect(opened).not.toContain('Notes.txt');
+    expect(opened).toContain('Top.md');
   }, 120_000);
 
   it('takes no member from a roles or groups file changed on disk and not committed, where the checkout alone would', async () => {
@@ -528,7 +561,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
     const second = service({}, store);
     const all = [...paths, 'Team/Since.md'];
     expect((await second.canReadBatch('ws', 'nobody@x.io', all)).get('Team/Since.md')).toBe(false);
-    expect(gitLog).toEqual(['ls-tree', 'cat-file', 'ls-tree', 'cat-file', 'diff-index', 'diff-index']);
+    expect(gitLog).toEqual(['ls-tree', 'cat-file', 'ls-tree', 'cat-file', 'diff-index', 'check-attr', 'diff-index']);
     expect(opened).toEqual([path.join('Team', 'Since.md')]);
     expect(await answers(second, 'ws', all)).toEqual(await answers(service(), 'plain', all));
   }, 120_000);
