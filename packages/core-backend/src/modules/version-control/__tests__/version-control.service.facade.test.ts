@@ -1815,6 +1815,87 @@ describe('VersionControlService.openChangeRequest — when the repository host r
 });
 
 /**
+ * Opening y→x refreshes y from x first — a merge of x into y. While x→y is
+ * open, that is exactly the merge `mergeBranch` refuses: it would land x→y's
+ * unreviewed commits on its own target and empty it. So the open goes ahead
+ * without the refresh.
+ */
+describe('VersionControlService.openChangeRequest — while a request in the reverse direction is open', () => {
+  const INPUT = { sourceBranch: 'ali/y', targetBranch: 'ali/x', title: 'The other way' };
+
+  /** A db whose inserted requests are rows the next guard read finds, as the real table's would be. */
+  function makeOpenHarness(rows: Record<string, unknown>[], mergeFromOrigin = vi.fn().mockResolvedValue({ kind: 'clean', alreadyUpToDate: false })) {
+    const git = Object.assign(makeGit(), {
+      mergeFromOrigin,
+      push: vi.fn().mockResolvedValue(undefined),
+      pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+    }) as unknown as GitService;
+    const prs = makePrs();
+    (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (prs.getPrDetail as ReturnType<typeof vi.fn>).mockImplementation(async (number: number) => ({ number }));
+    let next = 20;
+    const values = vi.fn((v: { sourceBranch: string; targetBranch: string }) => {
+      const number = next++;
+      rows.push({ number, sourceBranch: v.sourceBranch, targetBranch: v.targetBranch, state: 'open' });
+      return { returning: vi.fn(async () => [{ number }]) };
+    });
+    const db = Object.assign(makeDb(rows), { insert: vi.fn(() => ({ values })) }) as unknown as Database;
+    const svc = new VersionControlService(
+      db, git, prs, makeChangeRequestReview(), makeWorkspaceService(), makeAccessControl(),
+      makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
+    );
+    return { svc, git, values, rows };
+  }
+
+  it('opens y→x without merging x into y, and leaves x→y open and untouched', async () => {
+    const rows = [{ number: 7, sourceBranch: 'ali/x', targetBranch: 'ali/y', state: 'open' }];
+    const h = makeOpenHarness(rows);
+    await expect(h.svc.openChangeRequest('ali%2Fy', makeUser(), INPUT)).resolves.toMatchObject({ number: 20 });
+    // No refresh: x's commits never reach y, so x→y still proposes its files.
+    expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
+    expect(h.values).toHaveBeenCalledWith(expect.objectContaining({ sourceBranch: 'ali/y', targetBranch: 'ali/x' }));
+    expect(h.rows).toContainEqual({ number: 7, sourceBranch: 'ali/x', targetBranch: 'ali/y', state: 'open' });
+  });
+
+  it('refreshes as before when no request runs from the target into the source', async () => {
+    // A closed x→y, and open requests that only share one end, block nothing.
+    const rows = [
+      { number: 7, sourceBranch: 'ali/x', targetBranch: 'ali/y', state: 'closed' },
+      { number: 8, sourceBranch: 'ali/x', targetBranch: 'ali/z', state: 'open' },
+      { number: 9, sourceBranch: 'ali/z', targetBranch: 'ali/y', state: 'open' },
+    ];
+    const h = makeOpenHarness(rows);
+    await h.svc.openChangeRequest('ali%2Fy', makeUser(), INPUT);
+    expect(h.git.mergeFromOrigin).toHaveBeenCalledWith('ali%2Fy', 'ali/y', 'ali/x', expect.objectContaining({ email: 'alice@example.com' }));
+  });
+
+  it('an x→y opened at the same moment is seen: y→x waits for it, then skips the refresh', async () => {
+    let enter: () => void = () => {};
+    let release: () => void = () => {};
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const mergeFromOrigin = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ kind: 'clean', alreadyUpToDate: false });
+          enter();
+        }),
+    );
+    const h = makeOpenHarness([], mergeFromOrigin);
+    // x→y is mid-open (inside its own refresh of x from y), its row not yet there.
+    const forward = h.svc.openChangeRequest('ali%2Fx', makeUser(), { sourceBranch: 'ali/x', targetBranch: 'ali/y', title: 'Forward' });
+    await entered;
+    const reverse = h.svc.openChangeRequest('ali%2Fy', makeUser(), INPUT);
+    // A guard asked outside the pair's keys would answer "nothing open" now and merge.
+    await new Promise<void>((r) => setImmediate(r));
+    release();
+    await expect(forward).resolves.toMatchObject({ number: 20 });
+    await expect(reverse).resolves.toMatchObject({ number: 21 });
+    expect(mergeFromOrigin).toHaveBeenCalledTimes(1);
+    expect(mergeFromOrigin).toHaveBeenCalledWith('ali%2Fx', 'ali/x', 'ali/y', expect.anything());
+  });
+});
+
+/**
  * Opening a request tells the deployment's change-request listeners — once,
  * here, whether a person or an agent opened it — and answers `notified`: the
  * channels the listeners said reached the approvers. The approvers are the

@@ -525,6 +525,8 @@ export interface IVersionControlService {
    * Open a new change request. Auto-merges `targetBranch` into
    * `sourceBranch` and surfaces the resulting diff as the changes to review.
    * A conflicting merge surfaces as `ChangeRequestConflictsError` (409).
+   * No merge runs while a request from `targetBranch` into `sourceBranch` is
+   * open: that merge is the open request's, made only by applying it.
    */
   openChangeRequest(
     workspaceId: string,

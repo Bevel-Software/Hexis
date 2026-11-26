@@ -2456,6 +2456,8 @@ export class VersionControlService implements IVersionControlService {
    *      so the resulting CR shows the post-merge diff. Conflicts surface
    *      as `ChangeRequestConflictsError` (409 with the conflicting paths)
    *      so the caller (agent or UI) can route into the resolution flow.
+   *      Skipped while a request from the target into the source is open:
+   *      that merge is the open request's own, and only applying it makes it.
    *   4. Push the source branch so the remote carries every commit the CR
    *      will reference, including the auto-merge commit if any.
    *   5. Insert the `change_requests` row (author stored directly — no service
@@ -2525,22 +2527,31 @@ export class VersionControlService implements IVersionControlService {
       );
     }
 
-    // Auto-merge target → source. `mergeFromOrigin` enforces "current
-    // branch == source" and "clean working tree" before attempting; both
-    // failures surface as structured version-control errors that pass straight
-    // through to the caller.
-    const mergeOutcome = await this.git.mergeFromOrigin(
-      workspaceId,
-      input.sourceBranch,
-      input.targetBranch,
-      user,
-    );
-    if (mergeOutcome.kind === 'conflicts') {
-      throw new ChangeRequestConflictsError(
+    // Auto-merge target → source — unless a request from the target into the
+    // source is open. That refresh IS the merge `mergeBranch` refuses while
+    // the request is open: it would land the request's unreviewed commits on
+    // its own target, emptying it. So the request opens without the refresh,
+    // and the open one keeps its files. Asked here, under both branches'
+    // lifecycle keys, which every open of that request also takes: none can
+    // land between this answer and the merge.
+    //
+    // `mergeFromOrigin` enforces "current branch == source" and "clean
+    // working tree" before attempting; both failures surface as structured
+    // version-control errors that pass straight through to the caller.
+    if ((await this.openRequestBlockingMerge(input.targetBranch, input.sourceBranch)) === null) {
+      const mergeOutcome = await this.git.mergeFromOrigin(
+        workspaceId,
         input.sourceBranch,
         input.targetBranch,
-        mergeOutcome.paths,
+        user,
       );
+      if (mergeOutcome.kind === 'conflicts') {
+        throw new ChangeRequestConflictsError(
+          input.sourceBranch,
+          input.targetBranch,
+          mergeOutcome.paths,
+        );
+      }
     }
 
     // Push the source *after* the auto-merge so the remote sees the merge
