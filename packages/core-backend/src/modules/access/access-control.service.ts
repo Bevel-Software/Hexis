@@ -134,7 +134,7 @@ function sameSource(a: DenialSource, b: DenialSource): boolean {
 
 /** How close a source is to its target: the target's own scope, then deeper folders before shallower ones. */
 function closeness(s: DenialSource): number {
-  return s.kind === 'direct' ? Number.MAX_SAFE_INTEGER : s.path === '' ? 0 : s.path.split('/').length;
+  return s.kind === 'direct' ? Number.MAX_SAFE_INTEGER : s.path.split('/').length;
 }
 
 /** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
@@ -1282,23 +1282,45 @@ function eligibleHoldersResolved(
 type Holders = ReturnType<typeof eligibleHoldersResolved>;
 
 /**
- * The holders both `a` and `b` list, in `a`'s order: a principal by its kind
- * and name (the identity `eligibleHoldersResolved` keys it by), a person by
- * their email. `a` and `b` are one file's lists from two copies of its own
- * entries against the same rules (`ownCopiesOf`), so a holder in both holds
- * under either copy, as a gate asks it.
+ * One file's holders of `verb` under every copy of its own entries, against
+ * the same rules (`ownCopiesOf`); `lists[i]` is the list `copies[i]` gives.
+ * Each candidate is put to every copy's resolver, as `holderChangesFor` puts
+ * its candidates to a move's two sides: the candidates here are the rows any
+ * copy's list names, and each is kept that every copy's resolver allows. A
+ * person is put to `hasPermissionResolved` under each copy. A principal is
+ * allowed under a copy whose own list names it (so a row the list adds of
+ * its own, as Admin's on an `access.md`, stays) or whose
+ * `hasPermissionForKeys` allows its keys. Intersecting the lists instead
+ * would drop a holder the copies write differently: a role or group in one,
+ * a member of it by name in the other. One copy's list is returned as it is.
  */
-function holdersInBoth<H extends Holders>(a: H, b: Holders): H {
+function holdersUnderEveryCopy<H extends Holders>(
+  model: AccessModel,
+  verb: Verb,
+  relativePath: string,
+  copies: readonly (OwnEntries | null)[],
+  lists: readonly H[],
+): H {
+  if (lists.length === 1) return lists[0]!;
   const identity = (p: ResolvedPrincipal) => `${p.kind}\0${p.name.toLowerCase()}`;
-  const inB = new Set(b.principals.map(identity));
-  const emailsInB = new Set(b.users.map((u) => u.email));
-  const principals = a.principals.filter((p) => inB.has(identity(p)));
-  return {
-    ...a,
-    principals,
-    roles: [...new Set(principals.map((p) => p.name))],
-    users: a.users.filter((u) => emailsInB.has(u.email)),
-  };
+  const candidates = new Map<string, ResolvedPrincipal>();
+  for (const p of lists.flatMap((list) => list.principals)) {
+    if (!candidates.has(identity(p))) candidates.set(identity(p), p);
+  }
+  const principals = [...candidates.values()]
+    .filter((p) =>
+      copies.every(
+        (own, i) =>
+          lists[i]!.principals.some((q) => identity(q) === identity(p)) ||
+          hasPermissionForKeys(model, verb, keysOfHolder(model, p), relativePath, own),
+      ),
+    )
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+  const users = [...new Set(lists.flatMap((list) => list.users.map((u) => u.email)))]
+    .filter((email) => copies.every((own) => hasPermissionResolved(model, verb, email, relativePath, own)))
+    .sort((a, b) => a.localeCompare(b))
+    .map((email) => ({ name: '', email }));
+  return { ...lists[0]!, principals, roles: [...new Set(principals.map((p) => p.name))], users };
 }
 
 /**
@@ -1326,15 +1348,28 @@ function readersResolved(model: AccessModel, relativePath: string, own: OwnEntri
   return { restricted: !canEveryoneReadResolved(model, relativePath, own), principals, roles, users, publicVia };
 }
 
-/** `readersResolved` for both copies (see `holdersInBoth`): restricted when either is, public through what both say. */
-function readersInBoth(a: ReturnType<typeof readersResolved>, b: ReturnType<typeof readersResolved>): ReturnType<typeof readersResolved> {
-  const publicViaB = new Set(b.publicVia);
-  return { ...holdersInBoth(a, b), restricted: a.restricted || b.restricted, publicVia: a.publicVia.filter((k) => publicViaB.has(k)) };
-}
-
-/** The emails both maps hold (see `holdersInBoth`), with `a`'s entries. */
-function emailsInBoth<V>(a: Map<string, V>, b: ReadonlyMap<string, V>): Map<string, V> {
-  return new Map([...a].filter(([email]) => b.has(email)));
+/**
+ * `eligibleHolderEmailsResolved` under every copy of one file's own entries,
+ * by the rule of `holdersUnderEveryCopy`: every email any copy's map holds,
+ * kept where every copy allows it. A map holds only people the rules name,
+ * its own copy among them, so an email one copy alone names inline is in no
+ * other copy's map, even where that copy allows it. One copy's map is
+ * returned as it is.
+ */
+function holderEmailsUnderEveryCopy(
+  model: AccessModel,
+  verb: Verb,
+  relativePath: string,
+  copies: readonly (OwnEntries | null)[],
+  maps: readonly Map<string, { name: string; email: string }>[],
+): Map<string, { name: string; email: string }> {
+  if (maps.length === 1) return maps[0]!;
+  const emails = new Set(maps.flatMap((map) => [...map.keys()]));
+  return new Map(
+    [...emails]
+      .filter((email) => copies.every((own) => hasPermissionResolved(model, verb, email, relativePath, own)))
+      .map((email) => [email, { name: '', email }]),
+  );
 }
 
 /** One side of a move: the access model, the path, and the rules the file carries there. */
@@ -1647,10 +1682,12 @@ export class AccessControlService implements IAccessControl {
      * `fs.readFile` per node per tree build. Dropped by `invalidate()`, which
      * fires on every commit / pull / branch switch, so that is the PRIMARY
      * freshness mechanism; its age limit is only a backstop. Single-file
-     * gates (`canRead` / `canWrite`, through `rulesOf`) keep out of it: where
-     * the checkout answers them, a file's own entries are read disk-fresh, on
-     * purpose for the write gate; where a head map answers, they are the
-     * map's, read with its model.
+     * gates (`canRead` / `canWrite`, through `rulesOf` and `ownCopiesOf`)
+     * keep out of it: where the checkout answers them, a file's own entries
+     * are read disk-fresh, on purpose for the write gate; where a head map
+     * answers, a file the commit holds is judged under the map's copy of its
+     * own entries and under a copy read disk-fresh, and a file the commit
+     * does not hold under the disk-fresh copy alone.
      *
      * The memo keeps entries only for paths in the access-frontmatter
      * extension set; a batch reads any other path as before, without keeping
@@ -1874,11 +1911,17 @@ export class AccessControlService implements IAccessControl {
    * reading's copy, and, where it is the commit's and the commit holds the
    * file, the file's own entries as the checkout has them, against the same
    * rules. So a denial written into the file and not yet committed holds at
-   * once: a gate allows only what every copy allows (`gateAllows`), a holder
-   * list names only whom every copy's list names (`eligibleWriters` and the
-   * others), `explainAccess` explains the first copy that refuses, a grant's
-   * sources are the ones every copy has (`grantSources`), and a denial's are
-   * any copy's (`denialSources`, `locallyDeniedPrincipals`). The
+   * once: a gate allows only what every copy allows (`gateAllows`); a holder
+   * list (`eligibleWriters` and the others) keeps, of the rows any copy's
+   * list names, those every copy's resolver allows
+   * (`holdersUnderEveryCopy`); `explainAccess` explains the first copy that
+   * refuses, else the reading's own copy; a grant's sources are the ones
+   * every copy has (`grantSources`), and a denial's are any copy's
+   * (`denialSources`, `locallyDeniedPrincipals`). These are worked out
+   * apart, so while the copies differ they need not agree: for one person,
+   * `explainAccess` and `grantSources` can name different places, and
+   * `grantSources` none for a verb a holder list names them for (as when a
+   * role grants it in one copy and their own line in the other). The
    * checkout's copy only ever takes away; it never grants what the commit's
    * copy refuses, so a restriction moved on disk from the file to its folder
    * still holds by the commit's.
@@ -2096,7 +2139,8 @@ export class AccessControlService implements IAccessControl {
     users: { name: string; email: string }[];
   }> {
     const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
-    return copies.map((own) => eligibleHoldersResolved(model, 'owner', relativePath, own)).reduce(holdersInBoth);
+    const lists = copies.map((own) => eligibleHoldersResolved(model, 'owner', relativePath, own));
+    return holdersUnderEveryCopy(model, 'owner', relativePath, copies, lists);
   }
 
   async eligibleWriters(
@@ -2108,7 +2152,8 @@ export class AccessControlService implements IAccessControl {
     users: { name: string; email: string }[];
   }> {
     const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
-    return copies.map((own) => eligibleHoldersResolved(model, 'write', relativePath, own)).reduce(holdersInBoth);
+    const lists = copies.map((own) => eligibleHoldersResolved(model, 'write', relativePath, own));
+    return holdersUnderEveryCopy(model, 'write', relativePath, copies, lists);
   }
 
   async eligibleReaders(
@@ -2122,7 +2167,13 @@ export class AccessControlService implements IAccessControl {
     publicVia: string[];
   }> {
     const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
-    return copies.map((own) => readersResolved(model, relativePath, own)).reduce(readersInBoth);
+    const lists = copies.map((own) => readersResolved(model, relativePath, own));
+    // Restricted where any copy is; public through what every copy says.
+    return {
+      ...holdersUnderEveryCopy(model, 'read', relativePath, copies, lists),
+      restricted: lists.some((r) => r.restricted),
+      publicVia: lists[0]!.publicVia.filter((key) => lists.every((r) => r.publicVia.includes(key))),
+    };
   }
 
   async eligibleDownloaders(
@@ -2134,7 +2185,8 @@ export class AccessControlService implements IAccessControl {
     users: { name: string; email: string }[];
   }> {
     const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
-    return copies.map((own) => eligibleHoldersResolved(model, 'download', relativePath, own)).reduce(holdersInBoth);
+    const lists = copies.map((own) => eligibleHoldersResolved(model, 'download', relativePath, own));
+    return holdersUnderEveryCopy(model, 'download', relativePath, copies, lists);
   }
 
   /**
@@ -2262,7 +2314,8 @@ export class AccessControlService implements IAccessControl {
     relativePath: string,
   ): Promise<Map<string, { name: string; email: string }>> {
     const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
-    return copies.map((own) => eligibleHolderEmailsResolved(model, 'write', relativePath, own)).reduce(emailsInBoth);
+    const maps = copies.map((own) => eligibleHolderEmailsResolved(model, 'write', relativePath, own));
+    return holderEmailsUnderEveryCopy(model, 'write', relativePath, copies, maps);
   }
 
   async eligibleOwnerEmails(
@@ -2270,7 +2323,8 @@ export class AccessControlService implements IAccessControl {
     relativePath: string,
   ): Promise<Map<string, { name: string; email: string }>> {
     const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
-    return copies.map((own) => eligibleHolderEmailsResolved(model, 'owner', relativePath, own)).reduce(emailsInBoth);
+    const maps = copies.map((own) => eligibleHolderEmailsResolved(model, 'owner', relativePath, own));
+    return holderEmailsUnderEveryCopy(model, 'owner', relativePath, copies, maps);
   }
 
   async grantSources(
@@ -2348,7 +2402,7 @@ export class AccessControlService implements IAccessControl {
     // restriction made here is written into. A folder's are its `access.md` in
     // the dir model; a file node's are its own frontmatter, in every copy
     // `ownCopiesOf` reads, as its gates refuse what any copy denies.
-    const { model, copies } = await this.copiesFor(workspaceId, kind === 'folder' ? 'folder' : 'file', relativePath);
+    const { model, copies } = await this.copiesFor(workspaceId, kind, relativePath);
     const owns: OwnEntries[] = (
       kind === 'folder' ? [model.accessFilesByDir.get(relativePath)?.entries ?? null] : copies
     ).filter((o): o is OwnEntries => o !== null);
