@@ -19,9 +19,9 @@ import {
 const FETCH_TIMEOUT_MS = 15_000;
 /**
  * The key confirmation in front of every call, as ONE deadline over all of it
- * (each request, and an OAuth renewal between them): shorter, because a call
- * it cannot confirm in time goes ahead anyway, so a longer wait would only
- * delay a local tool behind a hanging deployment.
+ * (each request, its body, and an OAuth renewal between them): shorter,
+ * because a call it cannot confirm in time goes ahead anyway, so a longer wait
+ * would only delay a local tool behind a hanging deployment.
  */
 const CONFIRM_TIMEOUT_MS = 3_000;
 
@@ -94,17 +94,33 @@ function refusalSentence(refusal: { error?: unknown } | null): string | undefine
   return error && error.length <= 500 ? error : undefined;
 }
 
+/** `work`, or a DeploymentError once `signal` aborts first (the work goes on unobserved). */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined, label: string): Promise<T> {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => reject(new DeploymentError(`Gave up on ${label}: ${String(signal.reason)}`));
+    if (signal.aborted) return abort();
+    signal.addEventListener('abort', abort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
 async function getJson(
   url: string,
-  init: RequestInit & { label: string; renew?: () => Promise<string>; timeoutMs?: number },
+  init: Omit<RequestInit, 'signal'> & { label: string; renew?: () => Promise<string>; signal?: AbortSignal },
 ): Promise<unknown> {
-  const { renew, label, timeoutMs = FETCH_TIMEOUT_MS, ...request } = init;
+  // `signal`, when given, is ONE deadline over the whole read: both attempts,
+  // the renewal between them, and every body. Aborting a response's signal
+  // errors its body, so a refusal whose status has arrived is still decided
+  // (its sentence read as missing) when the body stalls past the deadline.
+  // Without one, each attempt gets its own FETCH_TIMEOUT_MS.
+  const { renew, label, signal, ...request } = init;
   const attempt = async (freshBearer?: string): Promise<Response> => {
     const headers = freshBearer
       ? { ...(request.headers as Record<string, string>), Authorization: `Bearer ${freshBearer}` }
       : request.headers;
     try {
-      return await fetch(url, { ...request, headers, signal: AbortSignal.timeout(timeoutMs) });
+      return await fetch(url, { ...request, headers, signal: signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     } catch (err) {
       throw new DeploymentError(
         `Could not reach ${label} at ${url}: ${err instanceof Error ? err.message : String(err)}`,
@@ -124,7 +140,7 @@ async function getJson(
     // an unread body pins its connection (and, kept long enough, its memory)
     // for as long as the runtime cares to wait.
     await res.body?.cancel().catch(() => {});
-    res = await attempt(await renew());
+    res = await attempt(await untilAborted(renew(), signal, label));
     retried = true;
   }
   // Every answer that is not a 2xx is consumed HERE, once, before any branch
@@ -372,9 +388,10 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
  * are cached), and would otherwise keep running on a revoked key.
  *
  * Bounded at {@link CONFIRM_TIMEOUT_MS} in TOTAL: the deadline covers the whole
- * read, an OAuth renewal (and the credential swap it awaits) included. Past it
- * this rejects as unconfirmed; the read left running settles unobserved, and
- * a renewal it started still completes for the requests after it.
+ * read, an OAuth renewal (and the credential swap it awaits) included. A
+ * request that has not answered by then rejects as unconfirmed; a refusal
+ * whose status has arrived stays a refusal, even when its body stalls past
+ * the deadline. A renewal it started still completes for the requests after it.
  *
  * Every failure PROPAGATES unchanged: a {@link ConnectionKeyRejectedError} is
  * the key-mode refusal, carrying the deployment's sentence; in OAuth mode a
@@ -384,26 +401,12 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
  * be confirmed, never that it is dead. Deciding what each means is the caller's.
  */
 export async function confirmConnectionKey(config: HexisMcpConfig): Promise<void> {
-  const read = getJson(`${config.baseUrl}/api/agent/instructions`, {
+  await getJson(`${config.baseUrl}/api/agent/instructions`, {
     label: 'the agent instructions',
     headers: { Authorization: `Bearer ${config.connectionKey}` },
     renew: renewer(config),
-    timeoutMs: CONFIRM_TIMEOUT_MS,
+    signal: AbortSignal.timeout(CONFIRM_TIMEOUT_MS),
   });
-  read.catch(() => {});
-  let timer: NodeJS.Timeout | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new DeploymentError(`Could not confirm the connection key within ${CONFIRM_TIMEOUT_MS} ms.`)),
-      CONFIRM_TIMEOUT_MS,
-    );
-    timer.unref();
-  });
-  try {
-    await Promise.race([read, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /** One `.tool` manual as `GET /api/agent/all-tools` returns it. */

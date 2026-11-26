@@ -1171,6 +1171,21 @@ export async function createHexisMcpServer(
   let keyRejected: string | null = null;
   const hostKeyRejected = config.onConnectionKeyRejected;
   /**
+   * Sticky: once ANY request has met the refusal, every request still in
+   * flight answers it too, whatever it was awaiting meanwhile (its own
+   * confirmation, which may have succeeded just before the revocation, the
+   * catalog, the hints). Called after each of those awaits and at each
+   * listing's return, so no request that outlived the refusal lists or runs.
+   */
+  const refuseIfKeyRejected = (): void => {
+    if (keyRejected !== null) throw new McpError(ErrorCode.InternalError, keyRejected);
+  };
+  /** A server going away says why: the refusal, when that is what stopped it. */
+  const shuttingDown = (): McpError =>
+    keyRejected !== null
+      ? new McpError(ErrorCode.InternalError, keyRejected)
+      : new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+  /**
    * The gate in front of every listing and every call, local-only tools and
    * meta-tools included: the deployment is asked, NOW, whether the credential
    * is live. Nothing else can answer that. A local tool may never contact the
@@ -1190,7 +1205,7 @@ export async function createHexisMcpServer(
    * 401 to every key, which would read as a revocation.
    */
   const confirmKeyBeforeServing = (): Promise<void> | undefined => {
-    if (keyRejected !== null) throw new McpError(ErrorCode.InternalError, keyRejected);
+    refuseIfKeyRejected();
     // Nothing to ask, so nothing to await: a server going away serves nothing
     // either way and each caller says so itself, and even one extra tick would
     // let a closing transport answer a parked request first.
@@ -1218,7 +1233,7 @@ export async function createHexisMcpServer(
       // through renewal.ts, and each caller answers it right after this gate,
       // in the words it uses for that case. Anything else is unconfirmed, not
       // refused (see above). Either way there is nothing more to say here.
-    });
+    }).then(refuseIfKeyRejected);
   };
 
   try {
@@ -1252,8 +1267,11 @@ export async function createHexisMcpServer(
     // that met the refusal. Applied at each return rather than by awaiting
     // the listing from a wrapper, whose extra tick would let a closing
     // transport answer a parked listing first (see the shutdown guard below).
-    const answered = (listing: ListToolsResult): ListToolsResult =>
-      signInRefused !== null ? { tools: [signInRefusedNoticeTool(signInRefused)] } : listing;
+    // A refused key decides it the same way, and before anything else.
+    const answered = (listing: ListToolsResult): ListToolsResult => {
+      refuseIfKeyRejected();
+      return signInRefused !== null ? { tools: [signInRefusedNoticeTool(signInRefused)] } : listing;
+    };
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Before anything that could ask the workspace: nothing is left to ask it with.
@@ -1288,7 +1306,7 @@ export async function createHexisMcpServer(
       // what a correctly configured, tool-less workspace shows, which is the
       // look the notice above exists to prevent. The truth is the same one
       // the call handler gives: this server is going away.
-      if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+      if (closed) throw shuttingDown();
       // The hints are read per listing, so an admin's change on the Tools page
       // is in the very next one (see `fetchToolHints`) — from a deployment
       // that serves them; an older one keeps the conservative false default.
@@ -1302,7 +1320,7 @@ export async function createHexisMcpServer(
           hints = listedHints;
         }
       }
-      if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+      if (closed) throw shuttingDown();
       return answered({ tools: listedTools(tools, apps.tools, listedHints) });
     });
 
@@ -1363,7 +1381,7 @@ export async function createHexisMcpServer(
       // now would run against a client being torn down, so the caller gets the
       // real reason rather than whatever a half-closed transport throws.
       const live = client;
-      if (closed || !live) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+      if (closed || !live) throw shuttingDown();
       inflightCalls += 1;
       try {
         const name = request.params.name;

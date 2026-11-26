@@ -5,7 +5,9 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { REVOKED_KEY_SENTENCE, createHexisMcpServer, type HexisMcpConfig } from '../index.js';
+import { createHexisMcpServer, type HexisMcpConfig } from '../index.js';
+// The deployment's own 401 sentence, which this suite's stub deployment answers with.
+import { REVOKED_KEY_SENTENCE } from '../deployment.js';
 
 /**
  * INTEGRATION: a connection key revoked while this process holds it stops
@@ -40,6 +42,8 @@ function holdDiscovery(): () => void {
 let mcpDelayMs = 0;
 /** Discovery fails: the manuals route answers 5xx. */
 let discoveryFails = false;
+/** The deployment advertises per-listing tool hints. */
+let advertiseHints = false;
 /** Every invocation the local receiver got, by tool, with the secret header it carried. */
 const received: { tool: string; secret: string | undefined }[] = [];
 
@@ -47,6 +51,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   revoked = false;
   discoveryFails = false;
+  advertiseHints = false;
   refusalSentence = REVOKED_KEY_SENTENCE;
   releaseManuals();
   holdManuals = null;
@@ -66,7 +71,7 @@ beforeAll(async () => {
           res.end(JSON.stringify(payload));
         };
         if (pathname === '/api/config') {
-          return json(200, { mcpUrl: `${base}/api/mcp`, agentInstructions: true });
+          return json(200, { mcpUrl: `${base}/api/mcp`, agentInstructions: true, toolHints: advertiseHints });
         }
         const receiver = /^\/local\/(secret|plain)$/.exec(pathname);
         if (receiver) {
@@ -202,6 +207,38 @@ async function start(extra: Partial<HexisMcpConfig> = {}): Promise<{
 
 const text = (result: unknown): string =>
   ((result as { content?: { type: string; text?: string }[] }).content ?? []).map((c) => c.text ?? '').join('');
+
+/**
+ * Holds every fetch whose URL ends in `suffix` until the server meets the
+ * refusal: the held read is answered `response` the moment the refusal is
+ * recorded, before the stop it schedules, which is the window a request in
+ * flight would otherwise slip through. Resolves `held` once a read is held.
+ */
+function holdUntilRefusal(
+  s: Awaited<ReturnType<typeof start>>,
+  suffix: string,
+  response: () => Response,
+): { held: Promise<void> } {
+  const waiting: (() => void)[] = [];
+  let heldOne!: () => void;
+  const held = new Promise<void>((resolve) => (heldOne = resolve));
+  vi.mocked(console.error).mockImplementation((...args: unknown[]) => {
+    const line = args.map(String).join(' ');
+    s.stderr.push(line);
+    if (line.includes('hexis-mcp has stopped serving')) waiting.splice(0).forEach((answer) => answer());
+  });
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    if (String(input instanceof Request ? input.url : input).split('?')[0]!.endsWith(suffix) && !revoked) {
+      return new Promise<Response>((resolve) => {
+        waiting.push(() => resolve(response()));
+        heldOne();
+      });
+    }
+    return realFetch(input, init);
+  });
+  return { held };
+}
 
 /** The server stopped serving: the transport it answered on is closed. */
 async function expectStopped(s: Awaited<ReturnType<typeof start>>, sentence = REVOKED_KEY_SENTENCE): Promise<void> {
@@ -442,6 +479,47 @@ describe('a connection key revoked while the local server holds it', () => {
       expect(text(result)).toBe('listed');
       // Asked again after the swap: the dispatch rests on a confirmation with no re-registration in progress.
       expect(confirmations).toBeGreaterThanOrEqual(2);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('runs nothing for a call whose confirmation succeeded just as another request met the refusal', { timeout: 60_000 }, async () => {
+    const s = await start();
+    try {
+      const plainTool = await s.toolNamed('plain');
+      const { held } = holdUntilRefusal(
+        s,
+        '/api/agent/instructions',
+        () => new Response(JSON.stringify({ instructions: 'Search.' }), { status: 200 }),
+      );
+      const inFlight = s.client.callTool({ name: plainTool, arguments: {} });
+      inFlight.catch(() => {});
+      await held;
+      revoked = true;
+      await expect(s.client.callTool({ name: plainTool, arguments: {} })).rejects.toThrow(REVOKED_KEY_SENTENCE);
+      await expect(inFlight).rejects.toThrow(REVOKED_KEY_SENTENCE);
+      expect(received).toEqual([]);
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  it('lists nothing for a listing still reading its hints when another request met the refusal', { timeout: 60_000 }, async () => {
+    advertiseHints = true;
+    const s = await start();
+    try {
+      const { held } = holdUntilRefusal(
+        s,
+        '/api/agent/tool-hints',
+        () => new Response(JSON.stringify({ hints: {} }), { status: 200 }),
+      );
+      const listing = s.client.listTools();
+      listing.catch(() => {});
+      await held;
+      revoked = true;
+      await expect(s.client.callTool({ name: 'list_tools', arguments: {} })).rejects.toThrow(REVOKED_KEY_SENTENCE);
+      await expect(listing).rejects.toThrow(REVOKED_KEY_SENTENCE);
     } finally {
       await s.shutdown();
     }

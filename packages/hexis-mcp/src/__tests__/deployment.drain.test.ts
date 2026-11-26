@@ -48,6 +48,50 @@ function stub(status: number, body: unknown = { error: 'no' }) {
 
 const keyConfig = (): HexisMcpConfig => ({ baseUrl: 'https://x.example', connectionKey: 'bevel_k' }) as HexisMcpConfig;
 
+/**
+ * A refusal whose status arrived and whose body then stalls. Like a real
+ * fetch, aborting the request's signal errors the body.
+ */
+function stalled(status: number, init?: RequestInit): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      init?.signal?.addEventListener('abort', () => controller.error(init.signal!.reason));
+    },
+  });
+  return new Response(stream, { status, headers: { 'content-type': 'application/json' } });
+}
+
+describe('a refusal whose body stalls past the confirmation deadline stays a refusal', () => {
+  it('key mode: the 401 rejects the key', { timeout: 20_000 }, async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init?: RequestInit) => stalled(401, init)),
+    );
+    await expect(confirmConnectionKey(keyConfig())).rejects.toThrow(/connection key was rejected/);
+  });
+
+  it('browser sign-in mode: the 401 after renewing stays the sign-in refusal', { timeout: 20_000 }, async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        calls += 1;
+        return calls === 1 ? new Response('{}', { status: 401 }) : stalled(401, init);
+      }),
+    );
+    const config = {
+      ...keyConfig(),
+      renewConnectionKey: async () => ({ token: 'fresh', expiresInMs: 3_600_000 }),
+    } as HexisMcpConfig;
+    try {
+      await expect(confirmConnectionKey(config)).rejects.toThrow(/even after refreshing it/);
+      expect(calls).toBe(2);
+    } finally {
+      closeRenewal(config);
+    }
+  });
+});
+
 describe('every refusal the key check meets is drained', () => {
   it.each([
     ['a revoked key (401)', 401, {}, /connection key was rejected/],
