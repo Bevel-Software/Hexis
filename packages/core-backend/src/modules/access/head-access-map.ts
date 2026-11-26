@@ -315,9 +315,9 @@ export class HeadMaps<M> implements IHeadMaps<M> {
   /**
    * Read the versions in `unseen` for the map of `commit`, which the checkout at `repoDir` stands on: from the
    * checkout where it holds the version's own bytes, through git everywhere else. It holds them where git says the
-   * file is the same there as in the commit, git writes it out unconverted (`rewrittenOnCheckout`) and it is the
-   * version's size, which an end-of-line conversion never leaves a file: git's "same" is told after its filters, so
-   * it alone is no proof the bytes on disk are the version's. Remembers
+   * file is the same there as in the commit, git can have written it out only as it is (`rewrittenOnCheckout`) and
+   * it is the version's size: git's "same" is told after its filters, so it alone is no proof the bytes on disk are
+   * the version's. Remembers
    * what each version declares and notes the ones that declare something in `own`, as `read` does. The map holds
    * the commit's versions only, never a newer one on disk: its model is the commit's, and a page read as the disk
    * has it beside rules read as the commit has them could pair a restriction's old place with its new one, and
@@ -348,17 +348,29 @@ export class HeadMaps<M> implements IHeadMaps<M> {
   }
 
   /**
-   * The paths among `paths` that git may write to the checkout as other bytes than their version's: a
-   * `working-tree-encoding`, a `filter` (git-lfs is one) or `ident` applies to them. One `git check-attr`, no file
-   * read. An end-of-line conversion needs no attribute read: on checkout git only adds a CR before an LF, so a file
-   * it converted is not its version's size (`readDeclaredOnDisk`).
+   * The paths among `paths` that git may have written to the checkout as other bytes than their version's.
+   *
+   * Every path, when git's configuration names a filter driver (a `smudge` or `process` command; git-lfs installs
+   * one). A file keeps the bytes it was written out with until a checkout writes it again, so one smudged under an
+   * attribute since removed is smudged still, and no attribute read now can tell. Without a driver no filter runs,
+   * whatever the attributes say. The server configures none; the production image installs none.
+   *
+   * Otherwise the paths a `working-tree-encoding` or `ident` attribute applies to, in one `git check-attr`. An
+   * end-of-line conversion needs no attribute read: on checkout git only adds a CR before an LF, so a file it
+   * converted is not its version's size (`readDeclaredOnDisk`), whichever attributes it was written out under.
+   *
+   * Like the `diff-index` reads around it, this runs without the workspace's reservation: a checkout that moves on
+   * meanwhile and writes a file out as other bytes is caught by the second `diff-index` or by the size, and a
+   * filter by the configuration, which no checkout changes.
    */
   private async rewrittenOnCheckout(repoDir: string, paths: string[]): Promise<Set<string>> {
     const rewritten = new Set<string>();
     if (paths.length === 0) return rewritten;
+    const { stdout: names } = await this.git.run(repoDir, ['config', '--list', '--name-only']);
+    if (names.split('\n').some((name) => /^filter\..+\.(?:smudge|process)$/i.test(name.trim()))) return new Set(paths);
     const { stdout } = await this.git.run(
       repoDir,
-      ['check-attr', '-z', '--stdin', 'working-tree-encoding', 'filter', 'ident'],
+      ['check-attr', '-z', '--stdin', 'working-tree-encoding', 'ident'],
       { input: paths.join('\0'), encoding: 'buffer' },
     );
     // `<path> NUL <attribute> NUL <value> NUL`, once per path and attribute.
