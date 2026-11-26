@@ -1215,6 +1215,50 @@ describe('read-permission gating', () => {
     expect(names).not.toContain('Secret.md');
   });
 
+  it('list_files answers every path under a denied folder with read_file\'s 403, and nothing else', async () => {
+    // `Vault/` denies the caller, as an `access.md` there would: the folder
+    // and everything under it.
+    const vaultGate = {
+      canRead: async (_w: string, _u: string, rel: string) => rel !== 'Vault' && !rel.startsWith('Vault/'),
+      canReadBatch: async (_w: string, _u: string, paths: string[]) =>
+        new Map(paths.map((p) => [p, p !== 'Vault' && !p.startsWith('Vault/')])),
+    } as unknown as IAccessControl;
+    const seed = async (): Promise<void> => {
+      await fs.writeFile(`${KB_DIR}/Vault/top.md`, 'top\n');
+      await fs.writeFile(`${KB_DIR}/Vault/Inner/plan.md`, 'plan\n');
+    };
+    const paths = ['Vault', 'Vault/Inner', 'Vault/NoSuchDir', 'Vault/top.md'].map((p) => `${KB_DIR}/${p}`);
+
+    const denied = await start('read', vaultGate);
+    await seed();
+    for (const path of paths) {
+      const listed = await post(`${denied}/api/agent/tools/list_files`, { path });
+      const read = await post(`${denied}/api/agent/tools/read_file`, { path });
+      expect(listed.status, path).toBe(403);
+      const body = await listed.text();
+      expect(body, path).toBe(await read.text());
+      expect(body, path).toContain(`You don't have permission to read \\"${path}\\"`);
+    }
+    // The folder above the denied one still lists, and names the denied
+    // folder (it is an entry of a folder the caller may read).
+    const above = (await (await post(`${denied}/api/agent/tools/list_files`, { path: KB_DIR })).json()) as {
+      entries: { name: string }[];
+    };
+    expect(above.entries.map((e) => e.name)).toContain('Vault');
+
+    // A caller the folder admits lists it as before.
+    const admitted = await start('read', denyReads(new Set()));
+    await seed();
+    const vault = (await (await post(`${admitted}/api/agent/tools/list_files`, { path: paths[0] })).json()) as {
+      entries: { name: string; type: string }[];
+    };
+    expect(vault.entries.map((e) => [e.name, e.type]).sort()).toEqual([
+      ['Inner', 'directory'],
+      ['top.md', 'file'],
+    ]);
+    expect((await post(`${admitted}/api/agent/tools/list_files`, { path: paths[1] })).status).toBe(200);
+  });
+
   it('grep never returns a line from an unreadable KB node', async () => {
     const base = await startGated();
     const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: KB_DIR })).json()) as {
