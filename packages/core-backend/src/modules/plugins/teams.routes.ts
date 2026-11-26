@@ -4,8 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('teams');
 import {
   isPersonalPluginDir,
-  isPersonalPluginFolder,
-  pluginOfPath,
+  personalPluginFolderOf,
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/index.js';
@@ -144,7 +143,4 @@ export function createTeamsRoutes(
 const accessMdOf = (folder: string) => `${folder}/access.md`;
 const skillMdOf = (skillPath: string) => `${skillPath}/SKILL.md`;
 /** Under `Plugins/personal-<id>/…` — one person's space, whatever it grants. */
-const inPersonalPlugin = (repoPath: string, layout: KbLayout) => {
-  const folder = pluginOfPath(repoPath, layout);
-  return folder !== null && isPersonalPluginFolder(folder);
-};
+const inPersonalPlugin = (repoPath: string, layout: KbLayout) => personalPluginFolderOf(repoPath, layout) !== null;

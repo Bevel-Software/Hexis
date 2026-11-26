@@ -53,7 +53,6 @@ import {
 } from '../../../shared/domain-errors.js';
 import {
   GitRunError,
-  assertOneSpecPerLine,
   redactGitToken,
   type GitCredentials,
   type GitRunOptions,
@@ -61,6 +60,7 @@ import {
   type IGitRunner,
 } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from './node-git-runner.js';
+import { catFileBatchBytes } from '../../../shared/cat-file-batch.js';
 import { printable } from '../../../shared/printable.js';
 import { branchForWorkspaceId } from '../../../shared/workspace-id.js';
 import { sanitizeError } from '../sanitize-error.js';
@@ -4648,33 +4648,13 @@ export class GitService implements IGitService {
     ref: string,
     repoRelativePath: string,
   ): Promise<{ bytes: Buffer; blobId: string } | null> {
-    // The spec has to be ONE line: the path is refused a control character
-    // twice over before it gets here (at the route's normaliser and again at
-    // `assertValidRelativePath`), and this is the fence at the protocol —
-    // `--batch` would otherwise read `<sha>:Docs/x.md\nzzz` as two object
-    // names and answer about the first, under the gates of the second.
-    const spec = `${ref}:${repoRelativePath}`;
-    assertOneSpecPerLine([spec]);
-    const { stdout } = await this.gitBytes(cwd, ['cat-file', '--batch'], {
-      input: `${spec}\n`,
-    });
-    const nl = stdout.indexOf(0x0a);
-    if (nl < 0) throw new Error('unexpected end of git cat-file output');
-    // The spec may itself contain spaces (a KB file routinely does), hence the
-    // endsWith checks rather than a split — same protocol reading as the
-    // access resolver's `catFileBatch`.
-    const header = stdout.subarray(0, nl).toString('utf-8');
-    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) return null;
-    const [blobId, type, rawSize] = header.split(' ');
-    // A tree here would be the per-file gate bypassed, and `assertNotTreeAtRef`
-    // is what refuses it before this runs; anything else non-blob (a tag, a
-    // commit) is not a file either. Nothing to serve in either case.
-    if (type !== 'blob' || blobId === undefined) return null;
-    const size = Number(rawSize);
-    if (!Number.isSafeInteger(size) || size < 0) {
-      throw new Error(`unexpected git cat-file header: ${header}`);
-    }
-    return { bytes: stdout.subarray(nl + 1, nl + 1 + size), blobId };
+    // One spec per LINE is fenced inside the reader (the path is also refused
+    // a control character at the route's normaliser and at
+    // `assertValidRelativePath`). A tree here would be the per-file gate
+    // bypassed, and `assertNotTreeAtRef` refuses it before this runs; anything
+    // else non-blob (a tag, a commit) is not a file either. Nothing to serve.
+    const [read] = await catFileBatchBytes(this.gitRunner, cwd, [`${ref}:${repoRelativePath}`]);
+    return read?.kind === 'blob' ? { bytes: read.bytes, blobId: read.oid } : null;
   }
 
   /**
@@ -4782,6 +4762,77 @@ export class GitService implements IGitService {
       repoRelativePath,
     ]);
     return stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+  }
+
+  /**
+   * Since where on HEAD's first-parent chain `repoRelativePath` has held what
+   * `holds` asks of its content, without a break: the position (lower is
+   * earlier) of the oldest commit in the unbroken run of the file's committed
+   * versions, newest back, that satisfy `holds`. Null when the version on HEAD
+   * does not: absent, deleted, or not committed yet. What decides which of two
+   * people's personal tools keeps a secret namespace both claim: the one whose
+   * file has DECLARED it longest, so a server added to an old `mcp.json`, or an
+   * id edited into an old `.tool`, counts from that commit, not from the
+   * file's. A version that stopped holding starts the run over, and so does a
+   * move: renames are not followed, as in `pathHistory`. A position,
+   * not a commit date: two commits in the same second, or under a clock that
+   * went back, keep their order; one commit is one position.
+   *
+   * First-parent: a change made on a draft reached HEAD when the draft was
+   * merged (merges are `--no-ff`), not when the draft's own commit was made.
+   * The path is literal (`git()` sets `GIT_LITERAL_PATHSPECS`), never a glob.
+   *
+   * Lock-free, like `pathHistory`: a read of history that a concurrent commit
+   * can only extend, and a change committed a moment after this read is the
+   * newer claim either way, which is what null already says.
+   */
+  async heldSince(
+    workspaceId: string,
+    repoRelativePath: string,
+    holds: (content: string) => boolean,
+  ): Promise<number | null> {
+    const cwd = await this.repoDir(workspaceId);
+    // Newest first: the newest commit that touched the file holds HEAD's
+    // version. `--raw` names each version's blob from the commit's own tree
+    // diff, so absence is git's TREE answer (a deletion's zero id), never the
+    // object store's: a version whose blob cannot be read is a broken history
+    // and throws, rather than reading as a claim that ended.
+    const { stdout } = await this.git(cwd, [
+      'log', '--first-parent', '--diff-merges=first-parent', '--no-renames', '--raw', '--no-abbrev',
+      '--format=%H', 'HEAD', '--', repoRelativePath,
+    ]);
+    const touches: { sha: string; blobId: string | null }[] = [];
+    for (const line of stdout.split('\n')) {
+      if (line.startsWith(':')) {
+        // `:<old mode> <new mode> <old id> <new id> <status>\t<path>`: the path
+        // is the literal one asked for. Only a regular file or a link holds
+        // content; a deletion (mode 000000) and a submodule (160000) do not.
+        const [, mode, , blobId] = line.slice(1).split(' ');
+        const touch = touches.at(-1);
+        if (touch) touch.blobId = mode === '100644' || mode === '100755' || mode === '120000' ? blobId ?? null : null;
+      } else if (line.trim() !== '') {
+        touches.push({ sha: line.trim(), blobId: null });
+      }
+    }
+    // The versions back to the newest one where the file was not there.
+    const gap = touches.findIndex((t) => t.blobId === null);
+    const run = gap < 0 ? touches : touches.slice(0, gap);
+    if (run.length === 0) return null;
+    // Every version in one process: a long-edited file costs three git calls,
+    // not one per edit.
+    const versions = await catFileBatchBytes(this.gitRunner, cwd, run.map((t) => t.blobId as string));
+    let since: string | null = null;
+    for (const [k, { sha }] of run.entries()) {
+      const version = versions[k];
+      if (version?.kind !== 'blob') throw new Error(`git history of ${repoRelativePath} names a version at ${sha} that cannot be read`);
+      if (!holds(version.bytes.toString('utf-8'))) break;
+      since = sha;
+    }
+    if (since === null) return null;
+    // That commit is on HEAD's first-parent chain, so its own first-parent
+    // depth is its position on the chain.
+    const { stdout: depth } = await this.git(cwd, ['rev-list', '--first-parent', '--count', since]);
+    return Number(depth.trim());
   }
 
   /**

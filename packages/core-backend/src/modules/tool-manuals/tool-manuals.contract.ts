@@ -394,6 +394,19 @@ export type LiveDeclaration =
   | { manual: ToolManualSummary; variable?: ToolVariable; refused?: undefined }
   | { refused: string; manual?: undefined; variable?: undefined };
 
+/**
+ * The one question the catalog asks of git: since where, on the scanned
+ * branch's first-parent chain (lower is earlier), a file's committed versions
+ * have all held what `holds` asks of their content, or null when the version
+ * on the branch does not. It settles which of two people's personal tools
+ * keeps a secret namespace both claim: the one whose file has declared that
+ * namespace longest, so a later write never takes an earlier tool, or the
+ * secrets set for it, away from its owner.
+ */
+export interface ToolManualHistorySource {
+  heldSince(workspaceId: string, repoRelativePath: string, holds: (content: string) => boolean): Promise<number | null>;
+}
+
 export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
@@ -448,6 +461,13 @@ export interface IToolManualService {
    * tool, which is the honest answer for a deployment with no MCP surface.
    */
   setHiddenTools(source: HiddenToolSource): void;
+
+  /**
+   * Wire the history a personal-tool namespace clash is settled from (git is
+   * constructed after this service). Without it such a clash cannot be
+   * settled, and every manual in it is refused rather than one picked by path.
+   */
+  setHistory(history: ToolManualHistorySource): void;
 
   /**
    * One line per manual the caller can read, each carrying the manual's
