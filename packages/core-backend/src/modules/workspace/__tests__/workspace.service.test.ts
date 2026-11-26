@@ -1,12 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { WorkspaceService, type ArchiveLanding } from '../workspace.service.js';
+import { ArchiveRefusedError, WorkspaceService, type ArchiveEntryJudge, type ArchiveLanding } from '../workspace.service.js';
+import { PathHeldError } from '../../kb-fs/index.js';
+import type { IDiffService } from '../../diff/index.js';
+import { AccessDeniedError } from '../../access-model/index.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
@@ -72,6 +76,27 @@ function diskLanding(workspaceDir: string): ArchiveLanding & { calls: string[][]
   };
 }
 
+/**
+ * An archive judge whose `entry` is `guard`. Unless `decides` says otherwise,
+ * no entry decides the archive, and a gate's refusal at the lock (an
+ * `AccessDeniedError`) is the entry's alone, as the real judge takes it.
+ */
+function judgeOf(
+  guard: (wsPath: string, kind: 'file' | 'dir') => Promise<void> = async () => undefined,
+  decides: (wsPath: string | null, entryName: string) => boolean = () => false,
+): ArchiveEntryJudge {
+  return {
+    entry: guard,
+    refusedAtLock: (_wsPath, err) => {
+      if (!(err instanceof AccessDeniedError)) throw err;
+    },
+    skipped: (wsPath, entryName, why) =>
+      decides(wsPath, entryName)
+        ? new ArchiveRefusedError(wsPath ?? entryName, `decided by ${entryName}: ${why instanceof Error ? why.message : String(why)}`, 422)
+        : null,
+  };
+}
+
 describe('WorkspaceService — branch-keyed identity', () => {
   let root: string;
 
@@ -89,7 +114,7 @@ describe('WorkspaceService — branch-keyed identity', () => {
   });
 
   it('a malformed workspace id (bad percent-escape) rejects as a 400 BranchNameError, not a 500', async () => {
-    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     // `%zz` fails decodeURIComponent, falls back to itself, and `%` never
     // passes the branch-name rules — the cold-path bootstrap must surface
     // that as the status-carrying domain error, not a wrapped plain Error.
@@ -101,7 +126,7 @@ describe('WorkspaceService — branch-keyed identity', () => {
 
   it('returns workspace info derived from the branch — no .workspace.json on disk', async () => {
     const { workspaceId, workspaceDir } = await seedBranchWorkspace(root, 'target-company-state');
-    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     const info = await svc.getOrCreateForBranch('target-company-state');
 
     expect(info.id).toBe(workspaceId);
@@ -114,7 +139,7 @@ describe('WorkspaceService — branch-keyed identity', () => {
   it('two branches map to distinct directories', async () => {
     const a = await seedBranchWorkspace(root, 'target-company-state');
     const b = await seedBranchWorkspace(root, 'alice/feature');
-    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
 
     const infoA = await svc.getOrCreateForBranch('target-company-state');
     const infoB = await svc.getOrCreateForBranch('alice/feature');
@@ -137,7 +162,7 @@ describe('WorkspaceService — branch-keyed identity', () => {
     const squatter = path.join(workspaceDir, 'knowledge-base');
     await fs.writeFile(squatter, 'not a clone', 'utf8');
 
-    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     await expect(svc.getOrCreateForBranch('target-company-state')).rejects.toThrow(
       /"knowledge-base" in this workspace exists but is not a directory/,
     );
@@ -145,21 +170,21 @@ describe('WorkspaceService — branch-keyed identity', () => {
   });
 
   it('rejects invalid branch names before touching disk', async () => {
-    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     await expect(svc.getOrCreateForBranch('')).rejects.toThrow();
     await expect(svc.getOrCreateForBranch('-bad-leading-dash')).rejects.toThrow();
   });
 
   it('getOrCreateForUser falls back to target-company-state when no branch is supplied', async () => {
     await seedBranchWorkspace(root, 'target-company-state');
-    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     const info = await svc.getOrCreateForUser({ id: 'u', email: 'a@b.c', name: 'A' });
     expect(info.id).toBe(workspaceIdForBranch('target-company-state'));
   });
 
   it('getOrCreateForUser respects an explicit branch override', async () => {
     await seedBranchWorkspace(root, 'alice/feature');
-    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     const info = await svc.getOrCreateForUser({ id: 'u', email: 'a@b.c', name: 'A' }, 'alice/feature');
     expect(info.id).toBe(workspaceIdForBranch('alice/feature'));
   });
@@ -179,7 +204,7 @@ describe('WorkspaceService.createDirectory', () => {
     workspaceDir = seeded.workspaceDir;
     repoDir = path.join(workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     // Hydrate the in-memory map so subsequent ops resolve fast.
     await svc.getWorkspacePath(workspaceId);
   });
@@ -290,7 +315,7 @@ describe('WorkspaceService.writeFile — expectedContent', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
   });
 
   afterEach(async () => {
@@ -431,7 +456,7 @@ describe('WorkspaceService.withPathTurn', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
   });
 
   afterEach(async () => {
@@ -659,7 +684,7 @@ describe('WorkspaceService.assertContentMatches', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
   });
 
   afterEach(async () => {
@@ -704,7 +729,7 @@ describe('WorkspaceService.createFolderZip', () => {
     workspaceDir = seeded.workspaceDir;
     repoDir = path.join(workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     await svc.getWorkspacePath(workspaceId);
   });
 
@@ -902,7 +927,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   });
 
   it('clones a branch on first bootstrap and checks out the right ref', async () => {
-    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), realDisk());
     const info = await svc.getOrCreateForBranch('target-company-state');
 
     const repo = path.join(info.absolutePath, 'knowledge-base');
@@ -911,7 +936,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   });
 
   it('uses an existing sibling clone as a --reference and stays dissociated', async () => {
-    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), realDisk());
     // First branch: plain clone — becomes the sibling for the next bootstrap.
     await svc.getOrCreateForBranch('target-company-state');
     // Second branch: should borrow the first clone's objects, then dissociate.
@@ -939,7 +964,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   // post-merge pull of a target branch. Every clone this service hands out must
   // therefore track exactly one upstream ref through exactly one refspec.
   it('stamps a single fetch refspec and upstream ref on a fresh clone', async () => {
-    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), realDisk());
     const info = await svc.getOrCreateForBranch('target-company-state');
     const repo = path.join(info.absolutePath, 'knowledge-base');
 
@@ -963,7 +988,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
     await runGit(repo, ['config', '--add', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
     await runGit(repo, ['config', '--add', 'branch.alice/draft.merge', 'refs/heads/target-company-state']);
 
-    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), realDisk());
     await svc.getOrCreateForBranch('alice/draft');
 
     expect(await gitOut(repo, ['config', '--get-all', 'remote.origin.fetch']))
@@ -975,7 +1000,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   });
 
   it('notifies the cloned-workspace listener with the workspace id after a clone', async () => {
-    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(workspacesRoot, upstream, testKbContext(), realDisk());
     const cloned: string[] = [];
     svc.setWorkspaceClonedListener((id) => cloned.push(id));
 
@@ -1003,7 +1028,7 @@ describe('WorkspaceService — symbolic links', () => {
     const seeded = await seedBranchWorkspace(root, 'main');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
   });
 
   afterEach(async () => {
@@ -1088,7 +1113,7 @@ describe('WorkspaceService — symbolic links', () => {
     // A mounted-volume shape: the whole workspaces root reached through a link.
     const mount = path.join(root, 'mount');
     await fs.symlink(root, mount, linkType);
-    const viaMount = newWorkspaceService(mount, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const viaMount = newWorkspaceService(mount, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     expect(await viaMount.readFile(workspaceId, rel)).toBe('Hello.');
     await viaMount.writeFile(workspaceId, rel, 'Hello again.');
     expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Hello again.');
@@ -1121,7 +1146,7 @@ describe('WorkspaceService.sweepOrphanedWorkspaces', () => {
 
   it('removes the clone of a branch that is not in the known set', async () => {
     const { workspaceId, workspaceDir } = await seedBranchWorkspace(root, 'target-company-state');
-    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    const svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     await svc.getOrCreateForBranch('target-company-state');
 
     // The branch vanishes from the known set; the sweep reclaims its clone.
@@ -1142,7 +1167,7 @@ describe('WorkspaceService.readAllKbFiles', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     repoRoot = path.join(seeded.workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     await svc.getWorkspacePath(workspaceId);
   });
 
@@ -1201,7 +1226,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     workspaceDir = seeded.workspaceDir;
     repoDir = path.join(workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', testKbContext(), realDisk());
     await svc.getWorkspacePath(workspaceId);
   });
 
@@ -1218,9 +1243,9 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
 
   it('skips entries the write guard rejects and never writes them to disk', async () => {
     await writeZip('a.zip', { 'keep.md': 'ok', 'blocked.md': 'no' });
-    const res = await svc.unzipFile(workspaceId, 'a.zip', 'out', async (wsPath) => {
+    const res = await svc.unzipFile(workspaceId, 'a.zip', 'out', judgeOf(async (wsPath) => {
       if (wsPath.endsWith('blocked.md')) throw new Error('Not in this conversation.');
-    }, diskLanding(workspaceDir));
+    }), diskLanding(workspaceDir));
     // An unprefixed destination is the repository's own `out/`, and the
     // extracted paths are reported workspace-relative, so prefixed.
     expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
@@ -1237,9 +1262,9 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     zip.addFile('keep.md', Buffer.from('ok'));
     await fs.writeFile(path.join(repoDir, 'c.zip'), zip.toBuffer());
 
-    const res = await svc.unzipFile(workspaceId, 'c.zip', 'out', async (wsPath) => {
-      if (wsPath.includes('blocked-dir')) throw new Error('Not in this conversation.');
-    }, diskLanding(workspaceDir));
+    const res = await svc.unzipFile(workspaceId, 'c.zip', 'out', judgeOf(async (wsPath, kind) => {
+      if (wsPath.includes('blocked-dir') && kind === 'dir') throw new Error('Not in this conversation.');
+    }), diskLanding(workspaceDir));
 
     expect(res.extracted).toEqual(['knowledge-base/out/keep.md']);
     expect(res.skipped).toContainEqual({ path: 'blocked-dir/', reason: 'Not in this conversation.' });
@@ -1305,9 +1330,9 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
 
   it('does not create the destination directory when every entry is blocked', async () => {
     await writeZip('d.zip', { 'a.md': '1', 'b.md': '2' });
-    const res = await svc.unzipFile(workspaceId, 'd.zip', 'out', async () => {
+    const res = await svc.unzipFile(workspaceId, 'd.zip', 'out', judgeOf(async () => {
       throw new Error('Not in this conversation.');
-    }, diskLanding(workspaceDir));
+    }), diskLanding(workspaceDir));
     expect(res.extracted).toEqual([]);
     expect(res.skipped).toHaveLength(2);
     await expect(fs.stat(path.join(repoDir, 'out'))).rejects.toThrow();
@@ -1397,9 +1422,9 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
       workspaceId,
       'one.zip',
       'out',
-      async (wsPath) => {
+      judgeOf(async (wsPath) => {
         if (wsPath.endsWith('refused.md')) throw new Error('Not in this conversation.');
-      },
+      }),
       { writeFiles: async (writes) => void handed.push(writes.map((w) => ({ path: w.path, content: w.content.toString() }))) },
     );
     // In the archive's own order (the zip writer keeps its entries sorted).
@@ -1429,6 +1454,137 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     ).rejects.toBe(failure);
     await expect(fs.stat(path.join(repoDir, 'out'))).rejects.toThrow();
   });
+
+  /** `zip` with the CRC of its entry `name` broken in both headers, so the reader refuses that entry alone. */
+  async function withBrokenChecksum(zip: { toBuffer(): Buffer }, name: string): Promise<Buffer> {
+    const archive = zip.toBuffer();
+    const nameBytes = Buffer.from(name);
+    for (const [signature, nameAt, crcAt] of [
+      [[0x50, 0x4b, 0x03, 0x04], 30, 14],
+      [[0x50, 0x4b, 0x01, 0x02], 46, 16],
+    ] as const) {
+      for (let at = archive.indexOf(Buffer.from(signature)); at !== -1; at = archive.indexOf(Buffer.from(signature), at + 4)) {
+        if (archive.subarray(at + nameAt, at + nameAt + nameBytes.length).equals(nameBytes)) {
+          archive.writeUInt32LE((archive.readUInt32LE(at + crcAt) ^ 0xffffffff) >>> 0, at + crcAt);
+        }
+      }
+    }
+    return archive;
+  }
+
+  it('refuses the whole extraction when an entry the judge says decides it is skipped for one of the extraction\'s own reasons', async () => {
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip();
+    zip.addFile('Secret/access.md', Buffer.from('---\nread:\n  - deny everyone\n---\n'));
+    zip.addFile('Secret/budget.md', Buffer.from('numbers'));
+    await fs.writeFile(path.join(repoDir, 'rules.zip'), await withBrokenChecksum(zip, 'Secret/access.md'));
+    const landing = diskLanding(workspaceDir);
+
+    const err = await svc
+      .unzipFile(workspaceId, 'rules.zip', 'out', judgeOf(undefined, (wsPath) => wsPath?.endsWith('/access.md') === true), landing)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ArchiveRefusedError);
+    expect((err as Error).message).toContain('could not be read');
+    expect(landing.calls).toEqual([]);
+    await expect(fs.stat(path.join(repoDir, 'out'))).rejects.toThrow();
+  });
+
+  it('skips a file whose lock the gates refuse, with the gate\'s refusal, and reports the rest as extracted', async () => {
+    await writeZip('gated.zip', { 'open.md': 'open', 'locked.md': 'locked' });
+    const refusal = new AccessDeniedError({ path: 'knowledge-base/out/locked.md', eligibleRoles: ['Admin'], eligibleUsers: [] });
+    const landing: ArchiveLanding = {
+      // The lock-aware batch, as it meets a gate refusing one path's lock: it
+      // asks `refused`, drops that path, and lands the rest.
+      writeFiles: async (writes, _summary, _deletes, _check, refused) => {
+        for (const w of writes) {
+          if (w.path.endsWith('locked.md')) {
+            refused?.(w.path, refusal);
+            continue;
+          }
+          await fs.mkdir(path.dirname(path.join(workspaceDir, w.path)), { recursive: true });
+          await fs.writeFile(path.join(workspaceDir, w.path), w.content);
+        }
+      },
+    };
+
+    const res = await svc.unzipFile(workspaceId, 'gated.zip', 'out', judgeOf(), landing);
+
+    expect(res.extracted).toEqual(['knowledge-base/out/open.md']);
+    expect(res.skipped).toEqual([{ path: 'locked.md', reason: refusal.message }]);
+  });
+
+  it('refuses the whole extraction when the gates refuse the lock of an entry that decides it', async () => {
+    await writeZip('rules.zip', { 'access.md': '---\nread:\n  - deny everyone\n---\n', 'page.md': 'page' });
+    const refusal = new AccessDeniedError({ path: 'knowledge-base/out/access.md', eligibleRoles: [], eligibleUsers: [] });
+    let landed = false;
+    const landing: ArchiveLanding = {
+      writeFiles: async (writes, _summary, _deletes, _check, refused) => {
+        for (const w of writes) if (w.path.endsWith('access.md')) refused?.(w.path, refusal);
+        landed = true;
+      },
+    };
+
+    const err = await svc
+      .unzipFile(workspaceId, 'rules.zip', 'out', judgeOf(undefined, (wsPath) => wsPath?.endsWith('/access.md') === true), landing)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ArchiveRefusedError);
+    expect(landed).toBe(false);
+  });
+
+  it('a commit whose push needs resolution has landed: its directory entries are created and its files synced before the error goes on', async () => {
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip();
+    zip.addFile('folder/', Buffer.alloc(0)); // bare directory entry
+    zip.addFile('page.md', Buffer.from('ok'));
+    await fs.writeFile(path.join(repoDir, 'shared-later.zip'), zip.toBuffer());
+    const synced: string[] = [];
+    svc.setDiffService({ syncFromDisk: async (_ws: string, p: string) => void synced.push(p) } as unknown as IDiffService);
+    const pending = new PushNeedsAgentResolutionError('target-company-state', 'knowledge-base/out/page.md', 'rejected', 'retry later', 'refused');
+    const landing: ArchiveLanding = {
+      writeFiles: async (writes) => {
+        for (const w of writes) {
+          await fs.mkdir(path.dirname(path.join(workspaceDir, w.path)), { recursive: true });
+          await fs.writeFile(path.join(workspaceDir, w.path), w.content);
+        }
+        throw pending;
+      },
+    };
+
+    await expect(svc.unzipFile(workspaceId, 'shared-later.zip', 'out', undefined, landing)).rejects.toBe(pending);
+
+    expect((await fs.stat(path.join(repoDir, 'out', 'folder'))).isDirectory()).toBe(true);
+    expect(synced).toEqual(['knowledge-base/out/page.md']);
+  });
+
+  it('answers a landing refused by a held lock with the 409 naming the path and the holder', async () => {
+    await writeZip('held.zip', { 'page.md': 'page' });
+    const landing: ArchiveLanding = {
+      writeFiles: async () => {
+        throw new PathHeldError('knowledge-base/out/page.md', 'J. Smith');
+      },
+    };
+
+    await expect(svc.unzipFile(workspaceId, 'held.zip', 'out', undefined, landing)).rejects.toMatchObject({
+      status: 409,
+      message: '"knowledge-base/out/page.md" is being edited by J. Smith, so nothing was extracted. Try again once they are done.',
+    });
+  });
+
+  it('passes on a landing failure that only reads like a held lock, as it is', async () => {
+    await writeZip('worded.zip', { 'page.md': 'page' });
+    const worded = new Error(
+      'Skipped editing "knowledge-base/out/page.md" — locked by Bo. Continuing with other edits; try this one again later.',
+    );
+    const landing: ArchiveLanding = {
+      writeFiles: async () => {
+        throw worded;
+      },
+    };
+
+    await expect(svc.unzipFile(workspaceId, 'worded.zip', 'out', undefined, landing)).rejects.toBe(worded);
+  });
 });
 
 /**
@@ -1452,7 +1608,7 @@ describe('WorkspaceService — every operation resolves inside the repository', 
     workspaceDir = seeded.workspaceDir;
     repoDir = path.join(workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
-    svc = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext(), new NodeFs());
+    svc = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext(), realDisk());
     await svc.getWorkspacePath(workspaceId);
   });
 

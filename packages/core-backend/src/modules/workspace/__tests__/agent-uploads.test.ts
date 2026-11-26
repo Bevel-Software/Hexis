@@ -13,6 +13,7 @@ import { createToolHandlerFactory, VersionControlHooks } from '../../../__tests_
 import type { ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
+import { AccessDeniedError, toKbRelative } from '../../access-model/index.js';
 import { normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
@@ -63,9 +64,10 @@ const allowAll = {
 
 /**
  * Access control that, at HEAD on a protected branch, denies `write` for an
- * explicit set of repo-relative paths — which is the only verdict the write
- * tools' preflight consults (`writeBlocked`). Everything else is allowed, so a
- * test says exactly which path it is about.
+ * explicit set of repo-relative paths — the verdict the destination's
+ * preflight (`writeBlocked`) and each path's lock (the write rule
+ * `acquireLock` asks) consult. Everything else is allowed, so a test says
+ * exactly which path it is about.
  */
 function denyWritesAtHead(denied: (rel: string) => boolean): IAccessControl {
   return {
@@ -153,25 +155,60 @@ async function start(options: StartOptions = {}): Promise<string> {
       inner(normalizeWorkspacePath(path, KB_DIR), ...rest);
   }
   const plainWriteFile = fs.writeFile.bind(fs);
-  // Stands in for `LockingFilesystem.writeFiles`: honours the caller's
-  // under-lock `check` (run with the paths "locked", just before any byte
-  // lands) and writes only what the check keeps. Content arrives as a Buffer
-  // from an apply, and is written through untouched — which is the property
-  // byte-for-byte landing rests on.
-  (fs as unknown as Record<string, unknown>).writeFiles = async (
+  const kb = testKbContext({ kbDirName: KB_DIR });
+  /**
+   * Stands in for `LockingFilesystem.writeFiles` on `branch`. Each path's lock
+   * meets the gates `acquireLock` asks — on a protected branch the write rule
+   * at HEAD, refused with the eligible writers; on every branch
+   * read-before-write, as the access double's read verdict (no case here
+   * creates a folder directly under a root, the one exception the real gate
+   * makes) — and a refused lock is the caller's `refused` to drop (or to
+   * refuse the batch with, before anything lands). Then it honours the caller's under-lock `check` (run with the
+   * paths "locked", just before any byte lands) and writes only what the
+   * check keeps. Content arrives as a Buffer from an apply, and is written
+   * through untouched — which is the property byte-for-byte landing rests on.
+   */
+  const batchOn = (branch: string) => async (
     writes: { path: string; content: string | Buffer }[],
     _summary: string,
     deletes: string[] = [],
     check?: (
       pending: readonly { path: string; content: string | Buffer }[],
     ) => Promise<{ path: string; content: string | Buffer }[]>,
+    refused?: (path: string, err: unknown) => void,
   ) => {
-    const landing = check ? await check(writes) : writes;
+    const ws = encodeURIComponent(branch);
+    /** The refusal the gates give `wsPath`'s lock, or null when they give it. */
+    const lockRefusal = async (wsPath: string): Promise<AccessDeniedError | null> => {
+      const rel = toKbRelative(wsPath, KB_DIR);
+      if (rel === null) return null;
+      if (kb.isProtectedBranch(branch)) {
+        const verdicts = await access.canWriteBatchAtRef(ws, 'HEAD', userEmail, [rel]);
+        if (verdicts && verdicts.get(rel) !== true) {
+          const eligible = await access.eligibleWritersAtRef(ws, 'HEAD', rel);
+          return new AccessDeniedError({ path: wsPath, eligibleRoles: eligible?.roles ?? [], eligibleUsers: eligible?.users ?? [] });
+        }
+      }
+      if (await access.canRead(ws, userEmail, rel)) return null;
+      return new AccessDeniedError({ path: wsPath, eligibleRoles: [], eligibleUsers: [], unreadable: rel.slice(0, rel.lastIndexOf('/')) });
+    };
+    let locked = writes;
+    for (const w of [...writes].sort((x, y) => (x.path < y.path ? -1 : 1))) {
+      const refusal = await lockRefusal(w.path);
+      if (refusal === null) continue;
+      if (!refused) throw refusal;
+      refused(w.path, refusal);
+      locked = locked.filter((l) => l.path !== w.path);
+    }
+    const landing = check ? await check(locked) : locked;
     batches.push(landing.map((w) => w.path));
     batchTurnDepth.push(turnsHeld);
     for (const w of landing) await plainWriteFile(w.path, w.content as never);
     for (const p of deletes) await fs.deleteFile(p);
   };
+  /** The filesystem a tool on `branch` writes through: this one, with the batch for that branch. */
+  const filesystemOn = (branch: string): LocalFilesystem =>
+    Object.assign(Object.create(fs) as LocalFilesystem, { writeFiles: batchOn(branch) });
 
   uploads =
     options.store ??
@@ -224,7 +261,7 @@ async function start(options: StartOptions = {}): Promise<string> {
     } as never,
     versionControlService: {} as never,
     events: {} as never,
-    getFilesystem: async () => fs,
+    getFilesystem: async (branch: string) => filesystemOn(branch),
   });
   const toolHandler =
     options.writeAccess !== undefined
@@ -947,25 +984,99 @@ describe('apply_file_upload', () => {
     expect(answer.count).toBe(1);
   });
 
-  // Scenario: an entry named `access.md`, or one that would create a platform
-  // folder.
-  it('refuses a platform file with the platform-file sentence, and lands the others', async () => {
+  // Scenario: a zip that carries a folder's access rules beside its files.
+  it('lands an access.md and a .bevelignore in the same batch as the files beside them', async () => {
     const base = await start();
     const { token } = await request(base);
-    await send(base, token, 'drop.zip', zipOf({
-      'access.md': '---\nread: everyone\n---\n',
-      'roles.yaml': 'Admin:\n  - e@x\n',
-      'ok.md': 'ok',
+    await send(base, token, 'team.zip', zipOf({
+      'Team/access.md': '---\nread:\n  - Finance\n---\n',
+      'Team/.bevelignore': 'drafts/\n',
+      'Team/page.md': 'page',
     }));
     const answer = await apply(base, { branch: DRAFT, token, destination: KB_DIR });
-    expect(outcomeAt(answer, `${KB_DIR}/access.md`)).toMatchObject({
-      outcome: 'refused',
-      error: 'platform_file',
-      message: 'access.md is a platform file and is never landed by an upload — change it with edit_file or write_file, where the change is checked.',
-    });
-    expect(outcomeAt(answer, `${KB_DIR}/roles.yaml`)).toMatchObject({ outcome: 'refused', error: 'platform_file' });
-    expect(outcomeAt(answer, `${KB_DIR}/ok.md`)).toMatchObject({ outcome: 'created' });
-    expect(await readdir(join(tempDir, KB_DIR))).toEqual(['ok.md']);
+    expect(answer.files.map((f) => f.outcome)).toEqual(['created', 'created', 'created']);
+    expect(batches).toHaveLength(1);
+    expect([...batches[0]].sort()).toEqual([`${KB_DIR}/Team/.bevelignore`, `${KB_DIR}/Team/access.md`, `${KB_DIR}/Team/page.md`]);
+    expect(await readFile(join(tempDir, KB_DIR, 'Team/access.md'), 'utf8')).toBe('---\nread:\n  - Finance\n---\n');
+  });
+
+  // Scenario: a zip that carries a file the platform reads by its fixed name at the root.
+  it.each(['roles.yaml', 'groups.yaml', 'synced-groups.yaml'])('refuses the whole upload when it carries %s, and lands nothing', async (name) => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'ok.md': 'ok', [name]: 'roles: {}\n' }));
+    const res = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
+    expect(res.status).toBe(422);
+    expect((await json<ApplyAnswer & { kind?: string }>(res)).error).toBe(
+      `${name} never comes from an archive: edit the file itself, where the change is checked. Nothing in the archive was landed.`,
+    );
+    expect(batches).toEqual([]);
+    await expect(readFile(join(tempDir, KB_DIR, 'ok.md'))).rejects.toThrow();
+  });
+
+  it('lands a plugin manifest like any other file', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'plugin.zip', zipOf({ 'plugin.json': '{"name":"team"}\n', 'README.md': 'readme' }));
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Plugins/team` });
+    expect(outcomeAt(answer, `${KB_DIR}/Plugins/team/plugin.json`)).toMatchObject({ outcome: 'created' });
+    expect(answer.count).toBe(2);
+  });
+
+  // Scenario: the zip's own access.md cannot land.
+  it('refuses the whole upload when its access.md may not be written, and lands nothing', async () => {
+    const base = await start({ access: denyWritesAtHead((rel) => rel === 'Locked/access.md') });
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'open.md': 'open', 'Locked/access.md': '---\nwrite:\n  - everyone\n---\n' }));
+    const res = await call(base, 'apply_file_upload', { branch: PROTECTED, token, destination: KB_DIR });
+    expect(res.status).toBe(403);
+    const body = await json<ApplyAnswer & { kind?: string }>(res);
+    expect(body.kind).toBe('archive-refused');
+    expect(body.error).toBe(
+      `"${KB_DIR}/Locked/access.md" could not land: You don't have permission to write to "${KB_DIR}/Locked/access.md". ` +
+        'Eligible: Editor; Ada <ada@x>. An archive\'s access rules land with its files or not at all, so nothing in it was landed.',
+    );
+    expect(batches).toEqual([]);
+    // Refused whole, the token is still good for a retry somewhere it may land.
+    const retry = await apply(base, { branch: DRAFT, token, destination: KB_DIR });
+    expect(retry.count).toBe(2);
+  });
+
+  it('refuses the whole upload when its access.md is refused by the mode, and lands nothing', async () => {
+    const base = await start();
+    await mkdir(join(tempDir, KB_DIR, 'Team'), { recursive: true });
+    await writeFile(join(tempDir, KB_DIR, 'Team/access.md'), '---\nread:\n  - Finance\n---\n');
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'Team/access.md': '---\nread:\n  - everyone\n---\n', 'Team/page.md': 'page' }));
+    const res = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
+    expect(res.status).toBe(409);
+    expect((await json<ApplyAnswer>(res)).error).toContain(`"${KB_DIR}/Team/access.md" could not land:`);
+    expect(batches).toEqual([]);
+    expect(await readdir(join(tempDir, KB_DIR, 'Team'))).toEqual(['access.md']);
+  });
+
+  // Scenario: one entry lands in a folder the caller cannot read.
+  it('refuses an entry in a folder the caller cannot read as that entry\'s own outcome, and lands the others', async () => {
+    const sealed = { ...allowAll, canRead: async (_w: string, _u: string, rel: string) => !rel.startsWith('Sealed/') } as unknown as IAccessControl;
+    const base = await start({ access: sealed });
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'open.md': 'open', 'Sealed/peek.md': 'peek' }));
+    const answer = await apply(base, { branch: DRAFT, token, destination: KB_DIR });
+    expect(outcomeAt(answer, `${KB_DIR}/Sealed/peek.md`)).toMatchObject({ outcome: 'refused', error: 'write-denied' });
+    expect(outcomeAt(answer, `${KB_DIR}/Sealed/peek.md`)?.message).toContain('read access to "Sealed"');
+    expect(outcomeAt(answer, `${KB_DIR}/open.md`)).toMatchObject({ outcome: 'created' });
+    expect(batches).toEqual([[`${KB_DIR}/open.md`]]);
+  });
+
+  it('refuses the whole upload when its access.md is in a folder the caller cannot read, and lands nothing', async () => {
+    const sealed = { ...allowAll, canRead: async (_w: string, _u: string, rel: string) => !rel.startsWith('Sealed/') } as unknown as IAccessControl;
+    const base = await start({ access: sealed });
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'open.md': 'open', 'Sealed/access.md': '---\nread:\n  - everyone\n---\n' }));
+    const res = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
+    expect(res.status).toBe(403);
+    expect((await json<ApplyAnswer & { kind?: string }>(res)).kind).toBe('archive-refused');
+    expect(batches).toEqual([]);
   });
 
   it('refuses an entry that would create the checkout folder\'s own name at the root', async () => {
@@ -1116,6 +1227,22 @@ describe('apply_file_upload', () => {
     const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Drop` });
     expect(outcomeAt(answer, 'bad.md')).toMatchObject({ outcome: 'refused', error: 'unreadable_entry' });
     expect(outcomeAt(answer, `${KB_DIR}/Drop/fine.md`)).toMatchObject({ outcome: 'created' });
+  });
+
+  it('lands nothing when the access.md it holds fails its checksum', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    // `Team/access.md` sorts first, so it is the FIRST entry whose checksum is broken.
+    const archive = zipOf({ 'Team/access.md': '---\nread:\n  - Finance\n---\n', 'Team/page.md': 'page' });
+    const firstLocal = archive.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    const firstCentral = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    archive.writeUInt32LE((archive.readUInt32LE(firstLocal + 14) ^ 0xffffffff) >>> 0, firstLocal + 14);
+    archive.writeUInt32LE((archive.readUInt32LE(firstCentral + 16) ^ 0xffffffff) >>> 0, firstCentral + 16);
+    await send(base, token, 'drop.zip', archive);
+    const res = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: KB_DIR });
+    expect(res.status).toBe(422);
+    expect((await json<ApplyAnswer>(res)).error).toContain(`"${KB_DIR}/Team/access.md" could not land: "Team/access.md" could not be read`);
+    expect(batches).toEqual([]);
   });
 
   // Scenario: a zip holds 60 entries.

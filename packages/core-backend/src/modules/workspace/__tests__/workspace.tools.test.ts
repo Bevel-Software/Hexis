@@ -29,7 +29,7 @@ import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/index.js';
 import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../../agent-scope/index.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
-import type { WorkspaceService } from '../workspace.service.js';
+import { ArchiveRefusedError, type ArchiveEntryJudge, type ArchiveLanding, type WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
@@ -114,6 +114,13 @@ let unzipEntries: string[] = [];
  * per call: how `unzip` lands an archive, as one batch.
  */
 let batches: string[][] = [];
+/**
+ * The lock's own gates as the batch stand-in meets them: asked once per write,
+ * in lock order, where the real `LockingFilesystem.writeFiles` takes each
+ * path's lock (and `acquireLock` asks the write rule and read-before-write).
+ * A throw is that lock refused. Null: every lock is given.
+ */
+let lockGate: ((wsPath: string) => Promise<void>) | null = null;
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -255,10 +262,24 @@ async function start(
     check?: (
       pending: readonly { path: string; content: string }[],
     ) => Promise<{ path: string; content: string }[]>,
+    refused?: (path: string, err: unknown) => void,
   ) => {
     await runRaceHook();
-    batches.push(writes.map((w) => w.path));
-    const landing = check ? await check(writes) : writes;
+    // Each lock in turn, as the real batch takes them: a refused one is the
+    // caller's `refused` to drop (or to refuse the batch with, before
+    // anything lands), and without one it refuses the batch.
+    let locked = writes;
+    for (const w of [...writes].sort((x, y) => (x.path < y.path ? -1 : 1))) {
+      try {
+        await lockGate?.(w.path);
+      } catch (err) {
+        if (!refused) throw err;
+        refused(w.path, err);
+        locked = locked.filter((l) => l.path !== w.path);
+      }
+    }
+    batches.push(locked.map((w) => w.path));
+    const landing = check ? await check(locked) : locked;
     for (const w of landing) await plainWriteFile(w.path, w.content);
     for (const p of deletes) await fs.deleteFile(p);
   };
@@ -267,6 +288,7 @@ async function start(
   unzipCalls = [];
   unzipEntries = [];
   batches = [];
+  lockGate = null;
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -303,8 +325,8 @@ async function start(
         _id: string,
         zipRel: string,
         destRel: string | undefined,
-        guardWrite: ((wsRelativePath: string) => Promise<void>) | undefined,
-        landing: { writeFiles(writes: { path: string; content: Buffer }[], summary: string): Promise<unknown> },
+        judge: ArchiveEntryJudge | undefined,
+        landing: ArchiveLanding,
       ) => {
         // Recorded so a test can assert the PATHS the tool handed over — both
         // ends normalised into the repository.
@@ -315,21 +337,40 @@ async function start(
           throw new PathNotFoundError(zipRel);
         }
         // As the real service: every entry judged first, then the ones that
-        // passed handed to the landing in one call.
+        // passed handed to the landing in one call, and every entry that will
+        // not land put to the judge's `skipped`, which may refuse the archive.
         const extracted: string[] = [];
         const skipped: { path: string; reason: string }[] = [];
+        const skip = (entry: string, why: unknown): void => {
+          const whole = judge?.skipped(entry, entry, why);
+          if (whole) throw whole;
+          skipped.push({ path: entry, reason: why instanceof Error ? why.message : String(why) });
+        };
         for (const entry of unzipEntries) {
           try {
-            await guardWrite?.(entry);
+            await judge?.entry(entry, 'file');
             extracted.push(entry);
           } catch (err) {
-            skipped.push({ path: entry, reason: err instanceof Error ? err.message : 'refused' });
+            if (err instanceof ArchiveRefusedError) throw err;
+            skip(entry, err);
           }
         }
+        const refusedAtLock = new Set<string>();
         if (extracted.length > 0) {
-          await landing.writeFiles(extracted.map((path) => ({ path, content: Buffer.from(`bytes of ${path}`) })), 'Extract');
+          await landing.writeFiles(
+            extracted.map((path) => ({ path, content: Buffer.from(`bytes of ${path}`) })),
+            'Extract',
+            [],
+            undefined,
+            judge &&
+              ((path, err) => {
+                judge.refusedAtLock(path, err);
+                skip(path, err);
+                refusedAtLock.add(path);
+              }),
+          );
         }
-        return { destination: '', extracted, skipped };
+        return { destination: '', extracted: extracted.filter((p) => !refusedAtLock.has(p)), skipped };
       },
     } as never,
     versionControlService: {} as never,
@@ -5156,26 +5197,33 @@ describe('agent read/write hooks', () => {
     expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
   });
 
-  it('unzip skips an entry whose write gate did not answer with text that names no infrastructure, and keeps a gate\'s own refusal', async () => {
-    // On a protected branch every entry meets the write rule at HEAD before anything is locked.
-    const answers = new Map<string, Error | boolean>([
-      ['out/infra.md', new Error('connect ECONNREFUSED db-internal:5432')],
-      // A server fault carries a status too, a 5xx one: it is not the gate's answer to the caller.
-      ['out/fault.md', Object.assign(new Error('roles.yaml line 3: group "db-admins" is malformed'), { status: 500 })],
-      ['out/refused.md', false],
-    ]);
-    const gated = {
-      ...allowAll,
-      canWriteBatchAtRef: async (_w: string, _r: string, _u: string, rels: string[]) => {
-        const answer = answers.get(rels[0]) ?? true;
-        if (answer instanceof Error) throw answer;
-        return new Map(rels.map((rel) => [rel, answer]));
-      },
-      eligibleWritersAtRef: async () => ({ roles: ['Admin'], users: [] }),
-    } as unknown as IAccessControl;
-    const base = await start('write', gated);
+  it('unzip skips an entry whose lock the gate refuses, with the gate\'s own refusal, and lands the rest', async () => {
+    const base = await start();
+    // The write rule as `acquireLock` asks it, at each path's lock.
+    lockGate = async (wsPath) => {
+      if (wsPath.endsWith('/refused.md')) {
+        throw new AccessDeniedError({ path: wsPath, eligibleRoles: ['Admin'], eligibleUsers: [] });
+      }
+    };
     await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
-    unzipEntries = [`${KB_DIR}/out/infra.md`, `${KB_DIR}/out/fault.md`, `${KB_DIR}/out/refused.md`, `${KB_DIR}/out/ok.md`];
+    unzipEntries = [`${KB_DIR}/out/refused.md`, `${KB_DIR}/out/ok.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/ok.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/refused.md`, reason: `You don't have permission to write to "${KB_DIR}/out/refused.md". Eligible: Admin.` },
+    ]);
+    expect(batches).toEqual([[`${KB_DIR}/out/ok.md`]]);
+  });
+
+  it('unzip lands nothing when a lock\'s gate fails rather than refuses, with text that names no infrastructure', async () => {
+    const base = await start();
+    lockGate = async (wsPath) => {
+      if (wsPath.endsWith('/infra.md')) throw new Error('connect ECONNREFUSED db-internal:5432');
+    };
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/infra.md`, `${KB_DIR}/out/ok.md`];
     const warnings: string[] = [];
     const capture: ILogger = {
       debug: () => {},
@@ -5187,23 +5235,18 @@ describe('agent read/write hooks', () => {
     const restore = setLogger(capture);
     let res: Awaited<ReturnType<typeof post>>;
     try {
-      res = await post(`${base}/api/agent/tools/unzip`, { branch: 'target-company-state', path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+      res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
     } finally {
       setLogger(restore);
     }
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
-    expect(body.extracted).toEqual([`${KB_DIR}/out/ok.md`]);
-    expect(body.skipped).toEqual([
-      { path: `${KB_DIR}/out/infra.md`, reason: 'Whether this file may be written could not be checked, so it was not extracted.' },
-      { path: `${KB_DIR}/out/fault.md`, reason: 'Whether this file may be written could not be checked, so it was not extracted.' },
-      { path: `${KB_DIR}/out/refused.md`, reason: `You don't have permission to write to "${KB_DIR}/out/refused.md". Eligible: Admin.` },
-    ]);
-    expect(JSON.stringify(body)).not.toContain('db-internal');
-    expect(JSON.stringify(body)).not.toContain('db-admins');
-    // The cause stays on the server.
-    expect(warnings.filter((m) => m.startsWith('unzip: checking'))).toHaveLength(2);
-    expect(batches).toEqual([[`${KB_DIR}/out/ok.md`]]);
+    expect(res.status).toBe(503);
+    const text = JSON.stringify(await res.json());
+    expect(text).toContain('Whether these files may be written could not be checked, so nothing was landed.');
+    expect(text).not.toContain('db-internal');
+    // The cause stays on the server, and nothing landed.
+    expect(warnings.filter((m) => m.startsWith('archive: checking'))).toHaveLength(1);
+    expect(batches).toEqual([]);
+    await expect(readFile(join(tempDir, `${KB_DIR}/out/ok.md`), 'utf8')).rejects.toThrow();
   });
 
   it('unzip leaves an entry the write hook refused out of the batch', async () => {
@@ -5215,6 +5258,21 @@ describe('agent read/write hooks', () => {
     const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
     expect(res.status).toBe(200);
     expect(batches).toEqual([[`${KB_DIR}/out/keep.md`]]);
+  });
+
+  it('unzip lands nothing when the write hook refuses an access.md the archive holds', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/access.md`, `${KB_DIR}/out/page.md`];
+    refuseWrites('Not in this conversation.', `${KB_DIR}/out/access.md`);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      `"${KB_DIR}/out/access.md" could not land: Not in this conversation. ` +
+        "An archive's access rules land with its files or not at all, so nothing in it was landed.",
+    );
+    expect(batches).toEqual([]);
   });
 
   it('unzip skips the refused entry with the hook\'s message and extracts the others', async () => {

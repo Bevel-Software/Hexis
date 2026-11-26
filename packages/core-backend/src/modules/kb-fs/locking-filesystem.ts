@@ -60,6 +60,31 @@ import type { CreationGrantPlan, ICreatorAccess } from '../access-model/index.js
 const ACQUIRE_RETRY_ATTEMPTS = 3;
 /** Backoff between retries (ms). 3 attempts × 2s ≈ 6s ceiling. */
 const ACQUIRE_RETRY_DELAY_MS = 2_000;
+/**
+ * The lease a batch assumes when the lock it was granted does not say how long
+ * it lasts (no `acquiredAt` / `expiresAt` to read it from): the lock service's
+ * own lease today.
+ */
+const FALLBACK_LEASE_MS = 60_000;
+
+/**
+ * A write could not take `path`'s lock: another holder kept it past the
+ * retries, and nothing of that write was written. The message is the sentence
+ * the agent tools have always relayed; a caller that answers in its own words
+ * reads `path` and `holderName` rather than the message.
+ */
+export class PathHeldError extends Error {
+  constructor(
+    readonly path: string,
+    readonly holderName: string | null,
+  ) {
+    super(
+      `Skipped editing "${path}" — locked by ${holderName ?? 'another user'}. ` +
+        'Continuing with other edits; try this one again later.',
+    );
+    this.name = 'PathHeldError';
+  }
+}
 
 /**
  * Whatever a lock cycle's `check` threw — an Error or any other value — carried
@@ -676,11 +701,21 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * one change via the version-control service's `commitChanges` (one `git add` + one
    * `git commit`, then push), and release WITHOUT a per-file commit. Fail-closed:
    * if any lock can't be acquired, or a write/commit throws, nothing is committed
-   * (the failure-path `releaseLockNoCommit` discards the uncommitted bytes).
+   * (the failure-path `releaseLockNoCommit` discards the uncommitted bytes). A
+   * lock another holds past the retries refuses the batch with
+   * {@link PathHeldError}, naming the path and the holder; a lock the lock's own
+   * gates refuse refuses it with the gate's error, unless `refused` (below)
+   * takes that refusal as its path's alone.
    * The ONE exception is `PushNeedsAgentResolutionError` — a POST-commit
    * failure (the commit landed, the push didn't): locks release via
    * `releaseLock` so the enqueued release commit arms the pending-commits
    * worker's push retry, and the error still propagates to the caller.
+   *
+   * Every lock the batch holds is renewed (`heartbeatLock`) every third of the
+   * lease it was granted until the batch gives it back, so a batch that runs
+   * past one lease — thousands of acquires, a large write, the commit and its
+   * push — still holds its paths when it commits and releases. A renewal that
+   * fails is logged, and the next one is tried a third of a lease later.
    *
    * `writes[].path` is workspace-relative (like `writeFile`). We do the disk
    * write here; `commitChanges` only stages + commits what's on disk (the git
@@ -696,14 +731,21 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * path releases untouched, stays out of the commit's scope, and takes its
    * creator-grant seed with it when no surviving write still wants one. A
    * `check` that THROWS refuses the whole batch, untouched.
+   *
+   * `refused` is asked when taking a WRITE's lock throws — the lock's own gates
+   * refusing that path (`acquireLock`'s write rule or read-before-write), or
+   * the lock service failing. Returning drops that write as `check` drops one:
+   * its path is not locked, written or committed, and the batch goes on. Throwing
+   * refuses the whole batch with what it threw, untouched. Without it, the
+   * error refuses the batch as it is. A delete's lock is never offered: a
+   * delete the gates refuse refuses the batch.
    */
-  async writeFiles(
-    writes: { path: string; content: FileContent }[],
+  async writeFiles<C extends FileContent>(
+    writes: { path: string; content: C }[],
     summary: string,
     deletes: string[] = [],
-    check?: (
-      writes: readonly { path: string; content: FileContent }[],
-    ) => Promise<{ path: string; content: FileContent }[]>,
+    check?: (writes: readonly { path: string; content: C }[]) => Promise<{ path: string; content: C }[]>,
+    refused?: (path: string, err: unknown) => void,
   ): Promise<Change | null> {
     const { versionControl, workspaceId, branch, user } = this.lockContext;
     // Fail the whole batch before any plan, validator or lock: one stray path
@@ -729,6 +771,12 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         seedOrigins.set(plan.wsRelPath, [...(seedOrigins.get(plan.wsRelPath) ?? []), w.path]);
       }
     }
+    /** Drop every seed none of the writes still in the batch asked for. */
+    const pruneSeeds = (): void => {
+      for (const [seedPath, origins] of seedOrigins) {
+        if (!origins.some((o) => writes.some((w) => w.path === o))) seeds.delete(seedPath);
+      }
+    };
     // Pre-disk gate every file BEFORE acquiring any lock (fail-closed): a
     // refusal must not leave a lock held or a partial batch on disk.
     if (this.lockContext.validateWrite) {
@@ -751,6 +799,9 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // mid-write AND the pre-image restore failed too. These must release
     // with the discard so the corrupt bytes can't outlive the batch.
     const failedSeedDiscards = new Set<string>();
+    // Every lock in `acquired` stays alive past its lease until `releaseAll`
+    // gives the locks back (see the doc above).
+    const leases = this.renewLeases(acquired);
     // Release every acquired lock, each with the semantics its outcome
     // earned. Three shapes (mirroring the three VersionControlService releases):
     //
@@ -771,6 +822,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     const releaseAll = async (
       modeOf: (p: string) => 'discard' | 'enqueue' | 'untouched',
     ): Promise<void> => {
+      await leases.stop();
       for (const p of acquired) {
         try {
           const mode = modeOf(p);
@@ -787,37 +839,69 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       }
     };
 
-    // Acquire every lock before committing a single byte (fail-closed).
-    for (const p of paths) {
+    /**
+     * Take `p`'s lock, retrying a held one up to `attempts` times. The ONE way
+     * this batch takes a lock, the caller's paths and the creator seeds alike:
+     * when the lock cannot be had — held past the retries ({@link
+     * PathHeldError}), refused by the lock's gates, or the lock service
+     * failing — every lock already held goes back untouched before the
+     * refusal goes on. Nothing is written yet, so every held lock is a
+     * merely-locked path, and the unwind leaves disk and queue exactly as they
+     * are. The one exception: `alone`, handed a throw, may take it as this
+     * path's refusal only, and the answer is then false with every other lock
+     * still held.
+     */
+    const acquireOrGiveBack = async (
+      p: string,
+      attempts: number,
+      alone?: (err: unknown) => void,
+    ): Promise<boolean> => {
       let holderName: string | null = null;
-      let ok = false;
-      for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
+      for (let attempt = 0; attempt < attempts; attempt++) {
         let result: Awaited<ReturnType<typeof versionControl.acquireLock>>;
         try {
           result = await versionControl.acquireLock(workspaceId, branch, p, user);
-        } catch (err) {
-          // A gate's refusal or a failure: the locks already held go back
-          // untouched, as for a held one, before the error goes on.
+        } catch (refusal) {
+          let reason: unknown = refusal;
+          if (alone) {
+            try {
+              alone(refusal);
+              return false;
+            } catch (verdict) {
+              reason = verdict;
+            }
+          }
           await releaseAll(() => 'untouched');
-          throw err;
+          throw reason;
         }
         if (result.acquired) {
-          ok = true;
-          break;
+          acquired.push(p);
+          leases.granted(result.lock);
+          return true;
         }
         holderName = result.lock.holderName;
-        if (attempt < ACQUIRE_RETRY_ATTEMPTS - 1) await sleep(ACQUIRE_RETRY_DELAY_MS);
+        if (attempt < attempts - 1) await sleep(ACQUIRE_RETRY_DELAY_MS);
       }
-      if (!ok) {
-        // Nothing written yet — every held lock is a merely-locked path, so
-        // the unwind must leave disk and queue exactly as they are.
+      await releaseAll(() => 'untouched');
+      throw new PathHeldError(p, holderName);
+    };
+
+    // Acquire every lock before committing a single byte (fail-closed). A
+    // write whose lock the caller's `refused` takes as that path's refusal
+    // alone leaves the batch here, as a write `check` drops does.
+    const droppedAtLock = new Set<string>();
+    for (const p of paths) {
+      const alone = refused && !deletes.includes(p) ? (err: unknown) => refused(p, err) : undefined;
+      if (!(await acquireOrGiveBack(p, ACQUIRE_RETRY_ATTEMPTS, alone))) droppedAtLock.add(p);
+    }
+    if (droppedAtLock.size > 0) {
+      writes = writes.filter((w) => !droppedAtLock.has(w.path));
+      pruneSeeds();
+      if (writes.length === 0 && deletes.length === 0) {
+        // Nothing left to write: no commit, for the reason given below.
         await releaseAll(() => 'untouched');
-        throw new Error(
-          `Skipped editing "${p}" — locked by ${holderName ?? 'another user'}. ` +
-            `Continuing with other edits; try this one again later.`,
-        );
+        return null;
       }
-      acquired.push(p);
     }
 
     // Judge every file again now that its lock is held: a validator that reads
@@ -844,9 +928,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         await releaseAll(() => 'untouched');
         throw err;
       }
-      for (const [seedPath, origins] of seedOrigins) {
-        if (!origins.some((o) => writes.some((w) => w.path === o))) seeds.delete(seedPath);
-      }
+      pruneSeeds();
       if (writes.length === 0 && deletes.length === 0) {
         // Every write dropped and nothing to delete: no bytes, so no commit
         // either. An unscoped one here would sweep in whatever another save
@@ -859,21 +941,13 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // Creator-grant seed locks: single attempt, acquired after the caller's
     // paths (a single non-blocking attempt cannot deadlock against another
     // batch). A contended access.md fails the batch the same way a contended
-    // caller path does, with nothing written: the seed exists to keep a new
-    // root folder visible to the person creating it, and a batch that landed
-    // without it would leave that folder invisible to them.
+    // caller path does, with nothing written, and so does a seed lock the
+    // gates refuse or the lock service fails to give: the seed exists to keep
+    // a new root folder visible to the person creating it, and a batch that
+    // landed without it would leave that folder invisible to them.
     for (const p of [...seeds.keys()].sort()) {
       if (paths.includes(p)) continue; // already locked as a caller path
-      const result = await versionControl.acquireLock(workspaceId, branch, p, user);
-      if (result.acquired) {
-        acquired.push(p);
-      } else {
-        await releaseAll(() => 'untouched');
-        throw new Error(
-          `Skipped editing "${p}" — locked by ${result.lock.holderName ?? 'another user'}. ` +
-            `Continuing with other edits; try this one again later.`,
-        );
-      }
+      await acquireOrGiveBack(p, 1);
     }
 
     // The paths this batch actually TOUCHED — the caller's writes + deletes,
@@ -1110,6 +1184,50 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     return bytes;
   }
 
+  /**
+   * Keep the locks in `held` alive until `stop`: from the first lock
+   * `granted`, every lock then in `held` (read afresh each time, so a lock
+   * taken later is renewed too) is renewed every third of that lock's lease
+   * (`expiresAt - acquiredAt`, or {@link FALLBACK_LEASE_MS} when the lock does
+   * not say). A renewal that fails is logged and tried again next time. `stop`
+   * waits for a renewal in flight, so none reaches the lock service after the
+   * locks are given back.
+   */
+  private renewLeases(held: readonly string[]): {
+    granted(lock: { acquiredAt?: string; expiresAt?: string }): void;
+    stop(): Promise<void>;
+  } {
+    const { versionControl, workspaceId, branch, user } = this.lockContext;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let inFlight: Promise<void> | undefined;
+    const renew = async (): Promise<void> => {
+      for (const p of [...held]) {
+        try {
+          await versionControl.heartbeatLock(workspaceId, branch, p, user);
+        } catch (err) {
+          log.warn(`lease renewal failed for "${p}" during writeFiles:`, { err });
+        }
+      }
+    };
+    return {
+      granted: (lock) => {
+        if (timer !== undefined) return;
+        const lease = Date.parse(lock.expiresAt ?? '') - Date.parse(lock.acquiredAt ?? '');
+        const every = (Number.isFinite(lease) && lease > 0 ? lease : FALLBACK_LEASE_MS) / 3;
+        timer = setInterval(() => {
+          inFlight ??= renew().finally(() => {
+            inFlight = undefined;
+          });
+        }, every);
+        timer.unref?.();
+      },
+      stop: async () => {
+        clearInterval(timer);
+        await inFlight;
+      },
+    };
+  }
+
   /** The bytes at `inputPath`, or null when nothing is there. */
   private async readIfExists(inputPath: string): Promise<Buffer | null> {
     const absolute = this.resolveAbsolutePath(inputPath);
@@ -1223,12 +1341,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         await sleep(ACQUIRE_RETRY_DELAY_MS);
       }
     }
-    if (!acquired) {
-      throw new Error(
-        `Skipped editing "${inputPath}" — locked by ${lastHolderName ?? 'another user'}. ` +
-          `Continuing with other edits; try this one again later.`,
-      );
-    }
+    if (!acquired) throw new PathHeldError(inputPath, lastHolderName);
 
     let result: T;
     try {

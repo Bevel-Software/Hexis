@@ -3,17 +3,20 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/change-gate.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { IAccessControl } from '../../access/index.js';
+import {
+  AccessDeniedError,
+  type ChangeReadVerdict,
+  type IChangeReadGate,
+  type ICreatorAccess,
+} from '../../access-model/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import type { WorkspaceService } from '../workspace.service.js';
+import type { ArchiveEntryJudge, WorkspaceService } from '../workspace.service.js';
 
 /**
  * Contract test for the creator read-grant hooks on the creation routes:
@@ -107,7 +110,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
         creatorAccess as unknown as ICreatorAccess,
       // Not exercised here — only `.bevelignore`'s tree visibility consults it.
       { isAdmin: async () => false } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
       undefined,
       opts.changeGate,
     ),
@@ -251,8 +254,9 @@ describe('creator read-grant hooks on the creation routes', () => {
 
 /**
  * Archive extraction asks the lock's read gate about the destination first,
- * and extracts nothing when it refuses; then about each entry, so an entry
- * it refuses is skipped rather than refusing the extraction's whole batch.
+ * and extracts nothing when it refuses; then each entry meets the archive
+ * judge (a directory entry asked as a folder, a file at its own lock), so an
+ * entry the gate refuses is skipped rather than refusing the whole batch.
  */
 describe('POST /unzip asks the read-before-write gate about its destination first', () => {
   let h: Harness | null = null;
@@ -304,7 +308,7 @@ describe('POST /unzip asks the read-before-write gate about its destination firs
     expect(h.unzipFileMock).toHaveBeenCalledOnce();
   });
 
-  it('hands the extraction a per-entry guard that asks the gate about each entry as a file', async () => {
+  it('hands the extraction the archive judge: a directory entry is asked about as a folder, a file is left to its lock', async () => {
     const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
     h = await makeHarness({ extracted: [], changeGate: gate });
     const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
@@ -313,10 +317,21 @@ describe('POST /unzip asks the read-before-write gate about its destination firs
       body: JSON.stringify({ path: `${KB}/KnowledgeBase/Open/drop.zip` }),
     });
     expect(res.status).toBe(200);
-    const guard = h.unzipFileMock.mock.calls[0]![3] as (p: string) => Promise<void>;
-    expect(typeof guard).toBe('function');
-    await guard(`${KB}/KnowledgeBase/Open/Nested/deep.md`);
-    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Open/Nested/deep.md`, 'file');
+    const archiveJudge = h.unzipFileMock.mock.calls[0]![3] as ArchiveEntryJudge;
+    judge.mockClear();
+    await archiveJudge.entry(`${KB}/KnowledgeBase/Open/Nested`, 'dir');
+    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Open/Nested`, 'dir');
+    // A file's read-before-write is asked by its lock, at `acquireLock`, and
+    // a refusal there is that entry's alone (see unzip-lands-as-one-commit.test.ts).
+    judge.mockClear();
+    await archiveJudge.entry(`${KB}/KnowledgeBase/Open/Nested/deep.md`, 'file');
+    expect(judge).not.toHaveBeenCalled();
+    expect(() =>
+      archiveJudge.refusedAtLock(
+        `${KB}/KnowledgeBase/Open/Nested/deep.md`,
+        new AccessDeniedError({ path: `${KB}/KnowledgeBase/Open/Nested/deep.md`, eligibleRoles: [], eligibleUsers: [] }),
+      ),
+    ).not.toThrow();
   });
 });
 

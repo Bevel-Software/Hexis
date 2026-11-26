@@ -15,7 +15,7 @@ import {
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
-import { BevelIgnoreStack, assertRepoRootNameFree, normalizeWorkspacePath, assertValidBranchName, normalizeRepositoryAddress, sameRepository } from '../kb-fs/index.js';
+import { BevelIgnoreStack, PathHeldError, assertRepoRootNameFree, normalizeWorkspacePath, assertValidBranchName, normalizeRepositoryAddress, sameRepository } from '../kb-fs/index.js';
 import {
   DestinationTakenError,
   inspectDestination,
@@ -37,6 +37,7 @@ import {
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
   BranchNotFoundError,
+  PushNeedsAgentResolutionError,
   RemoteBranchGoneError,
   VersionControlDomainError,
   isMissingRemoteBranchFailure,
@@ -98,28 +99,77 @@ export interface UnzipResult {
 /**
  * Where `unzipFile` lands an archive's files: `LockingFilesystem.writeFiles`,
  * which takes every path's lock before it writes a byte and commits the whole
- * set as one change. A lock it cannot take refuses the batch with nothing
- * written, and a write or commit that fails commits nothing.
+ * set as one change. A lock another holds refuses the batch with nothing
+ * written ({@link PathHeldError}). A lock the lock's own gates refuse is handed
+ * to `refused`, which skips that entry or refuses the batch. A write or commit
+ * that fails commits nothing, with one exception: a commit whose push needs
+ * resolution (`PushNeedsAgentResolutionError`) has landed, and only its sharing
+ * is pending.
  */
 export interface ArchiveLanding {
-  writeFiles(writes: { path: string; content: Buffer }[], summary: string): Promise<unknown>;
+  writeFiles(
+    writes: { path: string; content: Buffer }[],
+    summary: string,
+    deletes?: string[],
+    check?: undefined,
+    refused?: (path: string, err: unknown) => void,
+  ): Promise<unknown>;
 }
 
 /**
- * The landing's refusal when another holds a lock it needs, as the 409 an
- * extraction answers, or null for any other failure. `writeFiles` raises it
- * before writing anything, as a status-less error naming the path and the
- * holder in a sentence that also says "continuing with other edits", which
- * is not what happened here: the extraction stopped whole.
+ * An archive refused whole: nothing in it was written or committed, and no
+ * lock taken for it is still held.
+ *
+ * Raised by an archive's judge ({@link ArchiveEntryJudge}) for an entry that
+ * decides the archive rather than only itself: a file no archive may carry,
+ * or one of the archive's own access rules that cannot land. `entry` is the
+ * workspace path (or, when it has none, the name in the archive) of the entry
+ * that decided it.
  */
-function extractionLockedRefusal(err: unknown): VersionControlDomainError | null {
-  const held =
-    err instanceof Error
-      ? /^Skipped editing "(.*)" — locked by (.*)\. Continuing with other edits; try this one again later\.$/s.exec(err.message)
-      : null;
-  if (held === null) return null;
+export class ArchiveRefusedError extends VersionControlDomainError {
+  readonly kind = 'archive-refused' as const;
+  constructor(
+    readonly entry: string,
+    message: string,
+    status: number,
+  ) {
+    super(message, status, { kind: 'archive-refused', entry });
+    this.name = 'ArchiveRefusedError';
+  }
+}
+
+/**
+ * How one archive's entries are judged, by both doors that land an archive
+ * (the agent `unzip` tool and the app's unzip route, through `unzipFile`) and
+ * by `apply_file_upload`. One judge answers three questions about an entry:
+ *
+ *  - `entry`: may it be landed at all, asked before anything is locked or
+ *    written. Throwing skips the entry with the thrown message; throwing
+ *    `ArchiveRefusedError` refuses the whole archive.
+ *  - `refusedAtLock`: taking the entry's lock threw — the lock's own gates
+ *    refused it, or the lock service failed — with nothing written yet.
+ *    Returning skips the entry with `err`'s message; throwing refuses the
+ *    whole archive with what was thrown.
+ *  - `skipped`: what an entry that will not land, for any reason, means for
+ *    the archive: the whole-archive refusal to raise, or null when only the
+ *    entry is skipped. (An extraction drops macOS metadata entries without
+ *    asking.) `wsPath` is where the entry would land, or null when
+ *    its name gives it no place.
+ */
+export interface ArchiveEntryJudge {
+  entry(wsPath: string, kind: 'file' | 'dir'): Promise<void>;
+  refusedAtLock(wsPath: string, err: unknown): void;
+  skipped(wsPath: string | null, entryName: string, why: unknown): ArchiveRefusedError | null;
+}
+
+/**
+ * The 409 an extraction answers when another holds a lock its landing needs.
+ * Not `PathHeldError`'s own sentence, which says "continuing with other
+ * edits": the extraction stopped whole.
+ */
+function extractionHeldRefusal(err: PathHeldError): VersionControlDomainError {
   return new VersionControlDomainError(
-    `"${held[1]}" is being edited by ${held[2]}, so nothing was extracted. Try again once they are done.`,
+    `"${err.path}" is being edited by ${err.holderName ?? 'another user'}, so nothing was extracted. Try again once they are done.`,
     409,
   );
 }
@@ -2346,13 +2396,23 @@ export class WorkspaceService implements IWorkspaceService {
    * directory (defaults to the archive's parent directory — "unzip here").
    *
    * Every entry is judged first and nothing is written while it is: the
-   * guards below, the zip-bomb caps and the caller's `guardWrite`. The files
-   * that pass are then handed to `landing` in ONE call, and the directory
-   * entries that pass are created after it returns. With `LockingFilesystem`
-   * as the landing, the files that pass land as one commit: an archive's own
-   * `access.md` and the files beside it that passed too arrive together. A
-   * landing refused because another holds one of its paths' locks is
-   * answered as a 409 naming that path, and no directory entry is created.
+   * guards below, the zip-bomb caps and the `judge`'s `entry`. The files that
+   * pass are then handed to `landing` in ONE call, and the directory entries
+   * that pass are created after it returns. With `LockingFilesystem` as the
+   * landing, the files that pass land as one commit: an archive's own
+   * `access.md` and the files beside it arrive together. A file whose lock the
+   * lock's own gates refuse is skipped through the judge's `refusedAtLock`.
+   *
+   * Every entry that will not land, whatever the reason, is put to the
+   * judge's `skipped` (macOS metadata aside, which is never put to it, and
+   * under the entry cap is not reported either), and one that decides the
+   * archive refuses it whole (`ArchiveRefusedError`) with nothing written. A
+   * landing refused because
+   * another holds one of its paths' locks is answered as a 409 naming that
+   * path, and no directory entry is created. A landing whose commit landed
+   * but whose push needs resolution (`PushNeedsAgentResolutionError`) has its
+   * directory entries created and its files synced before that error goes on
+   * to the caller: the files are committed, only their sharing is pending.
    *
    * The files' bytes are all held in memory until they land: at most
    * `ONE_COMMIT_MAX_TOTAL_BYTES` of entries, besides the archive itself.
@@ -2361,13 +2421,8 @@ export class WorkspaceService implements IWorkspaceService {
     workspaceId: string,
     zipWsPath: string,
     destDirWsPath: string | undefined,
-    /**
-     * Per-extracted-path write guard. Called with each entry's
-     * workspace-relative target, before anything is written; if it throws,
-     * the entry is skipped (with the thrown message as the reason) rather
-     * than aborting the whole extraction.
-     */
-    guardWrite: ((wsRelativePath: string) => Promise<void>) | undefined,
+    /** How each entry is judged (see {@link ArchiveEntryJudge}); without one, every entry the guards below pass lands. */
+    judge: ArchiveEntryJudge | undefined,
     /** Where the files land: one call, for every file that passed. */
     landing: ArchiveLanding,
   ): Promise<UnzipResult> {
@@ -2429,16 +2484,42 @@ export class WorkspaceService implements IWorkspaceService {
     const extracted: string[] = [];
     const skipped: UnzipResult['skipped'] = [];
     const writes: { path: string; content: Buffer }[] = [];
+    /** The name in the archive of each file handed to the landing, for the report. */
+    const entryNameAt = new Map<string, string>();
+    /** Files the landing dropped because the lock's gates refused their lock. */
+    const refusedAtLock = new Set<string>();
     const directories: string[] = [];
     let processedCount = 0;
     let totalUncompressed = 0;
+    const destRoot = path.resolve(destAbsolute);
+
+    /**
+     * Record that the entry named `name` in the archive will not land, and
+     * why — unless the judge says that entry decides the whole archive, which
+     * then refuses the extraction before anything is written. `wsPath` is
+     * where the entry would have landed, or null when its name gives it none.
+     */
+    const skip = (name: string, wsPath: string | null, why: unknown): void => {
+      const whole = judge?.skipped(wsPath, name, why);
+      if (whole) throw whole;
+      skipped.push({ path: name, reason: why instanceof Error ? why.message : String(why) });
+    };
+
+    /** Where an entry named `rawName` lands, workspace-relative, or null when its name gives it no place. */
+    const landingOf = (rawName: string): string | null => {
+      if (zipEntryNameRefusal(rawName) !== null) return null;
+      const target = path.resolve(destAbsolute, ...zipEntrySegments(rawName));
+      if (target !== destRoot && !target.startsWith(destRoot + path.sep)) return null;
+      return path.relative(workspaceDir, target).replace(/\\/g, '/');
+    };
 
     for (const entry of zip.getEntries()) {
       if (processedCount >= ONE_COMMIT_MAX_ENTRIES) {
-        skipped.push({
-          path: entry.entryName,
-          reason: `Archive exceeds ${ONE_COMMIT_MAX_ENTRIES} entries`,
-        });
+        const reason = `Archive exceeds ${ONE_COMMIT_MAX_ENTRIES} entries`;
+        const rawName = zipEntryName(entry.entryName);
+        // Noise is never landed, under the cap or past it, so it decides nothing.
+        if (isZipNoiseEntry(rawName)) skipped.push({ path: entry.entryName, reason });
+        else skip(entry.entryName, landingOf(rawName), reason);
         continue;
       }
       processedCount++;
@@ -2452,7 +2533,7 @@ export class WorkspaceService implements IWorkspaceService {
       // than by a second copy of them.
       const nameRefusal = zipEntryNameRefusal(rawName);
       if (nameRefusal !== null) {
-        skipped.push({ path: rawName || '(empty)', reason: nameRefusal });
+        skip(rawName || '(empty)', null, nameRefusal);
         continue;
       }
 
@@ -2460,26 +2541,26 @@ export class WorkspaceService implements IWorkspaceService {
       const segments = zipEntrySegments(rawName);
 
       const targetAbsolute = path.resolve(destAbsolute, ...segments);
-      const destRoot = path.resolve(destAbsolute);
       if (targetAbsolute !== destRoot && !targetAbsolute.startsWith(destRoot + path.sep)) {
-        skipped.push({ path: rawName, reason: 'Path escapes destination' });
+        skip(rawName, null, 'Path escapes destination');
         continue;
       }
 
       const relForReport = path
         .relative(workspaceDir, targetAbsolute)
         .replace(/\\/g, '/');
-      // An entry the write guard refuses is skipped, not extracted, so an
-      // archive can't be a way around whatever the guard enforces. Every
-      // entry is judged before anything is written, so a refused entry leaves
-      // nothing behind on disk.
-      const allowEntry = async (): Promise<boolean> => {
-        if (!guardWrite) return true;
+      // An entry the judge refuses is skipped, not extracted, so an archive
+      // can't be a way around whatever the judge enforces. Every entry is
+      // judged before anything is written, so a refused entry leaves nothing
+      // behind on disk.
+      const allowEntry = async (kind: 'file' | 'dir'): Promise<boolean> => {
+        if (!judge) return true;
         try {
-          await guardWrite(relForReport);
+          await judge.entry(relForReport, kind);
           return true;
         } catch (err) {
-          skipped.push({ path: rawName, reason: err instanceof Error ? err.message : 'Refused before it was written' });
+          if (err instanceof ArchiveRefusedError) throw err;
+          skip(rawName, relForReport, err instanceof Error ? err : 'Refused before it was written');
           return false;
         }
       };
@@ -2501,7 +2582,7 @@ export class WorkspaceService implements IWorkspaceService {
         }
       })();
       if (reservedName !== null) {
-        skipped.push({ path: rawName, reason: reservedName });
+        skip(rawName, relForReport, reservedName);
         continue;
       }
 
@@ -2510,31 +2591,25 @@ export class WorkspaceService implements IWorkspaceService {
         await this.assertNotThroughLink(targetAbsolute, workspaceDir);
       } catch (err) {
         if (err instanceof PathTraversalError || err instanceof GitInternalsError) {
-          skipped.push({ path: rawName, reason: err.message });
+          skip(rawName, relForReport, err);
           continue;
         }
         throw err;
       }
 
       if (entry.isDirectory) {
-        if (!(await allowEntry())) continue;
+        if (!(await allowEntry('dir'))) continue;
         directories.push(targetAbsolute);
         continue;
       }
 
       const declaredSize = entry.header?.size ?? 0;
       if (declaredSize > UNZIP_MAX_ENTRY_BYTES) {
-        skipped.push({
-          path: rawName,
-          reason: `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
-        });
+        skip(rawName, relForReport, `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`);
         continue;
       }
       if (totalUncompressed + declaredSize > ONE_COMMIT_MAX_TOTAL_BYTES) {
-        skipped.push({
-          path: rawName,
-          reason: `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`,
-        });
+        skip(rawName, relForReport, `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`);
         continue;
       }
 
@@ -2549,33 +2624,42 @@ export class WorkspaceService implements IWorkspaceService {
         Math.min(UNZIP_MAX_ENTRY_BYTES, ONE_COMMIT_MAX_TOTAL_BYTES - totalUncompressed),
       );
       if (!read.ok && read.reason === 'unreadable') {
-        skipped.push({ path: rawName, reason: `Entry could not be read: ${read.detail}` });
+        skip(rawName, relForReport, `Entry could not be read: ${read.detail}`);
         continue;
       }
       if (!read.ok) {
-        skipped.push({
-          path: rawName,
-          reason:
-            totalUncompressed + UNZIP_MAX_ENTRY_BYTES > ONE_COMMIT_MAX_TOTAL_BYTES
-              ? `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`
-              : `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
-        });
+        skip(
+          rawName,
+          relForReport,
+          totalUncompressed + UNZIP_MAX_ENTRY_BYTES > ONE_COMMIT_MAX_TOTAL_BYTES
+            ? `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`
+            : `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
+        );
         continue;
       }
       const data = read.data;
       if (totalUncompressed + data.byteLength > ONE_COMMIT_MAX_TOTAL_BYTES) {
-        skipped.push({
-          path: rawName,
-          reason: `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`,
-        });
+        skip(rawName, relForReport, `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`);
         continue;
       }
-      if (!(await allowEntry())) continue;
+      if (!(await allowEntry('file'))) continue;
       writes.push({ path: relForReport, content: data });
+      entryNameAt.set(relForReport, rawName);
       totalUncompressed += data.byteLength;
       extracted.push(relForReport);
     }
 
+    // A file the lock's gates refuse is the judge's to answer for: skipped,
+    // or the whole extraction refused (the landing then gives back every lock
+    // with nothing written).
+    const refused = judge
+      ? (wsPath: string, err: unknown): void => {
+          judge.refusedAtLock(wsPath, err);
+          skip(entryNameAt.get(wsPath) ?? wsPath, wsPath, err);
+          refusedAtLock.add(wsPath);
+        }
+      : undefined;
+    let sharingPending: PushNeedsAgentResolutionError | undefined;
     // In the destination folder's turn, which `delete_folder` takes over the
     // same subtree: a folder delete running between the landing creating the
     // destination and its commit would remove the folder the files are
@@ -2586,18 +2670,27 @@ export class WorkspaceService implements IWorkspaceService {
           await landing.writeFiles(
             writes,
             `Extract ${zipRelativePath} (${writes.length} file${writes.length === 1 ? '' : 's'})`,
+            [],
+            undefined,
+            refused,
           );
         } catch (err) {
-          throw extractionLockedRefusal(err) ?? err;
+          if (err instanceof PathHeldError) throw extractionHeldRefusal(err);
+          if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
+          // Committed; only the push needs help. The rest of the extraction
+          // happens as it would have, and the caller is told after.
+          sharingPending = err;
         }
       }
       for (const dir of directories) await fs.mkdir(dir, { recursive: true });
     });
-    for (const written of new Set(extracted)) await this.diffService?.syncFromDisk(workspaceId, written);
+    const landed = extracted.filter((p) => !refusedAtLock.has(p));
+    for (const written of new Set(landed)) await this.diffService?.syncFromDisk(workspaceId, written);
+    if (sharingPending) throw sharingPending;
 
     return {
       destination: path.relative(workspaceDir, destAbsolute).replace(/\\/g, '/') || '.',
-      extracted,
+      extracted: landed,
       skipped,
     };
   }

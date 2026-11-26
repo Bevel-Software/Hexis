@@ -30,7 +30,7 @@ import {
 } from '../kb-fs/index.js';
 import { GitGuardedFilesystem, MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/index.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { isRolesYamlPath, toKbRelative, resolveReadableMap, AccessDeniedError } from '../access-model/index.js';
+import { FIXED_NAME_SOURCES, toKbRelative, resolveReadableMap, AccessDeniedError } from '../access-model/index.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/index.js';
@@ -50,7 +50,7 @@ import {
   isPlatformFolder,
   platformFileCreationRefusal,
   platformFileRefusal,
-  platformFileUploadRefusal,
+  platformFilesByDepth,
   platformFolderRefusal,
   isRepositoryOwnFile,
   repositoryOwnFileDeleteRefusal,
@@ -87,11 +87,12 @@ import { type ClaimedUpload } from './agent-upload.store.js';
 import type { IAgentDownloadStore } from './agent-download.store.js';
 import { buildDownload } from './agent-download.builder.js';
 import {
+  ArchiveRefusedError,
   DOWNLOAD_MAX_FILES,
   ONE_COMMIT_MAX_ENTRIES,
   ONE_COMMIT_MAX_TOTAL_BYTES,
   ZIP_DOWNLOAD_MAX_BYTES,
-  type ArchiveLanding,
+  type ArchiveEntryJudge,
 } from './workspace.service.js';
 import {
   isSymlinkZipEntry,
@@ -573,6 +574,12 @@ interface PlannedUploadPath {
   content?: Buffer;
   error?: string;
   message?: string;
+  /**
+   * Where a refused entry would have landed, when its name gives it a place:
+   * what the archive judge reads to tell whether the refusal decides the
+   * whole upload. Never part of the answer.
+   */
+  at?: string;
 }
 
 /**
@@ -614,6 +621,19 @@ async function planUpload(
   const planned: PlannedUploadPath[] = [];
   let seen = 0;
   let totalBytes = 0;
+  /**
+   * Where the entry named `rawName` lands under the destination, or undefined
+   * when its name gives it no place there. Belt and braces:
+   * `zipEntryNameRefusal` already refuses a `..` segment and a root-anchored
+   * name, so nothing should reach the containment check that climbs out. The
+   * check stays because the cost of being wrong about that is bytes landing
+   * outside the folder the caller named.
+   */
+  const landingOf = (rawName: string): string | undefined => {
+    if (zipEntryNameRefusal(rawName) !== null) return undefined;
+    const target = [destination, ...zipEntrySegments(rawName)].join('/');
+    return target.startsWith(`${destination}/`) && isInsideRepo(target, kbDirName) ? target : undefined;
+  };
   for (const entry of zip.getEntries()) {
     const rawName = zipEntryName(entry.entryName);
     if (isZipNoiseEntry(rawName)) continue;
@@ -622,6 +642,7 @@ async function planUpload(
         path: rawName || '(empty)',
         error: 'too_many_entries',
         message: `This archive holds more than ${APPLY_MAX_ENTRIES} entries; the rest were not applied.`,
+        at: landingOf(rawName),
       });
       continue;
     }
@@ -636,19 +657,15 @@ async function planUpload(
         path: rawName,
         error: 'link',
         message: `"${rawName}" is a symbolic link, not a file; an upload lands files, never links.`,
+        at: landingOf(rawName),
       });
       continue;
     }
     // A folder comes into being with the files under it (the write path mkdirs
     // each parent), so a directory member has nothing of its own to land.
     if (entry.isDirectory) continue;
-    const segments = zipEntrySegments(rawName);
-    const target = [destination, ...segments].join('/');
-    // Belt and braces: `zipEntryNameRefusal` already refuses a `..` segment
-    // and a root-anchored name, so nothing should reach here that climbs out.
-    // The check stays because the cost of being wrong about that is bytes
-    // landing outside the folder the caller named.
-    if (!target.startsWith(`${destination}/`) || !isInsideRepo(target, kbDirName)) {
+    const target = landingOf(rawName);
+    if (target === undefined) {
       planned.push({ path: rawName, error: 'invalid_entry', message: 'Path escapes destination' });
       continue;
     }
@@ -661,8 +678,8 @@ async function planUpload(
     if (!read.ok) {
       planned.push(
         read.reason === 'too_large'
-          ? { path: rawName, error: 'too_large', message: tooLargeToApply() }
-          : { path: rawName, error: 'unreadable_entry', message: `"${rawName}" could not be read: ${read.detail}.` },
+          ? { path: rawName, error: 'too_large', message: tooLargeToApply(), at: target }
+          : { path: rawName, error: 'unreadable_entry', message: `"${rawName}" could not be read: ${read.detail}.`, at: target },
       );
       continue;
     }
@@ -1165,34 +1182,116 @@ async function writeRefusalAtHead(
   });
 }
 
+/** Whether `err` is a refusal addressed to the caller (a 4xx), rather than something failing. */
+const isCallerRefusal = (err: unknown): err is Error & { status: number } =>
+  hasHttpStatus(err) && err.status >= 400 && err.status < 500;
+
 /**
- * The lock's own gates for one archive entry, asked before anything is
- * locked or written: the write rule on a protected branch, then
- * read-before-write, as `VersionControlService.acquireLock` asks them. An
- * archive lands as one batch, and a gate refusing a path inside the batch's
- * locking would refuse every entry; asked here, the entry alone is skipped.
+ * THE judge of an archive's entries (see `ArchiveEntryJudge`): the one the
+ * agent `unzip` tool and the app's unzip route hand `unzipFile`, and the one
+ * `apply_file_upload` asks about each path of an uploaded file. Per entry it
+ * answers for:
  *
- * A 4xx is the gate's answer to the caller and is the entry's reason. Any
- * other failure is the gate not answering: it is logged, and the entry is
- * skipped with text that names no infrastructure. The agent `unzip` tool and
- * the app's unzip route both ask this.
+ *  - the path rules: inside the repository, never the git folder in any
+ *    spelling, never the checkout's own name at the repository root;
+ *  - the platform's rule files. A file the platform reads by its fixed name
+ *    at the root (`roles.yaml`, `groups.yaml`, `synced-groups.yaml`) never
+ *    comes from an archive: an archive carrying one is refused whole. A
+ *    folder's rules (`access.md` and `.bevelignore`, at any depth) land in
+ *    the same commit as the files beside them, when the person may write
+ *    them, and when one will not land, for any reason, nothing in the archive
+ *    lands: files never arrive without the restriction they came with. A
+ *    plugin's manifest (`plugin.json`) is content and lands like any file;
+ *  - the write rule and read-before-write. A file's are the lock's own: the
+ *    landing takes each file's lock, `acquireLock` asks them, and a refusal
+ *    there comes back through `refusedAtLock`, so a gate the lock asks is
+ *    never restated here. A directory entry takes no lock, so a folder's
+ *    gates are asked before anything is written: the write rule at HEAD on a
+ *    protected branch, then read-before-write for a folder.
+ *
+ * `also` is the caller's own checks of each entry (the agent's write hook and
+ * its run's write policy), asked after the path rules and the fixed-name rule;
+ * what it throws is passed on as it is. A gate that fails rather than refuses
+ * (anything but a 4xx), a folder's or a file's at its lock, is logged, and the
+ * caller is told only that it could not be checked.
  */
-export async function assertArchiveEntryWritable(
+export function archiveEntryJudge(
   gates: { accessControl: IAccessControl; kb: KbContext; changeGate?: IChangeReadGate },
   branch: string,
   email: string,
-  wsPath: string,
-): Promise<void> {
-  try {
-    if ((await writeBlockedAtHead(gates.accessControl, gates.kb, branch, email, [wsPath])).length > 0) {
-      throw await writeRefusalAtHead(gates.accessControl, gates.kb.kbDirName, branch, wsPath, 'file');
+  also?: (wsPath: string) => void | Promise<void>,
+): ArchiveEntryJudge {
+  const { accessControl, kb, changeGate } = gates;
+  /**
+   * Which rule file an entry is: `never` (refuses the archive), `rule` (lands
+   * with the files or none do), or null (content). An entry whose name gives
+   * it no place is judged by its last segment, which names a folder's rules
+   * at any depth.
+   */
+  const ruleFileOf = (wsPath: string | null, entryName: string): 'never' | 'rule' | null => {
+    if (wsPath === null) {
+      const name = entryName.replace(/\/+$/, '').split('/').pop() ?? '';
+      return platformFilesByDepth(kb.layout).anyDepth.includes(name) ? 'rule' : null;
     }
-    await gates.changeGate?.assertMayChange(workspaceIdForBranch(branch), email, wsPath, 'file');
-  } catch (err) {
-    if (hasHttpStatus(err) && err.status >= 400 && err.status < 500) throw err;
-    log.warn(`unzip: checking ${printable(wsPath)} on ${printable(branch)} failed: ${printable(err instanceof Error ? err.message : String(err))}`);
-    throw new ToolError('Whether this file may be written could not be checked, so it was not extracted.', 503);
-  }
+    const rel = toKbRelative(wsPath, kb.kbDirName);
+    if (rel === null) return null;
+    if ((FIXED_NAME_SOURCES as readonly string[]).includes(rel)) return 'never';
+    return isPlatformFile(rel, kb.layout) ? 'rule' : null;
+  };
+  const neverRefusal = (wsPath: string): ArchiveRefusedError =>
+    new ArchiveRefusedError(
+      wsPath,
+      `${displayPath(wsPath.slice(wsPath.lastIndexOf('/') + 1))} never comes from an archive: edit the file itself, ` +
+        'where the change is checked. Nothing in the archive was landed.',
+      422,
+    );
+  /** Asked when it fails rather than refuses: logged, and named to the caller as unchecked. */
+  const unchecked = (what: string, wsPath: string, err: unknown): ToolError => {
+    log.warn(`archive: checking ${printable(wsPath)} on ${printable(branch)} failed: ${printable(err instanceof Error ? err.message : String(err))}`);
+    return new ToolError(what, 503);
+  };
+  return {
+    entry: async (wsPath, kind) => {
+      // An entry that would land beside the repository is skipped with the
+      // corrected-path reason, like any other refused entry.
+      assertInsideRepo(wsPath, kb.kbDirName);
+      assertNoGitInternalsSegment(wsPath);
+      assertRepoRootNameFree(wsPath, kb.kbDirName);
+      if (ruleFileOf(wsPath, wsPath) === 'never') throw neverRefusal(wsPath);
+      await also?.(wsPath);
+      if (kind === 'file') return;
+      try {
+        if ((await writeBlockedAtHead(accessControl, kb, branch, email, [wsPath])).length > 0) {
+          throw await writeRefusalAtHead(accessControl, kb.kbDirName, branch, wsPath, 'dir');
+        }
+        await changeGate?.assertMayChange(workspaceIdForBranch(branch), email, wsPath, 'dir');
+      } catch (err) {
+        if (isCallerRefusal(err)) throw err;
+        throw unchecked('Whether this folder may be created could not be checked, so it was not extracted.', wsPath, err);
+      }
+    },
+    refusedAtLock: (wsPath, err) => {
+      // The gate's refusal of this path: its own, and the entry's reason.
+      if (err instanceof AccessDeniedError) return;
+      // Any other refusal is the lock service's answer about the whole batch
+      // (the branch is being deleted, a race to retry).
+      if (isCallerRefusal(err)) throw err;
+      throw unchecked('Whether these files may be written could not be checked, so nothing was landed.', wsPath, err);
+    },
+    skipped: (wsPath, entryName, why) => {
+      const rule = ruleFileOf(wsPath, entryName);
+      if (rule === null) return null;
+      const at = wsPath ?? entryName;
+      if (rule === 'never') return neverRefusal(at);
+      const reason = (why instanceof Error ? why.message : String(why)).replace(/\.\s*$/, '');
+      return new ArchiveRefusedError(
+        at,
+        `"${displayPath(at)}" could not land: ${reason}. An archive's access rules land with its files or not at all, ` +
+          'so nothing in it was landed.',
+        isCallerRefusal(why) ? why.status : 422,
+      );
+    },
+  };
 }
 
 /**
@@ -1662,6 +1761,28 @@ export function registerWorkspaceTools(
     /** What `path` is — a folder the move or delete was judged on, or a file. See `AccessDeniedDetails.targetKind`. */
     targetKind: 'file' | 'dir' = 'file',
   ): Promise<AccessDeniedError> => writeRefusalAtHead(accessControl, kbDirName, branch, path, targetKind);
+
+  /**
+   * The branch's filesystem as the batch it lands a set of files through:
+   * `LockingFilesystem.writeFiles`, every path's lock and then one commit. A
+   * write tool (`write: true`) is refused to a read-scoped caller before its
+   * handler runs, so the filesystem a write tool's handler gets is always the
+   * locking one; this is the one place that says so.
+   */
+  const batchLandingOf = async (ctx: ToolContext, branch: string): Promise<Pick<LockingFilesystem, 'writeFiles'>> =>
+    (await ctx.getFilesystem(branch)) as unknown as LockingFilesystem;
+
+  /**
+   * {@link archiveEntryJudge} for an agent's call: each entry is also judged
+   * as a write of its own by the run's write policy and the deployment's write
+   * hook, so an archive is no way around either (a restricted run cannot
+   * extract a `.md` into the graph).
+   */
+  const agentArchiveJudge = (ctx: ToolContext, branch: string): ArchiveEntryJudge =>
+    archiveEntryJudge({ accessControl, kb, changeGate }, branch, ctx.user.email, async (wsPath) => {
+      writePolicy.assertPathWritable(ctx.sessionId, wsPath);
+      await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsPath);
+    });
 
   /** Whether a workspace-relative path is, or lies inside, a repository's `.git` metadata. */
   const isGitMetadata = (path: string): boolean => path.split('/').includes('.git');
@@ -3180,18 +3301,8 @@ export function registerWorkspaceTools(
       // decided per path too.
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
       const fs = await ctx.getFilesystem(a.branch as string);
-      // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
-      // batch as one commit. Structural cast avoids a version-control-internal import.
-      const batching = fs as unknown as {
-        writeFiles(
-          writes: { path: string; content: string }[],
-          summary: string,
-          deletes: string[],
-          check: (
-            pending: readonly { path: string; content: string }[],
-          ) => Promise<{ path: string; content: string }[]>,
-        ): Promise<void>;
-      };
+      // `writeFiles` lands the batch as one commit.
+      const batching = await batchLandingOf(ctx, a.branch as string);
       const writes: { path: string; content: string }[] = [];
       const outcomes: Record<string, unknown>[] = [];
       /** The `files` entry for `writes[i]`, so the re-judgement can revise it. */
@@ -4011,7 +4122,8 @@ export function registerWorkspaceTools(
     gated: true,
     description:
       'Extract a .zip already in the workspace (defaults to the zip\'s parent). Returns extracted files + skipped entries. Existing files are overwritten. ' +
-      'The extracted files are committed and shared as one change, like any write; if someone is editing any of them, nothing is extracted.',
+      'The extracted files are committed and shared as one change, like any write; if someone is editing any of them, nothing is extracted. ' +
+      'An `access.md` or `.bevelignore` in it lands with its files or nothing lands; an archive that would land `roles.yaml` or a groups file at the root is refused whole.',
     inputs: {
       type: 'object',
       properties: {
@@ -4047,11 +4159,10 @@ export function registerWorkspaceTools(
       // about it before a single entry is extracted out of it.
       await notifyAgentRead(agentAccessGate, ctx, a.branch as string, zipPath);
       const branch = a.branch as string;
-      // `write: true` guarantees a LockingFilesystem here. Its `writeFiles` is
-      // the landing: every entry's lock, then one commit of them all as the
-      // person, so an `access.md` that came in the archive and the files
-      // beside it enter one commit together.
-      const landing = (await ctx.getFilesystem(branch)) as unknown as ArchiveLanding;
+      // The landing is the filesystem's batch: every entry's lock, then one
+      // commit of them all as the person, so an `access.md` that came in the
+      // archive and the files beside it enter one commit together.
+      const landing = await batchLandingOf(ctx, branch);
       // A .zip that is not there is a missing PATH, not an unreadable archive:
       // the service now says so (PathNotFoundError) and the helper turns it
       // into the same 404 every other file tool answers. Only that declared
@@ -4063,26 +4174,7 @@ export function registerWorkspaceTools(
             workspaceIdForBranch(branch),
             zipPath,
             typeof a.destination === 'string' ? a.destination : undefined,
-            // Each extracted file is judged as a write of its own: an entry the
-            // write hook refuses is skipped (not extracted), so an archive can't
-            // be a way around it — the extension policy applies per entry too,
-            // so a restricted run can't unzip a `.md` into the graph.
-            async (wsRelPath) => {
-              // An entry that would land beside the repository is skipped with the
-              // corrected-path reason, like any other refused entry.
-              assertInsideRepo(wsRelPath, kbDirName);
-              // An archive may not carry a roles.yaml at all, as an upload may
-              // not (`platformFileReason`).
-              if (isRolesYamlPath(wsRelPath, kbDirName)) {
-                throw new ToolError(
-                  'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
-                  422,
-                );
-              }
-              writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
-              await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsRelPath);
-              await assertArchiveEntryWritable({ accessControl, kb, changeGate }, branch, ctx.user.email, wsRelPath);
-            },
+            agentArchiveJudge(ctx, branch),
             landing,
           ),
         'Nothing to extract',
@@ -4101,37 +4193,19 @@ export function registerWorkspaceTools(
   // the agent's disk to the server's and never enter a prompt.
   //
   /**
-   * Why one of an upload's paths may not be landed, judged on the path ALONE —
-   * or undefined when nothing about the name itself refuses it.
-   *
-   * The platform files are the whole of it. `access.md` governs who may read
-   * and write the folder it sits in, `roles.yaml` says which roles exist, and
-   * the agent guide is read as instructions: each is configuration the platform
-   * obeys, and each has a write path that CHECKS the change (the roles gate
-   * refuses an edit that would lock every admin out; a folder's access rules
-   * are judged against who is asking). Bytes arriving by upload meet none of
-   * those gates — they are a buffer the sender chose — so an upload never
-   * lands one, whatever else the caller may write. `unzip` has refused
-   * `roles.yaml` from an archive for the same reason; this is that rule, over
-   * all four names.
-   */
-  const platformFileReason = (wsPath: string): string | undefined => {
-    const rel = toKbRelative(wsPath, kbDirName);
-    return rel !== null && isPlatformFile(rel, kb.layout) ? platformFileUploadRefusal(rel) : undefined;
-  };
-
-  /**
    * `apply_file_upload`'s handler: resolve the stored bytes into one path per
-   * file, judge each path the way `write_files` judges its own, and land the
-   * survivors as ONE commit.
+   * file, judge each path, and land the survivors as ONE commit.
    *
-   * The judging is deliberately the same shape as `write_files`, down to the
-   * second verdict under the lock, because the promise the ticket makes is
-   * that an upload is judged "exactly as `write_file` would judge it". Three
-   * gates run per path and a path that fails one is that path's outcome and no
-   * more: the deployment's write hook, the platform-file rule above, and the
-   * `mode`. What is judged ONCE for the whole call is the destination — a
-   * caller who may not write the folder at all gets one refusal naming the
+   * Each path is put to the archive judge `unzip` uses too (`archiveEntryJudge`:
+   * the path rules, the platform's rule files, the run's write policy and the
+   * deployment's write hook, and — through each path's lock — the write rule
+   * and read-before-write), then to the link rule and the `mode`, which is
+   * asked again under the lock, as `write_files` asks it. A path that fails one
+   * is that path's outcome and no more, with one exception the judge decides:
+   * when one of the upload's own access rules (`access.md`, `.bevelignore`)
+   * will not land, or the upload would land a `roles.yaml` or a groups file at
+   * the repository root, nothing lands. What is judged ONCE for the whole call is the destination —
+   * a caller who may not write the folder at all gets one refusal naming the
    * change-request route, rather than the same refusal repeated per entry.
    */
   const applyFileUpload = async (
@@ -4175,20 +4249,28 @@ export function registerWorkspaceTools(
       }
 
       const planned = await planUpload(upload, destination, kbDirName);
-      const paths = planned.filter((p) => p.content !== undefined).map((p) => p.path as string);
-      // One batched access read for every path, like `write_files` — empty on
-      // a draft branch, where changes reach a protected branch only through a
-      // change request.
-      const blocked = new Set(await writeBlocked(branch, ctx, paths));
+      const judge = agentArchiveJudge(ctx, branch);
 
       const writes: { path: string; content: Buffer }[] = [];
       const outcomes: Record<string, unknown>[] = [];
-      /** The `files` entry for `writes[i]`, so the under-lock verdict can revise it. */
-      const entryOf: Record<string, unknown>[] = [];
+      /** The `files` entry of each write handed to the batch, so a verdict under the lock can revise it. */
+      const entryOf = new Map<{ path: string; content: Buffer }, Record<string, unknown>>();
+      /**
+       * Record on `entry` that its path will not land, as `refuseEntry` says it
+       * — an error that is no verdict about the path goes on, failing the whole
+       * apply — and then let the judge say whether that refuses the upload.
+       */
+      const refuse = (entry: Record<string, unknown>, wsPath: string | null, err: unknown): void => {
+        refuseEntry(entry, err);
+        const whole = judge.skipped(wsPath, entry.path as string, err);
+        if (whole) throw whole;
+      };
       for (const item of planned) {
         const entry: Record<string, unknown> = { path: item.path };
         outcomes.push(entry);
         if (item.content === undefined) {
+          const whole = judge.skipped(item.at ?? null, item.path, item.message);
+          if (whole) throw whole;
           entry.outcome = 'refused';
           entry.error = item.error;
           entry.message = item.message;
@@ -4196,19 +4278,11 @@ export function registerWorkspaceTools(
         }
         const wsPathOf = item.path;
         try {
-          if (blocked.has(wsPathOf)) throw await writeRefusal(branch, wsPathOf);
-          const platform = platformFileReason(wsPathOf);
-          if (platform !== undefined) throw new ToolError(platform, 422, { code: 'platform_file' });
-          // The git folder is never a workspace path, in any spelling. A ZIP
-          // entry's name has already met this rule in `zipEntryNameRefusal`; a
-          // SINGLE uploaded file's has not — `.git` is a name the upload
-          // route's `validateFilename` accepts — and the preflight that reads
-          // the caller's own arguments never sees it either, because the name
-          // came from the upload, not from the call. Asked here so that path
-          // is REFUSED like any other, with the rest of the upload landing,
-          // rather than failing the whole apply from inside `writeFiles`.
-          assertNoGitInternalsSegment(wsPathOf);
-          assertRepoRootNameFree(wsPathOf, kbDirName);
+          // The path rules (the git folder in any spelling, which a SINGLE
+          // uploaded file's name has not met yet — `.git` is a name the upload
+          // route's `validateFilename` accepts), the platform's rule files,
+          // the write policy and the write hook.
+          await judge.entry(wsPathOf, 'file');
           // A link already on disk under the destination must not redirect
           // these bytes — the rule `unzip` applies per entry, applied here on
           // the path the write will take.
@@ -4220,58 +4294,56 @@ export function registerWorkspaceTools(
               { code: 'symlink' },
             );
           }
-          writePolicy.assertPathWritable(ctx.sessionId, wsPathOf);
-          await assertAgentWriteAllowed(agentAccessGate, ctx, branch, wsPathOf);
           // An earlier entry of this same upload counts as existing, as it
           // does in `write_files`: two `create` entries for one path are a
           // mistake the commit would otherwise hide.
           const exists =
             writes.some((w) => w.path === wsPathOf) || (await kindOf(fs, wsPathOf)) !== null;
           entry.outcome = decideWrite(mode, wsPathOf, exists);
-          writes.push({ path: wsPathOf, content: item.content });
-          entryOf.push(entry);
+          const write = { path: wsPathOf, content: item.content };
+          writes.push(write);
+          entryOf.set(write, entry);
         } catch (err) {
-          refuseEntry(entry, err);
+          if (err instanceof ArchiveRefusedError) throw err;
+          refuse(entry, wsPathOf, err);
         }
       }
 
       // The mode gate again, with every path's lock held — the verdict the
       // answer carries, for the reason `write_file` states at length. A path
       // whose verdict changed under the lock is dropped from the batch and
-      // reported refused, leaving the rest to land.
+      // reported refused, leaving the rest to land — unless the judge says it
+      // refuses the upload, which then refuses the batch untouched.
       const recheck = async (
         pending: readonly { path: string; content: Buffer }[],
       ): Promise<{ path: string; content: Buffer }[]> => {
         const kept: { path: string; content: Buffer }[] = [];
-        for (let i = 0; i < pending.length; i++) {
-          const entry = entryOf[i];
+        for (const write of pending) {
+          const entry = entryOf.get(write) as Record<string, unknown>;
           try {
             const exists =
-              kept.some((k) => k.path === pending[i].path) || (await kindOf(fs, pending[i].path)) !== null;
-            entry.outcome = decideWrite(mode, pending[i].path, exists);
-            kept.push(pending[i]);
+              kept.some((k) => k.path === write.path) || (await kindOf(fs, write.path)) !== null;
+            entry.outcome = decideWrite(mode, write.path, exists);
+            kept.push(write);
           } catch (err) {
-            refuseEntry(entry, err);
+            refuse(entry, write.path, err);
           }
         }
         return kept;
       };
+      // A path whose lock the lock's own gates refuse (the write rule, or
+      // read-before-write) is that path's outcome, or the upload's when the
+      // judge says so.
+      const refusedAtLock = (wsPath: string, err: unknown): void => {
+        judge.refusedAtLock(wsPath, err);
+        for (const [write, entry] of entryOf) if (write.path === wsPath) refuse(entry, wsPath, err);
+      };
       if (writes.length > 0) {
-        // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands
-        // the whole set as ONE commit and takes a Buffer as content, so bytes
-        // reach disk exactly as they were sent — no text decode anywhere on
-        // the way, which is what makes a PNG and a backslash-heavy page land
-        // with the checksum they were uploaded with.
-        const batching = fs as unknown as {
-          writeFiles(
-            writes: { path: string; content: Buffer }[],
-            summary: string,
-            deletes: string[],
-            check: (
-              pending: readonly { path: string; content: Buffer }[],
-            ) => Promise<{ path: string; content: Buffer }[]>,
-          ): Promise<void>;
-        };
+        // `writeFiles` lands the whole set as ONE commit and takes a Buffer as
+        // content, so bytes reach disk exactly as they were sent — no text
+        // decode anywhere on the way, which is what makes a PNG and a
+        // backslash-heavy page land with the checksum they were uploaded with.
+        const batching = await batchLandingOf(ctx, branch);
         // In the DESTINATION folder's TURN, which `delete_folder` takes over the
         // same subtree (and `keepFolderOf` with it). `writeFiles` creates the
         // destination, and any folder above a zip entry on the way to it, as
@@ -4284,7 +4356,7 @@ export function registerWorkspaceTools(
         // its own (the folder's turn first, then each path's lock), which is
         // what keeps two callers from waiting on each other's half.
         await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), destination, async () => {
-          await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck);
+          await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck, refusedAtLock);
         });
       }
       // The token is spent once an ANSWER exists, even an answer in which
@@ -4363,8 +4435,8 @@ export function registerWorkspaceTools(
         'Returns `{ destination, count, total, files }`: one entry per path, each `{ path, outcome }` — `created` / ' +
         '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
         '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
-        'Every path is judged one by one — by your write access, the platform-file rules and what is already there — ' +
-        'as `write_file` judges it, except that platform files are refused and binary content is fine; a refused path does not stop the others. ' +
+        'Every path is judged one by one as `write_file` judges it (binary is fine); a refused path does not stop the others, ' +
+        'except an `access.md` or `.bevelignore` the upload holds: then nothing lands, as when it holds `roles.yaml` or a groups file at the root. ' +
         'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
         'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
       inputs: {
@@ -4403,7 +4475,7 @@ export function registerWorkspaceTools(
                   enum: ['created', 'replaced', 'updated', 'refused'],
                   description: 'What happened at this path. `refused` means nothing was written there.',
                 },
-                error: str('Present when `outcome` is `refused`: the refusal code — e.g. `exists`, `missing`, `invalid_entry`, `platform_file`, `write-denied`.'),
+                error: str('Present when `outcome` is `refused`: the refusal code — e.g. `exists`, `missing`, `invalid_entry`, `write-denied`.'),
                 message: str('Present when `outcome` is `refused`: the full refusal, the same one `write_file` would have given.'),
               },
               required: ['path', 'outcome'],

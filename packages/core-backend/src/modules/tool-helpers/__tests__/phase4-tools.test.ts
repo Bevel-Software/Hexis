@@ -24,17 +24,29 @@ const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', na
 const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
   getWorkspacePath: async () => '/tmp/ws',
-  unzipFile: async (ws: string, p: string, d?: string, guardWrite?: (target: string) => Promise<void>) => {
+  unzipFile: async (
+    ws: string,
+    p: string,
+    d?: string,
+    judge?: {
+      entry(target: string, kind: 'file' | 'dir'): Promise<void>;
+      skipped(target: string, name: string, why: unknown): Error | null;
+    },
+  ) => {
     recorded.push(['unzip', ws, p, d]);
     if (archiveEntries.length === 0) return { extracted: [p], skipped: [] };
-    // Mirrors the real extraction: a guard refusal skips that entry with its message.
+    // Mirrors the real extraction: the judge's refusal skips that entry with
+    // its message, unless the judge says the entry decides the whole archive.
     const extracted: string[] = [];
     const skipped: { path: string; reason: string }[] = [];
     for (const target of archiveEntries) {
       try {
-        await guardWrite?.(target);
+        await judge?.entry(target, 'file');
         extracted.push(target);
       } catch (err) {
+        if ((err as { kind?: string }).kind === 'archive-refused') throw err;
+        const whole = judge?.skipped(target, target, err);
+        if (whole) throw whole;
         skipped.push({ path: target, reason: (err as Error).message });
       }
     }
@@ -107,16 +119,16 @@ describe('Phase 4 tools (core subset)', () => {
     expect(recorded).toContainEqual(['unzip', WS, 'knowledge-base/a.zip', undefined]);
   });
 
-  it('unzip never extracts a roles.yaml — extraction bypasses the filesystem gate that checks it', async () => {
+  it('unzip refuses an archive carrying a roles.yaml whole — extraction bypasses the filesystem gate that checks it', async () => {
     archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/roles.yaml'];
     const base = await start();
     const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
-    expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
-    expect(body.skipped).toEqual([
-      { path: 'knowledge-base/roles.yaml', reason: expect.stringContaining('roles.yaml is never extracted') },
-    ]);
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string; kind: string };
+    expect(body.kind).toBe('archive-refused');
+    expect(body.error).toBe(
+      'roles.yaml never comes from an archive: edit the file itself, where the change is checked. Nothing in the archive was landed.',
+    );
   });
 
   it('the registered core tool appears in the internal manual', async () => {
