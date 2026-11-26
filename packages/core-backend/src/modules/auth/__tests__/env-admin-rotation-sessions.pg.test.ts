@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
-import type { Database } from '../../database/index.js';
+import jwt from 'jsonwebtoken';
+import { users, type Database } from '../../database/index.js';
 import type { IExternalApiKeyService } from '../../tool-auth/index.js';
 import { createKbSyncRoutes } from '../../kb-sync/index.js';
 import { PG_ADMIN_URL, PG_TEST_TIMEOUT, dropScratchDatabases, openMigratedScratchDb } from '../../../__tests__/pg-scratch.js';
@@ -33,6 +34,7 @@ const MEMBER_EMAIL = 'member@acme.test';
 /** Deployment admins of their own tests, so each starts with no row. */
 const LATE_ADMIN_EMAIL = 'late-root@acme.test';
 const NEXT_ADMIN_EMAIL = 'next-root@acme.test';
+const UPGRADED_ADMIN_EMAIL = 'upgraded-root@acme.test';
 const SYNC_SECRET = 'a-very-long-and-random-sync-secret';
 
 /** No connection key, OAuth token or internal token is presented here: the bearer is always a session. */
@@ -42,7 +44,7 @@ const noKeys = {
 } as unknown as IExternalApiKeyService;
 const noOAuth = { looksLikeAccessToken: () => false } as unknown as Parameters<typeof createMcpAuthMiddleware>[2];
 const internalTokens = new InternalTokenService({ secret: 'test-internal-secret-32-bytes-long!!' });
-const ADMINS = new Set([ADMIN_EMAIL, MEMBER_EMAIL, LATE_ADMIN_EMAIL, NEXT_ADMIN_EMAIL]);
+const ADMINS = new Set([ADMIN_EMAIL, MEMBER_EMAIL, LATE_ADMIN_EMAIL, NEXT_ADMIN_EMAIL, UPGRADED_ADMIN_EMAIL]);
 const isAdmin = async (email: string) => ADMINS.has(email);
 const reached = (_req: express.Request, res: express.Response) => {
   res.json({ ok: true });
@@ -165,6 +167,38 @@ describe.skipIf(!PG_ADMIN_URL)('the deployment admin across an ADMIN_PASSWORD ro
       const { base: unchanged } = await boot('rotated-password');
       expect((await call(unchanged, '/api/auth/me', bearer(fresh.token))).status).toBe(200);
       expect((await call(unchanged, '/api/auth/me', cookie(fresh.cookie))).status).toBe(200);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'signs the deployment admin out once, at the first boot after upgrading, and keeps the session it opens then',
+    async () => {
+      // The deployment as the previous version left it: the admin's row with
+      // no stamp, and a session token signed the way that version signed it,
+      // with the row's generation and no password stamp.
+      const [row] = await db
+        .insert(users)
+        .values({ email: UPGRADED_ADMIN_EMAIL, emailBidx: UPGRADED_ADMIN_EMAIL, name: 'Root' })
+        .returning();
+      expect(row.envAdminStamp).toBeNull();
+      const preUpgrade = jwt.sign(
+        { userId: row.id, email: row.email, sv: row.sessionVersion },
+        JWT_SECRET,
+        { expiresIn: '7d' },
+      );
+
+      const { base: upgraded } = await boot('kept-across-upgrade', UPGRADED_ADMIN_EMAIL);
+      for (const path of SURFACES) expect(await call(upgraded, path, bearer(preUpgrade))).toEqual(ENDED);
+      expect(await call(upgraded, '/api/auth/me', cookie(`${AUTH_COOKIE_NAME}=${preUpgrade}`))).toEqual(ENDED);
+
+      // The password did not change, so it still signs in, and that session
+      // outlives the next restart: only the upgrade signs the admin out.
+      const fresh = await signIn(upgraded, 'kept-across-upgrade', UPGRADED_ADMIN_EMAIL);
+      for (const path of SURFACES) expect((await call(upgraded, path, bearer(fresh.token))).status).toBe(200);
+      const { base: restarted } = await boot('kept-across-upgrade', UPGRADED_ADMIN_EMAIL);
+      expect((await call(restarted, '/api/auth/me', bearer(fresh.token))).status).toBe(200);
+      expect((await call(restarted, '/api/auth/me', cookie(fresh.cookie))).status).toBe(200);
     },
     PG_TEST_TIMEOUT,
   );
