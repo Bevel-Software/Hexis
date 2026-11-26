@@ -1443,7 +1443,9 @@ export function ManageAccessDialog({
    *   - a verb the set adds that nothing confers → grant it here.
    *
    * On a Denied row the whole Deny is lifted first, so the denials left behind
-   * are only the ones the steps above write for this set.
+   * are only the ones the steps above write for this set. If a later step
+   * fails, the whole Deny is written back, so a failure never leaves the
+   * principal holding parent grants the set leaves off.
    *
    * Order is broadest-verb-first for both halves; see {@link VERBS_BROADEST_FIRST}
    * for why neither half is safe in the other order. Each call answers with the
@@ -1462,6 +1464,7 @@ export function ManageAccessDialog({
       setMutateError(null);
       const base = { path: entry.relativePath, kind: targetKind, principal: row.principal };
       let latest = data;
+      let lifted = false;
       /** The row as the LATEST server response describes it — never a guess. */
       const current = (): PrincipalRow | undefined =>
         buildRows(latest, myEmail).find((r) => r.key === row.key);
@@ -1483,8 +1486,11 @@ export function ManageAccessDialog({
         // then writes back only the denials the set still needs (a verb a
         // parent grants that the set leaves off), so no leftover `deny`
         // download or owner line shadows a grant the parent makes later.
+        // Lifting first is forced: under a denial the server reports no parent
+        // grant, so which denials the set still needs is known only after it.
         if (current()?.deniedHere) {
           await step(() => revokeAccess(workspaceId, base));
+          lifted = true;
         }
 
         // ---- lower: what the set drops -------------------------------------
@@ -1531,6 +1537,13 @@ export function ManageAccessDialog({
         }
       } catch (err) {
         setMutateError(err instanceof Error ? err.message : String(err));
+        // A write after the lift failed: put the whole Deny back. If that fails
+        // too, the error above stands and the reload shows what landed.
+        if (lifted) {
+          await step(() => revokeAccess(workspaceId, { ...base, mode: 'deny-here' })).catch(
+            () => {},
+          );
+        }
         reload(); // re-sync on whatever the server actually holds now
       } finally {
         setBusy(false);
