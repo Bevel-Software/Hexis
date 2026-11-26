@@ -38,7 +38,8 @@ export interface FileChangeBoxesProps {
  * this is not a banner pointing at a review queue somewhere else.
  *
  * Owns the whole decision loop: per-request diffs from each request's fork
- * point (see `useCrFileDiffs`), Approve (approvals → merge → wait for the outcome event),
+ * point (see `useCrFileDiffs`), Approve (this file's approval → merge once no
+ * other file waits → wait for the outcome event),
  * Decline, the author's Withdraw, and "Read the whole change" opening the
  * shared {@link ChangeRequestDialog}. Resolutions dispatch
  * {@link PR_STALE_EVENT} so the tree dots, the tabs and this very list
@@ -144,11 +145,12 @@ export function FileChangeBoxes({
             blocked={blockedCrs.has(cr.number)}
             conflictPrompt={conflictResolutionPrompt(cr)}
             refusal={refusalLine(cr, applying.refusals)}
+            awaitingOthers={applying.awaiting.get(cr.number) ?? null}
             owner={ownersLabel}
             othersPending={othersPending}
             busy={busyCr === cr.number || applying.activeCr === cr.number}
             phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
-            onApprove={() => applying.apply(cr)}
+            onApprove={() => applying.apply(cr, repoRelativePath)}
             onDecline={() => void cancel(cr)}
             onWithdraw={() => void cancel(cr)}
             onOpenFull={() => setOpenCr(cr)}

@@ -28,7 +28,7 @@ export interface ChangeBoxProps {
   /**
    * The file is binary (an image, a document…): there is no text to diff,
    * and the box says so instead of loading forever. The verdict buttons keep
-   * working — approving still applies the whole request.
+   * working.
    */
   binary?: boolean;
   /**
@@ -61,6 +61,12 @@ export interface ChangeBoxProps {
    * the reader, so the button stays.
    */
   refusal?: string | null;
+  /**
+   * The viewer's Approve on this file was recorded, and the request still
+   * waits on this many other files before it applies. Withdraws Approve:
+   * there is nothing more to approve here.
+   */
+  awaitingOthers?: number | null;
   /** Who the decision is waiting on, for the non-owner's footer. */
   owner?: string;
   /**
@@ -119,6 +125,7 @@ export function ChangeBox({
   blocked = false,
   conflictPrompt = null,
   refusal = null,
+  awaitingOthers = null,
   owner,
   othersPending,
   busy,
@@ -217,11 +224,15 @@ export function ChangeBox({
                 ? phase === 'approving'
                   ? 'Recording your approval…'
                   : 'Applying the change…'
-                : 'Pending approval'}
+                : awaitingOthers !== null
+                  ? 'You approved this file'
+                  : 'Pending approval'}
             </span>
             {!busy && (
               <span className="text-meta text-ink-faint">
-                {canDecide
+                {awaitingOthers !== null
+                  ? `The change applies once ${awaitingOthers} other ${awaitingOthers === 1 ? 'file is' : 'files are'} approved.`
+                  : canDecide
                   ? othersPending === undefined
                     ? 'You can decide this.'
                     : waitingOnViewerLabel(othersPending)
@@ -253,17 +264,17 @@ export function ChangeBox({
               Withdraw
             </Button>
           )}
-          {/* Both verdicts act on the WHOLE change request, so neither is
-              offered against a file with nothing to show: approving would
-              merge, and declining would kill, a request whose other files this
-              panel is not displaying. "Read the whole change" is the honest
-              route to that decision. */}
+          {/* Neither verdict is offered against a file with nothing to show:
+              declining kills the WHOLE request, and approving consents to a
+              change this panel is not displaying. "Read the whole change" is
+              the honest route to that decision. Approve binds this file only;
+              the request applies once no other file waits. */}
           {canDecide && !upToDate && onDecline && (
             <Button variant="quiet" size="tiny" onClick={onDecline} disabled={busy}>
               Decline
             </Button>
           )}
-          {canDecide && !upToDate && !blocked && onApprove && (
+          {canDecide && !upToDate && !blocked && awaitingOthers === null && onApprove && (
             <Button variant="primary" size="tiny" onClick={onApprove} disabled={busy}>
               {busy ? busyLabel : 'Approve'}
             </Button>

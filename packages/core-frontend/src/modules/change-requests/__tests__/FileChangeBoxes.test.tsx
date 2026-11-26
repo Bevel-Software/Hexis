@@ -162,6 +162,69 @@ describe('FileChangeBoxes: who may decide', () => {
   });
 });
 
+describe('FileChangeBoxes: Approve binds the file on screen', () => {
+  const OTHER = 'Locked/gamma.md';
+  const approval = (path: string, isApproved: boolean) => ({
+    path,
+    eligibleApprovers: { roles: ['Admin'], users: [] },
+    approvedBy: [],
+    isApproved,
+    inMergeGate: true,
+    viewerCanApprove: true,
+  });
+
+  beforeEach(() => {
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [approval(PATH, false), approval(OTHER, false)],
+    });
+  });
+
+  it('approves only this file of a two-file request and leaves the request unapplied', async () => {
+    api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, false)]);
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    expect(await screen.findByText('You approved this file')).toBeInTheDocument();
+    expect(screen.getByText('The change applies once 1 other file is approved.')).toBeInTheDocument();
+    expect(api.approvePrFile).toHaveBeenCalledTimes(1);
+    expect(api.approvePrFile).toHaveBeenCalledWith(CR.number, PATH);
+    expect(api.approvePrFile).not.toHaveBeenCalledWith(CR.number, OTHER);
+    expect(api.mergePullRequest).not.toHaveBeenCalled();
+    // Nothing left to approve here, so the button goes.
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Published: the file now reads with that change.')).not.toBeInTheDocument();
+  });
+
+  it('applies when this file was the last one the request waited on', async () => {
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [approval(PATH, false), approval(OTHER, true)],
+    });
+    api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, true)]);
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => expect(api.mergePullRequest).toHaveBeenCalledWith(CR.number));
+    expect(api.approvePrFile).toHaveBeenCalledTimes(1);
+    expect(api.approvePrFile).toHaveBeenCalledWith(CR.number, PATH);
+  });
+
+  it('reports a refused approval of this file instead of applying anyway', async () => {
+    api.approvePrFile.mockRejectedValue(new Error('You may not approve Docs/guide.md'));
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('You may not approve');
+    expect(api.mergePullRequest).not.toHaveBeenCalled();
+  });
+});
+
 describe('FileChangeBoxes: the waiting label', () => {
   it('reads "Waiting on you" when the viewer is the only pending approver', async () => {
     renderBoxes({ mine: true, canDecide: true, othersPending: 0 });

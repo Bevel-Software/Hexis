@@ -1002,10 +1002,11 @@ export function SkillPage({
               blocked={blockedCrs.has(cr.number)}
               conflictPrompt={conflictResolutionPrompt(cr)}
               refusal={refusalLine(cr, applying.refusals)}
+              awaitingOthers={applying.awaiting.get(cr.number) ?? null}
               owner={ownerName}
               busy={busyCr === cr.number || applying.activeCr === cr.number}
               phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
-              onApprove={() => applying.apply(cr)}
+              onApprove={() => applying.apply(cr, fileRepoPath)}
               onDecline={() => void decline(cr)}
               onWithdraw={() => void withdraw(cr)}
               onOpenFull={canWrite ? () => setCompareCr(cr) : undefined}

@@ -64,7 +64,19 @@ export interface ApplyChangeRequest {
   phase: ApplyPhase;
   /** Refusals by change-request number, from the attempt that produced them. */
   refusals: Map<number, ApplyRefusal>;
-  apply(cr: PullRequestSummary): void;
+  /**
+   * Requests where this tab recorded a file-bound approval (`apply(cr, path)`)
+   * and stopped short of applying: how many files the gate still waits on.
+   */
+  awaiting: Map<number, number>;
+  /**
+   * Without `path`: approve every file the gate binds that this viewer may
+   * approve, then apply. That is the dialog's Apply, offered only when the
+   * viewer's authority covers the whole request. With `path`: approve THAT
+   * file only, and apply only when the gate then waits on no other file. A
+   * box under one file never consents to files it does not show.
+   */
+  apply(cr: PullRequestSummary, path?: string): void;
 }
 
 /**
@@ -107,6 +119,7 @@ export function useApplyChangeRequest(opts: {
   const [activeCr, setActiveCr] = useState<number | null>(null);
   const [phase, setPhase] = useState<ApplyPhase>('idle');
   const [refusals, setRefusals] = useState<Map<number, ApplyRefusal>>(new Map());
+  const [awaiting, setAwaiting] = useState<Map<number, number>>(new Map());
 
   /**
    * The in-flight change-request number, as a ref as well as state. Merging is
@@ -188,17 +201,13 @@ export function useApplyChangeRequest(opts: {
   );
 
   const apply = useCallback(
-    (cr: PullRequestSummary) => {
+    (cr: PullRequestSummary, path?: string) => {
       if (runningRef.current !== null) return;
       runningRef.current = cr.number;
       setActiveCr(cr.number);
       setPhase('approving');
-      setRefusals((m) => {
-        if (!m.has(cr.number)) return m;
-        const next = new Map(m);
-        next.delete(cr.number);
-        return next;
-      });
+      setRefusals((m) => without(m, cr.number));
+      setAwaiting((m) => without(m, cr.number));
 
       void (async () => {
         try {
@@ -207,16 +216,33 @@ export function useApplyChangeRequest(opts: {
           const detail = await fetchPrDetail(cr.number, { fresh: true });
           if (runningRef.current !== cr.number) return;
 
-          for (const a of detail.approvals) {
-            if (a.isApproved) continue;
-            // The server's verdict on whether the gate binds the file at all —
-            // a file it ignores gets no recorded approval.
-            if (!a.inMergeGate) continue;
-            // A refusal here is "not your file", which is normal on a change
-            // request spanning several owners — let the gate below decide
-            // whether what did get approved is enough.
-            await approvePrFile(cr.number, a.path).catch(() => undefined);
-            if (runningRef.current !== cr.number) return;
+          let approvals = detail.approvals;
+          if (path !== undefined) {
+            // The one file on screen. A refusal here is about the file the
+            // person asked to approve, so it reaches them instead of being
+            // skipped.
+            if (!approvals.find((a) => a.path === path)?.isApproved) {
+              approvals = await approvePrFile(cr.number, path);
+              if (runningRef.current !== cr.number) return;
+            }
+            const pending = approvals.filter((a) => a.inMergeGate && !a.isApproved).length;
+            if (pending > 0) {
+              stop();
+              setAwaiting((m) => new Map(m).set(cr.number, pending));
+              return;
+            }
+          } else {
+            for (const a of approvals) {
+              if (a.isApproved) continue;
+              // The server's verdict on whether the gate binds the file at all —
+              // a file it ignores gets no recorded approval.
+              if (!a.inMergeGate) continue;
+              // A refusal here is "not your file", which is normal on a change
+              // request spanning several owners — let the gate below decide
+              // whether what did get approved is enough.
+              await approvePrFile(cr.number, a.path).catch(() => undefined);
+              if (runningRef.current !== cr.number) return;
+            }
           }
 
           setPhase('applying');
@@ -264,8 +290,16 @@ export function useApplyChangeRequest(opts: {
         }
       })();
     },
-    [fail, succeed],
+    [fail, succeed, stop],
   );
 
-  return { activeCr, phase, refusals, apply };
+  return { activeCr, phase, refusals, awaiting, apply };
+}
+
+/** `m` without `key`; the same map when it had none, so nothing re-renders. */
+function without<V>(m: Map<number, V>, key: number): Map<number, V> {
+  if (!m.has(key)) return m;
+  const next = new Map(m);
+  next.delete(key);
+  return next;
 }
