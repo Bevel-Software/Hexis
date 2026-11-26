@@ -1537,6 +1537,13 @@ export class AccessControlService implements IAccessControl {
    */
   private readonly deploymentOwners: ReadonlySet<string>;
 
+  /**
+   * Four collaborators below have defaults this constructor builds itself
+   * (`gitRunner`, `treeIndexer`, `ownEntriesMemo`, `headMaps`): an exception
+   * to constructor injection, kept because many suites construct this service
+   * without them. The composition root passes every one, so in this
+   * repository only those suites run the defaults.
+   */
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly kbDirName: string,
