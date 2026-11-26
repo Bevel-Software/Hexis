@@ -3,15 +3,15 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { PathTraversalError } from '../../../shared/domain-errors.js';
 import { EntryExistsError } from '../workspace.service.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import type { SkillSaveCheck } from '../workspace.tools.js';
 import type { WorkspaceService } from '../workspace.service.js';
@@ -114,6 +114,7 @@ async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSave
 
   const versionControlService = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       lockedPaths.push(p);
       return { acquired: true, lock: { holderUserId: USER_ID, holderName: 'Alice' } };
@@ -153,7 +154,7 @@ async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSave
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => true } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
       opts.skillSaveCheck,
     ),
   );

@@ -5,14 +5,14 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { IAccessControl } from '../access-control.interface.js';
 import { AccessControlService } from '../access-control.service.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * HTTP-level contract tests for GROUP and ROLE principals on the share
@@ -87,6 +87,7 @@ async function makeHarness(opts: {
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
   const versionControlService = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: vi.fn(async () => ({ acquired: true, lock: {} })),
     releaseLock: vi.fn(async () => undefined),
     releaseLockNoCommit: vi.fn(async () => undefined),
@@ -100,7 +101,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), realDisk()));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));

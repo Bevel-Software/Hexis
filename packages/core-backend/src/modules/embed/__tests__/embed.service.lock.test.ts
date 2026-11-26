@@ -1,13 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { FileLockService } from '../../version-control/file-lock.service.js';
-import { makeFakeLockDb, type FakeLockDb } from '../../version-control/__tests__/fake-file-lock-db.js';
-import { createFileReaderRegistry } from '../../workspace/file-readers/file-reader.registry.js';
-import type { DocExtractOutcome, DocExtractService } from '../../workspace/file-readers/doc-extract.service.js';
-import { makeRolesYamlWriteValidator } from '../../access-model/roles-yaml-guard.js';
+import { realFileLocks } from '../../../__tests__/real-version-control.js';
+import { realFileReaders } from '../../../__tests__/real-readers.js';
+import { AccessDeniedError, makeRolesYamlWriteValidator } from '../../access-model/index.js';
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService } from '../embed.service.js';
-import { EmbedLockedError } from '../embed.errors.js';
+import { EmbedAccessError, EmbedLockedError } from '../embed.errors.js';
 
 /**
  * Edit and Save against the REAL lock.
@@ -33,17 +31,19 @@ const WS = `${KB}/${REPO}`;
 const ALICE: AuthUser = { id: '11111111-1111-4111-8111-111111111111', email: 'alice@example.com', name: 'Alice' };
 const BOB: AuthUser = { id: '22222222-2222-4222-8222-222222222222', email: 'bob@example.com', name: 'Bob' };
 
-let fake: FakeLockDb;
-let locks: FileLockService;
-
-/** The extraction service the reader registry takes, typed against its contract; no document is read here. */
-function noDocExtract(): DocExtractService {
-  const extract = async (): Promise<DocExtractOutcome> => ({
-    ok: false,
-    message: 'this suite reads no document-format file',
-  });
-  return { extract } satisfies Pick<DocExtractService, 'extract'> as DocExtractService;
-}
+let lockTable: ReturnType<typeof realFileLocks>;
+/** The real lock service, over the in-memory table (`lockTable.table` seeds rows). */
+let locks: ReturnType<typeof realFileLocks>["locks"];
+/** What the embed's own write check answers the viewer now: an admin's revoke flips it mid-test. */
+let writable: boolean;
+/**
+ * What the version-control write gate answers. It follows `writable` unless a
+ * test sets it apart: the two are separate checks, and the embed must answer
+ * the same refusal, and let go of the lock, whichever of them refuses.
+ */
+let gateGrants: (() => boolean) | null;
+const gate = (): boolean => (gateGrants ? gateGrants() : writable);
+const gateRefusal = () => new AccessDeniedError({ path: REPO, eligibleRoles: ['Admin'], eligibleUsers: [{ name: 'Root', email: 'root@example.com' }] });
 
 function build() {
   const workspaceService = {
@@ -55,17 +55,30 @@ function build() {
   };
   // The lock verbs go straight to the real service; release drops the row as
   // the real `releaseLock` does once it has enqueued the commit.
+  const releaseLock = vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
+    locks.release(id, branch, path, user),
+  );
   const versionControlService = {
-    getLock: vi.fn((id: string, branch: string, path: string) => locks.get(id, branch, path)),
-    acquireLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
-      locks.acquire(id, branch, path, user),
-    ),
+    // The real service's rule (pinned against it in
+    // version-control.service.held-lock.test.ts): only its own edit lock, not
+    // a coordination hold, counts; once the write gate refuses, the lock is
+    // released through `releaseLock` (the commit path) and the refusal thrown.
+    holdsEditLock: vi.fn(async (id: string, branch: string, path: string, user: AuthUser) => {
+      const lock = await locks.get(id, branch, path);
+      if (lock === null || lock.holderUserId !== user.id || lock.mode === 'coordination') return false;
+      if (gate()) return true;
+      await releaseLock(id, branch, path, user);
+      throw gateRefusal();
+    }),
+    // The real acquire asks the same gate before it takes the lock.
+    acquireLock: vi.fn(async (id: string, branch: string, path: string, user: AuthUser) => {
+      if (!gate()) throw gateRefusal();
+      return locks.acquire(id, branch, path, user);
+    }),
     heartbeatLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
       locks.heartbeat(id, branch, path, user),
     ),
-    releaseLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
-      locks.release(id, branch, path, user),
-    ),
+    releaseLock,
     releaseLockNoCommit: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
       locks.release(id, branch, path, user),
     ),
@@ -74,7 +87,8 @@ function build() {
     { jwtSecret: 's', embedSharedSecret: '', publicFrontendUrl: 'https://hexis.example', kbDirName: KB },
     testKbContext({ kbDirName: KB }),
     workspaceService as never,
-    { canRead: async () => true, canWrite: async () => true } as never,
+    // The write verdict every door here asks (`requireEditor`, the heartbeat).
+    { canRead: async () => true, canWrite: async () => writable } as never,
     {
       getUserById: async (id: string) => (id === ALICE.id ? ALICE : BOB),
       isEmailDomainAllowed: () => true,
@@ -83,15 +97,17 @@ function build() {
     versionControlService as never,
     { remoteBranchExists: async () => false } as never,
     { getUserId: async () => null } as never,
-    createFileReaderRegistry(noDocExtract()),
+    realFileReaders(),
     makeRolesYamlWriteValidator(KB),
   );
   return { service, workspaceService, versionControlService };
 }
 
 beforeEach(() => {
-  fake = makeFakeLockDb();
-  locks = new FileLockService(fake.db);
+  lockTable = realFileLocks();
+  locks = lockTable.locks;
+  writable = true;
+  gateGrants = null;
 });
 
 describe('the real lock is strict', () => {
@@ -125,6 +141,70 @@ describe('Edit then Save, as the writer does it', () => {
     await service.save(token, 'second');
     expect(workspaceService.writeFile).toHaveBeenLastCalledWith(WS_ID, WS, 'second');
   });
+
+  it('is refused once write is revoked after Edit, writes nothing, and lets go of the lock', async () => {
+    const { service, workspaceService, versionControlService } = build();
+    const { token } = await service.mintForUser({ userId: ALICE.id, reference: REPO });
+    expect(await service.acquireLock(token)).toEqual({ acquired: true });
+    writable = false;
+
+    // The refusal the route answers 403, as for any viewer who may not write.
+    await expect(service.save(token, 'typed after the revoke')).rejects.toBeInstanceOf(EmbedAccessError);
+
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    // The refusal is not turned into a fresh acquire.
+    expect(versionControlService.acquireLock).toHaveBeenCalledTimes(1);
+    expect(await locks.get(WS_ID, BRANCH, WS)).toBeNull();
+    // Let go through the commit path: bytes the same user saved under this
+    // lock from the app while the grant stood are committed, never discarded.
+    expect(versionControlService.releaseLock).toHaveBeenCalledWith(WS_ID, BRANCH, WS, ALICE);
+    expect(versionControlService.releaseLockNoCommit).not.toHaveBeenCalled();
+  });
+
+  it('answers the refusal on every write door even when letting go of the lock fails', async () => {
+    const { service, versionControlService } = build();
+    const { token } = await service.mintForUser({ userId: ALICE.id, reference: REPO });
+    expect(await service.acquireLock(token)).toEqual({ acquired: true });
+    writable = false;
+    versionControlService.releaseLock.mockRejectedValue(new Error('release failed'));
+
+    await expect(service.save(token, 'x')).rejects.toBeInstanceOf(EmbedAccessError);
+    await expect(service.acquireLock(token)).rejects.toBeInstanceOf(EmbedAccessError);
+    await expect(service.heartbeat(token)).rejects.toBeInstanceOf(EmbedAccessError);
+  });
+
+  it('lets go of the lock when its own check refuses even though the write gate still grants', async () => {
+    const { service, versionControlService } = build();
+    const { token } = await service.mintForUser({ userId: ALICE.id, reference: REPO });
+    expect(await service.acquireLock(token)).toEqual({ acquired: true });
+    writable = false;
+    gateGrants = () => true;
+
+    await expect(service.heartbeat(token)).rejects.toBeInstanceOf(EmbedAccessError);
+
+    // Refused, so the file must not stay shut to the writers until the TTL.
+    expect(await locks.get(WS_ID, BRANCH, WS)).toBeNull();
+    expect(versionControlService.releaseLock).toHaveBeenCalledWith(WS_ID, BRANCH, WS, ALICE);
+    expect(versionControlService.releaseLockNoCommit).not.toHaveBeenCalled();
+  });
+
+  it('answers the generic refusal, not the gate\'s eligible writers, when only the write gate refuses', async () => {
+    const { service, workspaceService } = build();
+    const { token } = await service.mintForUser({ userId: ALICE.id, reference: REPO });
+    expect(await service.acquireLock(token)).toEqual({ acquired: true });
+    gateGrants = () => false;
+
+    const save = service.save(token, 'typed after the gate refused');
+    await expect(save).rejects.toBeInstanceOf(EmbedAccessError);
+    await expect(save).rejects.not.toThrow('root@example.com');
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    // `holdsEditLock` let go of it on the refusal.
+    expect(await locks.get(WS_ID, BRANCH, WS)).toBeNull();
+
+    // Edit, which goes to the acquire, answers the same.
+    await expect(service.acquireLock(token)).rejects.toBeInstanceOf(EmbedAccessError);
+    expect(await locks.get(WS_ID, BRANCH, WS)).toBeNull();
+  });
 });
 
 describe('a Save whose lock is not the viewer own', () => {
@@ -145,7 +225,7 @@ describe('a Save whose lock is not the viewer own', () => {
     const { service, workspaceService } = build();
     const { token } = await service.mintForUser({ userId: ALICE.id, reference: REPO });
     const past = new Date(Date.now() - 60_000);
-    fake.seed({
+    lockTable.table.seed({
       workspaceId: WS_ID,
       branch: BRANCH,
       path: WS,
@@ -166,7 +246,7 @@ describe('a Save whose lock is not the viewer own', () => {
     await service.acquireLock(token);
     // Alice's lock lapses, and Bob takes the file.
     const past = new Date(Date.now() - 60_000);
-    fake.seed({
+    lockTable.table.seed({
       workspaceId: WS_ID,
       branch: BRANCH,
       path: WS,

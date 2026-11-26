@@ -9,12 +9,12 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
@@ -56,7 +56,7 @@ async function makeHarness(): Promise<Harness> {
   const workspaceDir = path.join(root, workspaceId);
   // The inner `.git` lets the service accept the workspace without cloning.
   await fs.mkdir(path.join(workspaceDir, KB, '.git'), { recursive: true });
-  const workspaceService = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), new NodeFs());
+  const workspaceService = newWorkspaceService(root, 'https://example.invalid/kb.git', testKbContext({ kbDirName: KB }), realDisk());
   await workspaceService.getWorkspacePath(workspaceId);
 
   const asked: string[] = [];
@@ -76,15 +76,29 @@ async function makeHarness(): Promise<Harness> {
   } as unknown as IAccessControl;
 
   const locked: string[] = [];
+  // A lock is held from its acquire to its release, and a heartbeat answers
+  // that same acquisition.
+  const held = new Map<string, { acquiredAt: string; holderName: string }>();
+  const release = vi.fn(async (_w: string, _b: string, p: string) => {
+    held.delete(p);
+  });
   const versionControlService = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
       locked.push(p);
-      return { acquired: true, lock: {} as never };
+      const lock = { acquiredAt: `acquisition-${locked.length}`, holderName: 'Business User' };
+      held.set(p, lock);
+      return { acquired: true, lock };
     }),
-    releaseLock: vi.fn(async () => undefined as never),
-    releaseLockNoCommit: vi.fn(async () => undefined as never),
-    releaseLockUntouched: vi.fn(async () => undefined as never),
+    heartbeatLock: vi.fn(async (_w: string, _b: string, p: string) => {
+      const lock = held.get(p);
+      if (!lock) throw new Error(`Cannot heartbeat lock on "${p}": not held by you (or no longer exists).`);
+      return lock;
+    }),
+    releaseLock: release,
+    releaseLockNoCommit: release,
+    releaseLockUntouched: release,
   } as unknown as IVersionControlService;
 
   const stubCreatorAccess: ICreatorAccess = {
@@ -109,7 +123,7 @@ async function makeHarness(): Promise<Harness> {
       testKbContext({ kbDirName: KB }),
       stubCreatorAccess,
       { isAdmin: async () => false } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
     ),
   );
   const server = await new Promise<Server>((resolve) => {

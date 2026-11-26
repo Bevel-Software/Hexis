@@ -88,20 +88,27 @@ function build(opts: Opts = {}) {
     isEmailDomainAllowed: vi.fn(() => opts.emailDomainAllowed ?? true),
     isActive: vi.fn(async () => opts.active ?? true),
   };
+  // The viewer's one lock: Edit (or a Save with none) takes it, a Save under
+  // it keeps it, a release drops it. The contention rules and a revoked grant
+  // are exercised against the real lock in embed.service.lock.test.ts.
+  let held = false;
   const versionControlService = {
-    // No live lock: a save takes it. The contention rules themselves are
-    // exercised against the real lock in embed.service.lock.test.ts.
-    getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => held),
     // The suggestions branch is created here, under the version-control service's own
     // branch-lifecycle lock, never straight through git.
     createBranch: opts.createBranch ?? vi.fn(async () => ({})),
-    acquireLock: vi.fn(async () => ({
-      acquired: opts.acquired ?? true,
-      lock: { holderName: opts.holderName ?? 'Bob' },
-    })),
+    acquireLock: vi.fn(async () => {
+      const acquired = opts.acquired ?? true;
+      if (acquired) held = true;
+      return { acquired, lock: { holderName: opts.holderName ?? 'Bob' } };
+    }),
     heartbeatLock: vi.fn(async () => undefined),
-    releaseLock: vi.fn(async () => undefined),
-    releaseLockNoCommit: vi.fn(async () => undefined),
+    releaseLock: vi.fn(async () => {
+      held = false;
+    }),
+    releaseLockNoCommit: vi.fn(async () => {
+      held = false;
+    }),
     commitChanges: vi.fn(async () => ({ sha: 'deadbee' })),
     openChangeRequest: opts.openChangeRequest ?? vi.fn(async () => ({ number: 42 })),
   };
@@ -484,6 +491,9 @@ describe('EmbedService: saving as a writer', () => {
     const { token } = await service.mintForUser({ userId: USER.id, reference: REPO });
     await service.acquireLock(token);
     await service.save(token, 'new text');
+    // Save wrote under the lock Edit took; it did not take a second one.
+    expect(versionControlService.acquireLock).toHaveBeenCalledTimes(1);
+    expect(versionControlService.holdsEditLock).toHaveBeenCalledTimes(1);
     expect(versionControlService.acquireLock).toHaveBeenCalledWith(
       encodeURIComponent(BRANCH),
       BRANCH,
@@ -532,13 +542,15 @@ describe('EmbedService: saving as a writer', () => {
     accessControl.canWrite.mockResolvedValue(false);
     await expect(service.heartbeat(token)).rejects.toThrow(EmbedAccessError);
     expect(versionControlService.heartbeatLock).not.toHaveBeenCalled();
-    expect(versionControlService.releaseLockNoCommit).toHaveBeenCalledWith(
+    // Let go through the commit path, the release a revoked holder's lock
+    // takes in `holdsEditLock`, never by discarding what is on disk.
+    expect(versionControlService.releaseLock).toHaveBeenCalledWith(
       expect.any(String),
       BRANCH,
       `${KB}/${REPO}`,
       expect.objectContaining({ id: USER.id }),
     );
-    expect(versionControlService.releaseLock).not.toHaveBeenCalled();
+    expect(versionControlService.releaseLockNoCommit).not.toHaveBeenCalled();
   });
 
   it('releases the lock WITHOUT committing when the write fails, and rethrows', async () => {

@@ -37,6 +37,7 @@ import { normalizeWorkspacePath } from '../kb-fs/index.js';
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { archiveEntryLocks } from './archive-entry-locks.js';
 import '../auth/index.js'; // Express Request augmentation
 import type { SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
@@ -242,6 +243,12 @@ export function createWorkspaceRoutes(
    * but the file wasn't actually dirty (e.g. mkdir of an already-populated
    * dir), the release commits nothing and returns `null`.
    */
+  /** The 409 for a write to a path held by another user's lock or the caller's own coordination hold. */
+  function lockedBy(targetPath: string, holderName: string | null | undefined): Error & { status: number } {
+    const err = new Error(`"${targetPath}" is being edited by ${holderName || 'another user'}. Try again in a moment.`);
+    return Object.assign(err, { status: 409 });
+  }
+
   async function withLock<T>(
     workspaceId: string,
     user: AuthUser,
@@ -295,8 +302,10 @@ export function createWorkspaceRoutes(
       if (before === null || decidesListing(toKbRelative(targetPath, kbDirName) ?? targetPath, kb.layout.pluginsDir)) return {};
       return (await listingProbe(workspaceId, targetPath)) === before ? { listingUnchanged: true } : {};
     };
-    const existing = await versionControlService.getLock(workspaceId, branch, targetPath);
-    if (existing && existing.holderUserId === user.id) {
+    // `holdsEditLock` re-asks the write gate: a lock taken while the caller
+    // could write is no licence to write once they cannot (it then refuses
+    // with the acquire's 403 and drops the lock).
+    if (await versionControlService.holdsEditLock(workspaceId, branch, targetPath, user)) {
       const result = await op();
       const listing = await mark();
       // Disk write landed but no commit yet (caller will release later,
@@ -323,14 +332,7 @@ export function createWorkspaceRoutes(
     const acquired = await versionControlService.acquireLock(workspaceId, branch, targetPath, user, {
       platformRestore: options?.platformRestore,
     });
-    if (!acquired.acquired) {
-      const holder = acquired.lock.holderName || 'another user';
-      const err: Error & { status?: number } = new Error(
-        `"${targetPath}" is being edited by ${holder}. Try again in a moment.`,
-      );
-      err.status = 409;
-      throw err;
-    }
+    if (!acquired.acquired) throw lockedBy(targetPath, acquired.lock.holderName);
     // Three release modes, the same three `LockingFilesystem.withLock` uses,
     // depending on what the op did:
     //
@@ -1553,26 +1555,64 @@ export function createWorkspaceRoutes(
       const plan = await creatorAccess.planForCreate(id, user, destDir, 'dir');
       if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
       await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
-      // Extract first (all files land on disk), then sweep each extracted
-      // file through a lock+release so it commits + pushes as its own
-      // one-file change. Per-file commits mean the validator runs N times
-      // on large archives — fine for the typical "few files" drop, slow
-      // but correct for a 100-file zip. If a single file's release fails
-      // (e.g. validator 422), the loop stops there so the user sees the
-      // first concrete problem rather than a list of N similar failures.
-      //
       // Each entry is asked about before it is written, through the same
       // gate: an archive can carry a path into a nested folder the caller
-      // cannot read, which the destination check above cannot see. Such an
-      // entry is skipped and reported, never written and then refused.
-      const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
-        await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
+      // cannot read, which the destination check above cannot see. Then it
+      // is LOCKED before its bytes land, through `archiveEntryLocks`, the
+      // mechanism the agent's unzip uses: an entry the caller may not write,
+      // or that somebody else (or the caller's own coordination hold) holds,
+      // is skipped and reported, never written and then refused; a lock is
+      // renewed and checked to be this call's before its release; and the
+      // files written before a failure part-way are still committed. An
+      // entry under the editor lock the caller already holds meets
+      // `holdsEditLock` instead: once their write is revoked it refuses (and
+      // lets the lock go, committing only what was there before); while it
+      // grants, the entry is written under that lock and left for the
+      // editor's Save, as `PUT /file` does.
+      //
+      // Every lock this call took is released, which commits + pushes its
+      // file as its own one-file change. A file that could not be committed
+      // (e.g. validator 422, or its lock lapsed to someone else) is answered
+      // as an error once every release has run, so the user sees the first
+      // concrete problem; its bytes stay on disk.
+      const branch = branchForWorkspaceId(id);
+      const locks = archiveEntryLocks({
+        vcs: versionControlService,
+        workspaceId: id,
+        branch,
+        user,
+        refused: lockedBy,
       });
-      for (const relFile of result.extracted) {
-        // The file is already on disk from the unzip; the release commits +
-        // pushes it.
-        await withLock(id, user, relFile, async () => undefined, { alreadyOnDisk: true });
+      const releaseAll = async (): Promise<void> => {
+        const notCommitted = await locks.releaseAll();
+        eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+        const first = notCommitted[0];
+        if (first) throw first.error ?? lockedBy(first.path, undefined);
+      };
+      let result: Awaited<ReturnType<typeof workspaceService.unzipFile>>;
+      try {
+        result = await workspaceService.unzipFile(
+          id,
+          zipPath,
+          destination,
+          async (entryPath) => {
+            await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
+            if (!locks.has(entryPath) && (await versionControlService.holdsEditLock(id, branch, entryPath, user))) return;
+            await locks.take(entryPath);
+          },
+          (entryPath) => locks.wrote(entryPath),
+        );
+        for (const relFile of result.extracted) {
+          // Under the editor lock the caller held: announced, not committed.
+          if (!locks.has(relFile)) await withLock(id, user, relFile, async () => undefined, { alreadyOnDisk: true });
+        }
+      } catch (err) {
+        await releaseAll().catch((releaseErr: unknown) => {
+          log.warn('unzip: a file written before the extraction failed was not committed', { err: releaseErr });
+        });
+        throw err;
       }
+      await releaseAll();
       res.json(result);
     } catch (err) {
       sendError(res, err);

@@ -7,6 +7,7 @@ import { logger } from '../../shared/logging.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAccessControl } from '../access/index.js';
+import { AccessDeniedError } from '../access-model/index.js';
 import { changeRequestLink, changeRequestLinkBase } from '../version-control/index.js';
 import type { FileReaderRegistry } from '../workspace/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';
@@ -320,12 +321,9 @@ export class EmbedService implements IEmbedService {
 
   async acquireLock(token: string): Promise<EmbedLockResult> {
     const { user, wsPath } = await this.requireEditor(token);
-    const result = await this.versionControlService.acquireLock(
-      this.defaultWorkspaceId(),
-      this.kb.defaultBranch,
-      wsPath,
-      user,
-    );
+    const result = await this.versionControlService
+      .acquireLock(this.defaultWorkspaceId(), this.kb.defaultBranch, wsPath, user)
+      .catch(asEmbedRefusal);
     return result.acquired
       ? { acquired: true }
       : { acquired: false, holderName: result.lock.holderName };
@@ -342,12 +340,8 @@ export class EmbedService implements IEmbedService {
     // a lock alive that shuts out the people who still have it. The lock
     // goes HERE, not only when the view hears the refusal: a frame that is
     // gone, or a host that never delivers the 403, would otherwise leave the
-    // file shut to the writers who still have access until the TTL. Letting
-    // go takes no access — the version-control service releases only a lock this user holds.
-    if (!canWrite) {
-      await this.versionControlService.releaseLockNoCommit(workspaceId, this.kb.defaultBranch, wsPath, user);
-      throw new EmbedAccessError();
-    }
+    // file shut to the writers who still have access until the TTL.
+    if (!canWrite) await this.refuseWriter(wsPath, user);
     await this.versionControlService.heartbeatLock(workspaceId, this.kb.defaultBranch, wsPath, user);
   }
 
@@ -531,14 +525,18 @@ export class EmbedService implements IEmbedService {
    */
   private async ensureHoldsLock(workspaceId: string, wsPath: string, user: AuthUser): Promise<void> {
     const branch = this.kb.defaultBranch;
-    const current = await this.versionControlService.getLock(workspaceId, branch, wsPath);
-    if (current) {
-      // A coordination hold grants no write authority, so it is not "ours"
-      // for a save even when the id matches.
-      if (current.holderUserId === user.id && current.mode !== 'coordination') return;
-      throw new EmbedLockedError(current.holderName);
-    }
-    const taken = await this.versionControlService.acquireLock(workspaceId, branch, wsPath, user);
+    // Our own edit lock counts only while we may still write the file
+    // (`holdsEditLock` re-asks the acquire's gate, and once the grant is gone
+    // releases the lock and refuses). Anything else — no lock, somebody
+    // else's, a coordination hold — goes to the acquire, which takes a free
+    // lock and names the holder of a taken one.
+    const held = await this.versionControlService
+      .holdsEditLock(workspaceId, branch, wsPath, user)
+      .catch(asEmbedRefusal);
+    if (held) return;
+    const taken = await this.versionControlService
+      .acquireLock(workspaceId, branch, wsPath, user)
+      .catch(asEmbedRefusal);
     if (!taken.acquired) throw new EmbedLockedError(taken.lock.holderName);
   }
 
@@ -570,9 +568,33 @@ export class EmbedService implements IEmbedService {
     const claims = this.verifyToken(token);
     const { user, canWrite } = await this.resolveIdentity(claims);
     if (!user) throw new EmbedAccessError('Link your account to edit');
-    if (!canWrite) throw new EmbedAccessError();
+    const wsPath = this.wsPathFor(claims.repoRelative);
+    if (!canWrite) await this.refuseWriter(wsPath, user);
     await this.workspaceService.getOrCreateForBranch(this.kb.defaultBranch);
-    return { claims, user, wsPath: this.wsPathFor(claims.repoRelative) };
+    return { claims, user, wsPath };
+  }
+
+  /**
+   * Refuse a viewer who may not write, and let go of the lock they hold on
+   * the file: a writer whose grant was removed while editing must not keep
+   * the file shut to the writers who still have it until the TTL. Every door
+   * here that asks for write (Edit, Save, the heartbeat) refuses through this
+   * one. The lock goes whatever the version-control gate would answer, and
+   * through `releaseLock`, the release a revoked holder's lock takes in
+   * `holdsEditLock`: bytes the same user saved under this lock from the app
+   * while the grant stood are committed, not discarded. `releaseLock`
+   * refuses when this user holds no edit lock here (none, somebody else's,
+   * or their own coordination hold, which is not the embed's to end); that
+   * and a failed release are logged, and the caller gets the refusal either
+   * way.
+   */
+  private async refuseWriter(wsPath: string, user: AuthUser): Promise<never> {
+    await this.versionControlService
+      .releaseLock(this.defaultWorkspaceId(), this.kb.defaultBranch, wsPath, user)
+      .catch((err: unknown) => {
+        log.info(`write refused for user=${user.id} path=${wsPath}; no lock released: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    throw new EmbedAccessError();
   }
 
   async viewerOf(token: string): Promise<EmbedViewer> {
@@ -665,6 +687,16 @@ export class EmbedService implements IEmbedService {
     }
     return { scope: 'embed', kind: c.kind, sub: c.sub, repoRelative: c.repoRelative, slug: c.slug };
   }
+}
+
+/**
+ * The version-control write gate's refusal, answered as every embed door
+ * answers a refusal: the generic 403, without the eligible writers the
+ * gate's message names. Anything else is rethrown as it is.
+ */
+function asEmbedRefusal(err: unknown): never {
+  if (err instanceof AccessDeniedError) throw new EmbedAccessError();
+  throw err;
 }
 
 /** Display name = file basename without its extension. */

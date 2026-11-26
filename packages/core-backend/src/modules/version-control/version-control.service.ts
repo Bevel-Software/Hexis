@@ -1604,21 +1604,7 @@ export class VersionControlService implements IVersionControlService {
     // and `commitFileWhileLocked` / `releaseLock` refuse to treat a
     // coordination hold as write possession (see those methods).
     if (!opts?.coordination) {
-      let via: 'granted' | 'restore' = 'granted';
-      if (this.kb.isProtectedBranch(branch)) {
-        // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
-        // eligible-writers payload so the frontend can render a useful refusal.
-        via = await this.assertCanWriteAtPath(
-          workspaceId,
-          branch,
-          user.email,
-          targetPath,
-          opts?.platformRestore,
-        );
-      }
-      if (via !== 'restore') {
-        await this.changeGate.assertMayChange(workspaceId, user.email, targetPath, 'file');
-      }
+      await this.assertMayEdit(workspaceId, branch, targetPath, user, opts?.platformRestore);
     }
     const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user, opts);
     if (result.acquired) {
@@ -1644,6 +1630,83 @@ export class VersionControlService implements IVersionControlService {
       );
     }
     return result;
+  }
+
+  /**
+   * The write gate and the read gate an edit lock is granted under (see
+   * `acquireLock`). Throws `AccessDeniedError` on refusal. ONE gate for both
+   * moments it is asked: when the lock is taken, and before every write a
+   * holder makes under it (`holdsEditLock`).
+   */
+  private async assertMayEdit(
+    workspaceId: string,
+    branch: string,
+    targetPath: string,
+    user: AuthUser,
+    platformRestore?: { source: string },
+  ): Promise<void> {
+    let via: 'granted' | 'restore' = 'granted';
+    if (this.kb.isProtectedBranch(branch)) {
+      // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
+      // eligible-writers payload so the frontend can render a useful refusal.
+      via = await this.assertCanWriteAtPath(workspaceId, branch, user.email, targetPath, platformRestore);
+    }
+    if (via !== 'restore') {
+      await this.changeGate.assertMayChange(workspaceId, user.email, targetPath, 'file');
+    }
+  }
+
+  /**
+   * Whether `user` holds a live EDIT lock on the path and may still write it.
+   *
+   * A held lock is not write authority on its own: the access rules can change
+   * while it is held (an admin removes the grant), and the holder's next write
+   * must meet the rules as they are THEN, not as they were at the acquire. So
+   * the gate `acquireLock` asks is asked again here, and every route that
+   * writes under a lock the caller already holds comes through this method
+   * rather than reading the lock row itself.
+   *
+   *   - not held by `user`, or held only as a coordination hold → `false`
+   *     (the caller then acquires, which meets the gate and the contention
+   *     rules as any acquire does);
+   *   - held, and the gate still grants → `true`;
+   *   - held, and the gate now refuses → the lock is released and the
+   *     refusal (`AccessDeniedError`, the same 403 a non-holder gets at the
+   *     acquire) is thrown. The release publishes what is already on disk:
+   *     those bytes were written while the holder still had the right to
+   *     write them, and a landed write is never thrown away by a later
+   *     permission change (see `acquireLock`). A release that fails is
+   *     logged (the lock may then stay until its TTL); the refusal is what
+   *     the caller receives either way.
+   *
+   * Any other failure of the gate (a rules read that failed) propagates and
+   * leaves the lock held.
+   */
+  async holdsEditLock(
+    workspaceId: string,
+    branch: string,
+    rawPath: string,
+    user: AuthUser,
+  ): Promise<boolean> {
+    const targetPath = canonicalFileIdentity(rawPath);
+    const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
+    if (!lock || lock.holderUserId !== user.id || lock.mode === 'coordination') return false;
+    try {
+      await this.assertMayEdit(workspaceId, branch, targetPath, user);
+    } catch (err) {
+      if (err instanceof AccessDeniedError) {
+        lockLog.info(
+          `HELD ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → write no longer granted, releasing`,
+        );
+        await this.releaseLock(workspaceId, branch, targetPath, user).catch((releaseErr: unknown) => {
+          lockLog.warn(
+            `HELD release failed ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}: ${sanitizeError(releaseErr)}`,
+          );
+        });
+      }
+      throw err;
+    }
+    return true;
   }
 
   async heartbeatLock(

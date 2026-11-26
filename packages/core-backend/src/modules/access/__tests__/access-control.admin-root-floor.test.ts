@@ -5,12 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import {
@@ -19,7 +19,7 @@ import {
   AccessMutationService,
 } from '../access-mutation.service.js';
 import { createAccessRoutes } from '../access.routes.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { AccessDeniedError } from '../../access-model/index.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
@@ -78,7 +78,7 @@ describe('Admin write floor at the repository root', () => {
   let root: string;
   let repo: string;
   let ws: WorkspaceService;
-  const service = () => new AccessControlService(ws, KB, new NodeFs(), [OWNER]);
+  const service = () => new AccessControlService(ws, KB, realDisk(), [OWNER]);
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-admin-floor-'));
@@ -314,6 +314,7 @@ describe('Admin write floor at the repository root', () => {
           { whileSwitchedOn: async (_email: string, write: () => Promise<void>) => write() },
           {
             getLock: async () => null,
+            holdsEditLock: async () => false,
             acquireLock: async () => ({ acquired: true, lock: {} }),
             releaseLock: async () => undefined,
             releaseLockNoCommit: async () => undefined,
@@ -321,7 +322,7 @@ describe('Admin write floor at the repository root', () => {
           { emit: () => {} } as unknown as VersionControlEventBus,
           usersDbDouble(),
           testKbContext({ kbDirName: KB }),
-          new NodeFs(),
+          realDisk(),
         ),
       );
       server = await new Promise<Server>((resolve) => {

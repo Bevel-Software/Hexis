@@ -6,14 +6,14 @@ import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
+import type { ICreatorAccess } from '../../access-model/index.js';
 import type { WorkspaceService } from '../workspace.service.js';
 
 /**
@@ -70,6 +70,7 @@ async function makeHarness(): Promise<Harness> {
   const acquireLock = vi.fn(async () => ({ acquired: true, lock: {} as never }));
   const versionControlServiceMock: Partial<IVersionControlService> = {
     getLock: vi.fn(async () => null),
+    holdsEditLock: vi.fn(async () => false),
     acquireLock: acquireLock as unknown as IVersionControlService['acquireLock'],
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
@@ -99,7 +100,7 @@ async function makeHarness(): Promise<Harness> {
     testKbContext({ kbDirName: KB }),
     creatorAccess,
     { isAdmin: async () => false } as unknown as IAdminAccessService,
-    new NodeFs(),
+    realDisk(),
   ));
 
   const server = await new Promise<Server>((resolve) => {

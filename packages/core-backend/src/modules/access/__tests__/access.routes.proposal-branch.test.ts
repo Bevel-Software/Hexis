@@ -6,12 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import { createAccessRoutes } from '../access.routes.js';
@@ -102,7 +102,7 @@ describe('access routes on a proposal branch (real git)', () => {
       },
     } as unknown as WorkspaceService;
 
-    access = new AccessControlService(workspaceService, KB, new NodeFs());
+    access = new AccessControlService(workspaceService, KB, realDisk());
 
     const authService = {
       getUserById: async (id: string) => Object.values(USERS).find((u) => u.id === id) ?? null,
@@ -117,6 +117,7 @@ describe('access routes on a proposal branch (real git)', () => {
     });
     const versionControlService = {
       getLock: async () => null,
+      holdsEditLock: async () => false,
       acquireLock: async () => ({ acquired: true, lock: {} }),
       releaseLock,
       releaseLockNoCommit: async () => undefined,
@@ -139,7 +140,7 @@ describe('access routes on a proposal branch (real git)', () => {
         { emit: () => {} } as unknown as VersionControlEventBus,
         usersDbDouble(),
         testKbContext({ kbDirName: KB }),
-        new NodeFs(),
+        realDisk(),
       ),
     );
     server = await new Promise<Server>((resolve) => {

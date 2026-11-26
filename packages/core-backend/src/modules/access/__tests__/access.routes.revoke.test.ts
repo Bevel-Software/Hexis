@@ -4,14 +4,16 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { IAccessControl, GrantSources } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import { createAccessRoutes } from '../access.routes.js';
+import { AccessDeniedError } from '../../access-model/index.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { realFileLocks, realLockingVersionControl } from '../../../__tests__/real-version-control.js';
 
 /**
  * HTTP-level contract tests for the revoke route's CLASSIFICATION + MODE logic —
@@ -59,6 +61,10 @@ async function makeHarness(opts: {
   eligibleWriters?: { roles: string[]; users: { name: string; email: string }[] };
   /** kbPrincipals' roles — empty (the default) reads as a model that failed to load. */
   roles?: string[];
+  /** The version-control answer to "does the caller hold the edit lock and may still write it". Defaults to not held. */
+  holdsEditLock?: () => Promise<boolean>;
+  /** Run the route against the real lock half of the version-control service over these locks, instead of the stubs. */
+  locks?: ReturnType<typeof realFileLocks>['locks'];
 }): Promise<Harness> {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
 
@@ -121,12 +127,21 @@ async function makeHarness(opts: {
   const acquireLock = vi.fn(async () => ({ acquired: true, lock: {} }));
   const releaseLock = vi.fn(async () => undefined);
   const releaseLockNoCommit = vi.fn(async () => undefined);
-  const versionControlService = {
-    getLock: vi.fn(async () => null),
-    acquireLock,
-    releaseLock,
-    releaseLockNoCommit,
-  } as unknown as VersionControlService;
+  const versionControlService = opts.locks
+    ? realLockingVersionControl({
+        locks: opts.locks,
+        accessControl,
+        pendingCommits: { enqueue: vi.fn(async () => undefined) },
+        changeGate: { judge: vi.fn(), assertMayChange: vi.fn(async () => undefined) },
+        kb: testKbContext({ kbDirName: KB }),
+      })
+    : ({
+        getLock: vi.fn(async () => null),
+        holdsEditLock: vi.fn(opts.holdsEditLock ?? (async () => false)),
+        acquireLock,
+        releaseLock,
+        releaseLockNoCommit,
+      } as unknown as VersionControlService);
 
   const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
   const db = usersDbDouble();
@@ -137,7 +152,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), realDisk()));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -462,5 +477,62 @@ describe('POST /access/revoke — route classification + modes', () => {
       // Rolled back to the original bytes (no lingering deny entry).
       expect(h.stubs.files.get(`${KB}/Sales/Deal.md`)).toBe(original);
     });
+  });
+});
+
+describe('POST /access/revoke under an edit lock the caller already holds', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+  const SALES = `${KB}/Sales/access.md`;
+  const BEFORE = '---\nwrite:\n  - Alice <alice@bevel.software>\n---\n';
+  const revoke = () =>
+    fetch(`${h!.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: `${KB}/Sales`, kind: 'folder', principal: ALICE }),
+    });
+
+  it('writes under that lock, without taking or releasing one, while the caller may still write', async () => {
+    h = await makeHarness({ files: { [SALES]: BEFORE }, holdsEditLock: async () => true });
+    const res = await revoke();
+    expect(res.status).toBe(200);
+    expect(h.stubs.files.get(SALES)).not.toContain('alice@bevel.software');
+    expect(h.stubs.acquireLock).not.toHaveBeenCalled();
+    expect(h.stubs.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('is refused with the 403 the lock answers once the caller may no longer write, and writes nothing', async () => {
+    // The version-control service refuses (and lets the lock go) when the
+    // gate the lock was granted under no longer grants; the route passes that
+    // refusal on rather than writing or acquiring.
+    h = await makeHarness({
+      files: { [SALES]: BEFORE },
+      holdsEditLock: async () => {
+        throw new AccessDeniedError({ path: SALES, eligibleRoles: ['Admin'], eligibleUsers: [] });
+      },
+    });
+    const res = await revoke();
+    expect(res.status).toBe(403);
+    expect(h.stubs.files.get(SALES)).toBe(BEFORE);
+    expect(h.stubs.acquireLock).not.toHaveBeenCalled();
+    expect(h.stubs.releaseLock).not.toHaveBeenCalled();
+  });
+
+  // A coordination hold serialises an agent's writes and grants no write
+  // authority, so it is not the editor's lock: the edit goes to the real
+  // acquire, which refuses a live lock even to its own holder.
+  it('is refused as contended under the caller own coordination hold, writes nothing, and leaves the hold', async () => {
+    const { locks } = realFileLocks();
+    h = await makeHarness({ files: { [SALES]: BEFORE }, locks });
+    expect((await locks.acquire(WS, WS, SALES, USER, { coordination: true })).acquired).toBe(true);
+
+    const res = await revoke();
+
+    expect(res.status).toBe(409);
+    expect(h.stubs.files.get(SALES)).toBe(BEFORE);
+    expect((await locks.get(WS, WS, SALES))?.mode).toBe('coordination');
   });
 });
