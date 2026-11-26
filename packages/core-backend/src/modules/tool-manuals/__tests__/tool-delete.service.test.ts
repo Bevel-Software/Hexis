@@ -91,6 +91,7 @@ function discovery(plugins: Partial<Discovery['plugins'][number]>[]): PluginSour
       })),
       warnings: [],
       unreadable: [],
+      serversUnseen: [],
       claimed: [],
     })),
   } as unknown as PluginSource;
@@ -419,6 +420,7 @@ describe('dependents the caller must not be told about', () => {
         plugins: [],
         warnings: [],
         unreadable: ['Plugins/Locked'],
+        serversUnseen: [],
         claimed: [],
       })),
     } as unknown as PluginSource;

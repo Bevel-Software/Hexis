@@ -195,6 +195,56 @@ describe('a removed tool takes its stored keys with it', () => {
     expect(rows.has(serverKey)).toBe(false);
   });
 
+  test('an mcp.json that cannot be read is not read as every server in it removed', async () => {
+    const serverKey = utcpNamespacedKey('srv', 'API_KEY');
+    await write('Ops/plugin.json', JSON.stringify({ name: 'ops' }));
+    await write('Ops/mcp.json', JSON.stringify({ mcpServers: { srv: { type: 'streamable-http', url: 'https://s.example.com/mcp' } } }));
+    const service = svc();
+    expect(await list(service)).toContain('srv Plugins/Ops/mcp.json');
+    rows.set(serverKey, 'sk-server');
+
+    // A read that fails (EISDIR here; EACCES or EIO in the field), not an absence.
+    await unlink(join(plugins(), 'Ops/mcp.json'));
+    await mkdir(join(plugins(), 'Ops/mcp.json'));
+    await list(service);
+    expect(retired).toEqual([]);
+    expect(rows.get(serverKey)).toBe('sk-server');
+
+    await rm(join(plugins(), 'Ops/mcp.json'), { recursive: true });
+    await list(service);
+    expect(retired).toEqual([utcpNamespacePrefix('srv')]);
+  });
+
+  test('a bundle registry that cannot be read retires nothing', async () => {
+    const service = svc();
+    await list(service);
+    rows.set(KEY, 'sk-old');
+
+    const registry = join(root, wsId, KB_DIR, 'configs/mcp/registry.json');
+    await mkdir(registry, { recursive: true });
+    await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+    await list(service);
+    expect(retired).toEqual([]);
+
+    await rm(registry, { recursive: true });
+    await list(service);
+    expect(retired).toEqual([utcpNamespacePrefix('qa_keyed')]);
+  });
+
+  test('renaming a file with no id is a new name, so the old name\'s keys go', async () => {
+    const OLD = utcpNamespacedKey('oldname', 'API_KEY');
+    const idless = `---\ntype: http\nurl: https://n.example.com/utcp\nheaders:\n  Authorization: "Bearer \${API_KEY}"\n---\n`;
+    await write('Alpha/oldname.tool', idless);
+    const service = svc();
+    expect(await list(service)).toContain('oldname Plugins/Alpha/oldname.tool');
+    rows.set(OLD, 'sk-old-name');
+
+    await rename(join(plugins(), 'Alpha/oldname.tool'), join(plugins(), 'Alpha/newname.tool'));
+    expect(await list(service)).toContain('newname Plugins/Alpha/newname.tool');
+    expect(retired).toEqual([utcpNamespacePrefix('oldname')]);
+    expect(rows.has(OLD)).toBe(false);
+  });
+
   test('a slow scan of an older tree never reports a tool added since as removed', async () => {
     // The plugin discovery runs after the `.tool` walk; holding it holds a
     // scan that has already listed the older tree.

@@ -369,6 +369,7 @@ export function descriptorsFromMcpJson(
     return [];
   }
   if (!isRecord(mcp) || (mcp.mcpServers !== undefined && !isRecord(mcp.mcpServers))) {
+    log.warn(`${pluginsDir}/${pluginFolder}/${PLUGIN_MCP_FILE} does not declare a server map — skipped.`);
     onUnreadable?.();
     return [];
   }

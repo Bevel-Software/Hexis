@@ -300,8 +300,11 @@ export class ToolManualService implements IToolManualService {
    * a complete scan saw declared is missing from a later complete scan, the
    * tool left the catalog (its file deleted, its server dropped from
    * `mcp.json`, its id changed) and its keys are wiped, so a later tool that
-   * reuses the name starts with none. A rename or move keeps the id in every
-   * scan, so its keys stay. See {@link retireRemoved}.
+   * reuses the name starts with none. A move, or a rename of a file that
+   * writes its `id`, keeps the name, so its keys stay. A file with no `id`
+   * is named after its file, so renaming it is a new name: the old keys,
+   * which never resolved for the new name, are wiped with the old one.
+   * See {@link retireRemoved}.
    */
   private retireNamespace?: RetireNamespace;
   /** What the newest complete scan saw declared; `null` before the first one. */
@@ -1116,7 +1119,7 @@ export class ToolManualService implements IToolManualService {
     const parsed: ToolManualDescriptor[] = [];
     const refused: RefusedManual[] = [];
     const discovered = await this.source.discover(kbRoot);
-    if (discovered.unreadable.length > 0) complete = false;
+    if (discovered.unreadable.length > 0 || discovered.serversUnseen.length > 0) complete = false;
     const onUnreadable = () => {
       complete = false;
     };
