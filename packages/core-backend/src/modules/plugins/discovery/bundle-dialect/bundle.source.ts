@@ -46,7 +46,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** The registry, when the repository has one; a missing file is null, a broken one warns. */
+/** The registry, when the repository has one; a missing file is null, a broken one warns and counts in `serversUnseen`. */
 export async function loadRegistry(
   kbRoot: string,
   warnings: string[],
@@ -67,6 +67,7 @@ export async function loadRegistry(
   }
   const registry = parseRegistry(text);
   warnings.push(...registry.warnings);
+  if (!registry.whole) serversUnseen.push(DEFAULT_REGISTRY_PATH);
   return registry;
 }
 

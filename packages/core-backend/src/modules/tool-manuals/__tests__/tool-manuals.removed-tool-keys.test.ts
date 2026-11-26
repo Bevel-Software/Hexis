@@ -1,10 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, mkdir, writeFile, unlink, rename } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, unlink, rename, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
+import type { PluginSource } from '../../plugins/index.js';
 import { ToolManualService } from '../tool-manuals.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { utcpNamespacePrefix, utcpNamespacedKey } from '../../../shared/utcp-namespace.js';
@@ -18,15 +18,16 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
  * Vault rows are keyed `<manual namespace><VAR>`, so a key stored for
  * `qa_keyed` would resolve for ANY later manual named `qa_keyed`. The catalog
  * owns the answer to "is this tool still here", so it is the catalog that
- * retires a namespace the moment a complete scan no longer finds it declared.
+ * retires a namespace the moment a scan finds its tool gone, and withholds a
+ * tool reusing the name until the wipe has landed.
  *
  * The vault here is a map of shared rows; its `removeNamespace` stands in for
  * the real one (which has its own tests). What these tests pin is WHEN the
  * catalog asks for the wipe: after a removal, before a reuse is listed, never
- * on a move or a typo, and never off a scan that could not see everything.
+ * on a move or a typo, and never for an absence a scan could not see.
  */
 
-const disk = new NodeFs();
+const disk = realDisk();
 const KB_DIR = 'knowledge-base';
 const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
 const KEY = utcpNamespacedKey('qa_keyed', 'API_KEY');
@@ -53,7 +54,9 @@ describe('a removed tool takes its stored keys with it', () => {
       failWipes--;
       throw new Error('vault unavailable');
     }
-    for (const k of [...rows.keys()]) if (k.startsWith(prefix)) rows.delete(k);
+    // The vault's membership rule (`isKeyInNamespace`): a remainder that
+    // starts with `_` may belong to a longer name, so the wipe leaves it.
+    for (const k of [...rows.keys()]) if (k.startsWith(prefix) && !k.slice(prefix.length).startsWith('_')) rows.delete(k);
   };
 
   const workspaceService = {
@@ -65,7 +68,7 @@ describe('a removed tool takes its stored keys with it', () => {
     canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as unknown as IAccessControl;
 
-  const svc = (source = new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR }))) => {
+  const svc = (source = realPluginSource(disk, testKbContext({ kbDirName: KB_DIR })) as PluginSource) => {
     const service = new ToolManualService(
       workspaceService,
       allowAll,
@@ -322,9 +325,9 @@ describe('a removed tool takes its stored keys with it', () => {
   test('a slow scan of an older tree never reports a tool added since as removed', async () => {
     // The plugin discovery runs after the `.tool` walk; holding it holds a
     // scan that has already listed the older tree.
-    const real = new KbPluginSource(disk, testKbContext({ kbDirName: KB_DIR }));
+    const real = realPluginSource(disk, testKbContext({ kbDirName: KB_DIR }));
     let hold: Promise<void> | null = null;
-    const source = Object.assign(Object.create(real) as KbPluginSource, {
+    const source = Object.assign(Object.create(real) as PluginSource, {
       discover: async (kbRoot: string) => {
         const gate = hold;
         hold = null;
@@ -353,25 +356,134 @@ describe('a removed tool takes its stored keys with it', () => {
     expect(rows.get(lateKey)).toBe('sk-late');
   });
 
-  test('a wipe that fails is retried, and still lands before a reuse can resolve the old key', async () => {
+  test('a reuse is withheld while the wipe keeps failing, and listed once it lands', async () => {
     const service = svc();
     await list(service);
     rows.set(KEY, 'sk-old');
-    failWipes = 1;
+    failWipes = 3; // the deletion's scan, the reuse's scan, the sign-in's fresh read
 
     await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
     await list(service);
     expect(rows.get(KEY)).toBe('sk-old');
 
-    // The reuse arrives while the wipe is still owed: owed it stays.
+    // The reuse arrives while the wipe is still owed, and the retry fails too:
+    // the reuse is not served, neither listed nor found by a sign-in.
     await write('Beta/reused.tool', keyedTool('https://b.example.com/utcp'));
+    expect(await list(service)).not.toContain('qa_keyed Plugins/Beta/reused.tool');
+    const { invalid } = await service.listAccessibleCatalog('a@x.com');
+    expect(invalid.map((i) => i.path)).toContain('Plugins/Beta/reused.tool');
+    expect(await service.liveDeclaration('a@x.com', 'qa_keyed', 'API_KEY')).toEqual({
+      refused: expect.stringContaining('could not be cleared'),
+    });
+    expect(rows.get(KEY)).toBe('sk-old');
+
+    // The next retry lands: the reuse is served, with no key.
     expect(await list(service)).toContain('qa_keyed Plugins/Beta/reused.tool');
-    expect(retired).toEqual([utcpNamespacePrefix('qa_keyed'), utcpNamespacePrefix('qa_keyed')]);
     expect(rows.has(KEY)).toBe(false);
 
     // Paid once: a key set for the new tool afterwards is not wiped again.
     rows.set(KEY, 'sk-new');
     await list(service);
     expect(rows.get(KEY)).toBe('sk-new');
+  });
+
+  test('a reuse seen by a scan that could not read everything still wipes the old key', async () => {
+    const service = svc();
+    await list(service);
+    rows.set(KEY, 'sk-old-tool-secret');
+
+    // A file that names nothing makes the scan incomplete, but the name is
+    // declared, by a file that shares neither path nor bytes with the old one.
+    await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+    await write('Beta/reused.tool', keyedTool('https://b.example.com/utcp'));
+    await write('Alpha/broken.tool', NAMELESS);
+    expect(await list(service)).toContain('qa_keyed Plugins/Beta/reused.tool');
+
+    expect(retired).toEqual([utcpNamespacePrefix('qa_keyed')]);
+    expect(rows.has(KEY)).toBe(false);
+  });
+
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'a folder that cannot be listed retires nothing',
+    async () => {
+      const service = svc();
+      await list(service);
+      rows.set(KEY, 'sk-old');
+
+      await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+      // Inside a plugin's folder, where plugin discovery does not look: only
+      // the catalog's own walk of the `.tool` files can tell it was not seen.
+      await write('Ops/plugin.json', JSON.stringify({ name: 'ops' }));
+      await mkdir(join(plugins(), 'Ops/Locked'));
+      await chmod(join(plugins(), 'Ops/Locked'), 0o000);
+      try {
+        await list(service);
+        expect(retired).toEqual([]);
+        expect(rows.get(KEY)).toBe('sk-old');
+      } finally {
+        await chmod(join(plugins(), 'Ops/Locked'), 0o755);
+      }
+      await list(service);
+      expect(retired).toEqual([utcpNamespacePrefix('qa_keyed')]);
+    },
+  );
+
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'a .tool file that cannot be read retires nothing',
+    async () => {
+      const service = svc();
+      await list(service);
+      rows.set(KEY, 'sk-old');
+
+      // The keyed tool is gone, but a file nobody could read could be it.
+      await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+      await write('Alpha/locked.tool', keyedTool('https://a.example.com/utcp'));
+      await chmod(join(plugins(), 'Alpha/locked.tool'), 0o000);
+      await list(service);
+      expect(retired).toEqual([]);
+      expect(rows.get(KEY)).toBe('sk-old');
+
+      await unlink(join(plugins(), 'Alpha/locked.tool'));
+      await list(service);
+      expect(retired).toEqual([utcpNamespacePrefix('qa_keyed')]);
+    },
+  );
+
+  test('a bundle registry that does not parse, or rejects a server, retires nothing', async () => {
+    const service = svc();
+    await list(service);
+    rows.set(KEY, 'sk-old');
+    const registry = join(root, wsId, KB_DIR, 'configs/mcp/registry.json');
+    await mkdir(join(registry, '..'), { recursive: true });
+    await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+
+    await writeFile(registry, '{ "servers": [');
+    await list(service);
+    await writeFile(registry, JSON.stringify({ servers: [{ id: 'srv', config: { type: 'sse', url: 'https://s.example.com' } }] }));
+    await list(service);
+    await writeFile(registry, JSON.stringify({ servers: [{ config: { url: 'https://s.example.com/mcp' } }] }));
+    await list(service);
+    expect(retired).toEqual([]);
+
+    await writeFile(registry, JSON.stringify({ servers: [] }));
+    await list(service);
+    expect(retired).toEqual([utcpNamespacePrefix('qa_keyed')]);
+  });
+
+  test('the namespace wipe leaves a `_`-leading variable\'s row, as the vault rule says', async () => {
+    // A `_`-leading variable's key is also the key a longer tool name's
+    // variable would have (see `isKeyInNamespace`), so the vault never wipes
+    // it. The changeset states this limit; this pins that nothing claims more.
+    const underscored = utcpNamespacedKey('qa_keyed', '_LEGACY');
+    const service = svc();
+    await list(service);
+    rows.set(KEY, 'sk-old');
+    rows.set(underscored, 'sk-underscored');
+
+    await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+    await list(service);
+    expect(retired).toEqual([utcpNamespacePrefix('qa_keyed')]);
+    expect(rows.has(KEY)).toBe(false);
+    expect(rows.get(underscored)).toBe('sk-underscored');
   });
 });

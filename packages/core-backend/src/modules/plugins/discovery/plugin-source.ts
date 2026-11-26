@@ -81,11 +81,12 @@ export interface Discovery {
    */
   unreadable: string[];
   /**
-   * Files that declare MCP servers and exist but could NOT be read,
-   * repo-relative: a plugin's `mcp.json`, the bundle registry. Not holes (no
+   * Files that declare MCP servers and exist but could NOT be read whole,
+   * repo-relative: a plugin's `mcp.json` that could not be read, the bundle
+   * registry that could not be read or is not whole (`McpRegistry.whole`). Not holes (no
    * identity, so no writer refuses over them), but which servers they
-   * declare is unknown: a reader comparing server lists between scans must
-   * not read them as declaring none.
+   * declare is not fully known: a reader comparing server lists between scans
+   * must not read them as declaring only what it could read.
    */
   serversUnseen: string[];
   /**

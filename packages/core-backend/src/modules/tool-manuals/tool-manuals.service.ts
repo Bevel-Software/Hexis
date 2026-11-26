@@ -218,14 +218,11 @@ interface Declaration {
 }
 
 /**
- * A scan of the whole tree, plus the secret-variable namespaces it saw
- * declared and where: by a manual that parses, or by a refused file that
- * still says which manual it is (a typo in an edit does not make a tool go
- * away). `null` when the scan could not see everything (a folder, a file or
- * an `mcp.json` it could not read, a refused file that names nothing),
- * because then "not declared" may only mean "not seen".
+ * Why a manual is withheld from a scan: its name's previous tool left the
+ * catalog and that tool's stored keys are not wiped yet.
  */
-type DiskScan = ScanResult & { declared: ReadonlyMap<string, readonly Declaration[]> | null };
+const KEYS_OWED =
+  'a removed tool with this id still has stored keys that could not be cleared yet — this tool is listed once they are.';
 
 /**
  * Wipes every stored value under a secret-variable namespace (the vault's
@@ -307,9 +304,11 @@ export class ToolManualService implements IToolManualService {
   private inFlightScan: Promise<ScanResult> | null = null;
   /**
    * A tool's stored keys belong to the tool, not to its name. When a later
-   * complete scan no longer declares a namespace the way the previous one
-   * did, the tool left the catalog and its keys are wiped, so a later tool
-   * that reuses the name starts with none. Two scans may be one change apart
+   * scan no longer declares a namespace the way an earlier one did, the tool
+   * left the catalog and its keys are wiped, so a later tool that reuses the
+   * name starts with none; until the wipe lands, that tool is withheld. Only
+   * the vault's namespace wipe runs, so a row it leaves (a `_`-leading
+   * variable, see `isKeyInNamespace`) stays. Two scans may be one change apart
    * or several (a deletion and a reuse written back to back land in ONE
    * scan), so the same tool is recognised per declaration, never by the name
    * alone: the name must still be declared in a file that declared it (an
@@ -321,8 +320,8 @@ export class ToolManualService implements IToolManualService {
    * one. See {@link retireRemoved}.
    */
   private retireNamespace?: RetireNamespace;
-  /** Where the newest complete scan saw each namespace declared; `null` before the first one. */
-  private declared: ReadonlyMap<string, readonly Declaration[]> | null = null;
+  /** Where the scans so far last saw each namespace declared. */
+  private declared: ReadonlyMap<string, readonly Declaration[]> = new Map();
   /** Namespaces whose wipe is owed: added when seen leaving, dropped once wiped. */
   private readonly owedRetirements = new Set<string>();
   /** Runs one retirement pass at a time, in scan order. */
@@ -362,7 +361,7 @@ export class ToolManualService implements IToolManualService {
 
   /**
    * Wire the wipe a removed tool's namespace gets (setter injection: the vault
-   * is constructed after this service). The first complete scan after it is
+   * is constructed after this service). The first scan after it is
    * the baseline a removal is measured against.
    */
   setNamespaceRetirement(retire: RetireNamespace): void {
@@ -788,11 +787,7 @@ export class ToolManualService implements IToolManualService {
     // See `TtlCache.begin`: taken before the read so an `invalidate()` that
     // lands mid-scan discards this result instead of being overwritten by it.
     const token = this.cache.begin();
-    const seq = ++this.scanSeq;
     const scanned = await this.scanDisk();
-    // Before the result is served: a tool that reuses a removed id must never
-    // be listed while the removed tool's keys still resolve.
-    await this.retireRemoved(scanned.declared, seq);
     const { manuals } = scanned;
     await this.decorateMcpOAuth(manuals);
     // AFTER the oauth decoration, so an injected `${MCP_OAUTH}` header ref is
@@ -803,34 +798,40 @@ export class ToolManualService implements IToolManualService {
   }
 
   /**
-   * Compare this scan's declarations with the newest complete scan's, owe a
-   * wipe for each namespace whose tool left (no declaration now shares a
-   * path or a source digest with one before), and pay every owed wipe.
-   * Serialized,
-   * and a scan older than one already applied is not compared (a slow scan
-   * of an earlier tree must not report a just-added tool as removed). An
-   * incomplete scan compares nothing, since "not declared" may mean "not
-   * read", but it still retries what is owed.
+   * Compare this scan's declarations with the earlier scans', owe a wipe for
+   * each namespace whose tool left, and pay every owed wipe. A tool left when
+   * no declaration of its name now shares a path or a source digest with one
+   * before. A name declared now is judged by every scan, complete or not:
+   * what declares it is there to compare. A name not declared now is judged
+   * only by a complete scan, since in an incomplete one "not declared" may
+   * mean "not read"; its earlier declarations are kept for the next scan.
+   * Serialized, and a scan older than one already applied is not compared (a
+   * slow scan of an earlier tree must not report a just-added tool as
+   * removed); every scan still retries what is owed.
    *
    * A wipe that fails stays owed and is retried on every later scan, even
-   * once a new tool declares the name again: the old keys must not reach it.
-   * The scan is served all the same, because the catalog must not go down
-   * with the vault; the tool's calls then fail at the vault too.
+   * once a new tool declares the name again: `scanDisk` withholds that tool
+   * until the wipe lands, so the old keys never reach it.
    */
-  private retireRemoved(declared: ReadonlyMap<string, readonly Declaration[]> | null, seq: number): Promise<void> {
+  private retireRemoved(
+    declared: ReadonlyMap<string, readonly Declaration[]>,
+    complete: boolean,
+    seq: number,
+  ): Promise<void> {
     const retire = this.retireNamespace;
     if (!retire) return Promise.resolve();
     const pass = this.retirements.then(async () => {
-      if (declared !== null && seq > this.appliedScanSeq) {
+      if (seq > this.appliedScanSeq) {
         this.appliedScanSeq = seq;
-        for (const [ns, before] of this.declared ?? []) {
-          const now = declared.get(ns) ?? [];
-          const sameTool = now.some((d) =>
-            before.some((b) => b.path === d.path || (b.source !== '' && b.source === d.source)),
-          );
-          if (!sameTool) this.owedRetirements.add(ns);
+        for (const [ns, before] of this.declared) {
+          const now = declared.get(ns);
+          const left =
+            now === undefined
+              ? complete
+              : !now.some((d) => before.some((b) => b.path === d.path || (b.source !== '' && b.source === d.source)));
+          if (left) this.owedRetirements.add(ns);
         }
-        this.declared = declared;
+        this.declared = complete ? declared : new Map([...this.declared, ...declared]);
       }
       for (const ns of [...this.owedRetirements]) {
         try {
@@ -1101,16 +1102,20 @@ export class ToolManualService implements IToolManualService {
      * misconfiguration, when the server could not read its files at all.
      */
     workspaceFailure: 'empty' | 'throw' = 'empty',
-  ): Promise<DiskScan> {
+  ): Promise<ScanResult> {
+    // Taken before the read: orders this scan's retirement pass (see `retireRemoved`).
+    const seq = branch === this.kb.defaultBranch ? ++this.scanSeq : 0;
     let wsId: string;
     try {
       wsId = (await this.workspaceService.getOrCreateForBranch(branch)).id;
     } catch (err) {
       if (workspaceFailure === 'throw') throw err;
-      return { ...emptyScan(), declared: null };
+      return emptyScan();
     }
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
-    // Whether this scan saw every declaration (see `DiskScan`).
+    // Whether this scan saw every declaration: not when a folder, a file or a
+    // server list could not be read, or a refused file names nothing, because
+    // then "not declared" may only mean "not seen".
     let complete = true;
 
     // A `.tool` sits under `Plugins/`, beside the skills that use it.
@@ -1247,6 +1252,28 @@ export class ToolManualService implements IToolManualService {
           'Names differing only in `-` vs `_` share one namespace — rename one of them.',
       }),
     );
+    let served = manuals;
+    if (branch === this.kb.defaultBranch) {
+      const declared = new Map<string, Declaration[]>();
+      const declare = (name: string, path: string, source: string) => {
+        const ns = utcpNamespacePrefix(name);
+        declared.set(ns, [...(declared.get(ns) ?? []), { path, source }]);
+      };
+      // Every parsed manual is stamped above; an unstamped one gets '', which
+      // `retireRemoved` never counts as a matching source.
+      for (const m of manuals) declare(m.name, m.path, m.sourceRevision ?? '');
+      for (const r of refused) declare(r.slug, r.path, refusedSource.get(r) ?? '');
+      // Every default-branch scan, the catalog's and a sign-in's fresh read
+      // alike, retires before it answers, and a tool whose name still owes a
+      // wipe is withheld: the removed tool's keys never reach its successor.
+      await this.retireRemoved(declared, complete, seq);
+      served = manuals.filter((m) => {
+        if (!this.owedRetirements.has(utcpNamespacePrefix(m.name))) return true;
+        invalid.push({ path: m.path, reason: KEYS_OWED });
+        refused.push({ slug: m.slug, path: m.path, reason: KEYS_OWED });
+        return false;
+      });
+    }
     // Sorted so the refused set is a stable VALUE: the change-detecting log
     // below compares one scan against the last, and two orderings of the same
     // three faults are not a change worth repeating.
@@ -1255,16 +1282,7 @@ export class ToolManualService implements IToolManualService {
     // draft workspace, and a draft's half-written `.tool` is not news about the
     // served catalog — it would also flap the log every time an agent saves.
     if (branch === this.kb.defaultBranch) this.logInvalidOnChange(invalid);
-    const declared = new Map<string, Declaration[]>();
-    const declare = (name: string, path: string, source: string) => {
-      const ns = utcpNamespacePrefix(name);
-      declared.set(ns, [...(declared.get(ns) ?? []), { path, source }]);
-    };
-    // Every parsed manual is stamped above; an unstamped one gets '', which
-    // `retireRemoved` never counts as a matching source.
-    for (const m of manuals) declare(m.name, m.path, m.sourceRevision ?? '');
-    for (const r of refused) declare(r.slug, r.path, refusedSource.get(r) ?? '');
-    return { manuals, invalid, refused, declared: complete ? declared : null };
+    return { manuals: served, invalid, refused };
   }
 }
 

@@ -51,6 +51,13 @@ export interface McpRegistry {
   /** Servers the registry declared but could not keep, by id, with the reason — so a profile selecting one can say why it is missing. */
   rejected: Map<string, string>;
   warnings: string[];
+  /**
+   * Whether every server the file declares is known by name: false when it
+   * did not parse as a registry, or a server in it was rejected or had no
+   * id. A reader comparing server lists between scans must not read a
+   * registry that is not whole as declaring only the servers it kept.
+   */
+  whole: boolean;
 }
 
 export function parseRegistry(text: string): McpRegistry {
@@ -62,13 +69,16 @@ export function parseRegistry(text: string): McpRegistry {
   try {
     root = JSON.parse(text);
   } catch {
-    return { servers, profiles, rejected, warnings: ['registry.json is not valid JSON'] };
+    return { servers, profiles, rejected, warnings: ['registry.json is not valid JSON'], whole: false };
   }
-  if (!isRecord(root)) return { servers, profiles, rejected, warnings: ['registry.json must be a JSON object'] };
+  if (!isRecord(root)) return { servers, profiles, rejected, warnings: ['registry.json must be a JSON object'], whole: false };
 
+  // A server list that is not a list, or a server with no id, declares names nobody can read.
+  let unnamed = root.servers !== undefined && !Array.isArray(root.servers);
   for (const raw of asArray(root.servers)) {
     if (!isRecord(raw) || typeof raw.id !== 'string' || !raw.id) {
       warnings.push('registry.json: a server without an id was skipped');
+      unnamed = true;
       continue;
     }
     if (servers.has(raw.id) || rejected.has(raw.id)) {
@@ -124,7 +134,7 @@ export function parseRegistry(text: string): McpRegistry {
       extends: typeof raw.extends === 'string' ? raw.extends : undefined,
     });
   }
-  return { servers, profiles, rejected, warnings };
+  return { servers, profiles, rejected, warnings, whole: !unnamed && rejected.size === 0 };
 }
 
 /**
