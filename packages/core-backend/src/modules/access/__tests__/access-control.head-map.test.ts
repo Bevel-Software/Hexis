@@ -685,6 +685,35 @@ describe('AccessControlService: reads answered from the map of the head commit',
     for (const list of [view.readers, view.eligible, view.owners, view.downloaders]) expect(list.roles).not.toContain('Member');
   }, 120_000);
 
+  it('says where a file\'s access comes from and where it is denied as its gates judge it, with its own entries changed on disk and not yet committed', async () => {
+    const page = 'Team/Named.md';
+    await commit('a page Pat owns by name', { [page]: '---\nowner:\n  - Pat <pat@x.io>\n---\n# named\n' });
+    const svc = service();
+    const pat = { kind: 'user' as const, email: 'pat@x.io' };
+    const member = { kind: 'role' as const, role: 'Member' };
+    // The commit's copy: Pat owns the page here; nobody is denied anything here.
+    expect((await svc.grantSources('ws', 'file', page, pat)).owner).toEqual([{ kind: 'direct' }]);
+    expect((await svc.denialSources('ws', 'file', page, member)).read).toBeUndefined();
+    expect((await svc.locallyDeniedPrincipals('ws', 'file', page)).principals).toEqual([]);
+
+    // On disk only, and nothing reported: Pat's grant is gone and members are denied reading.
+    await write(repo, { [page]: '---\nread:\n  - deny Member\n---\n# named\n' });
+    expect(await svc.canOwner('ws', 'pat@x.io', page)).toBe(false);
+    expect((await svc.grantSources('ws', 'file', page, pat)).owner).toBeUndefined();
+    expect(await svc.canRead('ws', 'mem@x.io', page)).toBe(false);
+    expect((await svc.denialSources('ws', 'file', page, member)).read).toEqual([{ kind: 'direct' }]);
+    expect((await svc.locallyDeniedPrincipals('ws', 'file', page)).principals.map((p) => p.name)).toEqual(['Member']);
+    // A grant the copy on disk takes away is not reported: members may no longer read, so neither their read nor
+    // their write, which needs it, comes from anywhere. The folder's read grant to the Platform group holds under
+    // both copies, so it still is.
+    expect(await svc.canWrite('ws', 'mem@x.io', page)).toBe(false);
+    expect(await svc.grantSources('ws', 'file', page, member)).toEqual({});
+    expect(await svc.canRead('ws', 'zoe@x.io', page)).toBe(true);
+    expect((await svc.grantSources('ws', 'file', page, { kind: 'role', role: 'Platform' })).read).toEqual([
+      { kind: 'ancestor', path: 'Team/access.md' },
+    ]);
+  }, 120_000);
+
   it('says whether a file is public, and through what, as its gates do, with a denial written into it and not yet committed', async () => {
     const page = 'Team/Pub.md';
     await commit('a page public through a plugin', {

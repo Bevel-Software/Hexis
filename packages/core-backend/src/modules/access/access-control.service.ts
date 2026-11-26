@@ -17,6 +17,7 @@ import type {
   AccessDecision,
   AccessDecisionSource,
   AccessTargetKind,
+  DenialSource,
   DenialSources,
   GrantPrincipal,
   GrantSource,
@@ -125,6 +126,16 @@ async function catFileBatch(
   return outcomes.map((o) => (o.kind === 'blob' ? o.text : null));
 }
 
+
+/** Whether two grant or denial sources name the same scope. */
+function sameSource(a: DenialSource, b: DenialSource): boolean {
+  return a.kind === 'direct' ? b.kind === 'direct' : b.kind === 'ancestor' && a.path === b.path;
+}
+
+/** How close a source is to its target: the target's own scope, then deeper folders before shallower ones. */
+function closeness(s: DenialSource): number {
+  return s.kind === 'direct' ? Number.MAX_SAFE_INTEGER : s.path === '' ? 0 : s.path.split('/').length;
+}
 
 /** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
 export interface AccessModel {
@@ -1865,7 +1876,9 @@ export class AccessControlService implements IAccessControl {
    * rules. So a denial written into the file and not yet committed holds at
    * once: a gate allows only what every copy allows (`gateAllows`), a holder
    * list names only whom every copy's list names (`eligibleWriters` and the
-   * others), and `explainAccess` explains the first copy that refuses. The
+   * others), `explainAccess` explains the first copy that refuses, a grant's
+   * sources are the ones every copy has (`grantSources`), and a denial's are
+   * any copy's (`denialSources`, `locallyDeniedPrincipals`). The
    * checkout's copy only ever takes away; it never grants what the commit's
    * copy refuses, so a restriction moved on disk from the file to its folder
    * still holds by the commit's.
@@ -2269,22 +2282,34 @@ export class AccessControlService implements IAccessControl {
   ): Promise<GrantSources> {
     // A file target consults its own frontmatter as the most-specific scope; a
     // folder target's most-specific scope is its own access.md (in the dir
-    // chain), so it passes no fileOwn.
-    const { model, own } = await this.rulesOf(workspaceId, relativePath, kind === 'file');
+    // chain), so it passes no fileOwn. A file's grant is reported only where
+    // every copy of its own entries grants it (`ownCopiesOf`), as its gates
+    // allow only what every copy allows.
+    const { model, copies } = await this.copiesFor(workspaceId, kind, relativePath);
     const out: GrantSources = {};
     for (const verb of KNOWN_VERBS) {
-      const sources = resolveGrantSourcesForVerb(
-        model,
-        verb,
-        kind,
-        relativePath,
-        principal,
-        own,
-        opts?.tokenMatch,
+      const [first, ...rest] = copies.map((own) =>
+        resolveGrantSourcesForVerb(model, verb, kind, relativePath, principal, own, opts?.tokenMatch),
       );
+      const sources = rest.reduce((kept, next) => kept.filter((s) => next.some((n) => sameSource(s, n))), first!);
       if (sources.length > 0) out[verb] = sources;
     }
     return out;
+  }
+
+  /**
+   * The rules and the copies of a target's own entries an annotation is read
+   * under: every copy `ownCopiesOf` reads for a file, none for a folder (its
+   * own rules are its `access.md`, in the model).
+   */
+  private async copiesFor(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<{ model: AccessModel; copies: (OwnEntries | null)[] }> {
+    if (kind === 'file') return this.ownCopiesOf(workspaceId, relativePath);
+    const { model } = await this.rulesOf(workspaceId, relativePath, false);
+    return { model, copies: [null] };
   }
 
   async denialSources(
@@ -2296,18 +2321,19 @@ export class AccessControlService implements IAccessControl {
   ): Promise<DenialSources> {
     // Same own-scope rule as `grantSources`: a file target consults its own
     // frontmatter, a folder target's own access.md is already in the dir chain.
-    const { model, own } = await this.rulesOf(workspaceId, relativePath, kind === 'file');
+    // A file's denial is reported where any copy of its own entries writes it,
+    // as its gates refuse what any copy refuses.
+    const { model, copies } = await this.copiesFor(workspaceId, kind, relativePath);
     const out: DenialSources = {};
     for (const verb of KNOWN_VERBS) {
-      const sources = resolveDenialSourcesForVerb(
-        model,
-        verb,
-        kind,
-        relativePath,
-        principal,
-        own,
-        opts?.tokenMatch,
-      );
+      const sources: DenialSource[] = [];
+      for (const own of copies) {
+        for (const s of resolveDenialSourcesForVerb(model, verb, kind, relativePath, principal, own, opts?.tokenMatch)) {
+          if (!sources.some((kept) => sameSource(kept, s))) sources.push(s);
+        }
+      }
+      // Closest first, as each copy lists them: the target's own denial, then its folders from the nearest up.
+      sources.sort((a, b) => closeness(b) - closeness(a));
       if (sources.length > 0) out[verb] = sources;
     }
     return out;
@@ -2320,15 +2346,17 @@ export class AccessControlService implements IAccessControl {
   ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }> {
     // The target's OWN entries, and only those — the one scope whose rules a
     // restriction made here is written into. A folder's are its `access.md` in
-    // the dir model; a file node's are its own frontmatter.
-    const { model, own: fileOwn } = await this.rulesOf(workspaceId, relativePath, kind !== 'folder');
-    const own: OwnEntries | null =
-      kind === 'folder' ? (model.accessFilesByDir.get(relativePath)?.entries ?? null) : fileOwn;
-    if (!own) return { principals: [], users: [] };
+    // the dir model; a file node's are its own frontmatter, in every copy
+    // `ownCopiesOf` reads, as its gates refuse what any copy denies.
+    const { model, copies } = await this.copiesFor(workspaceId, kind === 'folder' ? 'folder' : 'file', relativePath);
+    const owns: OwnEntries[] = (
+      kind === 'folder' ? [model.accessFilesByDir.get(relativePath)?.entries ?? null] : copies
+    ).filter((o): o is OwnEntries => o !== null);
+    if (owns.length === 0) return { principals: [], users: [] };
 
     const byIdentity = new Map<string, ResolvedPrincipal>();
     const byEmail = new Map<string, { name: string; email: string }>();
-    for (const verb of KNOWN_VERBS) {
+    for (const own of owns) for (const verb of KNOWN_VERBS) {
       for (const entry of own[verb] ?? []) {
         // Grants are already reported by the eligible lists; only the denials
         // are invisible there, and only they are this method's business.
