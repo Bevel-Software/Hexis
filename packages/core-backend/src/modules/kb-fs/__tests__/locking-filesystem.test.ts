@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { LockingFilesystem } from '../locking-filesystem.js';
+import { LockingFilesystem, PathHeldError } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
 import { makeAgentRolesYamlWriteValidator } from '../../access-model/index.js';
 
@@ -175,9 +175,10 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
         { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
       );
 
-      await expect(fsLayer.writeFile('knowledge-base/Locked.md', 'x')).rejects.toThrow(
-        /Skipped editing "knowledge-base\/Locked\.md" — locked by Bob/,
-      );
+      const err = await fsLayer.writeFile('knowledge-base/Locked.md', 'x').catch((e: unknown) => e);
+      expect((err as Error).message).toMatch(/Skipped editing "knowledge-base\/Locked\.md" — locked by Bob/);
+      expect(err).toBeInstanceOf(PathHeldError);
+      expect(err).toMatchObject({ path: 'knowledge-base/Locked.md', holderName: 'Bob' });
       expect(versionControl.acquireLock).toHaveBeenCalledTimes(3);
       expect(versionControl.releaseLock).not.toHaveBeenCalled();
     },
@@ -548,6 +549,193 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(2);
   });
+
+  /** A lock service whose gates refuse `refusedPath`'s lock. */
+  const gateRefusing = (refusedPath: string, refusal: Error): IVersionControlService => {
+    const versionControl = makeVersionControl();
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w, _b, p: string) => {
+      if (p === refusedPath) throw refusal;
+      return { acquired: true, lock: { holderUserId: 'user-1', holderName: 'Alice' } };
+    });
+    return versionControl;
+  };
+
+  it('writeFiles drops a write whose lock the gates refuse when `refused` takes it as that path\'s alone, and lands the rest', async () => {
+    const refusal = Object.assign(new Error('no write access'), { status: 403 });
+    const versionControl = gateRefusing('knowledge-base/b.md', refusal);
+    const asked: [string, unknown][] = [];
+
+    await layer(versionControl).writeFiles(
+      [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }, { path: 'knowledge-base/c.md', content: 'C' }],
+      'batch',
+      [],
+      undefined,
+      (p, err) => void asked.push([p, err]),
+    );
+
+    expect(asked).toEqual([['knowledge-base/b.md', refusal]]);
+    expect(versionControl.commitChanges).toHaveBeenCalledWith('ws-feat', USER, 'batch', ['knowledge-base/a.md', 'knowledge-base/c.md']);
+    await expect(fs.access(path.join(root, 'knowledge-base/b.md'))).rejects.toThrow();
+    expect(await fs.readFile(path.join(root, 'knowledge-base/c.md'), 'utf-8')).toBe('C');
+  });
+
+  it('a `refused` that throws refuses the whole batch with what it threw, untouched', async () => {
+    const versionControl = gateRefusing('knowledge-base/b.md', Object.assign(new Error('no write access'), { status: 403 }));
+    const verdict = new Error('the archive is refused');
+
+    await expect(
+      layer(versionControl).writeFiles(
+        [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }],
+        'batch',
+        [],
+        undefined,
+        () => {
+          throw verdict;
+        },
+      ),
+    ).rejects.toBe(verdict);
+
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/a.md', USER);
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, 'knowledge-base/a.md'))).rejects.toThrow();
+  });
+
+  it('a delete the gates refuse is never offered to `refused`: it refuses the batch', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/b.md'), 'B');
+    const refusal = Object.assign(new Error('no write access'), { status: 403 });
+    const versionControl = gateRefusing('knowledge-base/b.md', refusal);
+    const asked: string[] = [];
+
+    await expect(
+      layer(versionControl).writeFiles([{ path: 'knowledge-base/a.md', content: 'A' }], 'batch', ['knowledge-base/b.md'], undefined, (p) =>
+        void asked.push(p),
+      ),
+    ).rejects.toBe(refusal);
+
+    expect(asked).toEqual([]);
+    expect(await fs.readFile(path.join(root, 'knowledge-base/b.md'), 'utf-8')).toBe('B');
+  });
+
+  it('a write dropped at its lock takes its creator seed with it when no other write wants the seed', async () => {
+    const versionControl = gateRefusing('knowledge-base/KnowledgeBase/Mine/a.md', Object.assign(new Error('no'), { status: 403 }));
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      {
+        versionControl,
+        workspaceId: 'ws-feat',
+        branch: 'feat',
+        user: USER,
+        kbDirName: KB,
+        creatorAccess: {
+          planForCreate: async (_ws, _u, p: string) =>
+            p.startsWith('knowledge-base/KnowledgeBase/Mine/')
+              ? { kind: 'seed-access-md', wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md', apply: () => 'seed\n' }
+              : null,
+          noteAccessFileWritten: () => {},
+        },
+      },
+    );
+
+    await fsLayer.writeFiles(
+      [{ path: 'knowledge-base/KnowledgeBase/Mine/a.md', content: 'A' }, { path: 'knowledge-base/other.md', content: 'O' }],
+      'batch',
+      [],
+      undefined,
+      () => {},
+    );
+
+    const locked = (versionControl.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2]);
+    expect(locked).not.toContain('knowledge-base/KnowledgeBase/Mine/access.md');
+    expect(versionControl.commitChanges).toHaveBeenCalledWith('ws-feat', USER, 'batch', ['knowledge-base/other.md']);
+    await expect(fs.access(path.join(root, 'knowledge-base/KnowledgeBase/Mine'))).rejects.toThrow();
+  });
+});
+
+describe('LockingFilesystem.writeFiles — a batch longer than a lease', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const LEASE_MS = 60_000;
+
+  /**
+   * The lock service's leases, as the real one keeps them: an acquire grants
+   * a lease of `LEASE_MS` (refused while another live lease stands), a
+   * heartbeat extends a live lease by as much and refuses an expired one, and
+   * a release ends it. Its commit takes `commitMs`, a long commit and push.
+   */
+  function leasingVersionControl(commitMs: number) {
+    const expiry = new Map<string, number>();
+    const lockOf = (p: string, at: number) => ({
+      branch: 'feat',
+      path: p,
+      holderUserId: USER.id,
+      holderName: USER.name,
+      acquiredAt: new Date(at).toISOString(),
+      lastHeartbeatAt: new Date(at).toISOString(),
+      expiresAt: new Date(at + LEASE_MS).toISOString(),
+    });
+    const liveAtCommit: boolean[] = [];
+    let entered: () => void = () => {};
+    const committing = new Promise<void>((resolve) => (entered = resolve));
+    const release = vi.fn(async (_w: string, _b: string, p: string) => void expiry.delete(p));
+    const versionControl = {
+      acquireLock: vi.fn(async (_w: string, _b: string, p: string) => {
+        const now = Date.now();
+        if ((expiry.get(p) ?? 0) > now) return { acquired: false, lock: { ...lockOf(p, now), holderName: 'Someone' } };
+        expiry.set(p, now + LEASE_MS);
+        return { acquired: true, lock: lockOf(p, now) };
+      }),
+      heartbeatLock: vi.fn(async (_w: string, _b: string, p: string) => {
+        const now = Date.now();
+        if ((expiry.get(p) ?? 0) <= now) throw new Error(`Cannot heartbeat lock on "${p}": not held by you (or no longer exists).`);
+        expiry.set(p, now + LEASE_MS);
+        return lockOf(p, now);
+      }),
+      commitChanges: vi.fn(async (_w: string, _u: AuthUser, _s: string, paths: string[]) => {
+        entered();
+        await new Promise((resolve) => setTimeout(resolve, commitMs));
+        for (const p of paths) liveAtCommit.push((expiry.get(p) ?? 0) > Date.now());
+        return {};
+      }),
+      releaseLock: release,
+      releaseLockNoCommit: release,
+      releaseLockUntouched: release,
+    } as unknown as IVersionControlService;
+    return { versionControl, liveAtCommit, committing };
+  }
+
+  it('renews every lock it holds until it gives them back, so a batch that outlasts the lease still holds its paths', async () => {
+    const { versionControl, liveAtCommit, committing } = leasingVersionControl(2.5 * LEASE_MS);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+
+    const landing = fsLayer.writeFiles(
+      [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }],
+      'batch',
+    );
+    await committing;
+    await vi.advanceTimersByTimeAsync(2.5 * LEASE_MS);
+    await landing;
+
+    expect(liveAtCommit).toEqual([true, true]);
+    // Given back, the locks are renewed no more.
+    const renewals = (versionControl.heartbeatLock as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(renewals).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(2 * LEASE_MS);
+    expect((versionControl.heartbeatLock as ReturnType<typeof vi.fn>).mock.calls.length).toBe(renewals);
+  });
 });
 
 describe('LockingFilesystem — creator read grants on creation', () => {
@@ -781,11 +969,38 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         ],
         'batch',
       ),
-    ).rejects.toThrow(/locked by Bob/);
+    ).rejects.toSatisfy((err: unknown) => err instanceof PathHeldError && err.path === 'knowledge-base/B.md' && err.holderName === 'Bob');
     expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
   }, 10_000);
+
+  it('gives back every caller lock it holds, untouched, when taking a creator seed\'s lock throws', async () => {
+    const versionControl = makeVersionControl();
+    const failure = new Error('Lock contention race on "knowledge-base/KnowledgeBase/Mine/access.md" — please retry.');
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w, _b, p: string) => {
+      if (p.endsWith('/access.md')) throw failure;
+      return { acquired: true, lock: { holderUserId: 'user-1', holderName: 'Alice' } };
+    });
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
+      apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n',
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
+    );
+
+    await expect(
+      fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/a.md', content: 'a' }], 'batch'),
+    ).rejects.toBe(failure);
+
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/KnowledgeBase/Mine/a.md', USER);
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, 'knowledge-base/KnowledgeBase/Mine'))).rejects.toThrow();
+  });
 
   it('a DELETE batch whose later lock is contended deletes nothing — a folder never half-disappears', async () => {
     // The all-or-none property `delete_folder` relies on, asserted on disk:

@@ -131,6 +131,25 @@ describe('rejectPathsLocked', () => {
     await expect(fs.access(path.join(h.workspaceDir, 'knowledge-base/added.md'))).resolves.toBeUndefined();
   }, 15_000);
 
+  it('names the holder of a contended lock whole, a name with a dot in it included', async () => {
+    const h = await makeHarness({
+      acquire: (relPath) =>
+        relPath.endsWith('added.md')
+          ? { acquired: false, lock: { holderName: 'J. Smith' } }
+          : { acquired: true, lock: { holderName: 'Alice' } },
+    });
+    workspaceDir = h.workspaceDir;
+
+    await expect(
+      rejectPathsLocked(h.versionControl, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
+        'knowledge-base/a.md',
+        'knowledge-base/added.md',
+      ]),
+    ).rejects.toThrow(
+      'Couldn\'t revert: "knowledge-base/added.md" is being edited by J. Smith. No changes were committed — try again when the files are free.',
+    );
+  }, 15_000);
+
   it('surfaces a commit failure as a VersionControlValidationError and releases without committing', async () => {
     const h = await makeHarness({
       commit: () => {

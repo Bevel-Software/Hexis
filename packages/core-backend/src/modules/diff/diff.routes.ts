@@ -6,7 +6,7 @@ import type { IAccessControl } from '../access/index.js';
 import { canReadWorkspacePath, toKbRelative, resolveReadableMap } from '../access-model/index.js';
 import { VersionControlDomainError, VersionControlValidationError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
-import { LockingFilesystem } from '../kb-fs/index.js';
+import { LockingFilesystem, PathHeldError } from '../kb-fs/index.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import '../auth/index.js';
 
@@ -64,13 +64,13 @@ export async function rejectPathsLocked(
   } catch (err) {
     // Fail-closed: writeFiles committed nothing. Surface ONE clean 4xx
     // sentence (the raw error is status-less → would 500). The contention
-    // case is rebuilt rather than nested: writeFiles' own text says
-    // "Continuing with other edits", which is wrong here — the batch aborted.
-    const raw = err instanceof Error ? err.message : 'unknown error';
-    const contended = /Skipped editing "(.+?)" — locked by (.+?)\./.exec(raw);
-    const reason = contended
-      ? `"${contended[1]}" is being edited by ${contended[2]}`
-      : raw.replace(/\.\s*$/, '');
+    // case is rebuilt from the refusal's path and holder rather than nested:
+    // writeFiles' own text says "Continuing with other edits", which is wrong
+    // here — the batch aborted.
+    const reason =
+      err instanceof PathHeldError
+        ? `"${err.path}" is being edited by ${err.holderName ?? 'another user'}`
+        : (err instanceof Error ? err.message : 'unknown error').replace(/\.\s*$/, '');
     throw new VersionControlValidationError(
       `Couldn't revert: ${reason}. No changes were committed — try again when the files are free.`,
     );
