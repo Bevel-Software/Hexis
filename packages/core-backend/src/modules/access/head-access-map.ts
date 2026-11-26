@@ -80,10 +80,21 @@ export interface HeadSeed {
 
 /** Where the seed is kept between starts. */
 export interface IHeadSeedStore {
-  /** The seed last saved, or null when there is none this release may read. */
+  /** The seed last saved, or null when there is none this build may read. */
   load(): Promise<HeadSeed | null>;
   save(seed: HeadSeed): Promise<void>;
 }
+
+/**
+ * Which reading of a file version a seed records: what `read` and
+ * `readDeclaredOnDisk` take a version to declare, through `blobKey`,
+ * `parseOwnAccessEntries`, `accessMdSelfEntries`, `frontmatterHeadOfBytes`,
+ * `frontmatterHeadOfWholeFile` and `detachEntries`. A seed lists only the
+ * versions that declare something, so a version it leaves out is taken to
+ * declare nothing; a store keys the seed by this number (`DbHeadSeedStore`).
+ * Raise it with any change to what a version is read to declare.
+ */
+export const ACCESS_READING_VERSION = 1;
 
 /**
  * What {@link HeadMaps} asks of the access service: the access model of a

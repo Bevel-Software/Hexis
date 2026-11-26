@@ -31,9 +31,9 @@ describe.skipIf(!PG_ADMIN_URL)('DbHeadSeedStore, on a real Postgres', () => {
   };
 
   it(
-    'saves, reads back, replaces its one row, and is not read by another release',
+    'saves, reads back, replaces its one row, and is not read by another build',
     async () => {
-      const store = new DbHeadSeedStore(db, '1.2.3');
+      const store = new DbHeadSeedStore(db, { reading: 1, sha: '1'.repeat(40) });
       expect(await store.load()).toBeNull();
 
       // Paths as a knowledge base has them: spaces, a quote, non-ASCII.
@@ -54,8 +54,8 @@ describe.skipIf(!PG_ADMIN_URL)('DbHeadSeedStore, on a real Postgres', () => {
       expect(await store.load()).toEqual(second);
       expect(await rowCount()).toBe(1);
 
-      // Another release reads nothing, and its save takes the row over.
-      const next = new DbHeadSeedStore(db, '1.2.4');
+      // Another build reads nothing, and its save takes the row over.
+      const next = new DbHeadSeedStore(db, { reading: 1, sha: '2'.repeat(40) });
       expect(await next.load()).toBeNull();
       await next.save(first);
       expect(await next.load()).toEqual(first);
