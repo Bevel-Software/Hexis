@@ -10,7 +10,6 @@ import { McpService, type McpCaller } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/index.js';
 import { createExternalManualReader, createManualRoutes, ToolRegistry } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
-import { BearerRefusedError } from '../../tool-auth/index.js';
 
 /**
  * The hosted MCP endpoint learns the tools of the manuals this server hosts
@@ -252,7 +251,8 @@ describe('McpService — the platform manual is discovered in process', () => {
     const { state, mcp } = await harness();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     state.readPlatform = async () => {
-      throw new BearerRefusedError('Invalid or revoked connection key.', 401);
+      // What the read throws for a refused bearer: the route's words, with its status.
+      throw Object.assign(new Error('Invalid or revoked connection key.'), { status: 401 });
     };
     await expect(toolNames(await connect(mcp))).rejects.toThrow(
       "Bevel tool discovery failed: HTTP 401 discovering tools from 'KNOWLEDGE_BASE': Invalid or revoked connection key.",

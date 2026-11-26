@@ -9,8 +9,6 @@ export {
   createManualListReader,
   createToolManualsAgentRoutes,
   createToolManualsBrowserRoutes,
-  type InlineManualReader,
-  type ManualListAnswer,
   type ManualListReader,
 } from './tool-manuals.routes.js';
 export {
