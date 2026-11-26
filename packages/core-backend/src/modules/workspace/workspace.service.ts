@@ -174,13 +174,15 @@ export interface ArchiveEntryJudge {
 
 /**
  * The 409 an extraction answers when another holds a lock its landing needs.
- * Not `PathHeldError`'s own sentence, which says "continuing with other
- * edits": the extraction stopped whole.
+ * It carries `PathHeldError`'s payload, `{ kind: 'path-held', path }`, as the
+ * write tools that pass that error on do; its sentence is the extraction's
+ * own, saying nothing was extracted.
  */
 function extractionHeldRefusal(err: PathHeldError): VersionControlDomainError {
   return new VersionControlDomainError(
     `"${err.path}" is being edited by ${err.holderName ?? 'another user'}, so nothing was extracted. Try again once they are done.`,
     409,
+    { kind: 'path-held', path: err.path },
   );
 }
 
