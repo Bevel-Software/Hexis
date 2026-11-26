@@ -56,10 +56,6 @@ export {
   type RendererSurface,
 } from './components/renderers';
 export { RendererWorkspaceContext } from './components/renderers/rendererWorkspace';
-// The markdown view and the HTML renderer on their own, for a reading pane
-// that is not the file page: the skill page's.
-export { KbMarkdownView } from './components/renderers/KbMarkdownView';
-export { HtmlRenderer } from './components/renderers/HtmlRenderer';
 export { asksForFilePage, kbFilePageUrl, kbFileUrl, resolveKbHref } from './routing/kb-routes';
 export { PageLinkHomeContext } from './components/renderers/htmlToolBridge';
 export type { KbLinkTarget } from './components/renderers/KbAppLink';

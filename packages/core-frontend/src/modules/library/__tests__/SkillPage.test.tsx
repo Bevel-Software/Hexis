@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } fr
 import { useContext } from 'react';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { PageToolsContext, WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
 import { AuthContext, type AuthContextValue } from '../../auth';
 import { GitContext, type GitContextValue } from '../../git';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
@@ -16,7 +16,6 @@ import type { LibraryContextValue } from '../state/library-data';
 const apiMock = vi.hoisted(() => ({
   getSkill: vi.fn(),
   getSkillFile: vi.fn(),
-  readFileOnBranch: vi.fn(),
   proposeChange: vi.fn(),
   mergePullRequest: vi.fn(),
   cancelPullRequest: vi.fn(),
@@ -63,9 +62,19 @@ vi.mock('../services/library.api', () => ({
 }));
 /**
  * What the page takes from the workspace module, at its entry; everything
- * else the entry offers stays its own.
+ * else the entry offers stays its own: the write path a writer's in-place
+ * Save goes through, and the workspace a branch opens to, which a read of a
+ * file on a branch goes through as well.
+ */
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
+  getOrCreateWorkspace: apiMock.getOrCreateWorkspace,
+  writeFile: apiMock.writeFile,
+}));
+/**
+ * The reading pane's two renderers, at the component files the pane imports
+ * them from.
  *
- *  - The write path: what a writer's in-place Save goes through.
  *  - The markdown view: the pipeline (mermaid etc.) stays out of this test.
  *    The stand-in renders the raw source so assertions can see the body
  *    text, plus probes for the wiring the page hands the view: a click on a
@@ -76,78 +85,64 @@ vi.mock('../services/library.api', () => ({
  *    The stand-in shows what the page hands it: the page-tool bridge, and
  *    the path a page's calls would be recorded under.
  */
-vi.mock('../../workspace', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../../workspace')>();
-  return {
-    ...real,
-    getOrCreateWorkspace: apiMock.getOrCreateWorkspace,
-    writeFile: apiMock.writeFile,
-    KbMarkdownView: ({
-      source,
-      onOpenFile,
-      fileLinkTarget,
-      onOpenNodeId,
-      nodeIdLinkTarget,
-      resolveImage,
-    }: {
-      source: string;
-      onOpenFile: (href: string) => void;
-      fileLinkTarget?: (href: string) => unknown;
-      onOpenNodeId?: (id: string) => void;
-      nodeIdLinkTarget?: (id: string) => unknown;
-      resolveImage?: (src: string) => unknown;
-    }) => (
-      <div data-testid="md-view">
-        {source}
-        <h2 id="steps">Steps</h2>
-        <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
-          link-probe
-        </button>
-        <button type="button" onClick={() => onOpenFile('SKILL.md#steps')}>
-          section-probe
-        </button>
-        <button type="button" onClick={() => onOpenNodeId?.('newsletter#steps')}>
-          self-id-probe
-        </button>
-        <button type="button" onClick={() => onOpenNodeId?.('plan-node#goal')}>
-          other-id-probe
-        </button>
-        <span data-testid="other-id-target-probe">
-          {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('plan-node#goal') : 'no-target')}
-        </span>
-        <span data-testid="self-id-target-probe">
-          {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('newsletter#steps') : 'no-target')}
-        </span>
-        <span data-testid="link-target-probe">
-          {JSON.stringify(fileLinkTarget ? fileLinkTarget('Some%20File.md') : 'no-target')}
-        </span>
-        <span data-testid="section-target-probe">
-          {JSON.stringify(fileLinkTarget ? fileLinkTarget('SKILL.md#steps') : 'no-target')}
-        </span>
-        <span data-testid="image-probe">
-          {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
-        </span>
+vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
+  KbMarkdownView: ({
+    source,
+    onOpenFile,
+    fileLinkTarget,
+    onOpenNodeId,
+    nodeIdLinkTarget,
+    resolveImage,
+  }: {
+    source: string;
+    onOpenFile: (href: string) => void;
+    fileLinkTarget?: (href: string) => unknown;
+    onOpenNodeId?: (id: string) => void;
+    nodeIdLinkTarget?: (id: string) => unknown;
+    resolveImage?: (src: string) => unknown;
+  }) => (
+    <div data-testid="md-view">
+      {source}
+      <h2 id="steps">Steps</h2>
+      <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
+        link-probe
+      </button>
+      <button type="button" onClick={() => onOpenFile('SKILL.md#steps')}>
+        section-probe
+      </button>
+      <button type="button" onClick={() => onOpenNodeId?.('newsletter#steps')}>
+        self-id-probe
+      </button>
+      <button type="button" onClick={() => onOpenNodeId?.('plan-node#goal')}>
+        other-id-probe
+      </button>
+      <span data-testid="other-id-target-probe">
+        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('plan-node#goal') : 'no-target')}
+      </span>
+      <span data-testid="self-id-target-probe">
+        {JSON.stringify(nodeIdLinkTarget ? nodeIdLinkTarget('newsletter#steps') : 'no-target')}
+      </span>
+      <span data-testid="link-target-probe">
+        {JSON.stringify(fileLinkTarget ? fileLinkTarget('Some%20File.md') : 'no-target')}
+      </span>
+      <span data-testid="section-target-probe">
+        {JSON.stringify(fileLinkTarget ? fileLinkTarget('SKILL.md#steps') : 'no-target')}
+      </span>
+      <span data-testid="image-probe">
+        {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
+      </span>
+    </div>
+  ),
+}));
+vi.mock('../../workspace/components/renderers/HtmlRenderer', () => ({
+  HtmlRenderer: ({ filePath }: { filePath: string }) => {
+    const tools = useContext(PageToolsContext);
+    return (
+      <div data-testid="html-view" data-file={filePath}>
+        {tools ? tools.pagePath : 'no tools'}
       </div>
-    ),
-    HtmlRenderer: ({ filePath }: { filePath: string }) => {
-      const tools = useContext(real.PageToolsContext);
-      return (
-        <div data-testid="html-view" data-file={filePath}>
-          {tools ? tools.pagePath : 'no tools'}
-        </div>
-      );
-    },
-  };
-});
-// The change-request module's reads — the branch-file read feeds the editor
-// base and the per-request diffs.
-vi.mock('../../change-requests/services/change-requests.api', () => ({
-  listOpenChangeRequests: vi.fn(async () => []),
-  listMyChangeRequests: vi.fn(async () => []),
-  readFileOnBranch: apiMock.readFileOnBranch,
-  // No fork point: the change boxes fall back to the default branch, which is
-  // what these tests diff against.
-  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
+    );
+  },
 }));
 // The pull-request calls, at the pr module's entry, where the page and the
 // change boxes import them from. Approving is a step of its own before the
@@ -495,18 +490,67 @@ Collect the news and draft the letter.`;
 const RAW_BRANCH = RAW_MAIN.replace('draft the letter', 'ship the letter');
 
 /**
+ * A file's text on a branch, as the server holds it: what the page reads for
+ * the editor's base and for each change request's diff.
+ */
+const serverMock = vi.hoisted(() => ({
+  fileOnBranch: vi.fn<(branch: string, repoRelativePath: string) => Promise<string>>(),
+}));
+
+/**
+ * The workspace each branch opens to. The default branch's is the page's own
+ * workspace; any other branch gets an id that names it, so a file read in
+ * that workspace can be answered from the branch.
+ */
+function workspaceIdOf(branch: string): string {
+  return branch === DEFAULT_BRANCH ? 'target-company-state' : `branch-${encodeURIComponent(branch)}`;
+}
+function branchOfWorkspace(workspaceId: string): string {
+  return workspaceId.startsWith('branch-')
+    ? decodeURIComponent(workspaceId.slice('branch-'.length))
+    : DEFAULT_BRANCH;
+}
+
+/**
+ * The change-request reads, answered where change requests' own service
+ * meets the server: the open and own request lists (empty: the page's
+ * requests come from the library), the fork point (none, so the boxes diff
+ * against the default branch), and a file read in a branch's workspace,
+ * from `serverMock.fileOnBranch`; a read it refuses is a 404. `null` for any
+ * other address.
+ */
+async function answerChangeRequestReads(url: URL): Promise<Response | null> {
+  const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+  if (/^\/api\/workflow\/change-requests(\/mine)?$/.test(url.pathname)) return json([]);
+  if (/^\/api\/workflow\/change-requests\/\d+\/fork-point-file$/.test(url.pathname)) {
+    return json({ content: null, forkSha: null });
+  }
+  const read = /^\/api\/workspace\/([^/]+)\/file$/.exec(url.pathname);
+  if (!read) return null;
+  const path = url.searchParams.get('path') ?? '';
+  const repoRelativePath = path.replace(/^knowledge-base\//, '');
+  try {
+    return json({ content: await serverMock.fileOnBranch(branchOfWorkspace(read[1]), repoRelativePath) });
+  } catch {
+    return new Response('{}', { status: 404 });
+  }
+}
+
+/**
  * The server, where the page's modules meet it. The node id of the file in
  * the pane, as the backend answers it for the default branch
  * (`resolve-path`): SKILL.md is the node `newsletter`, and no other file of
- * the skill is a node. The access endpoints go to `answerAccess`. Every other
- * request goes to the real fetch, as it always has.
+ * the skill is a node. The access endpoints go to `answerAccess`, the
+ * change-request reads to `answerChangeRequestReads`. Every other request
+ * goes to the real fetch, as it always has.
  */
 let resolvePathSpy: MockInstance<typeof fetch>;
 beforeEach(() => {
   const realFetch = globalThis.fetch;
   resolvePathSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
-    const access = await answerAccess(new URL(url, 'http://app.test'), init);
+    const parsed = new URL(url, 'http://app.test');
+    const access = (await answerAccess(parsed, init)) ?? (await answerChangeRequestReads(parsed));
     if (access) return access;
     if (!url.includes('/resolve-path?')) return realFetch(input, init);
     return url.includes(encodeURIComponent('knowledge-base/Skills/newsletter/SKILL.md'))
@@ -521,11 +565,14 @@ afterEach(() => {
 beforeEach(() => {
   apiMock.getSkill.mockReset().mockResolvedValue(skillDetail);
   apiMock.getSkillFile.mockReset().mockResolvedValue('watchlist:\n  - topic: AI');
-  apiMock.readFileOnBranch
+  serverMock.fileOnBranch
     .mockReset()
     .mockImplementation((branch: string) =>
       Promise.resolve(branch.startsWith('suggestions/') ? RAW_BRANCH : RAW_MAIN),
     );
+  apiMock.getOrCreateWorkspace.mockReset().mockImplementation(async (branch: string) => ({
+    workspace: { id: workspaceIdOf(branch), kbDirName: 'knowledge-base' },
+  }));
   apiMock.proposeChange.mockReset().mockResolvedValue({ branch: 'b' });
   // 202 ack, which is all the endpoint ever returns — the merge itself runs
   // server-side afterwards and reports over the bus.
@@ -1113,7 +1160,7 @@ describe('SkillPage: proposing a change', () => {
 
   it("writes back in the file's own line endings", async () => {
     const crlfMain = RAW_MAIN.replace(/\n/g, '\r\n');
-    apiMock.readFileOnBranch.mockImplementation((branch: string) =>
+    serverMock.fileOnBranch.mockImplementation((branch: string) =>
       Promise.resolve(branch.startsWith('suggestions/') ? RAW_BRANCH : crlfMain),
     );
     renderPage(false);
@@ -1158,7 +1205,7 @@ describe('SkillPage: proposing a change', () => {
    */
   it('still refuses an untouched CRLF file, which the textarea hands back as LF', async () => {
     const crlfMain = RAW_MAIN.replace(/\n/g, '\r\n');
-    apiMock.readFileOnBranch.mockImplementation((branch: string) =>
+    serverMock.fileOnBranch.mockImplementation((branch: string) =>
       Promise.resolve(branch.startsWith('suggestions/') ? RAW_BRANCH : crlfMain),
     );
     renderPage(false);
@@ -1348,7 +1395,7 @@ describe('SkillPage: deciding on a change', () => {
     expect((await screen.findByTestId('md-view')).textContent).toContain('draft the letter');
 
     // What the default branch returns once the change request has landed.
-    apiMock.readFileOnBranch.mockImplementation(() => Promise.resolve(RAW_BRANCH));
+    serverMock.fileOnBranch.mockImplementation(() => Promise.resolve(RAW_BRANCH));
 
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.mergePullRequest).toHaveBeenCalledWith(7));
@@ -1465,7 +1512,7 @@ describe('SkillPage: deciding on a change', () => {
     const mainPending = new Promise<string>((res) => {
       releaseMain = res;
     });
-    apiMock.readFileOnBranch.mockImplementation((branch: string) =>
+    serverMock.fileOnBranch.mockImplementation((branch: string) =>
       branch.startsWith('suggestions/') ? Promise.resolve(RAW_BRANCH) : mainPending,
     );
 
@@ -1490,7 +1537,7 @@ describe('SkillPage: deciding on a change', () => {
    */
   it('withholds both verdicts when the file already reads as proposed', async () => {
     // Branch copy identical to main ⇒ the hook reports an overtaken proposal.
-    apiMock.readFileOnBranch.mockImplementation(() => Promise.resolve(RAW_MAIN));
+    serverMock.fileOnBranch.mockImplementation(() => Promise.resolve(RAW_MAIN));
     renderPage(true, [foreignCr]);
 
     expect(await screen.findByText('Already up to date')).toBeInTheDocument();

@@ -1,14 +1,14 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import '../../../change-requests/change-requests.css';
 import { FilePaneCard } from '../../../workspace/components/FilePaneCard';
+import { KbMarkdownView } from '../../../workspace/components/renderers/KbMarkdownView';
+import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
+import { HtmlRenderer } from '../../../workspace/components/renderers/HtmlRenderer';
 import {
-  HtmlRenderer,
-  KbMarkdownView,
   OpenPageInPlatformContext,
   PageLinkHomeContext,
   PageToolsContext,
   scrollToHeading,
-  type KbImageResolver,
   type KbLinkTarget,
 } from '../../../workspace';
 import type { DiffLine } from '../../../change-requests';
