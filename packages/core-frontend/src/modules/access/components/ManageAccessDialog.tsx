@@ -1442,6 +1442,9 @@ export function ManageAccessDialog({
    *     may restore it from the parent;
    *   - a verb the set adds that nothing confers → grant it here.
    *
+   * On a Denied row the whole Deny is lifted first, so the denials left behind
+   * are only the ones the steps above write for this set.
+   *
    * Order is broadest-verb-first for both halves; see {@link VERBS_BROADEST_FIRST}
    * for why neither half is safe in the other order. Each call answers with the
    * server's fresh view, and the next step re-reads the row from it rather than
@@ -1473,6 +1476,15 @@ export function ManageAccessDialog({
         if (picked === null) {
           await step(() => revokeAccess(workspaceId, { ...base, mode: 'deny-here' }));
           return;
+        }
+
+        // A set picked on a Denied row lifts the whole Deny first: one
+        // verb-less revoke strips all four local denials. The lower half below
+        // then writes back only the denials the set still needs (a verb a
+        // parent grants that the set leaves off), so no leftover `deny`
+        // download or owner line shadows a grant the parent makes later.
+        if (current()?.deniedHere) {
+          await step(() => revokeAccess(workspaceId, base));
         }
 
         // ---- lower: what the set drops -------------------------------------

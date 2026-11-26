@@ -131,6 +131,13 @@ describe('restricting below a parent keeps the principal reported', () => {
       access.invalidate(WS);
       return;
     }
+    // A Denied row (every verb denied here) has the whole Deny lifted first;
+    // the lower half below writes back only the denials the set still needs.
+    const before = await access.denialSources(WS, 'folder', FOLDER, toGrantPrincipal(principal), opts);
+    if (VERBS_BROADEST_FIRST.every((v) => (before[v] ?? []).some((s) => s.kind === 'direct'))) {
+      await mutation.revoke(WS, 'folder', FOLDER, principal, 'me@x');
+      access.invalidate(WS);
+    }
     for (const verb of VERBS_BROADEST_FIRST) {
       if (picked[verb]) continue;
       if (!(await effective(principal))[verb]) continue;
@@ -313,17 +320,69 @@ describe('restricting below a parent keeps the principal reported', () => {
       });
       const v = await view();
       // Read comes back from the PARENT, not from a new grant here: lifting the
-      // `deny read` uncovers the read the parent's edit grant always implied.
-      // The other three denials stay — "Can read" is what was asked for.
+      // Deny uncovers the read the parent's edit grant always implied. Only the
+      // denial "Can read" needs stays: write, which the parent grants. Download
+      // and owner, which nothing above grants, are not denied here any more.
       expect(v.sources['u:alice@example.com'].read).toEqual([
         { kind: 'ancestor', path: PARENT_MD },
       ]);
-      expect(v.denials['u:alice@example.com']?.read).toBeUndefined();
-      expect(v.denials['u:alice@example.com']?.write).toEqual([{ kind: 'direct' }]);
-      expect(v.denials['u:alice@example.com']?.owner).toEqual([{ kind: 'direct' }]);
+      expect(v.denials['u:alice@example.com']).toEqual({ write: [{ kind: 'direct' }] });
       // The row survives the whole round trip, still reported as restricted here.
       expect(v.deniedHere.users).toEqual([{ name: 'Alice', email: 'alice@example.com' }]);
     });
+  });
+
+  // ── lifting a Deny with a set leaves no denial the set does not need ──
+
+  describe('Deny, then Can edit, under a parent that grants edit', () => {
+    const SUB = 'Sales/Deals/note.md';
+
+    beforeEach(async () => {
+      await write(
+        repo,
+        PARENT_MD,
+        '---\nwrite:\n  - Alice <alice@example.com>\n  - GTM Team\n---\n# Sales\n',
+      );
+      await write(repo, `${FOLDER}/access.md`, '---\nwrite:\n  - Admin\n---\n# Deals\n');
+      await write(repo, SUB, '# Note\n');
+      access.invalidate(WS);
+    });
+
+    for (const [label, principal, email] of [
+      ['a person', ALICE, 'alice@example.com'],
+      ['a group', GTM, 'pat@example.com'],
+    ] as const) {
+      it(`leaves no deny in the file for ${label}`, async () => {
+        await applySet(principal, null);
+        expect(await fs.readFile(path.join(repo, FOLDER, 'access.md'), 'utf-8')).toContain('deny');
+
+        await applySet(principal, SET.edit);
+
+        const md = await fs.readFile(path.join(repo, FOLDER, 'access.md'), 'utf-8');
+        expect(md).not.toContain('deny');
+        expect(await effective(principal)).toEqual({
+          owner: false,
+          write: true,
+          download: false,
+          read: true,
+        });
+      });
+
+      it(`honours a later download grant at the parent for ${label}`, async () => {
+        await applySet(principal, null);
+        await applySet(principal, SET.edit);
+
+        const token = principal.kind === 'user' ? 'Alice <alice@example.com>' : 'GTM Team';
+        await write(
+          repo,
+          PARENT_MD,
+          `---\nwrite:\n  - Alice <alice@example.com>\n  - GTM Team\ndownload:\n  - ${token}\n---\n# Sales\n`,
+        );
+        access.invalidate(WS);
+
+        expect(await access.canDownload(WS, email, SUB)).toBe(true);
+      });
+    }
   });
 
   // ── a group principal ────────────────────────────────────────────────────

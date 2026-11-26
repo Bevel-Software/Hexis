@@ -336,25 +336,82 @@ describe('ManageAccessDialog: Deny, and re-granting after it', () => {
     const menu = await openRowMenu(user, /^denied here$/i);
     await user.click(setItem(menu, /^can read$/i));
 
-    // The read denial is lifted, then read is granted here: with every verb
-    // denied there was no parent grant left to fall back on.
+    // The whole Deny is lifted in one verb-less revoke, then read is granted
+    // here: with nothing left to inherit, the set has to be written.
     await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
-    expect(api.revokeAccess).toHaveBeenCalledWith(
-      'ws-1',
-      expect.objectContaining({ verb: 'read' }),
-    );
+    expect(api.revokeAccess).toHaveBeenCalledTimes(1);
+    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal: { kind: 'user', email: 'alice@x.com', displayName: 'Alice' },
+    });
     expect(api.grantAccess).toHaveBeenCalledWith(
       'ws-1',
       expect.objectContaining({ verb: 'read' }),
     );
-    // Only the denials the new set needs gone are lifted — edit, download and
-    // owner stay denied, because "Can read" is what was asked for.
-    for (const verb of ['write', 'download', 'owner']) {
-      expect(api.revokeAccess).not.toHaveBeenCalledWith(
-        'ws-1',
-        expect.objectContaining({ verb }),
-      );
-    }
+  });
+
+  it('Can edit on a denied PERSON whose parent grants edit lifts every denial and writes no new one', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(DENIED_HERE);
+    // Lifting the Deny uncovers the parent's edit grant.
+    api.revokeAccess.mockResolvedValue(EDIT_FROM_PARENT);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('Alice');
+
+    const menu = await openRowMenu(user, /^denied here$/i);
+    await user.click(setItem(menu, /^can edit$/i));
+
+    // Verb-less and not a deny-here: the download and owner denials go with
+    // the rest, and the parent's edit makes any grant here unnecessary.
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
+    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal: { kind: 'user', email: 'alice@x.com', displayName: 'Alice' },
+    });
+    expect(api.grantAccess).not.toHaveBeenCalled();
+  });
+
+  it('Can edit on a denied GROUP lifts every denial with one verb-less revoke', async () => {
+    const user = userEvent.setup();
+    const QA = { name: 'QA Team', kind: 'group' as const };
+    api.fetchFileAccess.mockResolvedValue({
+      ...BLANK,
+      denials: {
+        'g:qa team': {
+          read: [{ kind: 'direct' }],
+          write: [{ kind: 'direct' }],
+          download: [{ kind: 'direct' }],
+          owner: [{ kind: 'direct' }],
+        },
+      },
+      deniedHere: { principals: [QA], users: [] },
+    } as unknown as AccessResponse);
+    api.revokeAccess.mockResolvedValue({
+      ...BLANK,
+      eligible: { principals: [QA], roles: ['QA Team'], users: [] },
+      readers: { restricted: true, principals: [QA], roles: ['QA Team'], users: [] },
+      sources: {
+        'g:qa team': {
+          read: [{ kind: 'ancestor', path: PARENT }],
+          write: [{ kind: 'ancestor', path: PARENT }],
+        },
+      },
+    } as unknown as AccessResponse);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('QA Team');
+
+    const menu = await openRowMenu(user, /^denied here$/i);
+    await user.click(setItem(menu, /^can edit$/i));
+
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
+    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal: { kind: 'group', group: 'QA Team' },
+    });
+    expect(api.grantAccess).not.toHaveBeenCalled();
   });
 });
 
