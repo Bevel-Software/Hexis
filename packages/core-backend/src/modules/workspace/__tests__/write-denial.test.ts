@@ -1,9 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { writeDenial } from '../write-denial.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/change-gate.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import { AccessDeniedError, type ChangeReadVerdict, type IChangeReadGate } from '../../access-model/index.js';
+import type { IAccessControl } from '../../access/index.js';
 
 /**
  * The `write-denied` answer's "may you propose this instead?" is the read
