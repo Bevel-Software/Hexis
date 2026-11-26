@@ -134,7 +134,9 @@ describe('a downstream isError over a real MCP connection', () => {
     // One credential substituted from a variable, one spelled out in full.
     const client = await CodeModeUtcpClient.create(
       process.cwd(),
-      new UtcpClientConfigSerializer().validateDict({ variables: { notion_TOKEN: 'sk-live-1234567890abcdef' } }),
+      new UtcpClientConfigSerializer().validateDict({
+        variables: { notion_TOKEN: 'sk-live-1234567890abcdef', notion_A: 'a', notion_B: 'middle|secret-9876', notion_C: 'd' },
+      }),
     );
     cleanups.push(() => client.close());
     const template = serializer.validateDict({
@@ -147,21 +149,26 @@ describe('a downstream isError over a real MCP connection', () => {
             url: server.url,
             timeout: 10,
             terminate_on_close: true,
-            headers: { Authorization: 'Bearer ${TOKEN}', 'X-Api-Key': 'literal-key-abcdef123456' },
+            // `X-Trace` is not credential-named, and its middle value contains the separator.
+            headers: {
+              Authorization: 'Bearer ${TOKEN}',
+              'X-Api-Key': 'literal-key-abcdef123456',
+              'X-Trace': '${A}|${B}|${C}',
+            },
           },
         },
       },
     });
     expect(await registerManual(client, template)).toEqual({ ok: true });
     server.reportToolErrors(
-      'Rejected: token sk-live-1234567890abcdef (or its head sk-live-1234…) and key literal-key-abcdef123456.',
+      'Rejected: token sk-live-1234567890abcdef (or its head sk-live-1234…), key literal-key-abcdef123456, trace middle|secret-9876.',
     );
 
     const result = await dispatchToolCall(client, echo, { text: 'hi' });
 
     expect(result.isError).toBe(true);
     expect(result.content).toEqual([
-      { type: 'text', text: 'Rejected: token [redacted] (or its head [redacted]…) and key [redacted].' },
+      { type: 'text', text: 'Rejected: token [redacted] (or its head [redacted]…), key [redacted], trace [redacted].' },
     ]);
   });
 

@@ -1,5 +1,4 @@
 import type { CallTemplate } from '@utcp/sdk';
-import { VARIABLE_REFERENCE_PATTERN } from './utcp-namespace.js';
 
 /*
  * Keeping a secret out of text we quote back. One mechanism for every place
@@ -194,20 +193,15 @@ export function rememberCredentialQuery(url: string, redactor: SecretRedactor): 
 }
 
 /**
- * Remember everything a call to an `mcp` manual carried that may be a secret,
- * from the template as the client filled it in (`processed`) and as it is
- * stored (`raw`, with its `${VAR}` references):
- *
- * - every value substitution put in, each on its own (`substitutedValues`).
- *   The public text around them (a url's scheme and host, an auth scheme) is
- *   not remembered, so it is not blanked out of the message;
- * - every credential a server entry spells out in full: credential-named
- *   headers (and the part after the auth scheme), credential-named query
- *   parameters, credential-named environment variables, and credential-named
- *   fields of the template's `auth`.
+ * Remember every credential an `mcp` call's template spells out in full, as
+ * the client filled it in: credential-named headers (and the part after the
+ * auth scheme), credential-named query parameters, credential-named
+ * environment variables, and credential-named fields of the template's
+ * `auth`. The values substituted into it are recorded where they are resolved,
+ * at registration (`call-secrets.ts`), so nothing here reads them back out of
+ * the text.
  */
-export function rememberCallCredentials(redactor: SecretRedactor, processed: CallTemplate, raw?: CallTemplate): void {
-  if (raw) rememberSubstitutions(redactor, raw, processed);
+export function rememberCallCredentials(redactor: SecretRedactor, processed: CallTemplate): void {
   const servers = (processed as { config?: { mcpServers?: unknown } }).config?.mcpServers;
   if (servers && typeof servers === 'object') {
     for (const entry of Object.values(servers as Record<string, unknown>)) {
@@ -229,92 +223,4 @@ function rememberCredentialFields(fields: object, redactor: SecretRedactor): voi
   for (const [name, value] of Object.entries(fields)) {
     if (typeof value === 'string' && carriesCredential(name)) redactor.remember(value);
   }
-}
-
-/** Walk both templates side by side and remember what substitution put in. */
-function rememberSubstitutions(redactor: SecretRedactor, raw: unknown, processed: unknown): void {
-  if (typeof processed === 'string') {
-    if (typeof raw === 'string' && raw !== processed) {
-      for (const value of substitutedValues(raw, processed)) redactor.remember(value);
-    }
-    return;
-  }
-  if (!processed || typeof processed !== 'object' || !raw || typeof raw !== 'object') return;
-  for (const [key, value] of Object.entries(processed)) {
-    rememberSubstitutions(redactor, (raw as Record<string, unknown>)[key], value);
-  }
-}
-
-/** Past this many candidate values in one string, its changed span is remembered instead (see `substitutedValues`). */
-const MAX_CANDIDATES = 512;
-
-/**
- * Every value each reference in `raw` could have taken in `processed`.
- *
- * The stored string's references (`VARIABLE_REFERENCE_PATTERN`, the
- * substitutor's grammar) split it into literal pieces. A value is the text
- * between two pieces, but a value may itself contain the piece after it, so
- * one string can read several ways (`${A}|${B}|${C}` filled in as
- * `a|middle|secret|d`). Every reading is kept: for each reference, every
- * start the text before it allows and every end the text after it allows,
- * found from both ends, and every value between such a start and end. A
- * string the stored one does not describe (it changed some other way) yields
- * its changed span; so does a pathological one (adjacent references, which
- * any split satisfies) once it passes {@link MAX_CANDIDATES}.
- */
-function substitutedValues(raw: string, processed: string): string[] {
-  const pieces = raw.split(new RegExp(VARIABLE_REFERENCE_PATTERN.source)).filter((_, i) => i % 3 === 0);
-  // `split` interleaves each match's two capture groups: every third piece is literal text.
-  const references = pieces.length - 1;
-  if (references < 1) return [];
-  const n = processed.length;
-  const first = pieces[0]!;
-  const last = pieces[references]!;
-  if (!processed.startsWith(first) || !processed.endsWith(last) || first.length + last.length > n) {
-    return [changedSpan(raw, processed)];
-  }
-  // From the front: where value i can start.
-  const starts: Set<number>[] = [new Set([first.length])];
-  for (let i = 0; i < references; i++) {
-    const piece = pieces[i + 1]!;
-    const next = new Set<number>();
-    for (const s of starts[i]!) {
-      for (let e = s; e + piece.length <= n; e++) if (processed.startsWith(piece, e)) next.add(e + piece.length);
-    }
-    starts.push(next);
-  }
-  if (!starts[references]!.has(n)) return [changedSpan(raw, processed)];
-  // From the back: where value i can end and still leave a reading of the rest.
-  const values = new Set<string>();
-  let after = new Set([n]);
-  for (let i = references - 1; i >= 0; i--) {
-    const piece = pieces[i + 1]!;
-    const ends = [...after].map((p) => p - piece.length).filter((e) => e >= 0 && processed.startsWith(piece, e));
-    const reachable = new Set<number>();
-    for (const s of starts[i]!) {
-      for (const e of ends) {
-        if (e < s) continue;
-        reachable.add(s);
-        values.add(processed.slice(s, e));
-        if (values.size > MAX_CANDIDATES) return [changedSpan(raw, processed)];
-      }
-    }
-    after = reachable;
-  }
-  return [...values];
-}
-
-/** The text between the longest head and tail `raw` and `processed` share. */
-function changedSpan(raw: string, processed: string): string {
-  let head = 0;
-  while (head < raw.length && head < processed.length && raw[head] === processed[head]) head++;
-  let tail = 0;
-  while (
-    tail < raw.length - head &&
-    tail < processed.length - head &&
-    raw[raw.length - 1 - tail] === processed[processed.length - 1 - tail]
-  ) {
-    tail++;
-  }
-  return processed.slice(head, processed.length - tail);
 }

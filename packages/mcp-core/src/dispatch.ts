@@ -5,6 +5,8 @@ import type { ProxiedTool } from './proxied-tool.js';
 import { toCallToolResult, toolError, describeToolFailure, renderProgress } from './results.js';
 import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
+import { installSubstitutionCapture, recordingSubstitutions, rememberManualSecrets } from './call-secrets.js';
+import { utcpManualName } from './utcp-namespace.js';
 import { DownstreamToolError } from './downstream-tool-errors.js';
 import { removeExcludedTools } from './excluded-tools.js';
 
@@ -38,12 +40,17 @@ export async function registerManual(
   // (`call-guards.ts`).
   installGetHasNoBody();
   installCallGuards(client);
+  // The values this registration fills into the manual are what its calls
+  // carry, so they are kept for the manual (`call-secrets.ts`): a downstream
+  // error quoted back is redacted against them.
+  installSubstitutionCapture(client);
   try {
-    const result = await client.registerManual(manual);
+    const [result, values] = await recordingSubstitutions(() => client.registerManual(manual));
     if (result && result.success === false) {
       const errors = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
       return { ok: false, error: errors };
     }
+    rememberManualSecrets(client, utcpManualName(String(manual.name ?? '')), values);
     // The same one point is where the tools a manual leaves out
     // (`excludeTools`) come off the client: a session recovery or a catalog
     // refresh registers through here too, so none of them can bring one back.

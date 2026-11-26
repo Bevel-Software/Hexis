@@ -2,6 +2,7 @@ import { CommunicationProtocol, type CallTemplate } from '@utcp/sdk';
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { SecretRedactor, rememberCallCredentials } from './secret-redactor.js';
+import { manualSecrets } from './call-secrets.js';
 
 /**
  * A downstream MCP server said its own call failed: it answered a
@@ -98,18 +99,6 @@ type ResultProcessor = {
   callTool?: (this: unknown, caller: unknown, toolName: string, args: unknown, template: CallTemplate) => Promise<unknown>;
 };
 
-/** The template a client stores for `toolName`, with its `${VAR}` references, or undefined. */
-async function storedTemplate(caller: unknown, toolName: string): Promise<CallTemplate | undefined> {
-  try {
-    const repository = (caller as { config?: { tool_repository?: { getTool(name: string): Promise<unknown> } } })
-      ?.config?.tool_repository;
-    const tool = (await repository?.getTool(toolName)) as { tool_call_template?: CallTemplate } | undefined;
-    return tool?.tool_call_template;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * Teach one `@utcp/mcp` protocol instance to keep a downstream `isError`.
  *
@@ -123,9 +112,11 @@ async function storedTemplate(caller: unknown, toolName: string): Promise<CallTe
  *
  * The server's words are quoted back to the caller, and a server can echo the
  * credential the call carried. So `callTool` is wrapped too: a failure leaves
- * it with every secret the call carried taken out (`rememberCallCredentials`,
- * from the template as the client filled it in and as it stores it). Streaming
- * goes through `callTool` in this protocol, so it is covered by the same wrap.
+ * it with every secret the call carried taken out: each value substituted into
+ * the manual when it registered, as the substitutor resolved it
+ * (`call-secrets.ts`), and every credential the template spells out in full
+ * (`rememberCallCredentials`).
+ * Streaming goes through `callTool` in this protocol, so the same wrap covers it.
  */
 export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
   const target = protocol as unknown as ResultProcessor;
@@ -147,7 +138,8 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
       } catch (err) {
         if (!(err instanceof DownstreamToolError)) throw err;
         const redactor = new SecretRedactor();
-        rememberCallCredentials(redactor, template, await storedTemplate(caller, toolName));
+        for (const value of manualSecrets(caller, String(template.name ?? ''))) redactor.remember(value);
+        rememberCallCredentials(redactor, template);
         throw err.redactedWith(redactor);
       }
     };

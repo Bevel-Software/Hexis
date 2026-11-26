@@ -33,38 +33,27 @@ describe('SecretRedactor', () => {
 });
 
 describe('rememberCallCredentials', () => {
-  it('takes out each of several values substituted into one string, the later one echoed alone', () => {
+  it('remembers the credentials a template spells out in full, and nothing public', () => {
     const redactor = new SecretRedactor();
-    const raw = {
+    const template = {
       name: 'n',
       call_template_type: 'mcp',
-      config: { mcpServers: { s: { url: 'https://${HOST}/v1/$TOKEN?x=1' } } },
+      auth: { auth_type: 'api_key', api_key: 'auth-key-1234567890', var_name: 'X-Key' },
+      config: {
+        mcpServers: {
+          web: {
+            url: 'https://api.example.com/mcp?token=query-token-123456',
+            headers: { Authorization: 'Bearer header-token-123456' },
+          },
+          local: { command: 'node', env: { API_TOKEN: 'env-token-1234567', LOG_LEVEL: 'debugging' } },
+        },
+      },
     };
-    const processed = { ...raw, config: { mcpServers: { s: { url: 'https://api.example.com/v1/tok-abcdef123456?x=1' } } } };
-    rememberCallCredentials(redactor, processed as unknown as CallTemplate, raw as unknown as CallTemplate);
-    expect(redactor.redact('refused tok-abcdef123456 at api.example.com')).toBe('refused [redacted] at [redacted]');
-  });
-
-  it('keeps every reading of a string whose values contain its separator, the middle value included', () => {
-    const redactor = new SecretRedactor();
-    const raw = { name: 'n', call_template_type: 'mcp', config: { mcpServers: { s: { headers: { 'X-Id': '${A}|${B}|${C}' } } } } };
-    const processed = { ...raw, config: { mcpServers: { s: { headers: { 'X-Id': 'a|middle|secret|d' } } } } };
-    rememberCallCredentials(redactor, processed as unknown as CallTemplate, raw as unknown as CallTemplate);
-    // B was `middle|secret`, echoed whole.
-    expect(redactor.redact('B is middle|secret')).toBe('B is [redacted]');
-  });
-
-  it('takes out what substitution put in, and leaves the public text around it', () => {
-    const redactor = new SecretRedactor();
-    const raw = {
-      name: 'n',
-      call_template_type: 'mcp',
-      config: { mcpServers: { s: { url: 'https://api.example.com/${TENANT}/mcp' } } },
-    };
-    const processed = { ...raw, config: { mcpServers: { s: { url: 'https://api.example.com/acme-tenant-01/mcp' } } } };
-    rememberCallCredentials(redactor, processed as unknown as CallTemplate, raw as unknown as CallTemplate);
-    expect(redactor.redact('https://api.example.com/status refused acme-tenant-01')).toBe(
-      'https://api.example.com/status refused [redacted]',
-    );
+    rememberCallCredentials(redactor, template as unknown as CallTemplate);
+    expect(
+      redactor.redact(
+        'https://api.example.com/mcp refused header-token-123456, query-token-123456, env-token-1234567 and auth-key-1234567890 at debugging',
+      ),
+    ).toBe('https://api.example.com/mcp refused [redacted], [redacted], [redacted] and [redacted] at debugging');
   });
 });
