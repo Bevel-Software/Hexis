@@ -352,6 +352,12 @@ export function descriptorsFromMcpJson(
    * refused server answers why, instead of finding nothing by that name.
    */
   onRefused?: (server: string, reason: string, path: string) => void,
+  /**
+   * Told when the file cannot be read as a server map at all, so WHICH servers
+   * it declares is unknown, as opposed to a file that declares none. The
+   * catalog must not read that as "every server here was removed".
+   */
+  onUnreadable?: () => void,
 ): ToolManualDescriptor[] {
   const { pluginsDir } = layout;
   let mcp: unknown;
@@ -359,9 +365,14 @@ export function descriptorsFromMcpJson(
     mcp = JSON.parse(mcpJsonText);
   } catch {
     log.warn(`${pluginsDir}/${pluginFolder}/${PLUGIN_MCP_FILE} is not valid JSON — skipped.`);
+    onUnreadable?.();
     return [];
   }
-  if (!isRecord(mcp) || !isRecord(mcp.mcpServers)) return [];
+  if (!isRecord(mcp) || (mcp.mcpServers !== undefined && !isRecord(mcp.mcpServers))) {
+    onUnreadable?.();
+    return [];
+  }
+  if (!isRecord(mcp.mcpServers)) return [];
 
   let manifest: unknown = null;
   if (pluginJsonText !== null) {
