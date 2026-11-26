@@ -1,7 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -9,6 +7,7 @@ import type { WorkspaceService } from '../../../workspace/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { GitService } from '../git.service.js';
 import { NodeGitRunner } from '../node-git-runner.js';
+import { gitOut, runGit } from './git-test-helpers.js';
 import type { IGitRunner } from '../../../../shared/git.contract.js';
 
 /**
@@ -19,20 +18,8 @@ import type { IGitRunner } from '../../../../shared/git.contract.js';
  * not ask for the whole tree after a save that cannot have changed it.
  */
 
-const execFileAsync = promisify(execFile);
 const USER = { id: 'u-alice', name: 'Alice', email: 'alice@bevel.software' };
 const WS = 'ws-content-edit';
-
-async function runGit(cwd: string, args: string[]): Promise<void> {
-  await execFileAsync('git', args, {
-    cwd,
-    env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 't@x.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 't@x.com' },
-  });
-}
-
-async function gitOut(cwd: string, args: string[]): Promise<string> {
-  return (await execFileAsync('git', args, { cwd })).stdout.trim();
-}
 
 const PAGE = '---\nread: [Sales]\n---\n\n# Name\nA page\n';
 
