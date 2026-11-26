@@ -134,6 +134,80 @@ describe('a removed tool takes its stored keys with it', () => {
     expect(rows.has(KEY)).toBe(false);
   });
 
+  test('a deletion and a reuse that land in ONE scan still wipe the old key', async () => {
+    const service = svc();
+    await list(service);
+    rows.set(KEY, 'sk-old-tool-secret');
+
+    // Written back to back (an agent's delete_file + write_file): no scan
+    // sees the tree between them, so the name never looks absent.
+    await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+    await write('Beta/reused.tool', keyedTool('https://b.example.com/utcp'));
+    expect(await list(service)).toContain('qa_keyed Plugins/Beta/reused.tool');
+
+    expect(retired).toEqual([utcpNamespacePrefix('qa_keyed')]);
+    expect(rows.has(KEY)).toBe(false);
+  });
+
+  test('a deletion and a reuse announced back to back wipe the key before the reuse is listed', async () => {
+    const service = svc();
+    await list(service);
+    rows.set(KEY, 'sk-old-tool-secret');
+
+    await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+    service.invalidate();
+    await write('Beta/reused.tool', keyedTool('https://b.example.com/utcp'));
+    service.invalidate();
+
+    // The first listing that shows the reuse already finds no old key.
+    expect((await service.listAllSummaries()).map((m) => `${m.name} ${m.path}`)).toContain(
+      'qa_keyed Plugins/Beta/reused.tool',
+    );
+    expect(rows.has(KEY)).toBe(false);
+  });
+
+  test('a server name reused in another plugin\'s mcp.json in one scan does not inherit the key', async () => {
+    const serverKey = utcpNamespacedKey('srv', 'API_KEY');
+    await write('Ops/plugin.json', JSON.stringify({ name: 'ops' }));
+    await write('Ops/mcp.json', JSON.stringify({ mcpServers: { srv: { type: 'streamable-http', url: 'https://s.example.com/mcp' } } }));
+    const service = svc();
+    expect(await list(service)).toContain('srv Plugins/Ops/mcp.json');
+    rows.set(serverKey, 'sk-server');
+
+    await write('Ops/mcp.json', JSON.stringify({ mcpServers: {} }));
+    await write('Other/plugin.json', JSON.stringify({ name: 'other' }));
+    await write('Other/mcp.json', JSON.stringify({ mcpServers: { srv: { type: 'streamable-http', url: 'https://evil.example.com/mcp' } } }));
+    expect(await list(service)).toContain('srv Plugins/Other/mcp.json');
+
+    expect(retired).toEqual([utcpNamespacePrefix('srv')]);
+    expect(rows.has(serverKey)).toBe(false);
+  });
+
+  test('a move that also changes the file is not recognised as the same tool, so its key goes', async () => {
+    const service = svc();
+    await list(service);
+    rows.set(KEY, 'sk-old');
+
+    await unlink(join(plugins(), 'Alpha/qa_keyed.tool'));
+    await write('Beta/qa_keyed.tool', keyedTool('https://a.example.com/utcp/v2'));
+    expect(await list(service)).toContain('qa_keyed Plugins/Beta/qa_keyed.tool');
+
+    expect(retired).toEqual([utcpNamespacePrefix('qa_keyed')]);
+    expect(rows.has(KEY)).toBe(false);
+  });
+
+  test('an edit in place keeps the key, even one that changes where the tool calls', async () => {
+    const service = svc();
+    await list(service);
+    rows.set(KEY, 'sk-kept');
+
+    await write('Alpha/qa_keyed.tool', keyedTool('https://a.example.com/utcp/v2'));
+    expect(await list(service)).toContain('qa_keyed Plugins/Alpha/qa_keyed.tool');
+
+    expect(retired).toEqual([]);
+    expect(rows.get(KEY)).toBe('sk-kept');
+  });
+
   test('a move keeps the id in every scan, so the key follows it', async () => {
     const service = svc();
     await list(service);
