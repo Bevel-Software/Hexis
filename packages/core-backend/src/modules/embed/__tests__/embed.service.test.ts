@@ -542,10 +542,9 @@ describe('EmbedService: saving as a writer', () => {
     accessControl.canWrite.mockResolvedValue(false);
     await expect(service.heartbeat(token)).rejects.toThrow(EmbedAccessError);
     expect(versionControlService.heartbeatLock).not.toHaveBeenCalled();
-    // Let go the way every revoked holder's lock goes (`holdsEditLock`, which
-    // releases through the commit path; pinned in embed.service.lock.test.ts),
-    // never by discarding what is on disk.
-    expect(versionControlService.holdsEditLock).toHaveBeenCalledWith(
+    // Let go through the commit path, the release a revoked holder's lock
+    // takes in `holdsEditLock`, never by discarding what is on disk.
+    expect(versionControlService.releaseLock).toHaveBeenCalledWith(
       expect.any(String),
       BRANCH,
       `${KB}/${REPO}`,
