@@ -27,4 +27,4 @@ export { resolveReadableMap, toKbRelative } from './kb-read-filter.js';
 export { decidesListing, fencedHead, listingUnchangedBy } from './listing-deciders.js';
 export { synthesizePluginPrincipals } from './plugin-principals.js';
 export { renderRolesYaml } from './render-roles-yaml.js';
-export { ROLES_YAML_BASENAME, assertRolesYamlParsable, isRolesYamlPath, makeAgentRolesYamlWriteValidator, makeRolesYamlWriteValidator } from './roles-yaml-guard.js';
+export { ROLES_YAML_BASENAME, assertRolesYamlParsable, isRolesYamlPath, makeAgentAccessYamlWriteValidator, makeRolesYamlWriteValidator } from './roles-yaml-guard.js';

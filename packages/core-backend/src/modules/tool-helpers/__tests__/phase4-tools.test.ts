@@ -111,8 +111,8 @@ describe('Phase 4 tools (core subset)', () => {
     expect(recorded).toContainEqual(['unzip', WS, 'knowledge-base/a.zip', undefined]);
   });
 
-  it('unzip never extracts a roles.yaml — extraction bypasses the filesystem gate that checks it', async () => {
-    archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/roles.yaml'];
+  it('unzip never extracts a roles.yaml or groups.yaml — extraction bypasses the filesystem gate that checks them', async () => {
+    archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/roles.yaml', 'knowledge-base/groups.yaml'];
     const base = await start();
     const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
     expect(res.status).toBe(200);
@@ -120,6 +120,7 @@ describe('Phase 4 tools (core subset)', () => {
     expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
     expect(body.skipped).toEqual([
       { path: 'knowledge-base/roles.yaml', reason: expect.stringContaining('roles.yaml is never extracted') },
+      { path: 'knowledge-base/groups.yaml', reason: expect.stringContaining('groups.yaml is never extracted') },
     ]);
   });
 

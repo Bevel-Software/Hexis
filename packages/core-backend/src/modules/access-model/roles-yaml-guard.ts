@@ -23,7 +23,7 @@
 
 import type { FileContent } from '@mastra/core/workspace';
 import { GROUP_REF_PREFIX, canonicalRoleName, parseRolesYaml, parseYamlSubset } from './access-grammar.js';
-import type { GroupsIndex } from './group-files.js';
+import { GROUPS_YAML, type GroupsIndex } from './group-files.js';
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import type { WriteValidator } from '../kb-fs/index.js';
 
@@ -54,14 +54,19 @@ function normalizeWsPath(p: string): string {
 }
 
 /**
- * True iff `workspaceRelPath` targets the KB's `roles.yaml` (the file at
- * `<kbDirName>/roles.yaml`). Both the human save route and the agent's
+ * True iff `workspaceRelPath` targets the file `basename` at the KB repo root
+ * (`<kbDirName>/<basename>`). Both the human save route and the agent's
  * `LockingFilesystem` speak workspace-relative paths, so this is the form we
- * key on. A bare `roles.yaml` (no KB prefix) is also accepted defensively.
+ * key on. A bare `<basename>` (no KB prefix) is also accepted defensively.
  */
-export function isRolesYamlPath(workspaceRelPath: string, kbDirName: string): boolean {
+function isKbRootFilePath(workspaceRelPath: string, kbDirName: string, basename: string): boolean {
   const norm = normalizeWsPath(workspaceRelPath);
-  return norm === `${kbDirName}/${ROLES_YAML_BASENAME}` || norm === ROLES_YAML_BASENAME;
+  return norm === `${kbDirName}/${basename}` || norm === basename;
+}
+
+/** True iff `workspaceRelPath` targets the KB's `roles.yaml`; see {@link isKbRootFilePath}. */
+export function isRolesYamlPath(workspaceRelPath: string, kbDirName: string): boolean {
+  return isKbRootFilePath(workspaceRelPath, kbDirName, ROLES_YAML_BASENAME);
 }
 
 /**
@@ -233,35 +238,117 @@ export function assertKnownGroups(
   if (unknown.length > 0) throw new RolesYamlUnknownGroupError(unknown, active.sourceFile);
 }
 
+/** One group whose name a write would declare twice: the spelling it adds and the one already there. */
+export interface DuplicateGroup {
+  group: string;
+  existing: string;
+}
+
 /**
- * The agent's `roles.yaml` gate: everything {@link makeRolesYamlWriteValidator}
- * refuses, plus any role the current file does not declare and — when
- * `loadGroups` is given — any added `- group:<Name>` entry naming a group the
- * active group source does not declare. Agents manage
- * membership only; the human editor and the App roles service keep the plain
- * validator. `readCurrent` returns the file's current text, null when absent.
- * Content of any type is checked — decoded as UTF-8 — so bytes cannot slip past.
+ * An AGENT write whose candidate `groups.yaml` adds a group whose canonical
+ * name the file already declares (`PRODUCT:` beside `Product:`). The resolver
+ * keeps the first block in file order and skips the other with only a log
+ * warning, so the members of the skipped one silently vanish from the app —
+ * and the group editor's next re-emit deletes them from the file. Refused up
+ * front with the app's own "already exists" wording, naming both spellings.
+ */
+export class GroupsYamlDuplicateGroupError extends VersionControlDomainError {
+  readonly duplicates: DuplicateGroup[];
+  constructor(duplicates: DuplicateGroup[]) {
+    const listed = duplicates.map((d) => `'${d.group}' (a group named '${d.existing}' already exists)`).join(', ');
+    super(
+      `${GROUPS_YAML} was not saved: ${listed}. Group names are matched case- and whitespace-insensitively, ` +
+        'so the file would hold the same group twice and one block would be ignored. ' +
+        'Add the people to the existing group instead.',
+      422,
+      { kind: 'groups-yaml-duplicate-group', duplicates },
+    );
+    this.name = 'GroupsYamlDuplicateGroupError';
+    this.duplicates = duplicates;
+  }
+}
+
+/**
+ * The group names `text` declares, canonical → display spellings in file
+ * order. Lenient, like {@link declaredRoleNames}: text that is absent, does not
+ * parse or holds no `groups:` mapping declares none.
+ */
+function declaredGroupSpellings(text: string | null): Map<string, string[]> {
+  const names = new Map<string, string[]>();
+  if (text === null) return names;
+  const parsed = parseYamlSubset(text, { tolerateEmptyKeys: true });
+  if (!parsed.ok) return names;
+  const groups = (parsed.value as Record<string, unknown> | null)?.groups;
+  if (groups == null || typeof groups !== 'object' || Array.isArray(groups)) return names;
+  for (const display of Object.keys(groups)) {
+    const canonical = canonicalRoleName(display);
+    if (!canonical) continue;
+    names.set(canonical, [...(names.get(canonical) ?? []), display.trim()]);
+  }
+  return names;
+}
+
+/**
+ * Throw {@link GroupsYamlDuplicateGroupError} if `candidate` declares a
+ * canonical group name more times than `current` does. A duplicate already in
+ * `current` is left alone — cleaning one up is a separate decision — so it
+ * cannot block an unrelated membership edit. The spelling reported as existing
+ * is one `current` has, so `PRODUCT:` added above `Product:` names `Product`.
+ */
+export function assertNoNewDuplicateGroups(current: string | null, candidate: string): void {
+  const before = declaredGroupSpellings(current);
+  const duplicates: DuplicateGroup[] = [];
+  for (const [canonical, spellings] of declaredGroupSpellings(candidate)) {
+    const had = before.get(canonical) ?? [];
+    if (spellings.length < 2 || spellings.length <= had.length) continue;
+    const existing = spellings.find((s) => had.includes(s)) ?? spellings[0]!;
+    const added = spellings.filter((s) => s !== existing && !had.includes(s));
+    for (const group of added.length > 0 ? added : [existing]) duplicates.push({ group, existing });
+  }
+  if (duplicates.length > 0) throw new GroupsYamlDuplicateGroupError(duplicates);
+}
+
+/** True iff `workspaceRelPath` targets the KB's `groups.yaml`; see {@link isKbRootFilePath}. */
+function isGroupsYamlPath(workspaceRelPath: string, kbDirName: string): boolean {
+  return isKbRootFilePath(workspaceRelPath, kbDirName, GROUPS_YAML);
+}
+
+/**
+ * The agent's gate on the two people files at the KB root. For `roles.yaml`:
+ * everything {@link makeRolesYamlWriteValidator} refuses, plus any role the
+ * current file does not declare and — when `loadGroups` is given — any added
+ * `- group:<Name>` entry naming a group the active group source does not
+ * declare. For `groups.yaml`: any group whose canonical name the file would
+ * then declare twice. Agents manage membership only; the human editor and the
+ * App roles and groups services keep their own validators. `readCurrent`
+ * returns the named root file's current text, null when absent. Content of any
+ * type is checked — decoded as UTF-8 — so bytes cannot slip past.
  *
  * `readCurrent` is read afresh on every call, never cached: `LockingFilesystem`
  * calls this validator before taking the lock (a cheap early refusal) and again
- * once the `roles.yaml` lock is held, on the bytes that land. That second call
- * is the decisive one — it compares against the file as the other roles.yaml
- * writers, which coordinate on the same lock, left it — so a role deleted while
- * the write waited cannot be reinstated, and one added meanwhile is not refused.
+ * once the file's lock is held, on the bytes that land. That second call is the
+ * decisive one — it compares against the file as the other writers, which
+ * coordinate on the same lock, left it — so a role deleted while the write
+ * waited cannot be reinstated, and one added meanwhile is not refused.
  */
-export function makeAgentRolesYamlWriteValidator(
+export function makeAgentAccessYamlWriteValidator(
   kbDirName: string,
-  readCurrent: () => Promise<string | null>,
+  readCurrent: (basename: string) => Promise<string | null>,
   loadGroups?: () => Promise<ActiveGroupsForValidation>,
 ): WriteValidator {
   const validate: WriteValidator = async (path, content) => {
-    if (!isRolesYamlPath(path, kbDirName)) return;
+    const roles = isRolesYamlPath(path, kbDirName);
+    if (!roles && !isGroupsYamlPath(path, kbDirName)) return;
     const text = typeof content === 'string' ? content : Buffer.from(content).toString('utf-8');
+    if (!roles) {
+      assertNoNewDuplicateGroups(await readCurrent(GROUPS_YAML), text);
+      return;
+    }
     assertRolesYamlParsable(text);
-    const current = await readCurrent();
+    const current = await readCurrent(ROLES_YAML_BASENAME);
     assertNoNewRoles(current, text);
     if (loadGroups) assertKnownGroups(current, text, await loadGroups());
   };
-  validate.appliesTo = (path) => isRolesYamlPath(path, kbDirName);
+  validate.appliesTo = (path) => isRolesYamlPath(path, kbDirName) || isGroupsYamlPath(path, kbDirName);
   return validate;
 }
