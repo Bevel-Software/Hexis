@@ -9,6 +9,7 @@ export {
   TOOL_PREFIX_CAP,
   PREAMBLE_FILE,
   PREFIXED_TOOLS,
+  GET_AGENT_GUIDE_TOOL,
   PREAMBLE_TRUNCATION_MARKER,
   type ComposedAgentInstructions,
 } from './compose.js';
