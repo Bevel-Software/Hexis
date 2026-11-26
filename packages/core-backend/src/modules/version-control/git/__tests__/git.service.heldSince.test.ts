@@ -8,6 +8,8 @@ import { testKbContext } from '../../../../__tests__/kb-context.js';
 import type { WorkspaceService } from '../../../workspace/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { GitService } from '../git.service.js';
+import type { IGitRunner } from '../../../../shared/git.contract.js';
+import { NodeGitRunner } from '../node-git-runner.js';
 
 /**
  * Since where on the first-parent chain a file has, without a break, held
@@ -125,5 +127,46 @@ describe('GitService.heldSince', () => {
     // Written but not committed: the branch's version is what counts.
     await writeFile(join(repo, 'mcp.json'), 'other\n');
     expect(await g.heldSince('ws', 'mcp.json', claims)).toBe(5);
+  });
+
+  // A file edited for years is read in one batch, not one `git show` per
+  // version: the catalog asks this on every scan while a clash stands.
+  test('reads every version in a fixed number of git calls, however long the history; a multi-byte version keeps the rest aligned', async () => {
+    await git(['init', '-b', 'main'], 1);
+    const inner = new NodeGitRunner();
+    let calls = 0;
+    const counting = {
+      defaultTimeoutMs: inner.defaultTimeoutMs,
+      credentials: inner.credentials,
+      run: (cwd: string, args: string[], opts?: object) => {
+        calls++;
+        return inner.run(cwd, args, opts as never);
+      },
+    } as unknown as IGitRunner;
+    const g = new GitService(
+      { getWorkspacePath: async () => join(root, 'ws') } as unknown as WorkspaceService,
+      new VersionControlHooks(),
+      testKbContext({ kbDirName: KB_DIR }),
+      undefined,
+      null,
+      counting,
+    );
+    const claims = (c: string) => c.includes('qa_zen');
+    const commit = async (body: string) => {
+      await writeFile(join(repo, 'mcp.json'), body);
+      await git(['add', 'mcp.json'], 1);
+      await git(['commit', '-m', 'edit'], 1);
+    };
+    await commit('other\n'); // 1: without the claim
+    await commit('qa_zen é ✓\n'); // 2: the claim, multi-byte
+    for (let i = 0; i < 12; i++) await commit(`qa_zen edit ${i} ✓\n`); // 3..14
+    calls = 0;
+    expect(await g.heldSince('ws', 'mcp.json', claims)).toBe(2);
+    const forFourteen = calls;
+    for (let i = 0; i < 12; i++) await commit(`qa_zen more ${i}\n`);
+    calls = 0;
+    expect(await g.heldSince('ws', 'mcp.json', claims)).toBe(2);
+    expect(calls).toBe(forFourteen);
+    expect(calls).toBeLessThanOrEqual(4);
   });
 });
