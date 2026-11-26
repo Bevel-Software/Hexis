@@ -29,9 +29,11 @@ export class DownstreamToolError extends Error {
    * content block is rebuilt from the fields the MCP spec gives its kind
    * ({@link BLOCK_FIELDS}), so no key the server chose (`_meta`, an extension)
    * is passed on, and a block of a kind the spec does not name is left out.
-   * Every string in those fields is redacted, except what is not text the
-   * server wrote ({@link AS_SENT}: a kind, a MIME type, binary data, a size, a
-   * priority). The message is redacted too.
+   * Every string in those fields is redacted, a MIME type and binary data
+   * included: a payload that literally contains a secret is altered rather
+   * than passed on. Only a block's `type` (one of the spec's kinds, since it
+   * chose the fields) and numbers (a size, a priority) pass as they came. The
+   * message is redacted too.
    */
   redactedWith(redactor: SecretRedactor): DownstreamToolError {
     const content = this.content.flatMap((block) => {
@@ -65,17 +67,14 @@ const NESTED_FIELDS: Readonly<Record<string, readonly string[]>> = {
   resource: ['uri', 'mimeType', 'text', 'blob'],
   annotations: ['audience', 'priority', 'lastModified'],
 };
-/** Fields passed on as they came: not text the server wrote. */
-const AS_SENT = new Set(['type', 'mimeType', 'data', 'blob', 'size', 'priority']);
-
-/** `object` reduced to `fields`, each string redacted unless it is {@link AS_SENT}. */
+/** `object` reduced to `fields`: every string redacted, numbers kept, a block's `type` (a spec kind) kept. */
 function specFields(object: object, fields: readonly string[], redactor: SecretRedactor): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const field of fields) {
     if (!(field in object)) continue;
     const value = (object as Record<string, unknown>)[field];
     const nested = NESTED_FIELDS[field];
-    if (AS_SENT.has(field)) out[field] = value;
+    if (field === 'type' || typeof value === 'number') out[field] = value;
     else if (nested && value && typeof value === 'object' && !Array.isArray(value)) out[field] = specFields(value, nested, redactor);
     else if (typeof value === 'string') out[field] = redactor.redact(value);
     else if (Array.isArray(value)) out[field] = value.filter((item) => typeof item === 'string').map((item) => redactor.redact(item));

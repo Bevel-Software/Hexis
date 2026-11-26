@@ -72,7 +72,6 @@ describe('DownstreamToolError.redactedWith', () => {
     const KEY = 'sk-live-1234567890abcdef';
     const redactor = new SecretRedactor();
     redactor.remember(KEY);
-    // A binary payload that happens to spell the key is not text: it passes as it came.
     const failure = new DownstreamToolError(`refused ${KEY}`, [
       {
         type: 'text',
@@ -83,8 +82,9 @@ describe('DownstreamToolError.redactedWith', () => {
       },
       { type: 'resource_link', uri: `https://x.example/?k=${KEY}`, name: 'link', description: `uses ${KEY}` },
       { type: 'resource', resource: { uri: `https://x.example/${KEY}`, text: KEY, [KEY]: 'x' } },
-      { type: 'resource', resource: { uri: 'file:///a', mimeType: 'application/octet-stream', blob: KEY } },
-      { type: 'image', data: KEY, mimeType: 'image/png' },
+      { type: 'resource', resource: { uri: 'file:///a', mimeType: `application/${KEY}`, blob: `AAAA${KEY}` } },
+      { type: 'image', data: KEY, mimeType: `image/png; key=${KEY}` },
+      { type: 'resource_link', uri: 'file:///b', name: 'b', size: 42 },
       { type: `kind-${KEY}`, note: KEY },
     ] as unknown as CallToolResult['content']);
     const redacted = failure.redactedWith(redactor);
@@ -93,11 +93,12 @@ describe('DownstreamToolError.redactedWith', () => {
       { type: 'text', text: 'key [redacted]', annotations: { audience: ['user'], priority: 1 } },
       { type: 'resource_link', uri: 'https://x.example/?k=[redacted]', name: 'link', description: 'uses [redacted]' },
       { type: 'resource', resource: { uri: 'https://x.example/[redacted]', text: '[redacted]' } },
-      { type: 'resource', resource: { uri: 'file:///a', mimeType: 'application/octet-stream', blob: KEY } },
-      { type: 'image', data: KEY, mimeType: 'image/png' },
+      { type: 'resource', resource: { uri: 'file:///a', mimeType: 'application/[redacted]', blob: 'AAAA[redacted]' } },
+      { type: 'image', data: '[redacted]', mimeType: 'image/png; key=[redacted]' },
+      { type: 'resource_link', uri: 'file:///b', name: 'b', size: 42 },
     ]);
-    // The key is left only in the two binary payloads, nowhere a server-chosen key could carry it.
-    expect(JSON.stringify(redacted.content).split(KEY)).toHaveLength(3);
+    // Nowhere: not in a field, a MIME type, a payload, or a key the server chose.
+    expect(JSON.stringify(redacted.content)).not.toContain(KEY);
   });
 });
 
