@@ -1750,11 +1750,11 @@ export class AccessControlService implements IAccessControl {
     needsPaths: (model: AccessModel) => boolean = () => true,
     /** Read the checkout's own entries fresh, past the memo (a single-file gate's reading: `rulesOf`). */
     fresh = false,
-  ): Promise<{ model: AccessModel; owns: (OwnEntries | null)[] }> {
+  ): Promise<{ model: AccessModel; owns: (OwnEntries | null)[]; head: HeadMap<AccessModel> | null }> {
     const repoDir = await this.repoDir(workspaceId);
     const head = await this.headMapOf(workspaceId, repoDir);
     const model = head ? head.model : await this.loadCheckoutModel(workspaceId, repoDir);
-    if (!needsPaths(model)) return { model, owns: [] };
+    if (!needsPaths(model)) return { model, owns: [], head };
     const memo = fresh ? null : this.ownEntriesMemo.open(workspaceId);
     const owns = await Promise.all(
       relativePaths.map((p) => {
@@ -1762,7 +1762,7 @@ export class AccessControlService implements IAccessControl {
         return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
       }),
     );
-    return { model, owns };
+    return { model, owns, head };
   }
 
   /**
@@ -1775,15 +1775,37 @@ export class AccessControlService implements IAccessControl {
    * place with its new one, and keep it nowhere. Where the checkout answers,
    * the entries are read fresh, past the memo, as the write gate has always
    * read them. `needsOwn` false (a folder target, whose own rules are in the
-   * model) reads no entries, and `own` is null.
+   * model) reads no entries, and `own` is null. `fromCommit` says the entries
+   * are the commit's copy (`gateAllows`).
    */
   private async rulesOf(
     workspaceId: string,
     relativePath: string,
     needsOwn = true,
-  ): Promise<{ model: AccessModel; own: OwnEntries | null }> {
-    const { model, owns } = await this.batchRules(workspaceId, [relativePath], () => needsOwn, true);
-    return { model, own: owns[0] ?? null };
+  ): Promise<{ model: AccessModel; own: OwnEntries | null; fromCommit: boolean }> {
+    const { model, owns, head } = await this.batchRules(workspaceId, [relativePath], () => needsOwn, true);
+    return { model, own: owns[0] ?? null, fromCommit: needsOwn && head?.ownEntries(relativePath) !== undefined };
+  }
+
+  /**
+   * Whether a single-file gate allows what `allows` asks, judged against the
+   * rules and the file's own entries from one reading (`rulesOf`). Where that
+   * reading is the commit's and the commit holds the file, the file's own
+   * entries as the checkout has them are asked too, against the same rules,
+   * and the gate allows only what both allow: a denial written into the file
+   * and not yet committed holds at once. The checkout's copy only ever takes
+   * away; it never grants what the commit's copy refuses, so a restriction
+   * moved on disk from the file to its folder still holds by the commit's.
+   */
+  private async gateAllows(
+    workspaceId: string,
+    relativePath: string,
+    allows: (model: AccessModel, own: OwnEntries | null) => boolean,
+  ): Promise<boolean> {
+    const { model, own, fromCommit } = await this.rulesOf(workspaceId, relativePath);
+    if (!allows(model, own)) return false;
+    if (!fromCommit) return true;
+    return allows(model, await this.readOwnEntries(await this.repoDir(workspaceId), relativePath));
   }
 
   private async cachedOwnEntries(
@@ -1825,8 +1847,9 @@ export class AccessControlService implements IAccessControl {
   ): Promise<boolean> {
     const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
     if (machineOwned !== null) return machineOwned;
-    const { model, own } = await this.rulesOf(workspaceId, relativePath);
-    return hasPermissionResolved(model, 'write', userEmail, relativePath, own);
+    return this.gateAllows(workspaceId, relativePath, (model, own) =>
+      hasPermissionResolved(model, 'write', userEmail, relativePath, own),
+    );
   }
 
   async canRead(
@@ -1834,8 +1857,7 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const { model, own } = await this.rulesOf(workspaceId, relativePath);
-    return canReadResolved(model, userEmail, relativePath, own);
+    return this.gateAllows(workspaceId, relativePath, (model, own) => canReadResolved(model, userEmail, relativePath, own));
   }
 
   async canReadBatch(
@@ -1928,8 +1950,9 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const { model, own } = await this.rulesOf(workspaceId, relativePath);
-    return hasPermissionResolved(model, 'download', userEmail, relativePath, own);
+    return this.gateAllows(workspaceId, relativePath, (model, own) =>
+      hasPermissionResolved(model, 'download', userEmail, relativePath, own),
+    );
   }
 
   async canDownloadBatch(
@@ -1965,8 +1988,9 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const { model, own } = await this.rulesOf(workspaceId, relativePath);
-    return hasPermissionResolved(model, 'owner', userEmail, relativePath, own);
+    return this.gateAllows(workspaceId, relativePath, (model, own) =>
+      hasPermissionResolved(model, 'owner', userEmail, relativePath, own),
+    );
   }
 
   async eligibleOwners(
@@ -2286,15 +2310,24 @@ export class AccessControlService implements IAccessControl {
     relativePath: string,
   ): Promise<Record<Verb, AccessDecision>> {
     // The same reading `canRead`/`canWrite`/… make, whatever the kind: a
-    // directory simply has no own entries.
-    const { model, own } = await this.rulesOf(workspaceId, relativePath);
+    // directory simply has no own entries. As at the gates (`gateAllows`), a
+    // file the commit holds is asked as the checkout has it too, and a denial
+    // there is the one explained.
+    const { model, own, fromCommit } = await this.rulesOf(workspaceId, relativePath);
+    const onDisk = fromCommit ? await this.readOwnEntries(await this.repoDir(workspaceId), relativePath) : undefined;
+    const decide = (verb: Verb): PermissionDecision => {
+      const decision = decidePermissionResolved(model, verb, userEmail, relativePath, own);
+      if (!decision.allowed || onDisk === undefined) return decision;
+      const checkout = decidePermissionResolved(model, verb, userEmail, relativePath, onDisk);
+      return checkout.allowed ? decision : checkout;
+    };
     const out = {} as Record<Verb, AccessDecision>;
     for (const verb of KNOWN_VERBS) {
       const machineOwned = verb === 'write' ? this.machineOwnedWriteRule(userEmail, relativePath) : null;
       out[verb] =
         machineOwned !== null
           ? { allowed: machineOwned, source: null, via: 'machine-owned', principal: null }
-          : explainDecision(model, decidePermissionResolved(model, verb, userEmail, relativePath, own), kind, relativePath);
+          : explainDecision(model, decide(verb), kind, relativePath);
     }
     return out;
   }
