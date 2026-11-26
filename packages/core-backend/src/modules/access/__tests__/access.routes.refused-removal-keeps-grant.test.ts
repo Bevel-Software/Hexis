@@ -45,6 +45,7 @@ describe('a refused removal keeps an earlier, still-queued grant on the same acc
   let baseUrl: string;
   let queued: string[];
   let writeFile: ReturnType<typeof vi.fn>;
+  let readFileBinary: ReturnType<typeof vi.fn>;
   let releaseLockNoCommit: ReturnType<typeof vi.fn>;
   let releaseLockUntouched: ReturnType<typeof vi.fn>;
 
@@ -75,11 +76,12 @@ describe('a refused removal keeps an earlier, still-queued grant on the same acc
     writeFile = vi.fn(async (_id: string, wsRel: string, content: string) =>
       fs.writeFile(path.join(repo, wsRel), content, 'utf-8'),
     );
+    readFileBinary = vi.fn(async (_id: string, wsRel: string) => fs.readFile(path.join(repo, wsRel)));
     const workspaceService = {
       withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
       getOrCreateForBranch: async () => ({ id: WS, name: WS, kbDirName: KB }),
       readFile: async (_id: string, wsRel: string) => fs.readFile(path.join(repo, wsRel), 'utf-8'),
-      readFileBinary: async (_id: string, wsRel: string) => fs.readFile(path.join(repo, wsRel)),
+      readFileBinary,
       writeFile,
     } as unknown as WorkspaceService;
 
@@ -91,7 +93,8 @@ describe('a refused removal keeps an earlier, still-queued grant on the same acc
       // Nobody is inherited from anywhere: every remove-from-parent is stale.
       grantSources: async () => ({}),
       invalidate: () => undefined,
-      kbPrincipals: async () => ({ roles: [], groups: [], people: [] }),
+      // roles.yaml always declares Admin; a bare `Admin` is then the role.
+      kbPrincipals: async () => ({ roles: ['Admin', 'Everyone'], groups: [], people: [] }),
       eligibleWriters: async () => ({ roles: [], users: [] }),
       eligibleReaders: async () => ({ restricted: true, roles: [], users: [] }),
       eligibleOwners: async () => ({ roles: [], users: [] }),
@@ -233,5 +236,31 @@ describe('a refused removal keeps an earlier, still-queued grant on the same acc
     expect(await disk('Sales/access.md')).not.toContain('bob@bevel.software');
     expect(queued).toEqual([]);
     expect(await git('status', '--porcelain')).toBe('');
+  });
+
+  it('a failure whose bytes cannot be re-read keeps the discarding release (an unknown state is never "unchanged")', async () => {
+    readFileBinary
+      .mockImplementationOnce(async (_id: string, wsRel: string) => fs.readFile(path.join(repo, wsRel)))
+      .mockImplementationOnce(async () => {
+        throw Object.assign(new Error('i/o error'), { code: 'EIO' });
+      });
+    const res = await post('revoke', REFUSALS[0].revoke);
+    expect(res.status).toBe(409);
+    expect(releaseLockUntouched).not.toHaveBeenCalled();
+    expect(releaseLockNoCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refusal on a folder with no access.md yet leaves it absent and releases untouched', async () => {
+    const res = await post('revoke', {
+      path: `${KB}/Sales/Child/Deeper`,
+      kind: 'folder',
+      principal: BOB,
+      mode: 'remove-from-parent',
+      ancestor: `${KB}/Sales/Child`,
+    });
+    expect(res.status).toBe(409);
+    expect(releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(releaseLockUntouched).toHaveBeenCalledTimes(1);
+    await expect(fs.access(path.join(repo, KB, 'Sales/Child/access.md'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
