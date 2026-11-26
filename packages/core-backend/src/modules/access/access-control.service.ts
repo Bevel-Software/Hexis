@@ -1615,14 +1615,17 @@ export class AccessControlService implements IAccessControl {
 
   /**
    * Workspaces whose checkout was just reported changed (`invalidate`), with
-   * the commit it stood on then. Until its head moves off that commit, the
-   * change may be on disk and in no commit yet, so the workspace is answered
-   * from the checkout, as before the maps. `SUSPECT_MS` ends the wait for a
-   * change that never became a commit. The wait is short because every write
-   * path commits moments after it lands on disk (the agent tools, the app's
-   * routes, `unzip` included); only a file someone saves by hand later
-   * (`save_file`, e.g. one `unzip` reports `unsaved`) stays outside the
-   * commit longer, and until then the commit's rules answer for it.
+   * the commit a map last answered them at (or, when none is known, the one
+   * the checkout stands on at the next read). Until the head moves off that
+   * commit, and for `SUSPECT_MS` at most, the workspace is answered from the
+   * checkout, as before the maps. That covers a caller that reports its write
+   * once the bytes are on disk and before their commit, as the grant, revoke
+   * and deny edits of `AccessMutationService` do. The commit, pull and reset
+   * paths report once the head has moved. A write that reports nothing when
+   * its bytes land (a save, an agent's file write) is not covered: wherever
+   * a map answers, the head commit's rules (its `access.md` files, roles,
+   * groups and plugin manifests) answer for it until its commit lands,
+   * however long that takes.
    */
   private readonly suspects = new Map<string, { at: number; commit: string | undefined }>();
   private static readonly SUSPECT_MS = 10_000;
