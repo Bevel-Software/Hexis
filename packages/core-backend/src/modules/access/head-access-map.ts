@@ -4,12 +4,12 @@ import { readRevSha } from '../kb-fs/index.js';
 import { accessMdSelfEntries, isAccessMdPath, parseOwnAccessEntries, type OwnEntries } from '../access-model/index.js';
 import { catFileBatchBytes } from './cat-file-batch.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
-import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { frontmatterHeadOfBytes, frontmatterHeadOfWholeFile } from './frontmatter-head.js';
 import { detachEntries } from './own-entries-memo.js';
 import { mapPooled } from '../../shared/map-pooled.js';
+import { gitBlobHash, objectFormatOf } from '../../shared/git-blob-sha.js';
 import type { CommitPaths, ITreeIndexer } from './tree-index.js';
 
 const log = logger('access');
@@ -483,8 +483,7 @@ async function readDeclaredOnDisk(
   let head: string;
   try {
     if ((await fs.stat(file)).size !== size) return UNVOUCHED;
-    // A repository's object ids are SHA-1 (40 hex digits) or SHA-256 (64).
-    const hash = createHash(objectId.length === 64 ? 'sha256' : 'sha1').update(`blob ${size}\0`);
+    const hash = gitBlobHash(size, objectFormatOf(objectId));
     head = await frontmatterHeadOfWholeFile(file, (chunk) => hash.update(chunk));
     if (hash.digest('hex') !== objectId) return UNVOUCHED;
   } catch (err) {
