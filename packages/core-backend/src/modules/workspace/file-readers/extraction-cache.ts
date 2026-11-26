@@ -3,12 +3,14 @@ import path from 'node:path';
 import type { ExtractedDoc } from './doc-extract.types.js';
 
 /**
- * The cache key's content half: the git BLOB sha of the bytes read (see
- * `shared/git-blob-sha.ts`). Chosen because the workspace is a git clone: for
- * a clean tracked file this equals the sha `git ls-files -s` would report,
+ * The cache key's content half: the git BLOB sha of the bytes read, SHA-1
+ * whatever the repository's object format (see `shared/git-blob-sha.ts`).
+ * Chosen because the workspace is a git clone: for a clean tracked file in a
+ * SHA-1 repository this equals the sha `git ls-files -s` would report,
  * WITHOUT spawning git — and because it is computed from the bytes actually
- * read, it stays correct (it just stops matching the index) when the file is
- * untracked or dirty. One code path, no fallback branch.
+ * read, it stays a content hash (it just stops matching the index) when the
+ * file is untracked or dirty, or the repository is SHA-256. One code path, no
+ * fallback branch.
  */
 export { gitBlobSha } from '../../../shared/git-blob-sha.js';
 
