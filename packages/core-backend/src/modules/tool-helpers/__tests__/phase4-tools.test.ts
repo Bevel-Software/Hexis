@@ -44,18 +44,14 @@ const workspaceService = {
     throw new Error('no such file');
   },
 } as never;
-// Enough of the locks for `unzip`, which writes each entry under its lock and commits it on release.
-const versionControlService = {
-  acquireLock: async () => ({ acquired: true, lock: { acquiredAt: 't1' } }),
-  heartbeatLock: async () => ({ acquiredAt: 't1' }),
-  releaseLock: async () => undefined,
-  releaseLockUntouched: async () => undefined,
-  hasQueuedCommit: async () => false,
-} as never;
+// The stub extraction above lands nothing, so no lock or commit is asked of it.
+const versionControlService = {} as never;
 const events = {} as never;
 const accessControl = {
   canRead: async () => true,
   canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+  // `unzip` asks the write rule at HEAD of each entry on this protected branch; no rules there means allow.
+  canWriteBatchAtRef: async () => null,
 } as never;
 
 const internalToken = new InternalTokenService({ secret: 's' });
