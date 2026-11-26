@@ -31,10 +31,18 @@ import {
   type KbLayout,
 } from '@bevel-software/platform-shared';
 import { splitCallLine } from '@bevel-software/platform-mcp-core';
-import { GET_AGENT_GUIDE_TOOL } from '../tool-registry/index.js';
 import { sharedFileRulesSection } from './shared-file-rules.js';
 
 export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
+
+/**
+ * The one tool that returns the platform's guide (see `modules/agent-guide`).
+ * Named here, where the text that sends an agent to it is composed, and read
+ * from here by tool-registry's guide-first sentence: tool-registry already
+ * imports this module (`PREFIXED_TOOLS`), and this module imports no value
+ * from any other module, so neither import closes a cycle.
+ */
+export const GET_AGENT_GUIDE_TOOL = 'get_agent_guide';
 
 /** The tools whose descriptions carry the prefix. Every other tool is untouched. */
 export const PREFIXED_TOOLS: ReadonlySet<string> = new Set(['start_session', 'grep', 'list_files', 'read_file']);

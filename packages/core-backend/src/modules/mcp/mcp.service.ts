@@ -1185,7 +1185,7 @@ export class McpService {
    * way here, so the code that reads it is handed what it was always handed,
    * and a copy of its own: nothing it changes is the reader's.
    *
-   * The ONE policy for the four reads this service makes in process (the
+   * The ONE policy for the four reads that replaced a loopback request (the
    * catalog revision, the manual list, a skill read, a hosted manual). A read
    * that fails, is refused or passes the limit is answered as a failure, not
    * thrown, and is logged under `label`: one line when it was refused with
@@ -1326,7 +1326,8 @@ export class McpService {
    * when the composition handed over the reads (`readSkillsWith`), over
    * loopback otherwise. A failure is logged under the tool's name and degrades
    * to null either way — a skill read must not throw into the MCP request. A
-   * read in process is made as every one is ({@link readInProcess}).
+   * read in process is made as each read that replaced a loopback request is
+   * ({@link readInProcess}).
    */
   private async skillRead(
     bearer: string,
@@ -1663,7 +1664,8 @@ export class McpService {
    * `m` once the surface is built (`SharedDefinitions.share`), so calls are
    * judged against the manual as the catalog declares it.
    *
-   * The read is made as every read in process is ({@link readInProcess}). One
+   * The read is made as each read that replaced a loopback request is
+   * ({@link readInProcess}). One
    * that fails or is refused is a registration that failed, worded as the HTTP
    * discovery worded it.
    */

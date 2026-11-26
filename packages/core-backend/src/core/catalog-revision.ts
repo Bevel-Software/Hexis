@@ -5,7 +5,7 @@ import type { ISkillService, SkillSummary } from '../modules/skills/index.js';
 import type { IToolManualService } from '../modules/tool-manuals/index.js';
 import '../modules/tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
 import { type ConnectionScopeWire, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
-import { createCallerScope } from '../modules/tool-auth/index.js';
+import { createCallerScope, type ReadCaller } from '../modules/tool-auth/index.js';
 
 const log = logger('catalog-revision');
 
@@ -99,13 +99,6 @@ export interface CatalogRevisionSources {
   mcpApps?: { manifest(): Promise<{ resources: readonly { uri: string; text: string }[] }> };
 }
 
-/** Who a revision is read for: what a request's credential resolved to. */
-export interface CatalogRevisionCaller {
-  userId?: string | null;
-  /** The agent configuration the credential connects as; absent or null for Everything. */
-  agentPath?: string | null;
-}
-
 /** A caller's revision, the two counts behind it, and the agent their connection is narrowed to. */
 export interface CatalogRevisionAnswer {
   revision: string;
@@ -114,7 +107,8 @@ export interface CatalogRevisionAnswer {
   connection?: ConnectionScopeWire;
 }
 
-export type CatalogRevisionReader = (caller: CatalogRevisionCaller) => Promise<CatalogRevisionAnswer>;
+/** Reads the revision for a caller: what a request's credential resolved to. */
+export type CatalogRevisionReader = (caller: ReadCaller) => Promise<CatalogRevisionAnswer>;
 
 /**
  * Reads one caller's catalog revision. The ONE place it is computed: the
