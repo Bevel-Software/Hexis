@@ -70,7 +70,7 @@ export type TemplateKb = Pick<KbContext, 'layout'> & Partial<Pick<KbContext, 'de
  * folder a deployment really named `{{skillsDir}}` would come back as some
  * other folder's name, and the rule would then point at a folder that is not
  * the one it refuses a move out of. Injecting last leaves the section byte for
- * byte what both channels carry, and costs nothing:
+ * byte what the platform's guide serves, and costs nothing:
  * `renderKbLayoutPlaceholders` touches only its own four tokens, so the
  * placeholder for the rules survives the first pass untouched.
  *
@@ -165,9 +165,9 @@ export class TemplateSource {
    * placeholders passes through unchanged.
    *
    * `{{sharedFileRules}}` is filled from the ONE source text the platform's
-   * guide serves (see `shared-file-rules.ts`), so the rules every file tool
-   * shares are stated in both guides without being written twice. The MCP
-   * handshake only points at them. Filled AFTER the layout pass (see
+   * guide serves (see `shared-file-rules.ts`), so any template file that
+   * carries the placeholder states the rules every file tool shares without
+   * writing them a second time. The MCP handshake only points at them. Filled AFTER the layout pass (see
    * {@link renderTemplateText}): the rules come back already rendered for this
    * layout, so a layout pass over them could only misread a name they STATE as
    * a placeholder. The two passes do not collide — the layout renderer touches
