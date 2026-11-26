@@ -1569,8 +1569,10 @@ export class AccessControlService implements IAccessControl {
      * `fs.readFile` per node per tree build. Dropped by `invalidate()`, which
      * fires on every commit / pull / branch switch, so that is the PRIMARY
      * freshness mechanism; its age limit is only a backstop. Single-file
-     * gates (`canRead` / `canWrite`) stay uncached: the write gate reads
-     * disk-fresh on purpose.
+     * gates (`canRead` / `canWrite`, through `rulesOf`) keep out of it: where
+     * the checkout answers them, a file's own entries are read disk-fresh, on
+     * purpose for the write gate; where a head map answers, they are the
+     * map's, read with its model.
      *
      * The memo keeps entries only for paths in the access-frontmatter
      * extension set; a batch reads any other path as before, without keeping
@@ -1746,12 +1748,14 @@ export class AccessControlService implements IAccessControl {
      * `owns` is then empty.
      */
     needsPaths: (model: AccessModel) => boolean = () => true,
+    /** Read the checkout's own entries fresh, past the memo (a single-file gate's reading: `rulesOf`). */
+    fresh = false,
   ): Promise<{ model: AccessModel; owns: (OwnEntries | null)[] }> {
     const repoDir = await this.repoDir(workspaceId);
     const head = await this.headMapOf(workspaceId, repoDir);
     const model = head ? head.model : await this.loadCheckoutModel(workspaceId, repoDir);
     if (!needsPaths(model)) return { model, owns: [] };
-    const memo = this.ownEntriesMemo.open(workspaceId);
+    const memo = fresh ? null : this.ownEntriesMemo.open(workspaceId);
     const owns = await Promise.all(
       relativePaths.map((p) => {
         const own = head?.ownEntries(p);
@@ -1768,21 +1772,23 @@ export class AccessControlService implements IAccessControl {
    * checkout, as nothing in the commit says them), the checkout's for both
    * where no map answers. A gate that took the model from the commit and a
    * committed file's entries from the checkout could pair a restriction's old
-   * place with its new one, and keep it nowhere. `needsOwn` false (a folder
-   * target, whose own rules are in the model) reads no entries, and `own` is
-   * null.
+   * place with its new one, and keep it nowhere. Where the checkout answers,
+   * the entries are read fresh, past the memo, as the write gate has always
+   * read them. `needsOwn` false (a folder target, whose own rules are in the
+   * model) reads no entries, and `own` is null.
    */
   private async rulesOf(
     workspaceId: string,
     relativePath: string,
     needsOwn = true,
   ): Promise<{ model: AccessModel; own: OwnEntries | null }> {
-    const { model, owns } = await this.batchRules(workspaceId, [relativePath], () => needsOwn);
+    const { model, owns } = await this.batchRules(workspaceId, [relativePath], () => needsOwn, true);
     return { model, own: owns[0] ?? null };
   }
 
   private async cachedOwnEntries(
-    memo: WorkspaceOwnEntries,
+    /** Null reads fresh and keeps nothing (`batchRules`' `fresh`). */
+    memo: WorkspaceOwnEntries | null,
     repoDir: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
@@ -1791,7 +1797,7 @@ export class AccessControlService implements IAccessControl {
     // as before; only the memo leaves it out, because the file tree asks about
     // every file, screenshots and transcripts included, and the memo would
     // hold one entry for each.
-    if (!hasAccessFrontmatterExtension(relativePath)) return this.readOwnEntries(repoDir, relativePath);
+    if (memo === null || !hasAccessFrontmatterExtension(relativePath)) return this.readOwnEntries(repoDir, relativePath);
     const hit = memo.get(relativePath);
     if (hit !== undefined) return hit;
     const own = await this.readOwnEntries(repoDir, relativePath);

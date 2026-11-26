@@ -597,6 +597,17 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
   }, 120_000);
 
+  it('reads a single file\'s own entries fresh where the checkout answers, past the memo a batch keeps', async () => {
+    const svc = service();
+    // Reported changed: the checkout answers. A batch remembers that the page declares nothing.
+    svc.invalidate('ws');
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Top.md'])).get('Top.md')).toBe(true);
+    // The page restricts itself on disk, and nothing reports it: the write gate's reading sees it at once.
+    await write(repo, { 'Top.md': DENY_ALL });
+    expect(await svc.canRead('ws', 'mem@x.io', 'Top.md')).toBe(false);
+    expect(await svc.canWrite('ws', 'mem@x.io', 'Top.md')).toBe(false);
+  }, 120_000);
+
   it('previews a move from one reading as well: the checkout, which the moved file is read from', async () => {
     const svc = service();
     await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md']);
