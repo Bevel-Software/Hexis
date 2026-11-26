@@ -7,12 +7,10 @@ work with when they ask "does the agent read everything?".
 
 1. **The server instructions**: a short platform note, then this knowledge
    base's own description, which an admin writes in `mcp-description.md` at
-   the repository root (on the app's external agent page). The rules every
-   file tool shares are in this guide, not there. Some clients put the
-   instructions in the system prompt and cut them at a few thousand
-   characters; a client
-   that drops them gets one line and the description's first paragraph at the
-   top of `start_session`, `grep`, `list_files` and `read_file` instead.
+   the repository root (on the app's external agent page). Some clients put
+   them in the system prompt; a client that drops them gets one line and the
+   description's first paragraph at the top of `start_session`, `grep`,
+   `list_files` and `read_file` instead.
 2. **The tool list**: each tool's name, description and arguments.
 3. **The skills' names and descriptions**, as prompts and through
    `list_skills`.

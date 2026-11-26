@@ -130,8 +130,11 @@ export function platformInstructions(defaultBranch = ''): string {
  * instructions at 4,096 characters by default (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`
  * overrides it; a claude.ai connector is not cut). Version 2.1.293 cut at
  * 2,048, which is why the opening and the preamble's start must also sit
- * within the first 2,000 characters, and do: the opening is about 1,200
- * characters with a typical branch name.
+ * within the first 2,000 characters. They do for any branch name without
+ * backticks: the opening is about 1,450 characters with `main` and 1,700
+ * with a 255-character name. A name made mostly of backticks renders as a
+ * longer code span and can push the preamble's start past 2,000, though
+ * never past this cap.
  */
 export const INSTRUCTIONS_CAP = 4_096;
 
