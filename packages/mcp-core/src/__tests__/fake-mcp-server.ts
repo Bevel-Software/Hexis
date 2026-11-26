@@ -44,6 +44,12 @@ export interface FakeMcpServer {
   failToolCalls(reason: string | null): void;
   /** Answer every request 401, as a server that has stopped accepting our key. */
   failWithAuthError(on: boolean): void;
+  /**
+   * Make every tool call report its own failure the way a working server does
+   * when the call cannot be done (a missing entitlement, a bad argument): it
+   * RETURNS `isError: true` with this text, rather than throwing.
+   */
+  reportToolErrors(text: string | null): void;
 }
 
 const TOOLS = [
@@ -65,6 +71,7 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
   let initializations = 0;
   let counter = 0;
   let toolFailure: string | null = null;
+  let reportedFailure: string | null = null;
   let authFailure = false;
 
   function buildServer(): Server {
@@ -77,6 +84,7 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
       // reaches the caller as an exception, which is the only failure shape
       // recovery could ever mistake for session loss.
       if (toolFailure) throw new Error(toolFailure);
+      if (reportedFailure) return { isError: true, content: [{ type: 'text', text: reportedFailure }] };
       if (tool === 'bump') {
         counter += 1;
         return { content: [{ type: 'text', text: JSON.stringify({ counter }) }] };
@@ -173,6 +181,9 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
     },
     failWithAuthError: (on: boolean) => {
       authFailure = on;
+    },
+    reportToolErrors: (text: string | null) => {
+      reportedFailure = text;
     },
   };
 }

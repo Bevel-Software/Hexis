@@ -33,6 +33,9 @@ import {
   flattenManualTool,
   toListedTool,
   toolError,
+  installDownstreamToolErrors,
+  excludedToolNames,
+  removeExcludedTools,
   seedBevelHostedManualVars,
   printable,
   skillPromptText,
@@ -71,6 +74,11 @@ import {
   resetLocalVariableResolver,
 } from './local-variables.js';
 import { closeRenewal } from './renewal.js';
+
+// A downstream MCP server's `isError` must reach our caller as a failed call,
+// not as a success whose text is the error: `@utcp/mcp` drops the flag when it
+// unwraps a result. Installed once, before any client is built.
+installDownstreamToolErrors();
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
 const SERVER_NAME = 'hexis-mcp';
@@ -189,7 +197,9 @@ export async function discoverTools(
       console.error(`[hexis-mcp] skipping local tool "${String(manual.name)}": ${result.error}`);
     }
   }
-  const tools = await client.getTools();
+  // A local server's `excludeTools` is honoured here; the workspace's own
+  // servers arrive already without theirs, through the deployment's surface.
+  const tools = await removeExcludedTools(client, await client.getTools(), new Set(local.flatMap(excludedToolNames)));
   return tools.map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME));
 }
 
@@ -883,7 +893,9 @@ export async function createHexisMcpServer(
         noteManualReregistered(live, name);
       }
       tools = withoutRemoteMetaTools(
-        (await live.getTools()).map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME)),
+        (await removeExcludedTools(live, await live.getTools(), new Set(local.flatMap(excludedToolNames)))).map(
+          (tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME),
+        ),
       );
       // The views go with the tools: a tool that gained or re-pointed its
       // `ui://` view since startup must be listed — and its view served — as

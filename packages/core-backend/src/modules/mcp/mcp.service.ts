@@ -41,6 +41,9 @@ import {
   toListedTool,
   withReadOnlyOverride,
   toolError,
+  installDownstreamToolErrors,
+  excludedToolNames,
+  removeExcludedTools,
   needsAuthorizationResult,
   skillPromptText,
   ONBOARD_PROMPT,
@@ -87,6 +90,11 @@ import {
   describeConnection,
   type ConnectionScopeWire,
 } from '@bevel-software/platform-mcp-core';
+
+// A downstream MCP server's `isError` must reach our caller as a failed call,
+// not as a success whose text is the error: `@utcp/mcp` drops the flag when it
+// unwraps a result. Installed once, before any client is built.
+installDownstreamToolErrors();
 
 // Still offered from here, as this module's tests and callers learnt it.
 export { CONNECTION_META_KEY };
@@ -1552,6 +1560,9 @@ export class McpService {
       if (manualCatalogNames.get(rewritten) === EXTERNAL_KB_MANUAL_NAME) continue;
       manualCatalogNames.set(rewritten, String(m.name));
     }
+    // The tools each server's manual leaves out (`plugin.json`'s `excludeTools`),
+    // by UTCP name; taken off the surface below once every manual is registered.
+    const excluded = new Set(manuals.flatMap(excludedToolNames));
     // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
     // route by the rewritten prefix, so two manuals whose names rewrite to one
     // identifier would silently share it. Sequential registration used to
@@ -1631,7 +1642,7 @@ export class McpService {
     const kbFailure = outcomes.find((o) => o.isKb && !o.ok);
     if (kbFailure && !kbFailure.ok) throw new Error(`Bevel tool discovery failed: ${kbFailure.error}`);
     if (routes.size > 0) routeToDownstream(client, routes);
-    const utcpTools = await client.getTools();
+    const utcpTools = await removeExcludedTools(client, await client.getTools(), excluded);
     const flattened = utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
     const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId, loadId);
     return { tools, unavailable, catalogNames, hidden, degraded };

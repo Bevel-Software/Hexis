@@ -273,3 +273,30 @@ describe('descriptorsFromMcpJson', () => {
     ).toEqual([]);
   });
 });
+
+describe('excludeTools in the plugin.json extension', () => {
+  const MCP = JSON.stringify({ mcpServers: { notion: { type: 'streamable-http', url: 'https://mcp.notion.com/mcp' } } });
+  const manifestWith = (excludeTools: unknown) =>
+    JSON.stringify({ name: 'support', extensions: { 'software.bevel.hexis': { mcpServers: { notion: { excludeTools } } } } });
+
+  it('carries the left-out tools onto the server, each once', () => {
+    const [notion] = fromMcpJson('Support', MCP, manifestWith(['notion-spawn-session', 'notion-stop-session', 'notion-spawn-session']));
+    expect(notion?.excludeTools).toEqual(['notion-spawn-session', 'notion-stop-session']);
+  });
+
+  it('leaves the field off a server that excludes nothing', () => {
+    const [notion] = fromMcpJson('Support', MCP, null);
+    expect(notion).toBeDefined();
+    expect(notion?.excludeTools).toBeUndefined();
+  });
+
+  it('keeps a server with a malformed list offline instead of offering every tool', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const refused: string[] = [];
+    const out = descriptorsFromMcpJson('Support', MCP, manifestWith('notion-spawn-session'), DEFAULT_KB_LAYOUT, (server, reason) =>
+      refused.push(`${server}: ${reason}`),
+    );
+    expect(out).toEqual([]);
+    expect(refused).toEqual([expect.stringMatching(/^notion: .*excludeTools/)]);
+  });
+});

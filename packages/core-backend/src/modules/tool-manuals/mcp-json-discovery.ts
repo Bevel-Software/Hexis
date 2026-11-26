@@ -56,6 +56,20 @@ export interface HexisMcpServerExtension {
   description?: string;
   /** Only reachable from a user's machine (e.g. localhost) — remote proxy skips it. */
   local?: boolean;
+  /**
+   * Tools of this server agents are NOT offered, by the name the server lists
+   * them under (`notion-spawn-session`). For a server that offers more than
+   * its use here needs, or tools the connected account cannot run (a plan
+   * the workspace does not have): listed, each would only ever fail.
+   */
+  excludeTools?: string[];
+}
+
+/** The tool names a server's extension leaves out, or null when the declaration is malformed. */
+export function validatedExcludeTools(raw: unknown): string[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || !raw.every((t) => typeof t === 'string' && t.length > 0)) return null;
+  return [...new Set(raw as string[])];
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -420,6 +434,14 @@ export function descriptorsFromMcpJson(
       continue;
     }
     const variables = judged.variables;
+    // A malformed list keeps the server offline rather than offering every
+    // tool: the tools it names were left out on purpose, and a typo must not
+    // put them back in front of every agent.
+    const excludeTools = validatedExcludeTools(ext.excludeTools);
+    if (excludeTools === null) {
+      skip(name, 'its plugin.json `excludeTools` must be a list of tool names, as the server lists them.');
+      continue;
+    }
     const shared = {
       slug: name,
       name,
@@ -427,6 +449,7 @@ export function descriptorsFromMcpJson(
       type: 'mcp' as const,
       ...(typeof ext.description === 'string' ? { description: ext.description } : {}),
       ...(variables.length > 0 ? { variables } : {}),
+      ...(excludeTools.length > 0 ? { excludeTools } : {}),
     };
 
     if (verdict.transport === 'stdio') {

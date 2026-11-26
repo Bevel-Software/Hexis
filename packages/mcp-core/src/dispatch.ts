@@ -5,6 +5,7 @@ import type { ProxiedTool } from './proxied-tool.js';
 import { toCallToolResult, toolError, describeToolFailure, renderProgress } from './results.js';
 import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
+import { DownstreamToolError } from './downstream-tool-errors.js';
 
 /**
  * Register one manual on a client, reduced to a verdict.
@@ -91,6 +92,9 @@ export async function dispatchToolCall(
       hasPrev = true;
     }
   } catch (err) {
+    // The downstream server answered and said the call failed: pass its own
+    // answer on, marked as the failure it is.
+    if (err instanceof DownstreamToolError) return err.toCallToolResult();
     return toolError(`The "${tool.mcpName}" tool failed: ${describeToolFailure(err)}`);
   }
 

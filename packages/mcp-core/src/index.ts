@@ -132,6 +132,15 @@ export { installCallGuards, argumentRefusal, ArgumentsDoNotMatchError } from './
 
 export { installGetHasNoBody, withoutBodyOnGet, NO_BODY_FIELD } from './get-has-no-body.js';
 
+export { EXCLUDE_TOOLS_KEY, excludedToolNames, removeExcludedTools } from './excluded-tools.js';
+
+export {
+  DownstreamToolError,
+  downstreamErrorText,
+  installDownstreamToolErrors,
+  keepDownstreamToolErrors,
+} from './downstream-tool-errors.js';
+
 export {
   isSessionLoss,
   installSessionRecovery,
