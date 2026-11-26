@@ -542,7 +542,7 @@ export async function createCoreServer(
   });
   // Definitions only: the endpoints they describe are the app's own plugin
   // creation routes, mounted below behind the key-or-session gate.
-  registerPluginsTools(core.toolRegistry, core.kb);
+  registerPluginsTools(core.toolRegistry, core.kb, core.config.publicDemo);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
