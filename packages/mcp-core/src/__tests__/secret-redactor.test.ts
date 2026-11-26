@@ -45,6 +45,15 @@ describe('rememberCallCredentials', () => {
     expect(redactor.redact('refused tok-abcdef123456 at api.example.com')).toBe('refused [redacted] at [redacted]');
   });
 
+  it('keeps every reading of a string whose values contain its separator, the middle value included', () => {
+    const redactor = new SecretRedactor();
+    const raw = { name: 'n', call_template_type: 'mcp', config: { mcpServers: { s: { headers: { 'X-Id': '${A}|${B}|${C}' } } } } };
+    const processed = { ...raw, config: { mcpServers: { s: { headers: { 'X-Id': 'a|middle|secret|d' } } } } };
+    rememberCallCredentials(redactor, processed as unknown as CallTemplate, raw as unknown as CallTemplate);
+    // B was `middle|secret`, echoed whole.
+    expect(redactor.redact('B is middle|secret')).toBe('B is [redacted]');
+  });
+
   it('takes out what substitution put in, and leaves the public text around it', () => {
     const redactor = new SecretRedactor();
     const raw = {

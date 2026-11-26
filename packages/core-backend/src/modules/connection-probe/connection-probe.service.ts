@@ -9,7 +9,6 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   registerManual,
   SecretRedactor,
-  VARIABLE_REFERENCE_RE,
   rememberCredentialHeaders,
   rememberCredentialQuery,
 } from '@bevel-software/platform-mcp-core';
@@ -17,6 +16,7 @@ import type { IToolManualService, ToolHealthCheck, ToolProbeTarget } from '../to
 import type { ISecretsVaultService } from '../secrets-vault/index.js';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
 import { utcpNamespacedKey } from '../../shared/utcp-namespace.js';
+import { VARIABLE_REFERENCE_RE } from '../../shared/variable-refs.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { readCapped } from '../../shared/read-capped.js';
 import type { IConnectionProbeService, ProbeStatus, ProbeVerdict } from './connection-probe.contract.js';

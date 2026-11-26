@@ -8,12 +8,15 @@
  * so the classifiers must not each keep their own approximation of it.
  */
 
-// The SDK substitutor's reference grammar. It lives in
-// `@bevel-software/platform-mcp-core`, which also needs it (redacting a call's
-// substituted values); re-exported here because this is the path the rest of
-// the package imports.
-import { VARIABLE_REFERENCE_RE } from '@bevel-software/platform-mcp-core';
-export { VARIABLE_REFERENCE_RE };
+import { VARIABLE_REFERENCE_PATTERN } from '@bevel-software/platform-mcp-core';
+
+/**
+ * The SDK substitutor's reference grammar, global for scanning. The grammar
+ * itself lives in `@bevel-software/platform-mcp-core`
+ * (`VARIABLE_REFERENCE_PATTERN`), which also needs it to redact a call's
+ * substituted values; this is the path the rest of the package imports.
+ */
+export const VARIABLE_REFERENCE_RE = new RegExp(VARIABLE_REFERENCE_PATTERN.source, 'g');
 
 // `.test()` on a global regex is stateful (lastIndex persists across calls) —
 // the predicate gets its own non-global compilation of the same source.

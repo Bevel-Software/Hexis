@@ -2,11 +2,14 @@
  * The UTCP substitutor's reference grammar, exactly: `${VAR}` or `$VAR`, names
  * `[a-zA-Z0-9_]+`. Note a LEADING DIGIT is legal: `$5TOKEN` (and `$5` in
  * prose) is a reference as far as substitution is concerned, and classifying
- * it as anything else would diverge from what actually expands. The one copy:
- * the platform's classifiers (`shared/variable-refs.ts` in core-backend) and
- * the redaction of a call's substituted values both read it.
+ * it as anything else would diverge from what actually expands. The
+ * platform's classifiers (`shared/variable-refs.ts` in core-backend) and the
+ * redaction of a call's substituted values both read this one.
+ *
+ * Not global, so it holds no `lastIndex` between calls: a caller that scans
+ * every match builds its own `new RegExp(VARIABLE_REFERENCE_PATTERN.source, 'g')`.
  */
-export const VARIABLE_REFERENCE_RE = /\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+)/g;
+export const VARIABLE_REFERENCE_PATTERN = /\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+)/;
 
 /**
  * The key UTCP uses to look up a manual's `${VAR}`. `@utcp/sdk` first SANITIZES
