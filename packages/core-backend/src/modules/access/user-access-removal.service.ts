@@ -63,7 +63,7 @@ import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
-import { mapPooled } from './map-pooled.js';
+import { mapPooled } from '../../shared/map-pooled.js';
 
 const log = logger('user-access-removal');
 
