@@ -576,13 +576,20 @@ export class EmbedService implements IEmbedService {
    * the file: a writer whose grant was removed while editing must not keep
    * the file shut to the writers who still have it until the TTL. Every door
    * here that asks for write (Edit, Save, the heartbeat) refuses through this
-   * one. Nothing is committed: the embed writes only inside Save, under the
-   * lock, and releases in the same call, so a held lock has no bytes of its
-   * own on disk. Letting go takes no access — the version-control service
-   * releases only a lock this user holds.
+   * one. The lock goes the way every revoked holder's lock goes, through
+   * `holdsEditLock`: it asks the write gate again and, refused, releases with
+   * `releaseLock`, so bytes the same user saved under this lock from the app
+   * while the grant stood are committed, not discarded, and a failed release
+   * is logged there. Should that gate still grant, the lock is kept until it
+   * is let go or expires. Whatever it answers or throws, the caller gets the
+   * refusal.
    */
   private async refuseWriter(wsPath: string, user: AuthUser): Promise<never> {
-    await this.versionControlService.releaseLockNoCommit(this.defaultWorkspaceId(), this.kb.defaultBranch, wsPath, user);
+    await this.versionControlService
+      .holdsEditLock(this.defaultWorkspaceId(), this.kb.defaultBranch, wsPath, user)
+      .catch((err: unknown) => {
+        log.info(`write refused for user=${user.id} path=${wsPath}; lock check ended: ${err instanceof Error ? err.message : String(err)}`);
+      });
     throw new EmbedAccessError();
   }
 

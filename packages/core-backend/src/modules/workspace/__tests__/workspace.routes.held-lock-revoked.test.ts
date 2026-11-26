@@ -200,6 +200,32 @@ describe('an archive extracted over a file the caller holds the editor lock on',
     expect(await onDisk()).toBe(FROM_ARCHIVE);
     expect((await svc.getLock(WS, WS, FILE))?.holderUserId).toBe(USER.id);
   });
+
+  // Any other lock on the entry would meet the sweep's strict acquire (409)
+  // only after its bytes were written: the entry is skipped before that.
+  it('skips that file under the caller own coordination hold: its bytes never land and the hold stays', async () => {
+    expect((await svc.acquireLock(WS, WS, FILE, USER, { coordination: true })).acquired).toBe(true);
+
+    const res = await unzip();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ extracted: [], skipped: [{ path: FILE, reason: expect.stringContaining('is being edited by') }] });
+    expect(await onDisk()).toBe(ORIGINAL);
+    expect((await svc.getLock(WS, WS, FILE))?.mode).toBe('coordination');
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('skips that file under somebody else lock: its bytes never land and their lock stays', async () => {
+    const other: AuthUser = { id: '22222222-2222-4222-8222-222222222222', email: 'other@example.com', name: 'Other Editor' };
+    expect((await svc.acquireLock(WS, WS, FILE, other)).acquired).toBe(true);
+
+    const res = await unzip();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ extracted: [], skipped: [{ path: FILE, reason: expect.stringContaining('Other Editor') }] });
+    expect(await onDisk()).toBe(ORIGINAL);
+    expect((await svc.getLock(WS, WS, FILE))?.holderUserId).toBe(other.id);
+  });
 });
 
 describe('PUT /file under the caller own coordination hold', () => {

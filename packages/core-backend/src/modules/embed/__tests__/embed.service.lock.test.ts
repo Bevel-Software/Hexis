@@ -47,14 +47,20 @@ function build() {
   };
   // The lock verbs go straight to the real service; release drops the row as
   // the real `releaseLock` does once it has enqueued the commit.
+  const releaseLock = vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
+    locks.release(id, branch, path, user),
+  );
   const versionControlService = {
-    // The real service's answer while the write gate grants: its own edit
-    // lock, not a coordination hold. Its refusal once the grant is gone is
-    // pinned against the real service in version-control.service.held-lock.test.ts;
-    // here the embed's own write check (`canWrite`) refuses first.
+    // The real service's rule (pinned against it in
+    // version-control.service.held-lock.test.ts): only its own edit lock, not
+    // a coordination hold, counts; once the write gate refuses, the lock is
+    // released through `releaseLock` (the commit path) and the refusal thrown.
     holdsEditLock: vi.fn(async (id: string, branch: string, path: string, user: AuthUser) => {
       const lock = await locks.get(id, branch, path);
-      return lock !== null && lock.holderUserId === user.id && lock.mode !== 'coordination';
+      if (lock === null || lock.holderUserId !== user.id || lock.mode === 'coordination') return false;
+      if (writable) return true;
+      await releaseLock(id, branch, path, user);
+      throw Object.assign(new Error('write no longer granted'), { status: 403 });
     }),
     acquireLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
       locks.acquire(id, branch, path, user),
@@ -62,9 +68,7 @@ function build() {
     heartbeatLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
       locks.heartbeat(id, branch, path, user),
     ),
-    releaseLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
-      locks.release(id, branch, path, user),
-    ),
+    releaseLock,
     releaseLockNoCommit: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
       locks.release(id, branch, path, user),
     ),
@@ -140,6 +144,22 @@ describe('Edit then Save, as the writer does it', () => {
     // The refusal is not turned into a fresh acquire.
     expect(versionControlService.acquireLock).toHaveBeenCalledTimes(1);
     expect(await locks.get(WS_ID, BRANCH, WS)).toBeNull();
+    // Let go through the commit path: bytes the same user saved under this
+    // lock from the app while the grant stood are committed, never discarded.
+    expect(versionControlService.releaseLock).toHaveBeenCalledWith(WS_ID, BRANCH, WS, ALICE);
+    expect(versionControlService.releaseLockNoCommit).not.toHaveBeenCalled();
+  });
+
+  it('answers the refusal on every write door even when letting go of the lock fails', async () => {
+    const { service, versionControlService } = build();
+    const { token } = await service.mintForUser({ userId: ALICE.id, reference: REPO });
+    expect(await service.acquireLock(token)).toEqual({ acquired: true });
+    writable = false;
+    versionControlService.holdsEditLock.mockRejectedValue(new Error('rules unreadable'));
+
+    await expect(service.save(token, 'x')).rejects.toBeInstanceOf(EmbedAccessError);
+    await expect(service.acquireLock(token)).rejects.toBeInstanceOf(EmbedAccessError);
+    await expect(service.heartbeat(token)).rejects.toBeInstanceOf(EmbedAccessError);
   });
 });
 

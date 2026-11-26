@@ -242,6 +242,12 @@ export function createWorkspaceRoutes(
    * but the file wasn't actually dirty (e.g. mkdir of an already-populated
    * dir), the release commits nothing and returns `null`.
    */
+  /** The 409 for a write to a path held by another user's lock or the caller's own coordination hold. */
+  function lockedBy(targetPath: string, holderName: string | null | undefined): Error & { status: number } {
+    const err = new Error(`"${targetPath}" is being edited by ${holderName || 'another user'}. Try again in a moment.`);
+    return Object.assign(err, { status: 409 });
+  }
+
   async function withLock<T>(
     workspaceId: string,
     user: AuthUser,
@@ -325,14 +331,7 @@ export function createWorkspaceRoutes(
     const acquired = await versionControlService.acquireLock(workspaceId, branch, targetPath, user, {
       platformRestore: options?.platformRestore,
     });
-    if (!acquired.acquired) {
-      const holder = acquired.lock.holderName || 'another user';
-      const err: Error & { status?: number } = new Error(
-        `"${targetPath}" is being edited by ${holder}. Try again in a moment.`,
-      );
-      err.status = 409;
-      throw err;
-    }
+    if (!acquired.acquired) throw lockedBy(targetPath, acquired.lock.holderName);
     // Three release modes, the same three `LockingFilesystem.withLock` uses,
     // depending on what the op did:
     //
@@ -1570,11 +1569,18 @@ export function createWorkspaceRoutes(
       // entry the caller holds the edit lock on meets `holdsEditLock` here
       // too, BEFORE its bytes land: once their write is revoked it refuses
       // (and lets the lock go, committing only what was there before), where
-      // asking after the extraction would publish the archive's bytes.
+      // asking after the extraction would publish the archive's bytes. Any
+      // other lock on the entry (somebody else's, or the caller's own
+      // coordination hold) would be refused by the sweep's acquire with a 409
+      // after the bytes were already written, so such an entry is skipped
+      // here, with that refusal's words. A lock taken between this check and
+      // the write is not covered.
       const branch = branchForWorkspaceId(id);
       const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
         await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
-        await versionControlService.holdsEditLock(id, branch, entryPath, user);
+        if (await versionControlService.holdsEditLock(id, branch, entryPath, user)) return;
+        const lock = await versionControlService.getLock(id, branch, entryPath);
+        if (lock) throw lockedBy(entryPath, lock.holderName);
       });
       for (const relFile of result.extracted) {
         // The file is already on disk from the unzip; the release commits +
