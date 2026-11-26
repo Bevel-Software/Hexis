@@ -117,7 +117,8 @@ export class MarketplaceCompilerService {
 
   /**
    * One batch verdict per compile for the skills, then a lookup; any other
-   * path (a plugin's manifest, its `mcp.json`, its folder's files) is asked
+   * path (a skill's other files, a plugin's manifest, its `mcp.json`, its
+   * folder's files) is asked
    * once, on first use, and remembered. Fail closed both ways: a skill path
    * the batch skipped is unreadable, and for the everyone audience a path is
    * public only when the resolver says `read: everyone` applies cleanly

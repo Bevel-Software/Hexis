@@ -54,8 +54,9 @@ import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
  *   README.md                            names the source commit
  *
  * FAIL CLOSED, per file: a skill is copied only when `readable` says yes for
- * its SKILL.md — the same per-path verdict the catalog filters on — and a
- * plugin's own files the same way, each by its own path: the manifest it is
+ * its SKILL.md — the same per-path verdict the catalog filters on — and then
+ * only the files of its folder `readable` says yes for, each by its own path;
+ * a plugin's own files the same way: the manifest it is
  * named and described by, the `mcp.json` its servers come from, every other
  * file of its folder. So the compiled tree for a caller holds exactly what
  * that caller may read, and nothing about a skill or a plugin they may not.
@@ -131,6 +132,17 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   const warnings: string[] = [];
   const put = (rel: string, content: string | Buffer) =>
     files.set(rel, typeof content === 'string' ? Buffer.from(content, 'utf-8') : content);
+  // The ONE way a knowledge-base file is copied into the tree: each file
+  // under `folder` that `ships`, only when the caller may read it, asked by
+  // its own repo path. A skill's reference files go through it exactly as a
+  // plugin's CONVENTIONS.md does.
+  const copyReadable = async (folder: string, dest: string, ships: (rel: string) => boolean = () => true) => {
+    const abs = path.join(kbRoot, folder);
+    for (const rel of await disk.walkFiles(abs, (name) => !NEVER_SHIPPED.has(name))) {
+      if (!ships(rel) || !(await readable(`${folder}/${rel}`))) continue;
+      put(`${dest}/${rel}`, await fs.readFile(path.join(abs, rel)));
+    }
+  };
 
   // One verdict per skill, resolved once: every plugin below reads from it.
   // Readability is the only gate — every skill the caller may read ships.
@@ -263,9 +275,9 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     // the platform's own files (rules, the source manifests, `mcp.json`, all
     // rewritten below), the inline skills (copied by name below), and the
     // hexis-only `.tool` manuals under their extension folder.
-    if (p.folder) await copyPluginFiles(disk, kbRoot, p.folder, base, readable, put);
+    if (p.folder) await copyReadable(p.folder, base, isPluginOwnFile);
     for (const s of p.skills) {
-      await copySkill(disk, kbRoot, s,`${base}/skills/${s.name}`, put);
+      await copyReadable(s.path, `${base}/skills/${s.name}`);
     }
     const spec: Record<string, unknown> = { $schema: PLUGIN_MANIFEST_SCHEMA, name: p.slug };
     if (p.version) spec.version = p.version;
@@ -300,7 +312,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     (s, other) =>
       warnings.push(`"${s.name}" at ${s.path} shares its name with ${other.path} — left out of skills/ and the bundle`),
   );
-  for (const s of flat) await copySkill(disk, kbRoot, s,`skills/${s.name}`, put);
+  for (const s of flat) await copyReadable(s.path, `skills/${s.name}`);
 
   // 5. The one-install bundle: a plugin of its own that IS everything the
   //    caller may read — every skill once, plus the knowledge base's MCP
@@ -334,7 +346,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
       put(`${base}/${PLUGIN_MCP_FILE}`, `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers: kbMcp }, null, 2)}\n`);
       put(`${base}/.mcp.json`, `${JSON.stringify({ mcpServers: kbMcp }, null, 2)}\n`);
     }
-    for (const s of flat) await copySkill(disk, kbRoot, s,`${base}/skills/${s.name}`, put);
+    for (const s of flat) await copyReadable(s.path, `${base}/skills/${s.name}`);
   }
 
   // 6. The two catalogues + a README naming the source. The bundle is listed
@@ -393,47 +405,20 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
 const REWRITTEN_AT_ROOT = new Set([PLUGIN_MANIFEST_FILE, BUNDLE_MANIFEST_FILE, PLUGIN_MCP_FILE]);
 
 /**
- * Copy a plugin folder's own files under `dest`: everything except the
- * platform's files (rules, the manifests and `mcp.json` at the root — all
- * rewritten by the compiler), the inline skills under `skills/` (copied by
- * name, so a clash resolves the same way everywhere), the hexis extension
- * folder (`.tool` manuals no other client runs), `.tool` files anywhere,
- * and every file the caller may not read, asked by its own repo path.
+ * Whether a file of a plugin's own folder ships as it is: not the platform's
+ * files (the manifests and `mcp.json` at the root, all rewritten by the
+ * compiler), not the inline skills under `skills/` (copied by name, so a
+ * clash resolves the same way everywhere), not the hexis extension folder
+ * nor `.tool` files anywhere (manuals no other client runs).
  */
-async function copyPluginFiles(
-  disk: ITreeWalker,
-  kbRoot: string,
-  folder: string,
-  dest: string,
-  readable: (repoPath: string) => Promise<boolean>,
-  put: (rel: string, content: Buffer) => void,
-): Promise<void> {
-  const abs = path.join(kbRoot, folder);
-  for (const rel of await disk.walkFiles(abs, (name) => !NEVER_SHIPPED.has(name) && !name.endsWith('.tool'))) {
-    const top = rel.split('/')[0];
-    if (top === 'skills' || top === HEXIS_EXTENSION_NS) continue;
-    if (!rel.includes('/') && REWRITTEN_AT_ROOT.has(rel)) continue;
-    if (!(await readable(`${folder}/${rel}`))) continue;
-    put(`${dest}/${rel}`, await fs.readFile(path.join(abs, rel)));
-  }
+function isPluginOwnFile(rel: string): boolean {
+  const top = rel.split('/')[0];
+  if (top === 'skills' || top === HEXIS_EXTENSION_NS || rel.endsWith('.tool')) return false;
+  return rel.includes('/') || !REWRITTEN_AT_ROOT.has(rel);
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-/** Copy a skill folder (minus what never ships) under `dest`. */
-async function copySkill(
-  disk: ITreeWalker,
-  kbRoot: string,
-  skill: SkillSummary,
-  dest: string,
-  put: (rel: string, content: Buffer) => void,
-): Promise<void> {
-  const abs = path.join(kbRoot, skill.path);
-  for (const rel of await disk.walkFiles(abs, (name) => !NEVER_SHIPPED.has(name))) {
-    put(`${dest}/${rel}`, await fs.readFile(path.join(abs, rel)));
-  }
 }
 
 /** First by (name, path) order wins; the loser is reported to `onClash`. */

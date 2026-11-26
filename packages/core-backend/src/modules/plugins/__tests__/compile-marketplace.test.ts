@@ -334,6 +334,31 @@ describe('compileMarketplace', () => {
     expect(text(admin, 'plugins/gtm/internal/pricing.md')).toBe('floor prices');
   });
 
+  it('inside a skill the caller may read, a file they may not read stays behind wherever the skill is copied', async () => {
+    // Inline in a plugin (GTM/outreach) and shared (Sales/pitch): the skill
+    // ships in its plugin, the flat skills/ folder and the bundle — each copy
+    // without the denied file.
+    await write('Plugins/GTM/skills/outreach/private/access.md', '---\n---\nread:\n  - deny Sam <sam@x.io>\n');
+    await write('Plugins/GTM/skills/outreach/private/targets.md', 'target list');
+    await write('Skills/Sales/pitch/internal/access.md', '---\n---\nread:\n  - deny Sam <sam@x.io>\n');
+    await write('Skills/Sales/pitch/internal/discounts.md', 'discount table');
+
+    const person = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const personPaths = [...person.files.keys()];
+    expect(personPaths).toContain('plugins/gtm/skills/outreach/SKILL.md');
+    expect(personPaths).toContain('skills/pitch/SKILL.md');
+    expect(personPaths).toContain('plugins/hexis-all/skills/pitch/SKILL.md');
+    for (const content of person.files.values()) {
+      expect(content.toString('utf-8')).not.toContain('target list');
+      expect(content.toString('utf-8')).not.toContain('discount table');
+    }
+
+    const admin = await compiler.compileFor({ userEmail: 'admin@x.io' });
+    expect(text(admin, 'plugins/gtm/skills/outreach/private/targets.md')).toBe('target list');
+    expect(text(admin, 'skills/pitch/internal/discounts.md')).toBe('discount table');
+    expect(text(admin, 'plugins/hexis-all/skills/pitch/internal/discounts.md')).toBe('discount table');
+  });
+
   it("a plugin's servers ship only when its mcp.json is readable, each file asked by its own path", async () => {
     // The pure compiler against the real fixture, with a verdict that
     // refuses one path at a time — what folder rules alone cannot isolate.
