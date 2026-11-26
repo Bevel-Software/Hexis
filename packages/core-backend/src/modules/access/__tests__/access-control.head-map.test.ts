@@ -501,9 +501,23 @@ describe('AccessControlService: reads answered from the map of the head commit',
     // a byte of it is read.
     const openPage = FILES['Team/Own.md']!.replace(/^---$/gm, '+++');
     const page = path.join(repo, 'Team', 'Own.md');
+    // The files of the second checkout opened, by either call the service reads with (git's own files aside, as
+    // for the first checkout).
+    const second = path.join(root, 'ws2', KB);
+    const secondOpened: string[] = [];
+    const noteSecond = (file: unknown) => {
+      const f = String(file);
+      if (f.startsWith(second + path.sep) && !f.includes(`${path.sep}.git${path.sep}`)) secondOpened.push(path.relative(second, f));
+    };
+    const reading = vi.mocked(fs.readFile).getMockImplementation()!;
+    vi.mocked(fs.readFile).mockImplementation(((file: unknown, ...rest: unknown[]) => {
+      noteSecond(file);
+      return (reading as (...a: unknown[]) => unknown)(file, ...rest);
+    }) as typeof fs.readFile);
     const opening = vi.mocked(fs.open).getMockImplementation()!;
     let written = false;
     vi.mocked(fs.open).mockImplementation((async (file: unknown, ...rest: unknown[]) => {
+      noteSecond(file);
       const handle = await (opening as (...a: unknown[]) => Promise<unknown>)(file, ...rest);
       if (!written && String(file) === page) {
         written = true;
@@ -515,11 +529,14 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
     expect(written).toBe(true);
 
-    // Another checkout of the same commit, whose page is the version, finds the version remembered.
-    await execFileAsync('git', ['clone', '-q', repo, path.join(root, 'ws2', KB)]);
-    reset();
+    // Another checkout of the same commit, whose page is the version, finds the version remembered: it opens no
+    // file of its own.
+    await execFileAsync('git', ['clone', '-q', repo, second]);
     expect((await svc.canReadBatch('ws2', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
-    expect(opened).toEqual([]);
+    expect(secondOpened).toEqual([]);
+    // A service that remembers nothing reads that checkout's page: the count above would have seen it.
+    expect((await service().canReadBatch('ws2', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
+    expect(secondOpened).toContain(path.join('Team', 'Own.md'));
   }, 120_000);
 
   it('counts each version at its whole size against the wait budget: a map of more is read in the background', async () => {
