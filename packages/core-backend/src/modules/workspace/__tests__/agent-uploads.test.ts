@@ -15,6 +15,7 @@ import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import { AccessDeniedError, toKbRelative } from '../../access-model/index.js';
 import { normalizeWorkspacePath, PathHeldError } from '../../kb-fs/index.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/index.js';
 import { registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
@@ -109,6 +110,8 @@ let folderTurnAsked: Promise<void>;
 let announceFolderTurnAsked: () => void;
 /** When set, someone of this name holds a lock the next batch needs: it is refused whole, nothing written. */
 let lockHeldBy: string | undefined;
+/** When set, the next batch's commit lands and its push needs resolution. */
+let pushNeedsResolution = false;
 
 interface StartOptions {
   access?: IAccessControl;
@@ -148,6 +151,7 @@ async function start(options: StartOptions = {}): Promise<string> {
     folderTurnGate = undefined;
     folderTurnAsked = new Promise<void>((resolve) => (announceFolderTurnAsked = resolve));
     lockHeldBy = undefined;
+    pushNeedsResolution = false;
   }
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
   // The harness speaks the paths the TOOLS speak: a fixture written here as
@@ -171,7 +175,9 @@ async function start(options: StartOptions = {}): Promise<string> {
    * check keeps. Content arrives as a Buffer from an apply, and is written
    * through untouched — which is the property byte-for-byte landing rests on.
    * As the real batch does, a lock another holds (`lockHeldBy`) refuses it
-   * with `PathHeldError` before anything is written.
+   * with `PathHeldError` before anything is written, and a commit whose push
+   * needs resolution (`pushNeedsResolution`) throws that error once the files
+   * are written.
    */
   const batchOn = (branch: string) => async (
     writes: { path: string; content: string | Buffer }[],
@@ -211,6 +217,9 @@ async function start(options: StartOptions = {}): Promise<string> {
     batchTurnDepth.push(turnsHeld);
     for (const w of landing) await plainWriteFile(w.path, w.content as never);
     for (const p of deletes) await fs.deleteFile(p);
+    if (pushNeedsResolution && landing.length > 0) {
+      throw new PushNeedsAgentResolutionError(branch, landing[0].path, 'rejected', 'retry later', 'refused');
+    }
   };
   /** The filesystem a tool on `branch` writes through: this one, with the batch for that branch. */
   const filesystemOn = (branch: string): LocalFilesystem =>
@@ -1378,6 +1387,23 @@ describe('a token is good once, for one user, for a limited time', () => {
       destination: `${KB_DIR}/Two`,
       mode: 'overwrite',
     });
+    expect(second.status).toBe(404);
+    expect((await json<{ error: string }>(second)).error).toBe(UPLOAD_TOKEN_REFUSAL);
+    expect(await readdir(join(tempDir, KB_DIR))).toEqual(['One']);
+  });
+
+  it('is spent by an apply whose commit lands and whose push needs resolution', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'a.md', Buffer.from('a'));
+    pushNeedsResolution = true;
+    const first = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: `${KB_DIR}/One` });
+    expect(first.status).toBe(409);
+    expect((await json<{ kind?: string }>(first)).kind).toBe('push-needs-resolution');
+    expect(await readFile(join(tempDir, KB_DIR, 'One/a.md'), 'utf8')).toBe('a');
+    pushNeedsResolution = false;
+    // Landed, so a retry is the token used twice, not a second landing elsewhere.
+    const second = await call(base, 'apply_file_upload', { branch: DRAFT, token, destination: `${KB_DIR}/Two` });
     expect(second.status).toBe(404);
     expect((await json<{ error: string }>(second)).error).toBe(UPLOAD_TOKEN_REFUSAL);
     expect(await readdir(join(tempDir, KB_DIR))).toEqual(['One']);

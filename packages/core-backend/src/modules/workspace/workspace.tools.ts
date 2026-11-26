@@ -15,7 +15,7 @@ import type { IRoutineWritePolicy } from './routine-write-policy.js';
 import type { ToolHandlerFactory } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import { GitInternalsError, VersionControlValidationError } from '../../shared/domain-errors.js';
+import { GitInternalsError, PushNeedsAgentResolutionError, VersionControlValidationError } from '../../shared/domain-errors.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a version-control service, so this stays inside the module boundary.
 import {
@@ -4391,14 +4391,26 @@ export function registerWorkspaceTools(
         // recheck and the commit both, and in the same order the delete takes
         // its own (the folder's turn first, then each path's lock), which is
         // what keeps two callers from waiting on each other's half.
-        await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), destination, async () => {
-          await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck, refusedAtLock);
-        });
+        try {
+          await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), destination, async () => {
+            await batching.writeFiles(writes, `Apply upload of ${writes.length} file(s)`, [], recheck, refusedAtLock);
+          });
+        } catch (err) {
+          // The commit landed and only its push needs resolution, as
+          // `unzipFile` treats it: the upload is landed, so its token is spent
+          // as a landed apply's is, and the caller is told why sharing waits.
+          if (err instanceof PushNeedsAgentResolutionError) {
+            spent = true;
+            await uploads.consume(token);
+          }
+          throw err;
+        }
       }
       // The token is spent once an ANSWER exists, even an answer in which
       // every path was refused: the apply ran and said what happened at each
       // path, and re-running it would say the same. Only a refusal that landed
-      // nothing AND answered nothing (thrown above) gives the token back.
+      // nothing AND answered nothing (thrown above) gives the token back; a
+      // commit that landed with its push pending spends it (above).
       spent = true;
       await uploads.consume(token);
       const listed = a.all === true ? outcomes : outcomes.slice(0, APPLY_ANSWER_CAP);
