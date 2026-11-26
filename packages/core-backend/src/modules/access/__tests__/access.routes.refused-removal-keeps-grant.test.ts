@@ -15,7 +15,7 @@ import type { VersionControlService, VersionControlEventBus } from '../../versio
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * A refused access removal never discards an earlier grant on the same
@@ -141,7 +141,7 @@ describe('a refused removal keeps an earlier, still-queued grant on the same acc
         { emit: () => undefined } as unknown as VersionControlEventBus,
         usersDbDouble(),
         testKbContext({ kbDirName: KB }),
-        new NodeFs(),
+        realDisk(),
       ),
     );
     server = await new Promise<Server>((resolve) => {
