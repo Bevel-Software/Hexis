@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { printable } from '../../shared/printable.js';
+import { mapPooled } from '../../shared/map-pooled.js';
 
 /**
  * The reproduction probe behind "the first `start_session` on a fresh
@@ -325,7 +326,7 @@ export class ProbeOptionsError extends Error {}
 /**
  * A count the probe can actually run with, or a refusal naming the option.
  *
- * `runPooled` clamps its limit with `Math.max(1, …)`, so a `concurrency` of 0
+ * `mapPooled` clamps its limit with `Math.max(1, …)`, so a `concurrency` of 0
  * or -5 would quietly become a one-at-a-time run — the opposite of the burst
  * the caller asked for, reported as though it were the burst. A number that
  * cannot be honoured is answered, not reinterpreted.
@@ -367,26 +368,6 @@ function normalizeBaseUrl(baseUrl: string): string {
 }
 
 /**
- * Run `count` tasks with at most `limit` in flight. At the default
- * `limit === count` every task starts in the same tick, which is the burst the
- * probe is for; a smaller limit is there for an endpoint one would rather not
- * hit fifty-wide.
- */
-async function runPooled<T>(count: number, limit: number, task: (index: number) => Promise<T>): Promise<T[]> {
-  const results = new Array<T>(count);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const index = next++;
-      if (index >= count) return;
-      results[index] = await task(index);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, count)) }, worker));
-  return results;
-}
-
-/**
  * Open `connections` fresh connections, make exactly one first call on each,
  * and report. Never throws for a failed attempt — a thrown probe would lose
  * the other forty-nine results, and those are the evidence. It DOES throw for
@@ -413,6 +394,9 @@ export async function probeFirstCall(options: FirstCallProbeOptions): Promise<Fi
   };
   const attempt = mode === 'mcp' ? mcpAttempt : toolAttempt;
   const startedAt = now();
-  const attempts = await runPooled(connections, concurrency, (index) => attempt(index, ctx));
+  // At the default `concurrency === connections` every attempt starts in the
+  // same tick, which is the burst the probe is for; a smaller limit is there
+  // for an endpoint one would rather not hit fifty-wide.
+  const attempts = await mapPooled(Array.from({ length: connections }, (_, i) => i), concurrency, (index) => attempt(index, ctx));
   return summarizeProbe(attempts, { target: ctx.baseUrl, mode, toolName: ctx.toolName, wallClockMs: now() - startedAt });
 }

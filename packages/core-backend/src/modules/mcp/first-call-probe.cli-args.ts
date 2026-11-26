@@ -105,7 +105,7 @@ export function parseArgs(argv: readonly string[]): Record<string, string> {
  *
  * Every numeric flag this CLI takes is a count: connections, attempts in
  * flight, milliseconds. None of them has a meaning at zero or below —
- * `--concurrency 0` in particular would reach `runPooled`'s `Math.max(1, …)`
+ * `--concurrency 0` in particular would reach `mapPooled`'s `Math.max(1, …)`
  * and run one worker at a time, so the operator would get a report of a
  * one-at-a-time run labelled as the burst they asked for. Garbage and
  * out-of-range are both refused, before anything is opened.
