@@ -472,6 +472,25 @@ describe('workspace file primitives', () => {
     expect(String(await fs.readFile(`${KB_DIR}/a.md`))).toBe("hello\ncost: $& $1 $' $$\n");
   });
 
+  // "Not found" and "appears N times" are facts about the file's text, so a
+  // caller who may not read the file must not get them: every guess, right,
+  // wrong or repeated, gets the read refusal, and nothing is written.
+  it('edit_file refuses a file the caller may not read as read_file does, whatever old_string guesses', async () => {
+    const path = `${KB_DIR}/Secret/pay.md`;
+    const base = await start('write', denyReads(new Set(['Secret/pay.md'])));
+    await fs.writeFile(path, 'Salary: 120000\nSalary: 120000\nBonus: 5000\n');
+    const read = await post(`${base}/api/agent/tools/read_file`, { path });
+    const refusal = await read.text();
+    expect(read.status).toBe(403);
+    expect(refusal).toContain(`permission to read \\"${path}\\"`);
+    for (const guess of ['Bonus: 5000', 'Bonus: 9999', 'Salary: 120000']) {
+      const res = await post(`${base}/api/agent/tools/edit_file`, { path, old_string: guess, new_string: 'x' });
+      expect(res.status, guess).toBe(403);
+      expect(await res.text(), guess).toBe(refusal);
+    }
+    expect(String(await fs.readFile(path))).toBe('Salary: 120000\nSalary: 120000\nBonus: 5000\n');
+  });
+
   /**
    * An edit is a promise about the text it replaces, so that text has to be
    * found in the file as it is when the write lands — read with the path's
@@ -4664,11 +4683,12 @@ describe('a write refused for permissions says whether and how to propose it', (
 
   // The QA finding behind this: on a draft the branch sentence masked the
   // no-read one, sending the agent to another branch for the same refusal.
-  // A move must read what it moves, so an unreadable source is a read
-  // refusal before any write is judged: it has no write-denied answer.
+  // A move must read what it moves, and an edit the file it edits, so an
+  // unreadable path is a read refusal there before any write is judged: they
+  // have no write-denied answer.
   // A copy must read its source too, so that one path stays readable here:
   // the case is about the destination it may not write.
-  it.each(CALLS.filter(([tool]) => tool !== 'move_file'))('%s: without read access the no-read sentence wins on a branch that takes no change requests too', async (tool, body) => {
+  it.each(CALLS.filter(([tool]) => tool !== 'move_file' && tool !== 'edit_file'))('%s: without read access the no-read sentence wins on a branch that takes no change requests too', async (tool, body) => {
     const { ac } = readVerdict((rel) => rel === 'a.md');
     const base = await start('write', ac);
     await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });

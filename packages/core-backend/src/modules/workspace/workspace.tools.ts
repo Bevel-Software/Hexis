@@ -3472,6 +3472,11 @@ export function registerWorkspaceTools(
       assertTextContent(a.path as string, a.new_string as string, 'new_string');
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertAgentWriteAllowed(agentAccessGate, ctx, a.branch as string, a.path as string);
+      // Its answers ("not found", "appears N times") are read off the file's
+      // bytes, so a caller who may not read the file is refused before the
+      // first read, as `read_file` refuses it.
+      await notifyAgentRead(agentAccessGate, ctx, a.branch as string, a.path as string);
+      await assertCanRead(readGateFor(a.branch as string, ctx), a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);
       const path = a.path as string;
       const oldStr = a.old_string as string;
@@ -3499,8 +3504,8 @@ export function registerWorkspaceTools(
       // no lock cycle. It is a verdict about a file anyone may still change.
       let result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
       // The one the answer carries is taken again with the path's lock HELD,
-      // over the bytes read there (`write: true` guarantees the locking
-      // filesystem): read, verdict and write are one step nobody can get
+      // over the bytes read there (the locking filesystem: see
+      // `batchLandingOf`): read, verdict and write are one step nobody can get
       // between. Taken before the lock only, two callers replacing the same
       // text — two runners claiming a work item by filling its empty owner
       // field — were BOTH told their edit landed, and the second silently
