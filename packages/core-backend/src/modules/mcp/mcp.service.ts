@@ -52,7 +52,6 @@ import {
   type SkillSummary,
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
-import type { KbLayout } from '@bevel-software/platform-shared';
 import { bevelSecretsLoaderConfig, type ForcedRefreshOutcome, type ISecretsVaultService, scopesCovered, userSecretGap } from '../secrets-vault/index.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import type { IToolManualService } from '../tool-manuals/index.js';
@@ -114,17 +113,9 @@ export interface McpProxyOptions {
    */
   readAgentPreamble?: AgentPreambleReader;
   /**
-   * The layout in effect, read per request: the shared file rules spell the
-   * root folders and platform files by the names a deployment saved, and the
-   * setup save applies a layout without a restart. A GETTER, so nothing
-   * snapshots the pre-setup default. Absent, the rules use the default
-   * layout. The guide is `AGENTS.md` either way.
-   */
-  kbLayout?: () => KbLayout;
-  /**
-   * The default branch in effect, read per request: the shared file rules
-   * name it as the branch people read. A GETTER for the same reason as the
-   * layout. Absent, the rules name no branch.
+   * The default branch in effect, read per request: the handshake's opening
+   * names it as the branch people read. A GETTER, so nothing snapshots the
+   * pre-setup value. Absent, no branch is named.
    */
   defaultBranch?: () => string;
   /** Bounds of the downstream (`mcp.json`) connection pool; defaults are 4h idle / 5000 entries. */
@@ -1278,15 +1269,14 @@ export class McpService {
    * fails over its preamble.
    */
   private async composeAgentInstructions(): Promise<ComposedAgentInstructions> {
-    const layout = this.opts.kbLayout?.();
     const defaultBranch = this.opts.defaultBranch?.();
     const read = this.opts.readAgentPreamble;
-    if (!read) return composeAgentInstructions(null, layout, defaultBranch);
+    if (!read) return composeAgentInstructions(null, defaultBranch);
     try {
-      return composeAgentInstructions(await read(), layout, defaultBranch);
+      return composeAgentInstructions(await read(), defaultBranch);
     } catch (err) {
       log.warn('could not read mcp-description.md; this request gets the platform text alone:', { err });
-      return composeAgentInstructions(null, layout, defaultBranch);
+      return composeAgentInstructions(null, defaultBranch);
     }
   }
 

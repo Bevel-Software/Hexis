@@ -95,7 +95,7 @@ describe('the description', () => {
   it('centres the admin\'s description, with its count, and folds the platform message away', async () => {
     mount();
     expect(await screen.findByRole('heading', { name: 'Your description' })).toBeInTheDocument();
-    expect(screen.getByTestId('preamble-count')).toHaveTextContent('1,240 / 6,000 characters');
+    expect(screen.getByTestId('preamble-count')).toHaveTextContent('1,240 / 1,800 characters');
     const description = screen.getByTestId('description-text');
     expect(description).toHaveTextContent('Acme builds solar farms.');
     expect(description).not.toHaveTextContent(HEADER); // the fixed part is not mixed into the admin's
@@ -119,7 +119,7 @@ describe('the description', () => {
     mount();
     expect(await screen.findByTestId('description-empty')).toHaveTextContent('platform message only');
     expect(screen.queryByTestId('description-text')).toBeNull();
-    expect(screen.getByTestId('preamble-count')).toHaveTextContent('0 / 6,000 characters');
+    expect(screen.getByTestId('preamble-count')).toHaveTextContent('0 / 1,800 characters');
   });
 });
 
@@ -154,7 +154,7 @@ describe('the Edit action', () => {
     expect(fetchEditableMock).toHaveBeenCalledWith('knowledge-base');
 
     await user.type(editor, 'Acme builds solar farms.');
-    expect(screen.getByTestId('preamble-count')).toHaveTextContent('24 / 6,000 characters');
+    expect(screen.getByTestId('preamble-count')).toHaveTextContent('24 / 1,800 characters');
     await user.click(screen.getByRole('button', { name: 'Save description' }));
 
     await waitFor(() => {
@@ -267,8 +267,8 @@ describe('warnings', () => {
     fetchMock.mockResolvedValue(composed({ truncated: true, preambleChars: 7350 }));
     mount();
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('agents receive only the first 6,000 characters');
-    expect(screen.getByTestId('preamble-count')).toHaveTextContent('7,350 / 6,000 characters');
+    expect(alert).toHaveTextContent('agents receive only the first 1,800 characters');
+    expect(screen.getByTestId('preamble-count')).toHaveTextContent('7,350 / 1,800 characters');
   });
 
   it('warns about an open comment and, for an admin, names the action on THIS page', async () => {

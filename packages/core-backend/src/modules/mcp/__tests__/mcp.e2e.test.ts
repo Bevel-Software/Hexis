@@ -15,7 +15,6 @@ import { McpService } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/index.js';
 import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
-import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { platformInstructions } from '../../agent-instructions/index.js';
 import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fake-downstream-mcp-server.js';
 import { registerBevelSecretsVariableLoader } from '../../secrets-vault/index.js';
@@ -477,7 +476,7 @@ describe('agent instructions over the real transport', () => {
     const { client } = await connectSdkClient(baseUrl);
     const instructions = client.getInstructions();
     expect(instructions).toBe(
-      `${platformInstructions(DEFAULT_KB_LAYOUT, 'target-company-state')}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`,
+      `${platformInstructions('target-company-state')}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`,
     );
     expect(instructions).not.toContain('private');
     // The first line a client shows the model sends it to the guide.

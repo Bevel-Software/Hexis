@@ -1,5 +1,4 @@
 import express, { type RequestHandler } from 'express';
-import type { KbLayout } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('agent-instructions');
@@ -27,17 +26,8 @@ export function createAgentInstructionsRoutes(
   manualAuth: RequestHandler,
   readPreamble: AgentPreambleReader,
   /**
-   * The layout in effect, read per request — the shared file rules spell the
-   * root folders (`Skills/`, the knowledge folder) and the platform files by
-   * the names a deployment saved, which the setup save may change without a
-   * restart. Optional so a construction with no layout in hand gets the
-   * default layout. The guide itself is `AGENTS.md` on every deployment.
-   */
-  kbLayout?: () => KbLayout,
-  /**
-   * The default branch in effect, read per request, which the shared file
-   * rules name as the branch people read. Optional like the layout: without
-   * it the rules name no branch.
+   * The default branch in effect, read per request, which the opening names
+   * as the branch people read. Optional: without it no branch is named.
    */
   defaultBranch?: () => string,
 ): express.Router {
@@ -48,7 +38,7 @@ export function createAgentInstructionsRoutes(
     // successful one: the contract is on the route, not on the happy path.
     res.setHeader('Cache-Control', 'no-store');
     try {
-      res.json(composeAgentInstructions(await readPreamble(), kbLayout?.(), defaultBranch?.()));
+      res.json(composeAgentInstructions(await readPreamble(), defaultBranch?.()));
     } catch (err) {
       log.error('reading mcp-description.md failed:', { err });
       res.status(500).json({ error: 'Failed to read the agent instructions' });

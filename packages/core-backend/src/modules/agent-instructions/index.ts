@@ -4,6 +4,7 @@ export {
   platformInstructions,
   INSTRUCTIONS_CAP,
   PLATFORM_HEADER,
+  SHARED_RULES_POINTER,
   TOOL_PREFIX_LINE,
   PREAMBLE_CAP,
   TOOL_PREFIX_CAP,
@@ -15,6 +16,7 @@ export {
 export {
   SHARED_FILE_RULES_CAP,
   SHARED_RULES_SECTION,
+  SHARED_RULES_SECTION_ID,
   sharedFileRules,
   sharedFileRulesSection,
   type SharedFileRule,

@@ -21,7 +21,7 @@ type State =
   | { status: 'error'; message: string }
   | { status: 'ready'; data: AgentInstructions };
 
-/** `1,240 / 6,000 characters`, the same count the server truncates on. */
+/** `1,240 / 1,800 characters`, the same count the server truncates on. */
 function count(n: number, cap: number): string {
   return `${n.toLocaleString('en-US')} / ${cap.toLocaleString('en-US')} characters`;
 }

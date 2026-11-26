@@ -120,7 +120,7 @@ async function texts(): Promise<Array<{ where: string; text: string }>> {
   const sections = await agentGuideSections(DEFAULT_KB_LAYOUT, undefined, { defaultBranch: 'main' });
   return [
     ...sections.map((s) => ({ where: `section "${s.id}"`, text: s.body })),
-    { where: 'the handshake instructions', text: platformInstructions(DEFAULT_KB_LAYOUT) },
+    { where: 'the handshake instructions', text: platformInstructions() },
   ];
 }
 

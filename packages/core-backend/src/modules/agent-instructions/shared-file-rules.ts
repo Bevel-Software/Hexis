@@ -10,21 +10,17 @@
  * text specific to the tool sits. Agents saw `file_stat`, `read_file`,
  * `write_file` and `write_files` arrive ending in "[truncated]".
  *
- * So the shared rules are stated in TWO places and in neither description:
- *
- *  - the MCP `instructions` of the initialize handshake (see `compose.ts`),
- *    which Claude Code, Claude Desktop and Cursor put in the system prompt;
- *  - the platform's agent guide, which `get_agent_guide` returns and a
- *    `read_file` of the guide's name serves (see `modules/agent-guide`) —
- *    claude.ai on the web, the Agent SDK and Cline drop `instructions`, and a
- *    guide the agent is told to read before its first action is always
- *    available.
- *
- * Both places get the SAME string, from {@link sharedFileRulesSection} — not
- * two hand-mirrored copies. A rule written twice is a rule that drifts, and a
- * drifted rule is worse than a repeated one, because the agent cannot tell
- * which copy is current. Each description opens instead with the one
- * sentence sending the agent to the guide (`tool-registry/guide-first.ts`).
+ * So the shared rules are stated in ONE place and in no description: the
+ * platform's agent guide, which `get_agent_guide` returns and a `read_file`
+ * of the guide's name serves (see `modules/agent-guide`), as the section
+ * {@link SHARED_RULES_SECTION_ID}. A guide the agent is told to read before
+ * its first action is available in every client. The MCP `instructions`
+ * used to carry them too, ahead of the deployment's own description, and
+ * Claude Code cuts `instructions` at a few thousand characters: the
+ * description never arrived. The handshake now points at the section
+ * (`SHARED_RULES_POINTER` in `compose.ts`), and each description opens
+ * with the one sentence sending the agent to the guide
+ * (`tool-registry/guide-first.ts`).
  *
  * Pure text, a function of the layout and the default branch: both are
  * deployment settings, so every caller passes the values in effect when it
@@ -40,8 +36,11 @@ import {
 } from '@bevel-software/platform-shared';
 import { CHAIN_FAILURES_RULE, CHAIN_LARGE_RESULTS_RULE } from '@bevel-software/platform-mcp-core';
 
-/** The heading the rules live under, in both places and in the pointer sentence. */
+/** The heading the rules live under, in the guide and in the handshake's pointer to them. */
 export const SHARED_RULES_SECTION = 'Working with files';
+
+/** The guide section the rules are, by the id `get_agent_guide` takes; the handshake's pointer names it. */
+export const SHARED_RULES_SECTION_ID = 'working-with-files';
 
 /**
  * The guide's name on a knowledge base seeded before it was renamed to
@@ -52,8 +51,8 @@ export const SHARED_RULES_SECTION = 'Working with files';
 const PRE_RENAME_AGENTS_FILE = 'CLAUDE.md';
 
 /**
- * The ceiling on the whole section. Pinned by a test: the section lands in
- * every conversation through two channels, and a rule moved here to shorten a
+ * The ceiling on the whole section. Pinned by a test: the section is what an
+ * agent reads before its first file call, and a rule moved here to shorten a
  * description has only moved the cost if the section itself grows without
  * limit. Measured against {@link sharedFileRulesSection} under the default
  * layout.
@@ -269,12 +268,14 @@ function conventionsRule(defaultBranch: string): string {
  * names it too, but only once an agent calls `get_agent_guide`; every file
  * tool asks for "the branch you are working on", and an agent left to guess
  * guesses `main`, which on a deployment whose default is another branch
- * writes where nobody reads. So the rules every channel carries name it.
+ * writes where nobody reads. So the guide's rules and the handshake's
+ * opening (`platformInstructions` in `compose.ts`) both name it, with this
+ * one sentence.
  *
  * Empty while the deployment has no branch model (`KbContext.defaultBranch` is
  * `''` until setup is answered): there is no name to give yet.
  */
-function defaultBranchSentence(defaultBranch: string): string {
+export function defaultBranchSentence(defaultBranch: string): string {
   const name = defaultBranch.trim();
   if (!name) return '';
   return (
@@ -298,9 +299,9 @@ function markdownCodeSpan(text: string): string {
 }
 
 /**
- * The shared rules as ONE markdown section — the string both channels carry,
- * byte for byte. A `##` section so it drops into the managed guide at that
- * level and still reads as a block in the instructions blob.
+ * The shared rules as ONE markdown section, the string the guide carries as
+ * {@link SHARED_RULES_SECTION_ID}. A `##` section so it drops into the
+ * managed guide at that level.
  */
 export function sharedFileRulesSection(layout: KbLayout, defaultBranch = ''): string {
   const body = sharedFileRules(layout, defaultBranch)

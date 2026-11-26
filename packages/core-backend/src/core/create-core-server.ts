@@ -612,7 +612,6 @@ export async function createCoreServer(
     createAgentInstructionsRoutes(
       core.manualAuthMiddleware,
       core.readAgentPreamble,
-      () => core.kb.layout,
       () => core.kb.defaultBranch,
     ),
   );
