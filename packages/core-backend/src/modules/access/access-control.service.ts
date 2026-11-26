@@ -48,9 +48,11 @@ import {
   EVERYONE_DISPLAY,
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
+  FIXED_NAME_SOURCES,
   GROUP_TOKEN_PREFIX,
   splitPrincipalToken,
   accessMdSelfEntries,
+  accessSourceOf,
   canonicalEmail,
   canonicalRoleName,
   hasAccessFrontmatterExtension,
@@ -123,26 +125,6 @@ async function catFileBatch(
   return outcomes.map((o) => (o.kind === 'blob' ? o.text : null));
 }
 
-
-/** The sources of a model that are read by a fixed name at the root, whatever else the tree holds. */
-const FIXED_NAME_SOURCES = ['roles.yaml', SYNCED_GROUPS_YAML, GROUPS_YAML] as const;
-
-/**
- * Which source of an access model the file at `p` (repository-relative) is:
- * a folder's rules (an `access.md` at any depth), one read by its fixed name
- * at the root (`FIXED_NAME_SOURCES`), a plugin's manifest (in a folder below
- * the plugins root), or none. Both builds of a model ask it: the walk of the
- * checkout (`accessFileListener`) and the listing of a commit
- * (`listAccessFilesAtRef`), which makes `sourcesKey` from its answers, so
- * what a commit's build prefetches is what its key covers. `decidesListing`,
- * in the access-model module, still names the same set itself.
- */
-function accessSourceOf(p: string, pluginsDir: string): 'rules' | 'fixed-name' | 'manifest' | null {
-  if (isAccessMdPath(p)) return 'rules';
-  if ((FIXED_NAME_SOURCES as readonly string[]).includes(p)) return 'fixed-name';
-  const cut = p.lastIndexOf('/');
-  return cut > 0 && p.slice(cut + 1) === PLUGIN_MANIFEST_FILE && p.slice(0, cut).startsWith(`${pluginsDir}/`) ? 'manifest' : null;
-}
 
 /** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
 export interface AccessModel {
