@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import '@utcp/mcp'; // side effect: registers the stock 'mcp' protocol, which the install replaces
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { CallTemplateSerializer, CommunicationProtocol, type CallTemplate } from '@utcp/sdk';
+import { CallTemplateSerializer, CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
 import { downstreamErrorText, installDownstreamToolErrors } from '../downstream-tool-errors.js';
 import { registerManual, dispatchToolCall } from '../dispatch.js';
 import type { ProxiedTool } from '../proxied-tool.js';
@@ -98,6 +98,44 @@ describe('a downstream isError over a real MCP connection', () => {
     expect(result.content).toEqual([{ type: 'text', text: 'This tool requires a Business plan or higher.' }]);
     // The call ran once: a reported failure is an answer, not a reason to retry.
     expect(server.executions('echo')).toBe(1);
+  });
+
+  it("takes every credential the call carried out of the server's words", async () => {
+    installDownstreamToolErrors();
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    // One credential substituted from a variable, one spelled out in full.
+    const client = await CodeModeUtcpClient.create(
+      process.cwd(),
+      new UtcpClientConfigSerializer().validateDict({ variables: { notion_TOKEN: 'sk-live-1234567890abcdef' } }),
+    );
+    cleanups.push(() => client.close());
+    const template = serializer.validateDict({
+      name: 'notion',
+      call_template_type: 'mcp',
+      config: {
+        mcpServers: {
+          srv: {
+            transport: 'http',
+            url: server.url,
+            timeout: 10,
+            terminate_on_close: true,
+            headers: { Authorization: 'Bearer ${TOKEN}', 'X-Api-Key': 'literal-key-abcdef123456' },
+          },
+        },
+      },
+    });
+    expect(await registerManual(client, template)).toEqual({ ok: true });
+    server.reportToolErrors(
+      'Rejected: token sk-live-1234567890abcdef (or its head sk-live-1234…) and key literal-key-abcdef123456.',
+    );
+
+    const result = await dispatchToolCall(client, echo, { text: 'hi' });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      { type: 'text', text: 'Rejected: token [redacted] (or its head [redacted]…) and key [redacted].' },
+    ]);
   });
 
   it('leaves a successful call untouched once installed', async () => {

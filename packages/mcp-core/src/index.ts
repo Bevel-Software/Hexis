@@ -136,6 +136,8 @@ export { EXCLUDE_TOOLS_KEY } from './excluded-tools.js';
 
 export { DownstreamToolError, installDownstreamToolErrors } from './downstream-tool-errors.js';
 
+export { SecretRedactor, rememberCredentialHeaders, rememberCredentialQuery } from './secret-redactor.js';
+
 export {
   isSessionLoss,
   installSessionRecovery,

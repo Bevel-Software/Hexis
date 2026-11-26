@@ -1,6 +1,7 @@
-import { CommunicationProtocol } from '@utcp/sdk';
+import { CommunicationProtocol, type CallTemplate } from '@utcp/sdk';
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { SecretRedactor, rememberCallCredentials } from './secret-redactor.js';
 
 /**
  * A downstream MCP server said its own call failed: it answered a
@@ -22,10 +23,27 @@ export class DownstreamToolError extends Error {
   }
 
   /**
+   * The same failure with every secret `redactor` holds taken out of its words:
+   * text blocks, an embedded resource's text and the message. Other blocks
+   * (an image) carry no quoted text and pass as they are.
+   */
+  redactedWith(redactor: SecretRedactor): DownstreamToolError {
+    const content = this.content.map((block) => {
+      if (block.type === 'text') return { ...block, text: redactor.redact(block.text) };
+      if (block.type === 'resource' && 'text' in block.resource && typeof block.resource.text === 'string') {
+        return { ...block, resource: { ...block.resource, text: redactor.redact(block.resource.text) } };
+      }
+      return block;
+    });
+    return new DownstreamToolError(redactor.redact(this.message), content);
+  }
+
+  /**
    * The failed call as a proxy answers it: the downstream server's own words,
-   * unchanged, marked `isError`. Not re-worded: a server that already says
-   * which tool failed (the platform's own refusals do) would otherwise say it
-   * twice.
+   * marked `isError`, with the call's secrets already taken out (the protocol
+   * throws it redacted, see {@link keepDownstreamToolErrors}). Not re-worded
+   * otherwise: a server that already says which tool failed (the platform's
+   * own refusals do) would say it twice.
    */
   toCallToolResult(): CallToolResult {
     return { isError: true, content: this.content.length > 0 ? this.content : [{ type: 'text', text: this.message }] };
@@ -59,7 +77,22 @@ function contentBlocksOf(result: unknown): CallToolResult['content'] {
   );
 }
 
-type ResultProcessor = { _processMcpToolResult?: (this: unknown, result: unknown) => unknown };
+type ResultProcessor = {
+  _processMcpToolResult?: (this: unknown, result: unknown) => unknown;
+  callTool?: (this: unknown, caller: unknown, toolName: string, args: unknown, template: CallTemplate) => Promise<unknown>;
+};
+
+/** The template a client stores for `toolName`, with its `${VAR}` references, or undefined. */
+async function storedTemplate(caller: unknown, toolName: string): Promise<CallTemplate | undefined> {
+  try {
+    const repository = (caller as { config?: { tool_repository?: { getTool(name: string): Promise<unknown> } } })
+      ?.config?.tool_repository;
+    const tool = (await repository?.getTool(toolName)) as { tool_call_template?: CallTemplate } | undefined;
+    return tool?.tool_call_template;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Teach one `@utcp/mcp` protocol instance to keep a downstream `isError`.
@@ -71,6 +104,12 @@ type ResultProcessor = { _processMcpToolResult?: (this: unknown, result: unknown
  * did anything as done. The unwrap is private to
  * the library, so it is wrapped on the instance; `downstream-tool-errors.test`
  * fails if a release renames it.
+ *
+ * The server's words are quoted back to the caller, and a server can echo the
+ * credential the call carried. So `callTool` is wrapped too: a failure leaves
+ * it with every secret the call carried taken out (`rememberCallCredentials`,
+ * from the template as the client filled it in and as it stores it). Streaming
+ * goes through `callTool` in this protocol, so it is covered by the same wrap.
  */
 export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
   const target = protocol as unknown as ResultProcessor;
@@ -84,6 +123,19 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
     if (failure !== null) throw new DownstreamToolError(failure, contentBlocksOf(result));
     return unwrap.call(this, result);
   };
+  const call = target.callTool;
+  if (typeof call === 'function') {
+    target.callTool = async function (this: unknown, caller, toolName, args, template) {
+      try {
+        return await call.call(this, caller, toolName, args, template);
+      } catch (err) {
+        if (!(err instanceof DownstreamToolError)) throw err;
+        const redactor = new SecretRedactor();
+        rememberCallCredentials(redactor, template, await storedTemplate(caller, toolName));
+        throw err.redactedWith(redactor);
+      }
+    };
+  }
   return protocol;
 }
 

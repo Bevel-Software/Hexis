@@ -6,7 +6,12 @@ import '@utcp/http'; // side effect: registers the 'http' UTCP communication pro
 import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (remote MCP `.tool` sources)
 import { CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { registerManual } from '@bevel-software/platform-mcp-core';
+import {
+  registerManual,
+  SecretRedactor,
+  rememberCredentialHeaders,
+  rememberCredentialQuery,
+} from '@bevel-software/platform-mcp-core';
 import type { IToolManualService, ToolHealthCheck, ToolProbeTarget } from '../tool-manuals/index.js';
 import type { ISecretsVaultService } from '../secrets-vault/index.js';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
@@ -134,181 +139,6 @@ async function withProbeTimeout<T>(
     return await Promise.race([work, deadline]);
   } finally {
     if (timer) clearTimeout(timer);
-  }
-}
-
-/**
- * Below this, a value is redacted only where it stands ALONE — see
- * {@link SecretRedactor}. It is still redacted; what it may not do is match
- * inside a longer run of letters and digits.
- */
-const MIN_SECRET_CHARS = 6;
-/** The shortest leading run of a secret we will treat as an echo of it. */
-const MIN_ECHOED_PREFIX_CHARS = 8;
-const REDACTED = '[redacted]';
-
-/**
- * Every secret this probe resolved, so that none of them can come back out in
- * something we quote.
- *
- * A rejection is quoted verbatim because the provider's own words are the
- * actionable part — but providers routinely echo the credential they refused
- * ("Incorrect API key provided: sk-…"). Anyone who can READ a tool can probe
- * it, so without this a plain reader could recover part of a shared ADMIN key
- * they were never allowed to see by saving a probe's failure text. The 200-char
- * cap on the quote bounds it; it does not redact it.
- *
- * Leading PREFIXES count as well as whole values, because that echo is usually
- * masked in the middle ("sk-live-abcd…wxyz"): a whole-value search finds
- * nothing there and prints the head of the key regardless.
- *
- * SHORT values are redacted too — a four-character key is still the key, and a
- * provider that quotes it back would otherwise hand it to any reader who can
- * probe the tool. They are matched only where they stand alone, though,
- * bounded by something other than a letter or digit. Not every value this
- * class is told about is a credential: `substitute` hands it whatever every
- * `${VAR}` in the manual resolved to, so a `${VERSION}` of `1` or a
- * `${REGION}` of `us` arrives here alongside the token. Blanking those
- * wherever their characters happened to fall would turn `answered 401` into
- * `answered 40[redacted]` and destroy the message that makes the verdict
- * useful — so the short ones may only match a run of their own.
- */
-class SecretRedactor {
-  private readonly values = new Set<string>();
-
-  remember(value: string): void {
-    // Blank is not a secret, and a blank needle matches everywhere: `''` would
-    // put `[redacted]` between every character of the message.
-    if (value.trim()) this.values.add(value);
-  }
-
-  redact(text: string): string {
-    let out = text;
-    // Longest SECRET first, and not merely the longest prefix of each: when one
-    // resolved value is a prefix of another (a key and that same key with a
-    // suffix), redacting the short one first eats the head of the long one and
-    // leaves its tail printed — the exact half-redaction this class exists to
-    // avoid, arrived at from the other direction.
-    for (const secret of [...this.values].sort((a, b) => b.length - a.length)) {
-      if (secret.length < MIN_SECRET_CHARS) {
-        out = out.replace(standingAlone(secret), REDACTED);
-        continue;
-      }
-      // Longest match first: replacing the whole value when it is present beats
-      // replacing a prefix of it and leaving the tail on screen.
-      const shortest = Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS);
-      for (let len = secret.length; len >= shortest; len--) {
-        const candidate = secret.slice(0, len);
-        if (!out.includes(candidate)) continue;
-        out = out.split(candidate).join(REDACTED);
-        break;
-      }
-    }
-    return out;
-  }
-}
-
-/**
- * `value`, wherever it appears as a run of its own.
- *
- * Both ends are guarded, unconditionally. An earlier version applied the guard
- * only where the value's own edge was a letter or a digit, reasoning that a
- * value ending in punctuation cannot hide inside a longer word — but a value
- * made ENTIRELY of punctuation then compiled to a bare, unanchored pattern: a
- * `${SEPARATOR}` of `.` turned every sentence period and every dot of every
- * hostname in the provider's message into `[redacted]`, which destroys the
- * quote this class exists to keep readable.
- *
- * The cost is a narrow one, and the right way round: a sub-six-character value
- * whose edge is punctuation and which the provider echoes glued to a word
- * character (`sk-ab` for a value of `-ab`) is not redacted. That intersection
- * is far rarer than a punctuation-shaped `${VAR}`, and over-redaction cannot be
- * recovered from by the reader while this miss still needs a credential short
- * enough to carry almost no secret in the first place. Values of six
- * characters or more never come here at all.
- */
-function standingAlone(value: string): RegExp {
-  // Letters and digits of ANY script are word characters here: a value that
-  // happens to be the tail of a provider's non-ASCII word (`clé`, `código`)
-  // must not be cut out of it.
-  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(value)}(?![\\p{L}\\p{N}])`, 'gu');
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Names — of a header or of a query parameter — whose value IS a credential
- * rather than a description of the request. Matched as substrings and on
- * purpose generously: a name wrongly treated as secret costs one blanked word
- * in an error message, while one wrongly treated as public costs the
- * credential. `signature` and `hmac` earn their place because a signed url
- * (`X-Amz-Signature`, an Azure SAS) grants access exactly as a bearer token
- * does — the secret is what derived it, and the derivation is what is sent.
- */
-const CREDENTIAL_MARKERS = [
-  'auth',
-  'key',
-  'token',
-  'secret',
-  'password',
-  'cookie',
-  'credential',
-  'signature',
-  'hmac',
-];
-
-/**
- * The same, for names too short to match as substrings: `sig` inside a word
- * would swallow `design`, `assign` and `signal`, and blanking those would eat
- * the message rather than protect anything in it.
- */
-const CREDENTIAL_WORDS = /(?:^|[-_])(sig|hash)(?:$|[-_])/;
-
-function carriesCredential(fieldName: string): boolean {
-  const name = fieldName.toLowerCase();
-  return CREDENTIAL_MARKERS.some((marker) => name.includes(marker)) || CREDENTIAL_WORDS.test(name);
-}
-
-/**
- * Remember a credential the manual spelled out in full.
- *
- * {@link ConnectionProbeService.substitute} only ever learns values it resolved
- * from the vault, so a `.tool` whose header reads `Authorization: Bearer sk-…`
- * rather than `Bearer ${TOKEN}` left the redactor with nothing to look for. That
- * is the one credential a reader has no other route to: `ToolManualSummary`
- * withholds `headers` from the browser for precisely this reason, and a
- * provider quoting it in a 401 would have handed it back regardless.
- *
- * What follows the auth scheme is remembered as well as the whole value,
- * because `Bearer sk-…` is echoed as the bare token far more often than in
- * full, and `Bearer` by itself is not worth blanking out of a message.
- */
-function rememberCredentialHeaders(headers: Record<string, unknown>, redactor: SecretRedactor): void {
-  for (const [name, value] of Object.entries(headers)) {
-    if (typeof value !== 'string' || !carriesCredential(name)) continue;
-    redactor.remember(value);
-    const afterScheme = /^\S+\s+(\S.*)$/.exec(value.trim());
-    if (afterScheme) redactor.remember(afterScheme[1]);
-  }
-}
-
-/**
- * The same, for a credential written into a query string (`?api_key=…`) rather
- * than a header. Only the values of credential-NAMED parameters: a rejection
- * usually names the endpoint it rejected, and blanking the url wholesale would
- * cost more of the message than it protects.
- */
-function rememberCredentialQuery(url: string, redactor: SecretRedactor): void {
-  let params: URLSearchParams;
-  try {
-    params = new URL(url).searchParams;
-  } catch {
-    return;
-  }
-  for (const [name, value] of params) {
-    if (carriesCredential(name)) redactor.remember(value);
   }
 }
 
