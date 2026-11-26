@@ -86,6 +86,7 @@ function judgeOf(
   decides: (wsPath: string | null, entryName: string) => boolean = () => false,
 ): ArchiveEntryJudge {
   return {
+    archive: async () => undefined,
     entry: guard,
     refusedAtLock: (_wsPath, err) => {
       if (!(err instanceof AccessDeniedError)) throw err;

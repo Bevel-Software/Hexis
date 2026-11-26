@@ -1543,8 +1543,9 @@ export function createWorkspaceRoutes(
       const branch = branchForWorkspaceId(id);
       // The archive is judged by the judge the agent `unzip` tool hands the
       // extraction (`archiveEntryJudge`, without the agent's own write hook
-      // and policy, which a person in the app never meets): the path rules
-      // and the platform's rule files before anything is written, and each
+      // and policy, which a person in the app never meets): whether the
+      // person may read the archive, before a byte of it is read; the path
+      // rules and the platform's rule files before anything is written; and each
       // file's write rule and read-before-write at its lock (an archive can
       // carry a path into a nested folder the caller cannot read, which the
       // destination check above cannot see). The files that pass go through

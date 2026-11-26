@@ -467,6 +467,28 @@ describe.each(doors)('an archive extracted through %s into a folder the person c
   });
 });
 
+describe.each(doors)('an archive the person cannot read, extracted through %s', (_door, start) => {
+  beforeEach(() => seed(BRANCH, { ...DRAFT_TREE, 'Finance/Sealed/payroll.zip': secretArchive() }));
+
+  it('is refused as read_file refuses it, into a folder they can read: nothing lands, and no entry is named', async () => {
+    const unzip = await start();
+    const before = await commitCount();
+
+    const res = await unzip({ path: `${KB}/Finance/Sealed/payroll.zip`, destination: `${KB}/Finance` });
+
+    expect(res.status).toBe(403);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ error: `You don't have permission to read "${KB}/Finance/Sealed/payroll.zip".` });
+    // Nothing the archive holds is named: not a file, not a folder.
+    expect(text).not.toMatch(/Secret|Budget|access\.md|Notes/);
+    expect(await commitCount()).toBe(before);
+    expect((await git(repoDir, 'status', '--porcelain', '--untracked-files=all')).trim()).toBe('');
+    expect(await exists('Finance/Secret')).toBe(false);
+    expect(await exists('Finance/Notes')).toBe(false);
+    expect(lockTable.held.size).toBe(0);
+  });
+});
+
 describe.each(doors)('an archive extracted through %s that carries a file read by its fixed name at the root', (_door, start) => {
   beforeEach(() => seed(BRANCH, DRAFT_TREE));
 

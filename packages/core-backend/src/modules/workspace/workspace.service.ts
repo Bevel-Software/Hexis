@@ -141,7 +141,16 @@ export class ArchiveRefusedError extends VersionControlDomainError {
 /**
  * How one archive's entries are judged, by both doors that land an archive
  * (the agent `unzip` tool and the app's unzip route, through `unzipFile`) and
- * by `apply_file_upload`. One judge answers three questions about an entry:
+ * by `apply_file_upload`. An extraction first asks one question about the
+ * archive itself:
+ *
+ *  - `archive`: may the caller read the archive at `wsPath`, asked by
+ *    `unzipFile` before it reads a byte of it. Throwing refuses the
+ *    extraction with what was thrown: nothing is written and no entry is
+ *    named. (`apply_file_upload` lands the caller's own upload, which is no
+ *    file of the knowledge base, and does not ask it.)
+ *
+ * Then one judge answers three questions about an entry:
  *
  *  - `entry`: may it be landed at all, asked before anything is locked or
  *    written. Throwing skips the entry with the thrown message; throwing
@@ -157,6 +166,7 @@ export class ArchiveRefusedError extends VersionControlDomainError {
  *    its name gives it no place.
  */
 export interface ArchiveEntryJudge {
+  archive(wsPath: string): Promise<void>;
   entry(wsPath: string, kind: 'file' | 'dir'): Promise<void>;
   refusedAtLock(wsPath: string, err: unknown): void;
   skipped(wsPath: string | null, entryName: string, why: unknown): ArchiveRefusedError | null;
@@ -2395,6 +2405,10 @@ export class WorkspaceService implements IWorkspaceService {
    * Extract a `.zip` file already present in the workspace into a destination
    * directory (defaults to the archive's parent directory — "unzip here").
    *
+   * Before a byte of the archive is read, the judge's `archive` is asked
+   * whether the caller may read it, and its refusal is the answer: nothing
+   * is written and no entry is named.
+   *
    * Every entry is judged first and nothing is written while it is: the
    * guards below, the zip-bomb caps and the `judge`'s `entry`. The files that
    * pass are then handed to `landing` in ONE call, and the directory entries
@@ -2433,6 +2447,9 @@ export class WorkspaceService implements IWorkspaceService {
     if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
       throw new VersionControlValidationError('Only .zip files can be extracted');
     }
+    // Extracting an archive reads it: one the caller may not read is refused
+    // before its bytes, or the place it would land, are looked at.
+    await judge?.archive(zipRelativePath);
 
     // Inferred from the NORMALISED archive path, so an archive named without
     // the prefix extracts beside itself inside the repository rather than at

@@ -3752,6 +3752,22 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(KB('Locked/free.md'))).toBe(false);
     });
 
+    it('copy_file refuses a source the caller cannot read as read_file refuses it, the dry run too, and copies nothing', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Secret/plan.md'), 'plan');
+      // A draft is not write-gated and the destination is readable: only the
+      // read gate on the source stands between the caller and the copy.
+      const args = { branch: 'someone/draft', src: KB('Secret/plan.md'), dest: KB('Sales/plan.md') };
+      const read = await call(base, 'read_file', { branch: args.branch, path: args.src });
+      expect(read.status).toBe(403);
+      for (const body of [{ ...args, dryRun: true }, args]) {
+        const res = await call(base, 'copy_file', body);
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual(read.body);
+      }
+      expect(await exists(args.dest)).toBe(false);
+    });
+
     it('a move the caller may not write: the dry run says so, the real call is a write-denied with proposal steps', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Locked/deal.md') };
@@ -4468,14 +4484,14 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(title).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
   });
 
-  /** Access control whose read verdict is `readable` and which records every call. */
-  const readVerdict = (readable: boolean | 'throws') => {
+  /** Access control whose read verdict is `readable` (for every path, or as it says per path) and which records every call. */
+  const readVerdict = (readable: boolean | 'throws' | ((rel: string) => boolean)) => {
     const calls: string[] = [];
     const ac = {
       canRead: async (_w: string, _u: string, rel: string) => {
         calls.push(rel);
         if (readable === 'throws') throw new Error('git failed');
-        return readable;
+        return typeof readable === 'function' ? readable(rel) : readable;
       },
       canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
       // The move/delete preflight asks these before it ever reaches the
@@ -4650,8 +4666,10 @@ describe('a write refused for permissions says whether and how to propose it', (
   // no-read one, sending the agent to another branch for the same refusal.
   // A move must read what it moves, so an unreadable source is a read
   // refusal before any write is judged: it has no write-denied answer.
+  // A copy must read its source too, so that one path stays readable here:
+  // the case is about the destination it may not write.
   it.each(CALLS.filter(([tool]) => tool !== 'move_file'))('%s: without read access the no-read sentence wins on a branch that takes no change requests too', async (tool, body) => {
-    const { ac } = readVerdict(false);
+    const { ac } = readVerdict((rel) => rel === 'a.md');
     const base = await start('write', ac);
     await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
     await fs.writeFile(DENIED, 'old text\n');

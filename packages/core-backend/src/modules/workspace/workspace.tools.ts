@@ -1189,8 +1189,9 @@ const isCallerRefusal = (err: unknown): err is Error & { status: number } =>
 /**
  * THE judge of an archive's entries (see `ArchiveEntryJudge`): the one the
  * agent `unzip` tool and the app's unzip route hand `unzipFile`, and the one
- * `apply_file_upload` asks about each path of an uploaded file. Per entry it
- * answers for:
+ * `apply_file_upload` asks about each path of an uploaded file. Of the archive
+ * itself it answers whether the caller may read it, refused as `read_file`
+ * refuses. Per entry it answers for:
  *
  *  - the path rules: inside the repository, never the git folder in any
  *    spelling, never the checkout's own name at the repository root;
@@ -1212,8 +1213,8 @@ const isCallerRefusal = (err: unknown): err is Error & { status: number } =>
  * `also` is the caller's own checks of each entry (the agent's write hook and
  * its run's write policy), asked after the path rules and the fixed-name rule;
  * what it throws is passed on as it is. A gate that fails rather than refuses
- * (anything but a 4xx), a folder's or a file's at its lock, is logged, and the
- * caller is told only that it could not be checked.
+ * (anything but a 4xx), the archive's read, a folder's or a file's at its
+ * lock, is logged, and the caller is told only that it could not be checked.
  */
 export function archiveEntryJudge(
   gates: { accessControl: IAccessControl; kb: KbContext; changeGate?: IChangeReadGate },
@@ -1251,6 +1252,17 @@ export function archiveEntryJudge(
     return new ToolError(what, 503);
   };
   return {
+    archive: async (wsPath) => {
+      try {
+        await assertCanRead(
+          { accessControl, kbDirName: kb.kbDirName, workspaceId: workspaceIdForBranch(branch), userEmail: email },
+          wsPath,
+        );
+      } catch (err) {
+        if (isCallerRefusal(err)) throw err;
+        throw unchecked('Whether this archive may be read could not be checked, so nothing was extracted.', wsPath, err);
+      }
+    },
     entry: async (wsPath, kind) => {
       // An entry that would land beside the repository is skipped with the
       // corrected-path reason, like any other refused entry.
@@ -1658,7 +1670,9 @@ export function registerWorkspaceTools(
    * preview answers `allowed: false` with the sentence and no `kind` or
    * `descendants`: those are the half of the impact the caller has to have
    * earned. The two `access` sides are the caller's own four verbs and tell
-   * them nothing they could not ask `file_stat` for.
+   * them nothing they could not ask `file_stat` for. Past the write verdict, a
+   * source the caller may not read is refused ({@link assertCopySourceReadable})
+   * before it is looked at.
    */
   const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
     const fromTmp = isTmpRef(src);
@@ -1686,6 +1700,7 @@ export function registerWorkspaceTools(
         copied: false,
       };
     }
+    await assertCopySourceReadable(branch, ctx, src);
     const fs = await ctx.getFilesystem(branch);
     // A tmp ref names one file by rule: resolving it is the whole look, and
     // a folder or nothing there is refused by the resolver itself.
@@ -1714,6 +1729,21 @@ export function registerWorkspaceTools(
       dryRun: true,
       copied: false,
     };
+  };
+
+  /**
+   * `copy_file`'s source must be readable to the caller, refused as
+   * `read_file` refuses it and as `move_file` refuses its own source: a copy
+   * carries the source's bytes to a place the caller may read. The read hook
+   * is asked first, as `read_file` asks it. A staged file (`__tmp__/`) is the
+   * caller's own, not a file of the knowledge base, and is not asked. Asked
+   * once the write verdict on the destination has let the copy go on, in the
+   * order `copy_file` keeps (see `copyImpact`).
+   */
+  const assertCopySourceReadable = async (branch: string, ctx: ToolContext, src: string): Promise<void> => {
+    if (isTmpRef(src)) return;
+    await notifyAgentRead(agentAccessGate, ctx, branch, src);
+    await assertCanRead(readGateFor(branch, ctx), src);
   };
 
   /**
@@ -4066,6 +4096,7 @@ export function registerWorkspaceTools(
       // answered, which is exactly the oracle.
       const blockedDest = await writeBlocked(branch, ctx, [dest]);
       if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0]);
+      await assertCopySourceReadable(branch, ctx, src);
       const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
       if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
       // The copy itself lands exclusively (`COPYFILE_EXCL`, under the
@@ -4156,7 +4187,9 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const zipPath = a.path as string;
       // Opening the archive is a read of the archive, so the read hook hears
-      // about it before a single entry is extracted out of it.
+      // about it before a single entry is extracted out of it. Whether the
+      // caller may read it is the judge's `archive`, which the extraction
+      // asks before it reads a byte.
       await notifyAgentRead(agentAccessGate, ctx, a.branch as string, zipPath);
       const branch = a.branch as string;
       // The landing is the filesystem's batch: every entry's lock, then one
