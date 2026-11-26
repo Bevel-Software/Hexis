@@ -95,6 +95,35 @@ export interface UnzipResult {
   skipped: { path: string; reason: string }[];
 }
 
+/**
+ * Where `unzipFile` lands an archive's files: `LockingFilesystem.writeFiles`,
+ * which takes every path's lock before it writes a byte and commits the whole
+ * set as one change. A lock it cannot take refuses the batch with nothing
+ * written, and a write or commit that fails commits nothing.
+ */
+export interface ArchiveLanding {
+  writeFiles(writes: { path: string; content: Buffer }[], summary: string): Promise<unknown>;
+}
+
+/**
+ * The landing's refusal when another holds a lock it needs, as the 409 an
+ * extraction answers, or null for any other failure. `writeFiles` raises it
+ * before writing anything, as a status-less error naming the path and the
+ * holder in a sentence that also says "continuing with other edits", which
+ * is not what happened here: the extraction stopped whole.
+ */
+function extractionLockedRefusal(err: unknown): VersionControlDomainError | null {
+  const held =
+    err instanceof Error
+      ? /^Skipped editing "(.*)" — locked by (.*)\. Continuing with other edits; try this one again later\.$/s.exec(err.message)
+      : null;
+  if (held === null) return null;
+  return new VersionControlDomainError(
+    `"${held[1]}" is being edited by ${held[2]}, so nothing was extracted. Try again once they are done.`,
+    409,
+  );
+}
+
 // Zip-bomb guardrails. The upload cap is 50 MB compressed; even a generous
 // 100× expansion ratio still fits inside these limits, so a well-behaved
 // archive will never trip them. They exist so a hostile or malformed zip
@@ -2316,26 +2345,32 @@ export class WorkspaceService implements IWorkspaceService {
   /**
    * Extract a `.zip` file already present in the workspace into a destination
    * directory (defaults to the archive's parent directory — "unzip here").
-   * Validation + zip-bomb guards are identical to the per-user version that
-   * preceded the workspace-per-branch migration.
+   *
+   * Every entry is judged first and nothing is written while it is: the
+   * guards below, the zip-bomb caps and the caller's `guardWrite`. The files
+   * that pass are then handed to `landing` in ONE call, and the directory
+   * entries that pass are created after it returns. With `LockingFilesystem`
+   * as the landing, the files that pass land as one commit: an archive's own
+   * `access.md` and the files beside it that passed too arrive together. A
+   * landing refused because another holds one of its paths' locks is
+   * answered as a 409 naming that path, and no directory entry is created.
+   *
+   * The files' bytes are all held in memory until they land: at most
+   * `UNZIP_MAX_TOTAL_BYTES` of entries, besides the archive itself.
    */
   async unzipFile(
     workspaceId: string,
     zipWsPath: string,
-    destDirWsPath?: string,
+    destDirWsPath: string | undefined,
     /**
      * Per-extracted-path write guard. Called with each entry's
-     * workspace-relative target before it is written; if it throws, the entry
-     * is skipped (with the thrown message as the reason) rather than aborting
-     * the whole extraction. Omitted by non-agent / human callers.
+     * workspace-relative target, before anything is written; if it throws,
+     * the entry is skipped (with the thrown message as the reason) rather
+     * than aborting the whole extraction.
      */
-    guardWrite?: (wsRelativePath: string) => Promise<void>,
-    /**
-     * Told each file's workspace-relative target once its bytes are on disk:
-     * what the caller may commit, even when the extraction fails after it.
-     * Directory entries are created, not written, and are never reported.
-     */
-    onWritten?: (wsRelativePath: string) => void,
+    guardWrite: ((wsRelativePath: string) => Promise<void>) | undefined,
+    /** Where the files land: one call, for every file that passed. */
+    landing: ArchiveLanding,
   ): Promise<UnzipResult> {
     const { workspaceDir, relativePath: zipRelativePath, absolutePath: zipAbsolute } =
       await this.resolveInsideRepo(workspaceId, zipWsPath);
@@ -2389,11 +2424,13 @@ export class WorkspaceService implements IWorkspaceService {
       throw new UnreadableArchiveError(err instanceof Error ? err.message : String(err));
     }
 
-    // The destination directory is created on demand by the first allowed entry
-    // (each guarded path mkdirs its parents with `recursive: true`). Creating it
-    // up front would leave it behind even when every entry is write-blocked.
+    // The destination directory is created by the landing, with the first
+    // file under it, or by a directory entry. Creating it up front would
+    // leave it behind even when every entry is write-blocked.
     const extracted: string[] = [];
     const skipped: UnzipResult['skipped'] = [];
+    const writes: { path: string; content: Buffer }[] = [];
+    const directories: string[] = [];
     let processedCount = 0;
     let totalUncompressed = 0;
 
@@ -2434,9 +2471,9 @@ export class WorkspaceService implements IWorkspaceService {
         .relative(workspaceDir, targetAbsolute)
         .replace(/\\/g, '/');
       // An entry the write guard refuses is skipped, not extracted, so an
-      // archive can't be a way around whatever the guard enforces. Runs before
-      // any filesystem side effect — including directory creation — so a
-      // refused entry leaves nothing behind on disk.
+      // archive can't be a way around whatever the guard enforces. Every
+      // entry is judged before anything is written, so a refused entry leaves
+      // nothing behind on disk.
       const allowEntry = async (): Promise<boolean> => {
         if (!guardWrite) return true;
         try {
@@ -2482,7 +2519,7 @@ export class WorkspaceService implements IWorkspaceService {
 
       if (entry.isDirectory) {
         if (!(await allowEntry())) continue;
-        await fs.mkdir(targetAbsolute, { recursive: true });
+        directories.push(targetAbsolute);
         continue;
       }
 
@@ -2535,13 +2572,29 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
       if (!(await allowEntry())) continue;
-      await fs.mkdir(path.dirname(targetAbsolute), { recursive: true });
-      await fs.writeFile(targetAbsolute, data);
+      writes.push({ path: relForReport, content: data });
       totalUncompressed += data.byteLength;
       extracted.push(relForReport);
-      onWritten?.(relForReport);
-      await this.diffService?.syncFromDisk(workspaceId, relForReport);
     }
+
+    // In the destination folder's turn, which `delete_folder` takes over the
+    // same subtree: a folder delete running between the landing creating the
+    // destination and its commit would remove the folder the files are
+    // landing in (see `apply_file_upload`, which lands the same way).
+    await this.withFolderTurn(workspaceId, destRel, async () => {
+      if (writes.length > 0) {
+        try {
+          await landing.writeFiles(
+            writes,
+            `Extract ${zipRelativePath} (${writes.length} file${writes.length === 1 ? '' : 's'})`,
+          );
+        } catch (err) {
+          throw extractionLockedRefusal(err) ?? err;
+        }
+      }
+      for (const dir of directories) await fs.mkdir(dir, { recursive: true });
+    });
+    for (const written of new Set(extracted)) await this.diffService?.syncFromDisk(workspaceId, written);
 
     return {
       destination: path.relative(workspaceDir, destAbsolute).replace(/\\/g, '/') || '.',

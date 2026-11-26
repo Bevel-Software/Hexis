@@ -85,6 +85,8 @@ async function makeHarness(): Promise<Harness> {
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
     releaseLockUntouched: vi.fn(async () => undefined as never),
+    // An archive's files land as one batch commit (`LockingFilesystem.writeFiles`).
+    commitChanges: vi.fn(async () => null),
   } as unknown as IVersionControlService;
 
   const stubCreatorAccess: ICreatorAccess = {

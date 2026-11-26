@@ -33,12 +33,12 @@ import type { VersionControlEventBus } from '../version-control/index.js';
 import { PathTraversalError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
-import { normalizeWorkspacePath } from '../kb-fs/index.js';
+import { LockingFilesystem, normalizeWorkspacePath } from '../kb-fs/index.js';
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/index.js'; // Express Request augmentation
-import type { SkillSaveCheck } from './workspace.tools.js';
+import { assertArchiveEntryWritable, type SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
 import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';
 
@@ -70,12 +70,13 @@ function requestPath(value: unknown): string | null {
  * workspace" ownership check.
  *
  * Every file-mutating route on this surface — `PUT /file`, `DELETE /file`,
- * `PATCH /file` (move), `POST /directory`, `POST /upload`, `POST /unzip` —
- * routes its write through `withLock(path, op)`: acquire the per-file
- * version-control lock, perform the op, then release. The release commits the
- * file as a one-file change attributed to the user and pushes it to origin,
- * exactly like the lock-aware filesystem the agent writes through. There
- * is no separate "share" step; save and share are fused.
+ * `PATCH /file` (move), `POST /directory`, `POST /upload` — routes its write
+ * through `withLock(path, op)`: acquire the per-file version-control lock,
+ * perform the op, then release. The release commits the file as a one-file
+ * change attributed to the user and pushes it to origin, exactly like the
+ * lock-aware filesystem the agent writes through. `POST /unzip` lands an
+ * archive's files through that filesystem's batch instead: every lock, then
+ * one commit. There is no separate "share" step; save and share are fused.
  */
 export function createWorkspaceRoutes(
   workspaceService: WorkspaceService,
@@ -90,10 +91,12 @@ export function createWorkspaceRoutes(
   /** Save-time skill check: `PUT /file` on a SKILL.md answers with `warnings` (advisory, never a refusal). */
   skillSaveCheck?: SkillSaveCheck,
   /**
-   * Read-before-write, asked ahead of the lock where a route puts bytes on
-   * disk BEFORE it locks them (archive extraction). Every other route's writes
-   * meet the same gate inside `acquireLock`. Optional so route harnesses that
-   * exercise other behaviour need not wire it.
+   * Read-before-write, asked ahead of the lock by archive extraction: of the
+   * destination, and of each entry, so an entry it refuses is skipped rather
+   * than refusing the whole batch inside its locking. `acquireLock` asks the
+   * same gate of every write lock it grants, a platform-file restore aside.
+   * Optional so route harnesses that exercise other behaviour need not wire
+   * it.
    */
   changeGate?: IChangeReadGate,
 ): express.Router {
@@ -1540,44 +1543,35 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
-      // The destination is asked about BEFORE anything is extracted: this is
-      // the one route whose bytes land on disk ahead of the lock, so the
-      // lock's read gate would find them already there. Same verdict, same
-      // refusal, one step earlier. A destination inside a folder the caller
-      // cannot read is refused whole; a folder they can read — or a new
-      // folder directly under a root — extracts, and each file then meets
-      // the lock as any other write does.
-      //
-      // A new root folder gets its creator's access.md seeded first, as
-      // every other creation route does: extraction would otherwise bring
-      // the folder into existence itself, and the first file's lock would
-      // then find an existing folder the caller cannot read.
-      // Both spellings are already repository paths, so the inferred parent is
-      // one too — the same destination the service resolves.
+      // The destination is asked about first, as a folder: one inside a
+      // folder the caller cannot read is refused whole, before the archive
+      // is opened. Both spellings are already repository paths, so the
+      // inferred parent is one too — the same destination the service
+      // resolves.
       const destDir = destination ?? path.posix.dirname(zipPath);
-      const plan = await creatorAccess.planForCreate(id, user, destDir, 'dir');
-      if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
       await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
-      // Extract first (all files land on disk), then sweep each extracted
-      // file through a lock+release so it commits + pushes as its own
-      // one-file change. Per-file commits mean the validator runs N times
-      // on large archives — fine for the typical "few files" drop, slow
-      // but correct for a 100-file zip. If a single file's release fails
-      // (e.g. validator 422), the loop stops there so the user sees the
-      // first concrete problem rather than a list of N similar failures.
-      //
-      // Each entry is asked about before it is written, through the same
-      // gate: an archive can carry a path into a nested folder the caller
-      // cannot read, which the destination check above cannot see. Such an
-      // entry is skipped and reported, never written and then refused.
-      const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
-        await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
-      });
-      for (const relFile of result.extracted) {
-        // The file is already on disk from the unzip; the release commits +
-        // pushes it.
-        await withLock(id, user, relFile, async () => undefined, { alreadyOnDisk: true });
-      }
+      const branch = branchForWorkspaceId(id);
+      // The archive lands as the agent `unzip` tool lands it: every entry is
+      // judged before anything is written, each against the lock's own gates
+      // (an archive can carry a path into a nested folder the caller cannot
+      // read, which the destination check above cannot see), and the files
+      // that pass go through the lock-aware filesystem's batch as this
+      // person: every lock, then one commit. A path whose lock is held
+      // refuses the whole extraction, with nothing written. Where the
+      // creator's read grant is planned for a new folder (`creatorAccess`),
+      // the batch lands it in that same commit.
+      const landing = new LockingFilesystem(
+        { basePath: await workspaceService.getWorkspacePath(id), contained: true },
+        { versionControl: versionControlService, workspaceId: id, branch, user, kbDirName, creatorAccess },
+      );
+      const result = await workspaceService.unzipFile(
+        id,
+        zipPath,
+        destination,
+        (entryPath) => assertArchiveEntryWritable({ accessControl, kb, changeGate }, branch, user.email, entryPath),
+        landing,
+      );
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
       res.json(result);
     } catch (err) {
       sendError(res, err);
