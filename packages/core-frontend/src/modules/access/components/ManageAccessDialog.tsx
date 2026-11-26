@@ -1444,8 +1444,9 @@ export function ManageAccessDialog({
    *
    * On a Denied row the whole Deny is lifted first, so the denials left behind
    * are only the ones the steps above write for this set. If a later step
-   * fails, the whole Deny is written back, so a failure never leaves the
-   * principal holding parent grants the set leaves off.
+   * fails, the dialog writes the whole Deny back. If that write fails too, the
+   * principal may still hold parent grants the set leaves off: the error says
+   * the Deny was not put back, and the reload shows what they hold.
    *
    * Order is broadest-verb-first for both halves; see {@link VERBS_BROADEST_FIRST}
    * for why neither half is safe in the other order. Each call answers with the
@@ -1536,12 +1537,16 @@ export function ManageAccessDialog({
           await step(() => grantAccess(workspaceId, { ...base, verb }));
         }
       } catch (err) {
-        setMutateError(err instanceof Error ? err.message : String(err));
-        // A write after the lift failed: put the whole Deny back. If that fails
-        // too, the error above stands and the reload shows what landed.
+        const message = err instanceof Error ? err.message : String(err);
+        setMutateError(message);
+        // A write after the lift failed: put the whole Deny back, and say so
+        // when that fails too, since the person may then hold the parent's grants.
         if (lifted) {
           await step(() => revokeAccess(workspaceId, { ...base, mode: 'deny-here' })).catch(
-            () => {},
+            (undo: unknown) =>
+              setMutateError(
+                `${message} The Deny could not be put back (${undo instanceof Error ? undo.message : String(undo)}): check what they hold below.`,
+              ),
           );
         }
         reload(); // re-sync on whatever the server actually holds now

@@ -1,14 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
 import { AccessMutationService } from '../access-mutation.service.js';
 import { resolveAccessView } from '../access-view.js';
-import type { Principal } from '../../access-model/access-splice.js';
+import type { Principal } from '../../access-model/index.js';
 
 /**
  * RESTRICTING BELOW A PARENT, END TO END THROUGH THE REAL RESOLVER.
@@ -91,7 +91,7 @@ describe('restricting below a parent keeps the principal reported', () => {
     await write(repo, 'groups.yaml', 'groups:\n  GTM Team:\n    - pat@example.com\n');
     await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n# Root\n');
     const ws = stubWorkspace(workspaceDir);
-    access = new AccessControlService(ws, KB, new NodeFs());
+    access = new AccessControlService(ws, KB, realDisk());
     mutation = new AccessMutationService(ws, access, KB);
   });
 

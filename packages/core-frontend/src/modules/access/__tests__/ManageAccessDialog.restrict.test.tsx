@@ -34,10 +34,14 @@ vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
   return { ...actual, ...api };
 });
-vi.mock('../../workspace/state/workspace.context', () => ({
+// The dialog reaches both modules through their entries; the doubles stand in
+// at those same entries, keeping everything else each entry exports.
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   useWorkspace: () => ({ workspaceId: 'ws-1', kbDirName: 'knowledge-base' }),
 }));
-vi.mock('../../auth/state/auth.context', () => ({
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   useAuth: () => ({ user: { email: 'me@x.com', name: 'Me' } }),
 }));
 
@@ -405,7 +409,31 @@ describe('ManageAccessDialog: Deny, and re-granting after it', () => {
       mode: 'deny-here',
     });
     expect(await screen.findByText(/push refused/)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be put back/)).not.toBeInTheDocument();
     expect(api.grantAccess).not.toHaveBeenCalled();
+  });
+
+  it('a Deny that cannot be put back says so, and the sheet reloads what landed', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(DENIED_HERE);
+    api.revokeAccess
+      .mockResolvedValueOnce(EDIT_FROM_PARENT) // the lift uncovers the parent's edit
+      .mockRejectedValueOnce(new Error('push refused')) // the re-deny of write fails
+      .mockRejectedValueOnce(new Error('lock held')); // writing the Deny back fails too
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('Alice');
+    const loadsBefore = api.fetchFileAccess.mock.calls.length;
+
+    const menu = await openRowMenu(user, /^denied here$/i);
+    await user.click(setItem(menu, /^can read$/i));
+
+    // The failed rollback is not swallowed: the error names both failures.
+    expect(
+      await screen.findByText(/push refused.*Deny could not be put back \(lock held\)/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.fetchFileAccess.mock.calls.length).toBeGreaterThan(loadsBefore),
+    );
   });
 
   it('Can edit on a denied PERSON whose parent grants edit lifts every denial and writes no new one', async () => {
