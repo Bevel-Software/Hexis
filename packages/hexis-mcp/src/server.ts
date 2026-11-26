@@ -34,6 +34,7 @@ import {
   toListedTool,
   toolError,
   installDownstreamToolErrors,
+  EXCLUDE_TOOLS_KEY,
   excludedToolNames,
   removeExcludedTools,
   seedBevelHostedManualVars,
@@ -335,9 +336,9 @@ function withReadOnlyHint(tool: ProxiedTool, hints: Readonly<Record<string, bool
  * the rest of the toolset must not pay for one broken server. The one
  * exception is a rejected connection key: that is not one broken server but a
  * dead credential for all of them, so it propagates and fails startup with
- * its own sentence.
+ * its own sentence. Exported for the stdio end-to-end test.
  */
-async function prepareLocalManuals(
+export async function prepareLocalManuals(
   config: HexisMcpConfig,
   templates: CallTemplate[],
   localOnly: ReadonlyMap<string, LocalManualInfo>,
@@ -345,8 +346,8 @@ async function prepareLocalManuals(
   const out: CallTemplate[] = [];
   const materialized = new Map<string, Awaited<ReturnType<typeof materializePlugin>>>();
   for (const template of templates) {
-    const config_ = (template as { config?: { mcpServers?: Record<string, StdioServerSpec & { transport?: string }> } })
-      .config;
+    type ServerEntry = StdioServerSpec & { transport?: string } & Partial<Record<typeof EXCLUDE_TOOLS_KEY, unknown>>;
+    const config_ = (template as { config?: { mcpServers?: Record<string, ServerEntry> } }).config;
     const servers = config_?.mcpServers ?? {};
     const stdioNames = Object.keys(servers).filter((k) => servers[k]?.transport === 'stdio');
     if (stdioNames.length === 0) {
@@ -365,8 +366,17 @@ async function prepareLocalManuals(
         console.error(`[hexis-mcp] materialized plugin "${folder}" at ${plugin.pluginRoot}`);
       }
       for (const name of stdioNames) {
-        const prepared = await prepareStdioSpec(servers[name]!, plugin);
-        servers[name] = { ...prepared, transport: 'stdio' };
+        const entry = servers[name]!;
+        const prepared = await prepareStdioSpec(entry, plugin);
+        // The prepared spec is what spawns; the tools the server leaves out
+        // ride beside it, as in every other server entry, so
+        // `excludedToolNames` still finds them when the tool list is built.
+        const exclude = entry[EXCLUDE_TOOLS_KEY];
+        servers[name] = {
+          ...prepared,
+          transport: 'stdio',
+          ...(exclude !== undefined ? { [EXCLUDE_TOOLS_KEY]: exclude } : {}),
+        };
       }
       out.push(template);
     } catch (err) {

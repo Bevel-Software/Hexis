@@ -237,6 +237,24 @@ describe('putServer', () => {
     expect(servers.vendor).toBeUndefined();
   });
 
+  it("keeps the server's excludeTools, which the form does not show, through a save and a rename", async () => {
+    const manifestWith = (excludeTools: unknown) => ({
+      name: 'gtm',
+      extensions: { 'software.bevel.hexis': { mcpServers: { vendor: { excludeTools } } } },
+    });
+    const extEntry = async (key: string) =>
+      (
+        (await readJson('Plugins/GTM/plugin.json')).extensions as Record<string, { mcpServers: Record<string, unknown> }>
+      )['software.bevel.hexis'].mcpServers[key];
+
+    await write('Plugins/GTM/plugin.json', manifestWith(['paid-a', 'paid-b']));
+    await svc.putServer(USER, 'vendor', { transport: 'streamable-http', description: 'Vendor tools' });
+    expect(await extEntry('vendor')).toEqual({ excludeTools: ['paid-a', 'paid-b'], description: 'Vendor tools' });
+
+    await svc.putServer(USER, 'vendor', { newName: 'vendor_eu', transport: 'streamable-http' });
+    expect(await extEntry('vendor_eu')).toEqual({ excludeTools: ['paid-a', 'paid-b'], description: 'Vendor tools' });
+  });
+
   it('refuses a rename onto a taken key with 409, committing nothing', async () => {
     // A second server occupies the target name.
     const mcp = await readJson('Plugins/GTM/mcp.json');

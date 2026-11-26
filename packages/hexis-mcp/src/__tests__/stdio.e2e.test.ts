@@ -8,8 +8,9 @@ import AdmZip from 'adm-zip';
 import '@utcp/mcp'; // side effect: registers the 'mcp' call-template protocol
 import { CallTemplateSerializer, UtcpClientConfigSerializer } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { registerManual } from '@bevel-software/platform-mcp-core';
+import { EXCLUDE_TOOLS_KEY, excludedToolNames, registerManual } from '@bevel-software/platform-mcp-core';
 import { FALLBACKS_DIR, materializePlugin, prepareStdioSpec } from '../materialize.js';
+import { prepareLocalManuals } from '../server.js';
 import type { HexisMcpConfig } from '../config.js';
 
 /**
@@ -253,6 +254,27 @@ describe('stdio end-to-end', () => {
       // Per-test dirs get per-test cleanup — the shared afterAll only owns `home`.
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("keeps a stdio server's left-out tools through local preparation", { timeout: 60_000 }, async () => {
+    const template = new CallTemplateSerializer().validateDict({
+      name: 'gtmprobe',
+      call_template_type: 'mcp',
+      config: {
+        mcpServers: {
+          probe: {
+            transport: 'stdio',
+            command: 'node',
+            args: ['${PLUGIN_ROOT}/bin/server.cjs'],
+            [EXCLUDE_TOOLS_KEY]: ['probe'],
+          },
+        },
+      },
+    });
+    const localOnly = new Map([['gtmprobe', { slug: 'gtmprobe', path: 'Plugins/GTM/mcp.json' }]]);
+    const [prepared] = await prepareLocalManuals(config, [template], localOnly);
+    expect(prepared).toBeDefined();
+    expect(excludedToolNames(prepared!)).toEqual(['gtmprobe.probe.probe']);
   });
 
   it('refuses an escaping cwd within the same composed flow', async () => {

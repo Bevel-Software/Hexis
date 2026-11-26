@@ -1,4 +1,4 @@
-import { branchAuthorLocalpart, suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
+import { ownDraftPrefixFor } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { ToolError } from '../tool-helpers/index.js';
 import { AccessDeniedError, toKbRelative } from '../access-model/index.js';
@@ -64,8 +64,7 @@ function reasonOf(err: AccessDeniedError): string {
  * manage and delete.
  */
 function draftNameFor(user: { email: string; id: string }, path: string): string {
-  const local = branchAuthorLocalpart(user.email);
-  const prefix = local !== null ? `${local}/` : suggestionsBranchPrefixFor(user);
+  const prefix = ownDraftPrefixFor(user);
   const base = path.split('/').filter(Boolean).pop() ?? 'change';
   const slug = base.toLowerCase().replace(/\.[a-z0-9]+$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'change';
   return `${prefix}propose-${slug}`;

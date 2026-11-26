@@ -284,10 +284,12 @@ describe('excludeTools in the plugin.json extension', () => {
     expect(notion?.excludeTools).toEqual(['notion-spawn-session', 'notion-stop-session']);
   });
 
-  it('leaves the field off a server that excludes nothing', () => {
-    const [notion] = fromMcpJson('Support', MCP, null);
-    expect(notion).toBeDefined();
-    expect(notion?.excludeTools).toBeUndefined();
+  it('leaves the field off a server that excludes nothing: no list, or an empty one', () => {
+    for (const manifest of [null, manifestWith([])]) {
+      const [notion] = fromMcpJson('Support', MCP, manifest);
+      expect(notion).toBeDefined();
+      expect(notion?.excludeTools).toBeUndefined();
+    }
   });
 
   it('keeps a server with a malformed list offline instead of offering every tool', () => {

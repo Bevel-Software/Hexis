@@ -58,9 +58,11 @@ export interface IVersionControlService {
   createBranch(workspaceId: string, name: string, fromBase?: string): Promise<Branch>;
   /**
    * The name a draft `user` asks for as `name` is created under. A bare name
-   * (no `/`) that `user` could not delete once it exists comes back as
-   * `<email-localpart>/<name>`, so the person who made a draft can always
-   * remove it; every other name comes back unchanged. An agent rarely knows
+   * (no `/`) that is not protected and that `user` could not delete once it
+   * exists comes back with their own draft prefix (`ownDraftPrefixFor`:
+   * `<email-localpart>/`, else their `suggestions/` prefix), so the person who
+   * made a draft can remove it; every other name comes back unchanged, and a
+   * protected one is then refused by `createBranch`. An agent rarely knows
    * the person's email, so it cannot be relied on to add the prefix itself.
    */
   draftNameFor(workspaceId: string, name: string, user: AuthUser): Promise<string>;

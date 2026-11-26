@@ -65,6 +65,7 @@ import {
   isPlatformRestoreShape,
   CHANGE_REQUEST_DESCRIPTION_MAX,
   CHANGE_REQUEST_TITLE_MAX,
+  ownDraftPrefixFor,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { readableAtCommits, ReadOnBranchDeniedError } from './read-on-branch.js';
@@ -89,7 +90,7 @@ import {
   type ChangeRequestPerson,
   type IChangeRequestHooks,
 } from './change-request-hooks.js';
-import { WorkspaceMutex, assertValidBranchName, branchAuthorLocalpart } from '../kb-fs/index.js';
+import { WorkspaceMutex, assertValidBranchName } from '../kb-fs/index.js';
 import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   BranchAuthorshipError,
@@ -401,10 +402,11 @@ export class VersionControlService implements IVersionControlService {
   }
 
   async draftNameFor(workspaceId: string, name: string, user: AuthUser): Promise<string> {
-    if (name.includes('/')) return name;
-    if (await this.git.mayDeleteBranch(workspaceId, name, user)) return name;
-    const localpart = branchAuthorLocalpart(user.email);
-    return localpart ? `${localpart}/${name}` : name;
+    // A protected name stays as asked, so `createBranch` refuses it rather
+    // than this turning the refusal into a draft nobody meant.
+    if (name.includes('/') || this.kb.isProtectedBranch(name)) return name;
+    if (await this.mayDelete(workspaceId, name, user)) return name;
+    return `${ownDraftPrefixFor(user)}${name}`;
   }
 
   createBranch(workspaceId: string, name: string, fromBase?: string): Promise<Branch> {

@@ -622,6 +622,48 @@ describe('proxied third-party MCP servers: the downstream pool', () => {
     expect(res.isError).toBeFalsy();
     expect(downstream.initializations()).toBe(2);
   });
+
+  it('a tool the manual leaves out is neither listed nor reached, even by name through the chain bridge', async () => {
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [
+        { name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+        { name: 'paid', description: 'paid', inputSchema: { type: 'object', properties: {} } },
+      ],
+    });
+    const url = downstream.url;
+    const { baseUrl } = await startPlatform({
+      manualsFor: () => [
+        {
+          name: 'notion',
+          call_template_type: 'mcp',
+          config: { mcpServers: { srv: { transport: 'http', url, exclude_tools: ['paid'] } } },
+        },
+      ],
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain('notion_srv_echo');
+    expect(names).not.toContain('notion_srv_paid');
+
+    // The chain's bridge takes any name, past the bindings it generates; the
+    // pooled connection behind the route still has the tool. The route refuses
+    // it before it reaches the server.
+    const bridged = (name: string, args: unknown) =>
+      client.callTool({
+        name: 'call_tool_chain',
+        arguments: {
+          code: `return __callToolRef.applySyncPromise(undefined, [${JSON.stringify(name)}, ${JSON.stringify(JSON.stringify(args))}]);`,
+        },
+      });
+    const refused = JSON.parse(JSON.parse(toolText(await bridged('notion.srv.paid', {}))).result as string);
+    expect(refused).toEqual({ success: false, error: "Tool 'notion.srv.paid' not found in the repository." });
+    expect(downstream.executions()).toBe(0);
+
+    // The sibling, through the same bridge and route, is reached.
+    const reached = JSON.parse(JSON.parse(toolText(await bridged('notion.srv.echo', { text: 'hi' }))).result as string);
+    expect(reached.success).toBe(true);
+    expect(downstream.executions()).toBe(1);
+  });
 });
 
 describe('proxied third-party MCP servers: a rejected token gets one refresh and a retry', () => {

@@ -70,6 +70,18 @@ export function suggestionsBranchPrefixFor(user: { email: string; id: string }):
 }
 
 /**
+ * The prefix that makes a draft `user`'s own, to manage and delete later:
+ * `<email-localpart>/`, or, for an address with no usable localpart, their
+ * {@link suggestionsBranchPrefixFor} prefix, which exists for every signed-in
+ * user. {@link isBranchAuthoredBy} or {@link isOwnSuggestionsBranch}
+ * recognises either as theirs.
+ */
+export function ownDraftPrefixFor(user: { email: string; id: string }): string {
+  const local = branchAuthorLocalpart(user.email);
+  return local !== null ? `${local}/` : suggestionsBranchPrefixFor(user);
+}
+
+/**
  * True when `branchName` is one of THIS user's suggestion branches — the
  * authorship rule for the `suggestions/…` namespace, where the plain
  * `<localpart>/` convention of {@link isBranchAuthoredBy} does not apply.

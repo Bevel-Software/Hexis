@@ -34,8 +34,12 @@ const echo: ProxiedTool = {
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => {});
+  // Every cleanup runs even when one fails, and a failure fails the test:
+  // a server left running would otherwise leak into the next one unseen.
+  const failures: unknown[] = [];
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch((err: unknown) => failures.push(err));
   CommunicationProtocol.communicationProtocolFactories['mcp'] = stockFactory;
+  if (failures.length > 0) throw new AggregateError(failures, 'test cleanup failed');
 });
 
 async function clientFor(url: string): Promise<CodeModeUtcpClient> {

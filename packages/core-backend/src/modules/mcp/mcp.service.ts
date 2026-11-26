@@ -2235,10 +2235,22 @@ function routeToDownstream(client: CodeModeUtcpClient, routes: ReadonlyMap<strin
   const callTool = client.callTool.bind(client);
   const callToolStreaming = client.callToolStreaming.bind(client);
   const routeOf = (toolName: string) => routes.get(toolName.split('.')[0] ?? '');
+  // A routed call reaches only a tool this request's client still holds, as an
+  // unrouted one does. The pooled client holds every tool its server lists;
+  // this client holds the surface: that list minus what was taken off it (a
+  // manual's `excludeTools`, a tool hidden for an invalid schema). Without the
+  // check, a chain's tool bridge could still call such a tool by name. The
+  // refusal is the one UTCP's own `callTool` gives a tool missing from the repository.
+  const assertOnSurface = async (toolName: string) => {
+    if (!(await client.config.tool_repository.getTool(toolName))) {
+      throw new Error(`Tool '${toolName}' not found in the repository.`);
+    }
+  };
 
   client.callTool = async function routedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
     const route = routeOf(toolName);
     if (!route) return callTool(toolName, toolArgs);
+    await assertOnSurface(toolName);
     const once = async () => {
       const lease = await route.acquire();
       try {
@@ -2265,6 +2277,7 @@ function routeToDownstream(client: CodeModeUtcpClient, routes: ReadonlyMap<strin
       yield* callToolStreaming(toolName, toolArgs);
       return;
     }
+    await assertOnSurface(toolName);
     const once = async function* () {
       const lease = await route.acquire();
       try {
