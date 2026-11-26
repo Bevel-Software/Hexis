@@ -145,7 +145,7 @@ export function FileChangeBoxes({
             blocked={blockedCrs.has(cr.number)}
             conflictPrompt={conflictResolutionPrompt(cr)}
             refusal={refusalLine(cr, applying.refusals)}
-            awaitingOthers={applying.awaiting.get(cr.number) ?? null}
+            awaitingOthers={applying.waitingOn(cr.number, repoRelativePath)}
             owner={ownersLabel}
             othersPending={othersPending}
             busy={busyCr === cr.number || applying.activeCr === cr.number}

@@ -62,9 +62,10 @@ export interface ChangeBoxProps {
    */
   refusal?: string | null;
   /**
-   * The viewer's Approve on this file was recorded, and the request still
-   * waits on this many other files before it applies. Withdraws Approve:
-   * there is nothing more to approve here.
+   * The viewer pressed Approve on this file and the request then still waited
+   * on this many other files, so it did not apply. A note about that press,
+   * not the request's state now: the button stays, as Apply, and pressing it
+   * checks again and applies if nothing waits any more.
    */
   awaitingOthers?: number | null;
   /** Who the decision is waiting on, for the non-owner's footer. */
@@ -225,13 +226,13 @@ export function ChangeBox({
                   ? 'Recording your approval…'
                   : 'Applying the change…'
                 : awaitingOthers !== null
-                  ? 'You approved this file'
+                  ? 'Waiting on other files'
                   : 'Pending approval'}
             </span>
             {!busy && (
               <span className="text-meta text-ink-faint">
                 {awaitingOthers !== null
-                  ? `The change applies once ${awaitingOthers} other ${awaitingOthers === 1 ? 'file is' : 'files are'} approved.`
+                  ? `When you last pressed, ${awaitingOthers} other ${awaitingOthers === 1 ? 'file' : 'files'} still needed approval.`
                   : canDecide
                   ? othersPending === undefined
                     ? 'You can decide this.'
@@ -268,15 +269,17 @@ export function ChangeBox({
               declining kills the WHOLE request, and approving consents to a
               change this panel is not displaying. "Read the whole change" is
               the honest route to that decision. Approve binds this file only;
-              the request applies once no other file waits. */}
+              the request applies once no other file waits. After a press that
+              found other files waiting it reads Apply: another viewer may
+              approve them meanwhile, and only a new press can tell. */}
           {canDecide && !upToDate && onDecline && (
             <Button variant="quiet" size="tiny" onClick={onDecline} disabled={busy}>
               Decline
             </Button>
           )}
-          {canDecide && !upToDate && !blocked && awaitingOthers === null && onApprove && (
+          {canDecide && !upToDate && !blocked && onApprove && (
             <Button variant="primary" size="tiny" onClick={onApprove} disabled={busy}>
-              {busy ? busyLabel : 'Approve'}
+              {busy ? busyLabel : awaitingOthers !== null ? 'Apply' : 'Approve'}
             </Button>
           )}
         </span>

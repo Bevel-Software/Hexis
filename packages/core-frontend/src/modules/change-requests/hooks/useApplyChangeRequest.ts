@@ -65,10 +65,14 @@ export interface ApplyChangeRequest {
   /** Refusals by change-request number, from the attempt that produced them. */
   refusals: Map<number, ApplyRefusal>;
   /**
-   * Requests where this tab recorded a file-bound approval (`apply(cr, path)`)
-   * and stopped short of applying: how many files the gate still waits on.
+   * What this tab's last `apply(cr, path)` found for `path` when it stopped
+   * short of applying: how many other files the gate still waited on. `null`
+   * for every other file, and for a request this tab has not stopped on. It
+   * records that press and is never a verdict: the server may have moved
+   * since, so a box shows it as a note and keeps its button, and the next
+   * press reads the server again.
    */
-  awaiting: Map<number, number>;
+  waitingOn(crNumber: number, path: string): number | null;
   /**
    * Without `path`: approve every file the gate binds that this viewer may
    * approve, then apply. That is the dialog's Apply, offered only when the
@@ -119,7 +123,7 @@ export function useApplyChangeRequest(opts: {
   const [activeCr, setActiveCr] = useState<number | null>(null);
   const [phase, setPhase] = useState<ApplyPhase>('idle');
   const [refusals, setRefusals] = useState<Map<number, ApplyRefusal>>(new Map());
-  const [awaiting, setAwaiting] = useState<Map<number, number>>(new Map());
+  const [awaiting, setAwaiting] = useState<Map<number, { path: string; others: number }>>(new Map());
 
   /**
    * The in-flight change-request number, as a ref as well as state. Merging is
@@ -218,17 +222,18 @@ export function useApplyChangeRequest(opts: {
 
           let approvals = detail.approvals;
           if (path !== undefined) {
-            // The one file on screen. A refusal here is about the file the
-            // person asked to approve, so it reaches them instead of being
-            // skipped.
-            if (!approvals.find((a) => a.path === path)?.isApproved) {
+            // The one file on screen, approved only when the gate binds it, as
+            // in the loop below. A refusal here is about the file the person
+            // asked to approve, so it reaches them instead of being skipped.
+            const own = approvals.find((a) => a.path === path);
+            if (own?.inMergeGate && !own.isApproved) {
               approvals = await approvePrFile(cr.number, path);
               if (runningRef.current !== cr.number) return;
             }
             const pending = approvals.filter((a) => a.inMergeGate && !a.isApproved).length;
             if (pending > 0) {
               stop();
-              setAwaiting((m) => new Map(m).set(cr.number, pending));
+              setAwaiting((m) => new Map(m).set(cr.number, { path, others: pending }));
               return;
             }
           } else {
@@ -293,7 +298,15 @@ export function useApplyChangeRequest(opts: {
     [fail, succeed, stop],
   );
 
-  return { activeCr, phase, refusals, awaiting, apply };
+  const waitingOn = useCallback(
+    (crNumber: number, path: string) => {
+      const w = awaiting.get(crNumber);
+      return w && w.path === path ? w.others : null;
+    },
+    [awaiting],
+  );
+
+  return { activeCr, phase, refusals, waitingOn, apply };
 }
 
 /** `m` without `key`; the same map when it had none, so nothing re-renders. */

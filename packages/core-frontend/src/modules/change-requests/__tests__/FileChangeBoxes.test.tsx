@@ -187,15 +187,79 @@ describe('FileChangeBoxes: Approve binds the file on screen', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
 
-    expect(await screen.findByText('You approved this file')).toBeInTheDocument();
-    expect(screen.getByText('The change applies once 1 other file is approved.')).toBeInTheDocument();
+    expect(await screen.findByText('Waiting on other files')).toBeInTheDocument();
+    expect(screen.getByText('When you last pressed, 1 other file still needed approval.')).toBeInTheDocument();
     expect(api.approvePrFile).toHaveBeenCalledTimes(1);
     expect(api.approvePrFile).toHaveBeenCalledWith(CR.number, PATH);
     expect(api.approvePrFile).not.toHaveBeenCalledWith(CR.number, OTHER);
     expect(api.mergePullRequest).not.toHaveBeenCalled();
-    // Nothing left to approve here, so the button goes.
-    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
     expect(screen.queryByText('Published: the file now reads with that change.')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The note records a press; it never withholds the button. Another viewer
+   * may approve the other file meanwhile and this tab hears nothing of it, so
+   * the next press reads the server again and applies.
+   */
+  it('applies on the next press once the other file was approved elsewhere', async () => {
+    api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, false)]);
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await screen.findByText('Waiting on other files');
+
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [approval(PATH, true), approval(OTHER, true)],
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => expect(api.mergePullRequest).toHaveBeenCalledWith(CR.number));
+    expect(api.approvePrFile).toHaveBeenCalledTimes(1);
+  });
+
+  /** The note belongs to the file it was pressed on, not to the request. */
+  it('keeps the note off another file of the same request', async () => {
+    api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, false)]);
+    const both = { ...CR, touchedNodePaths: [PATH, OTHER] } as PullRequestSummary;
+    const bus = makeFakeBus();
+    const tree = (path: string) => (
+      <EventBusContext.Provider value={bus}>
+        <OpenChangeRequestsContext.Provider value={NO_CHANGE_REQUESTS}>
+          <FileChangeBoxes
+            repoRelativePath={path}
+            requests={[both]}
+            canDecide
+            ownersLabel="Docs"
+            onApplied={() => {}}
+          />
+        </OpenChangeRequestsContext.Provider>
+      </EventBusContext.Provider>
+    );
+    const { rerender } = render(tree(PATH));
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await screen.findByText('Waiting on other files');
+
+    rerender(tree(OTHER));
+
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument();
+    expect(screen.getByText('Pending approval')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting on other files')).not.toBeInTheDocument();
+  });
+
+  /** A file the gate does not bind gets no approval record, as in the dialog. */
+  it('records no approval on a file outside the merge gate', async () => {
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [{ ...approval(PATH, false), inMergeGate: false }, approval(OTHER, true)],
+    });
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => expect(api.mergePullRequest).toHaveBeenCalledWith(CR.number));
+    expect(api.approvePrFile).not.toHaveBeenCalled();
   });
 
   it('applies when this file was the last one the request waited on', async () => {
@@ -224,7 +288,7 @@ describe('FileChangeBoxes: Approve binds the file on screen', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
 
-    expect(await screen.findByText('The change applies once 1 other file is approved.')).toBeInTheDocument();
+    expect(await screen.findByText('When you last pressed, 1 other file still needed approval.')).toBeInTheDocument();
     expect(api.approvePrFile).not.toHaveBeenCalled();
     expect(api.mergePullRequest).not.toHaveBeenCalled();
   });

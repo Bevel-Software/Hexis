@@ -750,6 +750,7 @@ describe('SkillPage', () => {
    */
   it('hides the Owner badge from a writer who is not an owner, and keeps their editor affordances', async () => {
     const writer = libraryValue(false, [foreignCr], [], true);
+    accessMock.result = { ...accessMock.result, canWrite: true };
     renderPage(false, [foreignCr], [], makeFakeBus(), undefined, {
       items: writer.items,
       writableSkills: writer.writableSkills,
@@ -1151,6 +1152,27 @@ describe('SkillPage: proposing a change', () => {
 });
 
 describe('SkillPage: deciding on a change', () => {
+  // Approve binds the file on screen, so it asks that file's own write grant.
+  beforeEach(() => {
+    accessMock.result = { ...accessMock.result, canWrite: true };
+  });
+
+  /**
+   * A file restricted below the skill folder: the skill's writer may not
+   * approve it, so the box offers no Approve that the gate would refuse.
+   * Decline stays: it answers for the whole request, as before.
+   */
+  it('offers no Approve on a file the viewer may not write, even to a writer of the skill', async () => {
+    accessMock.result = { ...accessMock.result, canWrite: false };
+    renderPage(true, [foreignCr]);
+
+    expect(await screen.findByRole('button', { name: 'Decline' })).toBeInTheDocument();
+    await waitFor(() => expect(accessMock.fetchFileAccess).toHaveBeenCalled());
+    await act(async () => {});
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(apiMock.approvePrFile).not.toHaveBeenCalled();
+  });
+
   it("shows a non-owner the change box without a verdict, and names who decides", async () => {
     renderPage(false, [foreignCr]);
 
@@ -1459,6 +1481,8 @@ describe('SkillPage: deciding on a change', () => {
       touchedNodePaths: [],
     } as unknown as PullRequestSummary;
 
+    // A reader of the file: the propose path, not Edit.
+    accessMock.result = { ...accessMock.result, canWrite: false };
     renderPage(false, [uncomputed], [uncomputed.number]);
     fireEvent.click(await screen.findByRole('button', { name: 'Propose changes' }));
 
@@ -1484,6 +1508,7 @@ describe('SkillPage: deciding on a change', () => {
   });
 
   it('offers the author Withdraw AND the way to keep editing their proposal', async () => {
+    accessMock.result = { ...accessMock.result, canWrite: false };
     renderPage(false, [foreignCr], [7]);
 
     const withdraw = await screen.findByRole('button', { name: 'Withdraw' });
