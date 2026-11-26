@@ -497,6 +497,24 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/b.md', USER);
   });
 
+  it('writeFiles gives back the locks it holds, untouched, when taking a later one throws', async () => {
+    const versionControl = makeVersionControl();
+    const refusal = Object.assign(new Error('no write access'), { status: 403 });
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w, _b, p: string) => {
+      if (p === 'knowledge-base/b.md') throw refusal;
+      return { acquired: true, lock: { holderName: 'Alice' } };
+    });
+    await expect(
+      layer(versionControl).writeFiles(
+        [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }],
+        'batch',
+      ),
+    ).rejects.toBe(refusal);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/a.md', USER);
+    await expect(fs.access(path.join(root, 'knowledge-base/a.md'))).rejects.toThrow();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+  });
+
   it('a writeFiles check that drops EVERY write commits nothing and releases everything untouched', async () => {
     const versionControl = makeVersionControl();
     const change = await layer(versionControl).writeFiles(

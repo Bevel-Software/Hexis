@@ -114,9 +114,8 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
     expect(treeEvents()[0]).not.toHaveProperty('listingUnchanged');
   };
 
-  it('an unzip, whose files are on disk before their locks, says nothing: the tree is asked for', async () => {
-    // The archive's entries replace nothing here, yet by the time each file
-    // meets its lock it is on disk, so "the same before and after" would hold.
+  it('an unzip says nothing about the listing: the tree is asked for', async () => {
+    // An archive adds files, so no event of its extraction may say the listing is unchanged.
     const res = await fetch(`${baseUrl}/api/workspace/${WS}/unzip`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

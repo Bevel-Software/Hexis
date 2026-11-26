@@ -124,23 +124,22 @@ function extractionLockedRefusal(err: unknown): VersionControlDomainError | null
   );
 }
 
-// Zip-bomb guardrails. The upload cap is 50 MB compressed; even a generous
-// 100× expansion ratio still fits inside these limits, so a well-behaved
-// archive will never trip them. They exist so a hostile or malformed zip
-// can't run the container out of disk by inflating to gigabytes.
-const UNZIP_MAX_ENTRIES = 10_000;
+// What one archive may land as one commit: an extraction (`unzipFile`) and an
+// apply (`apply_file_upload`) both hold every entry's bytes in memory until
+// that commit, so the property that makes the landing atomic is the one that
+// makes a zip bomb expensive. These bound what one archive may expand into;
+// an entry past them is skipped with the reason, and nothing else changes.
+export const ONE_COMMIT_MAX_ENTRIES = 5_000;
+export const ONE_COMMIT_MAX_TOTAL_BYTES = 128 * 1024 * 1024; // 128 MB uncompressed
 const UNZIP_MAX_ENTRY_BYTES = 100 * 1024 * 1024; // 100 MB per file
-const UNZIP_MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500 MB across the whole archive
 
 // Folder-download cap. The whole zip is built in memory by adm-zip (no
 // streaming) so the cap also bounds peak heap usage for one download.
-// Reuses the unzip total as a single "fits in a workspace" budget.
-export const ZIP_DOWNLOAD_MAX_BYTES = UNZIP_MAX_TOTAL_BYTES;
+export const ZIP_DOWNLOAD_MAX_BYTES = 500 * 1024 * 1024;
 
-// How many files one agent download request may carry: what one zip may hold
-// for `apply_file_upload` to unzip it back, and a bound on the lists a
+// How many files one agent download request may carry: a bound on the lists a
 // request builds before anything is judged.
-export const DOWNLOAD_MAX_FILES = UNZIP_MAX_ENTRIES;
+export const DOWNLOAD_MAX_FILES = 10_000;
 
 /**
  * Which of a folder's files a zip may pack: handed every file the walk found
@@ -2356,7 +2355,7 @@ export class WorkspaceService implements IWorkspaceService {
    * answered as a 409 naming that path, and no directory entry is created.
    *
    * The files' bytes are all held in memory until they land: at most
-   * `UNZIP_MAX_TOTAL_BYTES` of entries, besides the archive itself.
+   * `ONE_COMMIT_MAX_TOTAL_BYTES` of entries, besides the archive itself.
    */
   async unzipFile(
     workspaceId: string,
@@ -2435,10 +2434,10 @@ export class WorkspaceService implements IWorkspaceService {
     let totalUncompressed = 0;
 
     for (const entry of zip.getEntries()) {
-      if (processedCount >= UNZIP_MAX_ENTRIES) {
+      if (processedCount >= ONE_COMMIT_MAX_ENTRIES) {
         skipped.push({
           path: entry.entryName,
-          reason: `Archive exceeds ${UNZIP_MAX_ENTRIES} entries`,
+          reason: `Archive exceeds ${ONE_COMMIT_MAX_ENTRIES} entries`,
         });
         continue;
       }
@@ -2531,10 +2530,10 @@ export class WorkspaceService implements IWorkspaceService {
         });
         continue;
       }
-      if (totalUncompressed + declaredSize > UNZIP_MAX_TOTAL_BYTES) {
+      if (totalUncompressed + declaredSize > ONE_COMMIT_MAX_TOTAL_BYTES) {
         skipped.push({
           path: rawName,
-          reason: `Archive exceeds ${UNZIP_MAX_TOTAL_BYTES} byte total uncompressed limit`,
+          reason: `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`,
         });
         continue;
       }
@@ -2547,7 +2546,7 @@ export class WorkspaceService implements IWorkspaceService {
       // entry's refusal rather than the whole archive's.
       const read = readZipEntry(
         entry,
-        Math.min(UNZIP_MAX_ENTRY_BYTES, UNZIP_MAX_TOTAL_BYTES - totalUncompressed),
+        Math.min(UNZIP_MAX_ENTRY_BYTES, ONE_COMMIT_MAX_TOTAL_BYTES - totalUncompressed),
       );
       if (!read.ok && read.reason === 'unreadable') {
         skipped.push({ path: rawName, reason: `Entry could not be read: ${read.detail}` });
@@ -2557,17 +2556,17 @@ export class WorkspaceService implements IWorkspaceService {
         skipped.push({
           path: rawName,
           reason:
-            totalUncompressed + UNZIP_MAX_ENTRY_BYTES > UNZIP_MAX_TOTAL_BYTES
-              ? `Archive exceeds ${UNZIP_MAX_TOTAL_BYTES} byte total uncompressed limit`
+            totalUncompressed + UNZIP_MAX_ENTRY_BYTES > ONE_COMMIT_MAX_TOTAL_BYTES
+              ? `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`
               : `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
         });
         continue;
       }
       const data = read.data;
-      if (totalUncompressed + data.byteLength > UNZIP_MAX_TOTAL_BYTES) {
+      if (totalUncompressed + data.byteLength > ONE_COMMIT_MAX_TOTAL_BYTES) {
         skipped.push({
           path: rawName,
-          reason: `Archive exceeds ${UNZIP_MAX_TOTAL_BYTES} byte total uncompressed limit`,
+          reason: `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`,
         });
         continue;
       }

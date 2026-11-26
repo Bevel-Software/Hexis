@@ -260,13 +260,6 @@ export function createWorkspaceRoutes(
     options?: {
       skipFsTreeEvent?: boolean;
       /**
-       * The op writes nothing itself: the bytes were put on disk before this
-       * call (an unzip's extracted files), and the lock only carries them to a
-       * commit. The events then say nothing about the listing, since what was
-       * there before is no longer known here.
-       */
-      alreadyOnDisk?: boolean;
-      /**
        * This acquire is the destination side of an admin putting a misplaced
        * platform file back, coming from `source`. Passed straight to
        * `acquireLock`, which VERIFIES both halves — that the move is a restore
@@ -295,9 +288,6 @@ export function createWorkspaceRoutes(
     // back what was there before that save would be announced as changing
     // nothing.
     const mark = async (before: string | null): Promise<{ listingUnchanged?: true }> => {
-      // Bytes that were on disk before this call cannot be compared with what
-      // they replaced: nothing is said, so the tree is asked for.
-      if (options?.alreadyOnDisk) return {};
       if (before === null || decidesListing(toKbRelative(targetPath, kbDirName) ?? targetPath, kb.layout.pluginsDir)) return {};
       return (await listingProbe(workspaceId, targetPath)) === before ? { listingUnchanged: true } : {};
     };

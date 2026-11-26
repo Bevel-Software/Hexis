@@ -792,7 +792,15 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       let holderName: string | null = null;
       let ok = false;
       for (let attempt = 0; attempt < ACQUIRE_RETRY_ATTEMPTS; attempt++) {
-        const result = await versionControl.acquireLock(workspaceId, branch, p, user);
+        let result: Awaited<ReturnType<typeof versionControl.acquireLock>>;
+        try {
+          result = await versionControl.acquireLock(workspaceId, branch, p, user);
+        } catch (err) {
+          // A gate's refusal or a failure: the locks already held go back
+          // untouched, as for a held one, before the error goes on.
+          await releaseAll(() => 'untouched');
+          throw err;
+        }
         if (result.acquired) {
           ok = true;
           break;

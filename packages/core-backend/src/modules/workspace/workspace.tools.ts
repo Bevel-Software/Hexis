@@ -86,7 +86,13 @@ import type { AgentUploadStore} from './agent-upload.store.js';
 import { type ClaimedUpload } from './agent-upload.store.js';
 import type { IAgentDownloadStore } from './agent-download.store.js';
 import { buildDownload } from './agent-download.builder.js';
-import { DOWNLOAD_MAX_FILES, ZIP_DOWNLOAD_MAX_BYTES, type ArchiveLanding } from './workspace.service.js';
+import {
+  DOWNLOAD_MAX_FILES,
+  ONE_COMMIT_MAX_ENTRIES,
+  ONE_COMMIT_MAX_TOTAL_BYTES,
+  ZIP_DOWNLOAD_MAX_BYTES,
+  type ArchiveLanding,
+} from './workspace.service.js';
 import {
   isSymlinkZipEntry,
   isZipNoiseEntry,
@@ -548,16 +554,13 @@ const APPLY_ANSWER_CAP = 25;
 
 /**
  * How many entries of one uploaded archive are landed, and how many bytes of
- * uncompressed content in total.
- *
- * Tighter than `unzip`'s own caps on purpose. An apply lands its whole set as
- * ONE commit, which means every entry's bytes are held in memory at once —
- * the property that makes the commit atomic is the one that makes a zip bomb
- * expensive. The upload itself is already bounded by the deployment's upload
- * limit; these bound what that upload is allowed to expand into.
+ * uncompressed content in total: what one archive may land as one commit,
+ * the caps `unzip` lands under too (see `ONE_COMMIT_MAX_TOTAL_BYTES`). The
+ * upload itself is already bounded by the deployment's upload limit; these
+ * bound what that upload is allowed to expand into.
  */
-const APPLY_MAX_ENTRIES = 5_000;
-const APPLY_MAX_TOTAL_BYTES = 128 * 1024 * 1024; // 128 MB uncompressed
+const APPLY_MAX_ENTRIES = ONE_COMMIT_MAX_ENTRIES;
+const APPLY_MAX_TOTAL_BYTES = ONE_COMMIT_MAX_TOTAL_BYTES;
 
 /**
  * One path of an upload, as `apply_file_upload` plans it: the bytes to write,
@@ -4031,15 +4034,6 @@ export function registerWorkspaceTools(
           items: {
             type: 'object',
             properties: { path: str('Entry path inside the archive.'), reason: str('Why it was skipped (e.g. unsafe path, size cap).') },
-            required: ['path', 'reason'],
-          },
-        },
-        unsaved: {
-          type: 'array',
-          description: 'Present only when some extracted files may not be committed (also beside `error` when the extraction stopped part-way): each is on disk; save it with `save_file` (saving a committed file changes nothing).',
-          items: {
-            type: 'object',
-            properties: { path: str('Workspace-relative path of the extracted file.'), reason: str('What to do about it.') },
             required: ['path', 'reason'],
           },
         },
