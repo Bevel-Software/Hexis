@@ -470,8 +470,11 @@ export interface IVersionControlService {
    * every write under an already-held lock asks instead of reading the lock
    * row: a lock does not outlive the write access it was granted under.
    * `false` when the caller holds no edit lock there (they acquire instead);
-   * when they hold it but the gate now refuses, the lock is released and the
-   * gate's `AccessDeniedError` is thrown.
+   * when they hold it but the gate now refuses, the lock is released through
+   * `releaseLock` — which queues a commit of the bytes already on disk (saved
+   * while the grant stood), not a discard — and the gate's `AccessDeniedError`
+   * is thrown. A release that fails is logged, not thrown: the lock may then
+   * stay until its TTL, and the caller still receives the refusal.
    */
   holdsEditLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<boolean>;
 

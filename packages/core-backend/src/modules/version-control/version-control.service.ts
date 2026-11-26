@@ -1676,7 +1676,8 @@ export class VersionControlService implements IVersionControlService {
    *     those bytes were written while the holder still had the right to
    *     write them, and a landed write is never thrown away by a later
    *     permission change (see `acquireLock`). A release that fails is
-   *     logged; the refusal is what the caller receives either way.
+   *     logged (the lock may then stay until its TTL); the refusal is what
+   *     the caller receives either way.
    *
    * Any other failure of the gate (a rules read that failed) propagates and
    * leaves the lock held.

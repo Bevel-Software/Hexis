@@ -17,8 +17,7 @@ import type { PullRequestService } from '../../version-control/git/pull-request.
 import type { IChangeRequestReviewService } from '../../version-control/change-request-review/change-request-review.interface.js';
 import type { PendingCommitsService } from '../../version-control/pending-commits.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { IChangeReadGate } from '../../access-model/change-gate.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
+import type { IChangeReadGate, ICreatorAccess } from '../../access-model/index.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkspaceService } from '../workspace.service.js';
@@ -144,21 +143,27 @@ describe('PUT /file by the holder of the editor lock', () => {
     const nonWriterBody = await nonWriter.json();
     expect(nonWriter.status).toBe(403);
 
-    // Edit while granted, then the admin removes the grant.
+    // Edit and save while granted, then the admin removes the grant.
     writable = true;
     expect((await svc.acquireLock(WS, WS, FILE, USER)).acquired).toBe(true);
+    expect((await save('# Notes\nSaved while granted.\n')).status).toBe(200);
+    expect(enqueue).not.toHaveBeenCalled();
     writable = false;
 
     const res = await save('# Notes\nTyped after the revoke.\n');
 
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual(nonWriterBody);
-    expect(await onDisk()).toBe(ORIGINAL);
+    // The bytes saved while the grant stood stay, and are queued to commit
+    // under the holder's name; the bytes typed after the revoke never land.
+    expect(await onDisk()).toBe('# Notes\nSaved while granted.\n');
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ path: FILE, authorEmail: USER.email }));
     expect(await locks.get(WS, WS, FILE)).toBeNull();
 
     // And again, now holding nothing: the plain non-writer refusal.
     const again = await save('# Notes\nStill no.\n');
     expect(again.status).toBe(403);
-    expect(await onDisk()).toBe(ORIGINAL);
+    expect(await onDisk()).toBe('# Notes\nSaved while granted.\n');
   });
 });

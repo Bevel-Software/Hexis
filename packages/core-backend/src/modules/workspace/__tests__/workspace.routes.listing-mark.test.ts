@@ -35,7 +35,8 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
   let server: Server;
   let baseUrl: string;
   let emitted: { kind: string; listingUnchanged?: true; path?: string }[];
-  let heldBy: string | null;
+  /** The one path the user holds the edit lock on, as the real lock keys it; null for none. */
+  let heldPath: string | null;
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-listing-mark-'));
@@ -45,7 +46,7 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
     await fs.writeFile(path.join(root, KB, 'Data', 'table.csv'), 'a,b\n');
     await fs.writeFile(path.join(root, KB, 'Data', 'notes.txt'), '---\nread: [Sales]\n---\nA note\n');
     emitted = [];
-    heldBy = null;
+    heldPath = null;
     const workspaceService = {
       getWorkspacePath: async () => root,
       withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
@@ -62,8 +63,8 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
       },
     } as unknown as WorkspaceService;
     const versionControlService = {
-      getLock: vi.fn(async () => (heldBy ? { holderUserId: heldBy } : null)),
-      holdsEditLock: vi.fn(async () => heldBy === USER.id),
+      // Path-aware, as the real lock is: holding one file holds nothing else.
+      holdsEditLock: vi.fn(async (_w: string, _b: string, p: string) => p === heldPath),
       acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderUserId: USER.id, holderName: 'Alice' } })),
       releaseLock: vi.fn(async () => null),
       releaseLockNoCommit: vi.fn(async () => undefined),
@@ -182,13 +183,14 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
   });
 
   it('an editor that holds the lock saves to disk: both events carry the same answer', async () => {
-    heldBy = USER.id;
+    heldPath = `${KB}/Data/page.md`;
     await save('Data/page.md', `${PAGE}\nMore.\n`);
     expect(emitted.map((e) => [e.kind, e.listingUnchanged])).toEqual([
       ['file-changed', true],
       ['fs-tree-changed', true],
     ]);
     emitted.length = 0;
+    heldPath = `${KB}/Data/brand-new.md`;
     await save('Data/brand-new.md', '# Name\nNew\n');
     expect(emitted.map((e) => [e.kind, e.listingUnchanged])).toEqual([
       ['file-changed', undefined],

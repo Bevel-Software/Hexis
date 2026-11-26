@@ -10,8 +10,8 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import { FileLockService } from '../file-lock.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService } from '../version-control.service.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import type { IChangeReadGate } from '../../access-model/change-gate.js';
+import { AccessDeniedError } from '../../access-model/index.js';
+import type { IChangeReadGate } from '../../access-model/index.js';
 import { makeFakeLockDb } from './fake-file-lock-db.js';
 
 /**
@@ -163,11 +163,30 @@ describe('holdsEditLock', () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  it('a release that fails still answers the refusal, not the release error', async () => {
+  it('a release whose lock drop fails still answers the refusal, not the release error', async () => {
+    expect((await svc.acquireLock(WS, PROTECTED, PATH, ALICE)).acquired).toBe(true);
+    writable = false;
+    const drop = vi.spyOn(locks, 'release').mockRejectedValueOnce(new Error('lock table down'));
+
+    const held = await svc.holdsEditLock(WS, PROTECTED, PATH, ALICE).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(held).toBeInstanceOf(AccessDeniedError);
+    expect((held as AccessDeniedError).status).toBe(403);
+    // The release got as far as dropping the row, and that is what failed.
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ path: PATH }));
+    expect(drop).toHaveBeenCalled();
+  });
+
+  it('a release whose commit enqueue fails still answers the refusal, and leaves the lock to its TTL', async () => {
     expect((await svc.acquireLock(WS, PROTECTED, PATH, ALICE)).acquired).toBe(true);
     writable = false;
     enqueue.mockRejectedValueOnce(new Error('queue down'));
 
     await expect(svc.holdsEditLock(WS, PROTECTED, PATH, ALICE)).rejects.toBeInstanceOf(AccessDeniedError);
+    // `releaseLock` enqueues before it drops, so nothing was dropped.
+    expect((await locks.get(WS, PROTECTED, PATH))?.holderUserId).toBe(ALICE.id);
   });
 });

@@ -8,6 +8,7 @@ import { makeRolesYamlWriteValidator } from '../../access-model/roles-yaml-guard
 import { testKbContext, TEST_BRANCH_MODEL } from '../../../__tests__/kb-context.js';
 import { EmbedService } from '../embed.service.js';
 import { EmbedLockedError } from '../embed.errors.js';
+import { AccessDeniedError } from '../../access-model/index.js';
 
 /**
  * Edit and Save against the REAL lock.
@@ -35,6 +36,8 @@ const BOB: AuthUser = { id: '22222222-2222-4222-8222-222222222222', email: 'bob@
 
 let fake: FakeLockDb;
 let locks: FileLockService;
+/** What the write gate answers the viewer now: an admin's revoke flips it mid-test. */
+let writable: boolean;
 
 /** The extraction service the reader registry takes, typed against its contract; no document is read here. */
 function noDocExtract(): DocExtractService {
@@ -56,11 +59,16 @@ function build() {
   // The lock verbs go straight to the real service; release drops the row as
   // the real `releaseLock` does once it has enqueued the commit.
   const versionControlService = {
-    getLock: vi.fn((id: string, branch: string, path: string) => locks.get(id, branch, path)),
-    // The real service's answer when the write gate still grants.
+    // The real service's rule: its own edit lock counts while the write gate
+    // grants (`writable`); once it refuses, the lock is released and the
+    // gate's 403 is thrown. The rule itself is pinned against the real
+    // service in version-control.service.held-lock.test.ts.
     holdsEditLock: vi.fn(async (id: string, branch: string, path: string, user: AuthUser) => {
       const lock = await locks.get(id, branch, path);
-      return lock !== null && lock.holderUserId === user.id && lock.mode !== 'coordination';
+      if (lock === null || lock.holderUserId !== user.id || lock.mode === 'coordination') return false;
+      if (writable) return true;
+      await locks.release(id, branch, path, user);
+      throw new AccessDeniedError({ path, eligibleRoles: [], eligibleUsers: [] });
     }),
     acquireLock: vi.fn((id: string, branch: string, path: string, user: AuthUser) =>
       locks.acquire(id, branch, path, user),
@@ -97,6 +105,7 @@ function build() {
 beforeEach(() => {
   fake = makeFakeLockDb();
   locks = new FileLockService(fake.db);
+  writable = true;
 });
 
 describe('the real lock is strict', () => {
@@ -129,6 +138,20 @@ describe('Edit then Save, as the writer does it', () => {
     await service.acquireLock(token);
     await service.save(token, 'second');
     expect(workspaceService.writeFile).toHaveBeenLastCalledWith(WS_ID, WS, 'second');
+  });
+
+  it('is refused with the 403 once write is revoked after Edit, writes nothing, and loses the lock', async () => {
+    const { service, workspaceService, versionControlService } = build();
+    const { token } = await service.mintForUser({ userId: ALICE.id, reference: REPO });
+    expect(await service.acquireLock(token)).toEqual({ acquired: true });
+    writable = false;
+
+    await expect(service.save(token, 'typed after the revoke')).rejects.toMatchObject({ status: 403 });
+
+    expect(workspaceService.writeFile).not.toHaveBeenCalled();
+    // The refusal is not turned into a fresh acquire.
+    expect(versionControlService.acquireLock).toHaveBeenCalledTimes(1);
+    expect(await locks.get(WS_ID, BRANCH, WS)).toBeNull();
   });
 });
 
