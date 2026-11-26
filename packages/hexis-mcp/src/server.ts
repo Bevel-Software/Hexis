@@ -51,6 +51,8 @@ import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 import {
   callKbTool,
   ConnectionKeyRejectedError,
+  REVOKED_KEY_SENTENCE,
+  confirmConnectionKey,
   fetchAllManuals,
   fetchCatalogState,
   fetchMcpApps,
@@ -1095,8 +1097,14 @@ export async function createHexisMcpServer(
     },
   );
 
-  const shutdown = async (): Promise<void> => {
-    if (closed) return;
+  /**
+   * ONE teardown however many ask for it. A second caller (the CLI's orderly
+   * exit, after the server stopped itself for a revoked key) gets the run
+   * already under way, so nobody exits while children are still closing.
+   */
+  let shutdownRun: Promise<void> | null = null;
+  const shutdown = (): Promise<void> => (shutdownRun ??= closeEverything());
+  const closeEverything = async (): Promise<void> => {
     closed = true;
     // First, because everything below tears down what a refresh would run
     // against. A poll already in flight finds `closed` at the gate and
@@ -1155,6 +1163,53 @@ export async function createHexisMcpServer(
     await releaseDiscovered();
   };
 
+  /**
+   * REVOKED KEY. Set once the deployment refuses this process's connection key
+   * mid-run; from then on nothing is listed or run, and the server is going
+   * away.
+   */
+  let keyRejected = false;
+  const hostKeyRejected = config.onConnectionKeyRejected;
+  /**
+   * The gate in front of every listing and every call, local-only tools and
+   * meta-tools included: the deployment is asked, NOW, whether the credential
+   * is live. Nothing else can answer that. A local tool may never contact the
+   * deployment (no variables, or variables cached), and the catalog check runs
+   * throttled and after the call, so a previous success authorizes nothing.
+   *
+   * A refusal answers the sentence and stops the server: the call that met it
+   * gets its answer first (the stop waits a turn of the event loop), then
+   * every manual, and with it every spawned local server, is closed, and the
+   * host is told. A key that merely could not be confirmed (the deployment is
+   * unreachable, or answered 5xx) is not a revoked one: the call goes ahead
+   * and reports whatever it meets. A deployment that does not advertise the
+   * instructions route is not asked, because its unknown `/api/*` path answers
+   * 401 to every key, which would read as a revocation.
+   */
+  const confirmKeyBeforeServing = async (): Promise<void> => {
+    if (keyRejected) throw new McpError(ErrorCode.InternalError, REVOKED_KEY_SENTENCE);
+    if (!agentInstructions) return;
+    try {
+      await confirmConnectionKey(config);
+    } catch (err) {
+      if (err instanceof ConnectionKeyRejectedError) {
+        if (!keyRejected) {
+          keyRejected = true;
+          console.error(`[hexis-mcp] ${printable(err.message)} hexis-mcp has stopped serving.`);
+          setImmediate(() => {
+            void shutdown();
+            hostKeyRejected?.(REVOKED_KEY_SENTENCE);
+          });
+        }
+        throw new McpError(ErrorCode.InternalError, REVOKED_KEY_SENTENCE);
+      }
+      // A sign-in refused for good (OAuth mode) has already set `signInRefused`
+      // through renewal.ts, and each caller answers it right after this gate,
+      // in the words it uses for that case. Anything else is unconfirmed, not
+      // refused (see above). Either way there is nothing more to say here.
+    }
+  };
+
   try {
     server = new Server(
       { name: SERVER_NAME, version },
@@ -1193,6 +1248,8 @@ export async function createHexisMcpServer(
       // Before anything that could ask the workspace: nothing is left to ask it with.
       if (signInRefused !== null) return answered({ tools: [] });
       await ready;
+      await confirmKeyBeforeServing();
+      if (signInRefused !== null) return answered({ tools: [] });
       // A listing is the one moment a stale toolset is answered out loud, so
       // the check is AWAITED here: the list handed back is the current one, a
       // refresh included, rather than a notification's promise of a better
@@ -1276,6 +1333,9 @@ export async function createHexisMcpServer(
       // the manual between its deregister and its register, where a repository
       // lookup finds nothing.
       while (reregisterInProgress) await reregisterInProgress;
+      // Asked after every wait above, so nothing between the answer and the
+      // dispatch below can outlast a revocation.
+      await confirmKeyBeforeServing();
       // The sign-in may have ended while this call waited.
       if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       // Shutdown can land while a call waits here, and `shutdown` waits only

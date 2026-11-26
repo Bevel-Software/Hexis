@@ -36,6 +36,8 @@ export {
 export {
   DeploymentError,
   ConnectionKeyRejectedError,
+  REVOKED_KEY_SENTENCE,
+  confirmConnectionKey,
   resolveMcpUrl,
   resolveDeployment,
   fetchAgentInstructions,

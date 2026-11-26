@@ -64,6 +64,13 @@ export class ConnectionKeyRejectedError extends DeploymentError {
   }
 }
 
+/**
+ * What a call answers once the deployment has refused the connection key in
+ * the middle of a run: the sentence the deployment's own 401 carries, so a
+ * local-only tool is refused in exactly the words a remote one is.
+ */
+export const REVOKED_KEY_SENTENCE = 'Invalid or revoked connection key. Mint a new one in External agent access.';
+
 async function getJson(
   url: string,
   init: RequestInit & { label: string; renew?: () => Promise<string> },
@@ -329,6 +336,28 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
     );
     return undefined;
   }
+}
+
+/**
+ * Ask the deployment, now, whether the credential is still live: one
+ * authenticated read of the agent instructions route, the cheapest read a
+ * deployment that advertises `agentInstructions` serves to a connection key.
+ * The local server awaits it before every listing and every call, because a
+ * local-only tool may never contact the deployment on its own (it declares no
+ * variables, or they are cached), and would otherwise keep running on a
+ * revoked key.
+ *
+ * Every failure PROPAGATES unchanged: a {@link ConnectionKeyRejectedError} is
+ * the revocation, a `SignInRefusedError` its OAuth-mode counterpart, and
+ * anything else (a network failure, a 5xx) means the key could not be
+ * confirmed, never that it is dead. Deciding what each means is the caller's.
+ */
+export async function confirmConnectionKey(config: HexisMcpConfig): Promise<void> {
+  await getJson(`${config.baseUrl}/api/agent/instructions`, {
+    label: 'the agent instructions',
+    headers: { Authorization: `Bearer ${config.connectionKey}` },
+    renew: renewer(config),
+  });
 }
 
 /** One `.tool` manual as `GET /api/agent/all-tools` returns it. */
