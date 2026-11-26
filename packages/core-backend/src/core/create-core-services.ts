@@ -178,6 +178,8 @@ import {
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import { McpService } from '../modules/mcp/mcp.service.js';
+import { ManualInHand } from '../modules/mcp/manual-in-hand.js';
+import { registerCallable } from '@utcp/direct-call';
 import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-audit.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
 import {
@@ -1579,6 +1581,9 @@ export async function createCoreServices(
         const caller = await resolveManualCaller(bearer);
         return readInlineManual({ userId: caller.userId, agentPath: caller.agentPath }, slug);
       },
+      // What those two read reaches the tool client through the `direct-call`
+      // protocol, by one function this graph registers, under a name of its own.
+      manualInHand: new ManualInHand(registerCallable),
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this

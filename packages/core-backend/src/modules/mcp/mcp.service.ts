@@ -20,8 +20,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import '@utcp/http'; // side effect: registers the 'http' UTCP communication protocol
 import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (native MCP-server `.tool` sources)
-import { registerCallable } from '@utcp/direct-call'; // and registers the 'direct-call' protocol
-import { AsyncLocalStorage } from 'node:async_hooks';
+import '@utcp/direct-call'; // side effect: registers the 'direct-call' protocol (a manual read in process; see ManualInHand)
 import {
   UtcpClientConfigSerializer,
   CallTemplateSerializer,
@@ -69,6 +68,7 @@ import { ToolSchemaGuard, type ScreenedHiddenTool } from './tool-schema-guard.js
 import { DownstreamRefreshGuard, isDownstreamTokenRejection } from './downstream-token-refresh.js';
 import { SurfaceCache, type SurfaceCacheOptions } from './surface-cache.js';
 import { SharedDefinitions } from './shared-definitions.js';
+import type { ManualInHand } from './manual-in-hand.js';
 import { currentRequest, runInRequest, type McpRequestContext } from './request-context.js';
 import { printable } from '../../shared/printable.js';
 import { withinLoopTime } from '../../shared/loop-time-limit.js';
@@ -221,6 +221,14 @@ export interface McpProxyOptions {
    */
   readInlineManual?: (bearer: string, slug: string) => Promise<unknown>;
   /**
+   * How a manual read in process (by {@link McpProxyOptions.readPlatformManual}
+   * or {@link McpProxyOptions.readInlineManual}) reaches the tool client: the
+   * `direct-call` protocol's function, registered by the composition root for
+   * its graph. Absent, those two readers are not called, and the hosted
+   * manuals are discovered over loopback as before.
+   */
+  manualInHand?: ManualInHand;
+  /**
    * How long a read this service makes in process may take: a limit a held
    * event loop cannot use up (`shared/loop-time-limit.ts`); default
    * {@link IN_PROCESS_READ_LIMIT_MS}. A read that passes it is given up on, as
@@ -318,28 +326,6 @@ const IN_PROCESS_READ_LIMIT_MS = 15_000;
 export const MCP_LOOPBACK_TOKEN_TTL_MS = 5 * 60 * 60 * 1000;
 
 const callTemplateSerializer = new CallTemplateSerializer();
-
-/**
- * A manual this process has already read, on its way into a tool client.
- *
- * A client learns a manual's tools by asking the manual's communication
- * protocol to discover them. For a platform-hosted manual that was an HTTP
- * request to this server. Read in process, the manual is in hand before the
- * client is asked to register it, and the `direct-call` protocol discovers it
- * by calling ONE function, registered once for the process, which answers the
- * manual the current registration carries here.
- *
- * Carried in the async context of that one registration, so concurrent
- * registrations (every manual of a surface registers at once, and so do the
- * surfaces of different people) each discover their own.
- */
-const manualInHand = new AsyncLocalStorage<{ manual: unknown }>();
-const MANUAL_IN_HAND_CALLABLE = 'hexis.manual-in-hand';
-registerCallable(MANUAL_IN_HAND_CALLABLE, () => {
-  const carried = manualInHand.getStore();
-  if (!carried) throw new Error('no manual was read for this registration');
-  return carried.manual;
-});
 
 /** `${API_URL}/api/agent/utcp`: where the platform manual is discovered over HTTP. */
 const PLATFORM_MANUAL_URL = '${API_URL}/api/agent/utcp';
@@ -1639,8 +1625,9 @@ export class McpService {
 
   /**
    * Register one `http` manual: read in process when it is one this server
-   * hosts and the composition offers its reader, discovered over HTTP
-   * otherwise (a third-party `.tool`, or a composition with no reader).
+   * hosts and the composition offers its reader and the way to hand it over
+   * (`manualInHand`), discovered over HTTP otherwise (a third-party `.tool`,
+   * or a composition without them).
    */
   private registerHostedOrRemote(
     client: CodeModeUtcpClient,
@@ -1649,15 +1636,16 @@ export class McpService {
     const url = (m as { url?: unknown }).url;
     const hosted = m.call_template_type === 'http' && typeof url === 'string';
     const bearer = currentRequest()?.loopbackBearer;
-    if (hosted && bearer !== undefined) {
+    const inHand = this.opts.manualInHand;
+    if (hosted && bearer !== undefined && inHand) {
       const readPlatform = this.opts.readPlatformManual;
       if (readPlatform && m.name === EXTERNAL_KB_MANUAL_NAME && url === PLATFORM_MANUAL_URL) {
-        return this.registerInHand(client, m, () => readPlatform(bearer));
+        return this.registerInHand(client, m, inHand, () => readPlatform(bearer));
       }
       const readInline = this.opts.readInlineManual;
       const slug = INLINE_MANUAL_URL.exec(url)?.[1];
       if (readInline && slug !== undefined) {
-        return this.registerInHand(client, m, () => readInline(bearer, decodeURIComponent(slug)));
+        return this.registerInHand(client, m, inHand, () => readInline(bearer, decodeURIComponent(slug)));
       }
     }
     return registerManual(client, m);
@@ -1666,7 +1654,7 @@ export class McpService {
   /**
    * Register a manual this server hosts from what `read` answers, with no
    * request to the server: read it first, then hand it to the client through
-   * the `direct-call` protocol ({@link manualInHand}).
+   * the `direct-call` protocol (`inHand`, see {@link ManualInHand}).
    *
    * The client keeps the tools the manual's own protocol allows, exactly as it
    * did when it discovered the manual over that protocol. `m` itself is not
@@ -1681,6 +1669,7 @@ export class McpService {
   private async registerInHand(
     client: CodeModeUtcpClient,
     m: CallTemplate,
+    inHand: ManualInHand,
     read: () => Promise<unknown>,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const name = String(m.name);
@@ -1689,14 +1678,13 @@ export class McpService {
       const status = answer.status !== undefined ? `HTTP ${answer.status} ` : '';
       return { ok: false, error: `${status}discovering tools from '${name}': ${answer.message}` };
     }
-    const manual = answer.value;
-    const inHand = callTemplateSerializer.validateDict({
+    const template = callTemplateSerializer.validateDict({
       name,
       call_template_type: 'direct-call',
-      callable_name: MANUAL_IN_HAND_CALLABLE,
+      callable_name: inHand.callableName,
       allowed_communication_protocols: [m.call_template_type],
     });
-    return manualInHand.run({ manual }, () => registerManual(client, inHand));
+    return inHand.carry(answer.value, () => registerManual(client, template));
   }
 
   /**

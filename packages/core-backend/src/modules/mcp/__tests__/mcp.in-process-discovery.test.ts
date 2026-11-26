@@ -6,7 +6,9 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CallTemplate } from '@utcp/sdk';
+import { registerCallable } from '@utcp/direct-call';
 import { McpService, type McpCaller } from '../mcp.service.js';
+import { ManualInHand } from '../manual-in-hand.js';
 import { SpillStore } from '../../workspace/index.js';
 import { createExternalManualReader, createManualRoutes, ToolRegistry } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
@@ -25,6 +27,9 @@ import { toolDef } from '../../tool-helpers/index.js';
 
 let httpServer: HttpServer | undefined;
 const cleanups: Array<() => Promise<void>> = [];
+
+/** The way a manual read in process reaches the client: one for the file, as the composition root makes one per graph. */
+const IN_HAND = new ManualInHand(registerCallable);
 
 afterEach(async () => {
   for (const c of cleanups.splice(0)) await c().catch(() => {});
@@ -77,6 +82,8 @@ interface HarnessOptions {
   inProcessReadLimitMs?: number;
   /** Do not hand the endpoint the readers: it discovers over loopback, as a composition without them does. */
   overLoopback?: boolean;
+  /** Hand it the readers but no way to hand a manual to the client. */
+  withoutManualInHand?: boolean;
 }
 
 async function harness(opts: HarnessOptions = {}) {
@@ -145,6 +152,7 @@ async function harness(opts: HarnessOptions = {}) {
             state.inlineReads.push({ bearer, slug });
             return state.readInline(bearer, slug);
           },
+          ...(opts.withoutManualInHand ? {} : { manualInHand: IN_HAND }),
         }),
     ...(opts.inProcessReadLimitMs !== undefined ? { inProcessReadLimitMs: opts.inProcessReadLimitMs } : {}),
   });
@@ -227,7 +235,8 @@ describe('McpService — the platform manual is discovered in process', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     state.readPlatform = async () => {
       const manual = manualOf(state.base, 'read_file', 'smuggled');
-      manual.tools[1]!.tool_call_template = { call_template_type: 'direct-call', callable_name: 'hexis.manual-in-hand' } as never;
+      // Even one naming the very function that hands manuals over.
+      manual.tools[1]!.tool_call_template = { call_template_type: 'direct-call', callable_name: IN_HAND.callableName } as never;
       return manual;
     };
     expect(withoutMeta(await toolNames(await connect(mcp)))).toEqual(['read_file']);
@@ -277,6 +286,17 @@ describe('McpService — the platform manual is discovered in process', () => {
     expect(withoutMeta(await toolNames(await connect(mcp)))).toEqual(['read_file']);
     expect(state.platformReads).toEqual([]);
     expect(state.loopbackDiscoveries).toEqual(['/api/agent/utcp']);
+  });
+
+  // The readers are of no use without the way to hand what they read to the
+  // client, so they are not called.
+  it('discovers over loopback, and calls no reader, when the composition hands over no way into the client', async () => {
+    const { state, mcp } = await harness({ withoutManualInHand: true });
+    state.manuals = [inlineManual('acme')];
+    expect(withoutMeta(await toolNames(await connect(mcp)))).toEqual(['acme_ping', 'read_file']);
+    expect(state.platformReads).toEqual([]);
+    expect(state.inlineReads).toEqual([]);
+    expect(state.loopbackDiscoveries.sort()).toEqual(['/api/agent/utcp', '/api/tools/acme/manual']);
   });
 });
 
