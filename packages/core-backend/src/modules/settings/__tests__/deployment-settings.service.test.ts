@@ -602,15 +602,37 @@ describe('DeploymentSettingsService — validation', () => {
       null,
     );
     expect(changed.restartRequired).toBe(false);
+    // The allow-list is read at every sign-in too.
+    const domains = await settings.save({ allowedEmailDomains: 'example.org' }, null);
+    expect(domains).toEqual({ restartRequired: false, restartKeys: [] });
     // …while one that genuinely needs it, saved alongside, still says so.
     const mixed = await settings.save(
-      { oidcClientId: 'hexis-2', allowedEmailDomains: 'example.com' },
+      { oidcClientId: 'hexis-2', allowedEmailDomains: 'example.com', kbDirName: 'company-brain' },
       null,
     );
-    expect(mixed.restartKeys).toEqual(['allowedEmailDomains']);
-    expect(
-      settings.describe().filter((s) => s.key.startsWith('oidc') && s.restartToApply),
-    ).toEqual([]);
+    expect(mixed.restartKeys).toEqual(['kbDirName']);
+    // Nothing on the Single sign-on card waits for a restart.
+    expect(settings.describe().filter((s) => s.section === 'sign-in' && s.restartToApply)).toEqual([]);
+  });
+
+  /** What the auth service reads at every SSO sign-in: the saved list, as domains, at once. */
+  it('answers the allow-list in effect at the moment it is asked', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY, undefined, { env: {} });
+    expect(settings.resolveAllowedEmailDomains()).toEqual([]);
+    await settings.save({ allowedEmailDomains: 'Email.COM , @example.org .eu.example.net' }, null);
+    expect(settings.resolveAllowedEmailDomains()).toEqual(['email.com', 'example.org', 'eu.example.net']);
+    await settings.save({ allowedEmailDomains: '' }, null);
+    expect(settings.resolveAllowedEmailDomains()).toEqual([]);
+  });
+
+  it('keeps the environment ahead of a saved allow-list', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY, undefined, {
+      env: { ALLOWED_EMAIL_DOMAINS: 'bevel.software' },
+    });
+    await settings.load();
+    expect(settings.resolveAllowedEmailDomains()).toEqual(['bevel.software']);
   });
 });
 

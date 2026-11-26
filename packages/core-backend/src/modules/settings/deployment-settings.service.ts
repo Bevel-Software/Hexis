@@ -400,10 +400,13 @@ export const CORE_SETTINGS: SettingDef[] = [
     // Belongs with SSO because SSO is what makes it load-bearing: sign-in
     // auto-provisions, so against a multi-tenant issuer this list is the only
     // thing between "has an account somewhere" and "has an account here".
+    // Read at every check (see `resolveAllowedEmailDomains`), so it applies
+    // without a restart, like the provider settings it guards. A blank is
+    // its default, no guard: erasing the field clears the list.
     key: 'allowedEmailDomains',
     envVar: 'ALLOWED_EMAIL_DOMAINS',
     section: 'sign-in',
-    restartToApply: true,
+    blankMeansDefault: true,
   },
 
   {
@@ -1018,6 +1021,19 @@ export class DeploymentSettingsService {
       clientId: this.resolve('oidcClientId'),
       clientSecret: this.resolve('oidcClientSecret'),
     };
+  }
+
+  /**
+   * The SSO domain allow-list in effect, as domains: `a.com, @B.com` →
+   * `['a.com', 'b.com']`, tolerating a leading `@` or `.`. Empty means no
+   * guard. Answers from the environment, else the stored row, at the moment
+   * it is asked, so a save is in effect for the next sign-in.
+   */
+  resolveAllowedEmailDomains(): string[] {
+    return this.resolve('allowedEmailDomains')
+      .split(/[\s,]+/)
+      .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
+      .filter((d) => d.length > 0);
   }
 
   /**

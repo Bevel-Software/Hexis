@@ -101,6 +101,27 @@ describe('SetupScreen — single sign-on check', () => {
     expect(problem).toHaveAttribute('id', 'oidcClientSecret-problem');
   });
 
+  /**
+   * The allowed domains apply at the next sign-in, so their save answers no
+   * restart and the page claims none; a save that does owe one says so on
+   * the Deployment page, whichever field on the card it came from.
+   */
+  it.each([
+    [false, false],
+    [true, true],
+  ])('after saving the allowed domains with restartRequired %s, a restart notice shown: %s', async (owed, shown) => {
+    api.saveSettings.mockResolvedValue({ restartRequired: owed, complete: true, settings: SETTINGS });
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" />);
+    await userEvent.type(field('Allowed email domains'), 'example.org');
+    await userEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ allowedEmailDomains: 'example.org' }));
+    const notice = screen.queryByText(/only takes effect when the server starts/);
+    if (shown) expect(notice).toBeInTheDocument();
+    else expect(notice).not.toBeInTheDocument();
+  });
+
   it('labels the configuration with what the save answered', async () => {
     api.saveSettings.mockResolvedValue({
       restartRequired: true,

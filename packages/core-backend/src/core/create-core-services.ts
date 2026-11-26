@@ -56,13 +56,6 @@ function mcpEndpointUrl(publicBackendUrl: string): string {
   return url.toString();
 }
 
-/** `a.com, b.com` → `['a.com','b.com']`, tolerating a leading `@` or `.`. */
-function parseDomainList(raw: string): string[] {
-  return raw
-    .split(/[\s,]+/)
-    .map((d) => d.trim().toLowerCase().replace(/^[@.]+/, ''))
-    .filter((d) => d.length > 0);
-}
 import { SpillStore } from '../modules/workspace/spill-store.js';
 import { TmpSweeper } from '../modules/workspace/workspace-tmp.js';
 import { AgentUploadStore, assertUploadsRootOutsideWorkspaces } from '../modules/workspace/agent-upload.store.js';
@@ -964,14 +957,18 @@ export async function createCoreServices(
   // access lookups. (Change requests now store the author email directly, so
   // PullRequestService no longer depends on it for attribution.)
   // The allow-list is resolved, not read off the environment: it is settable
-  // from the setup screen alongside the SSO configuration it guards.
+  // from the setup screen alongside the SSO configuration it guards. A getter,
+  // so every check reads the list in effect and a save applies at the next
+  // sign-in, without a restart.
   const authService = new AuthService(
     db,
     {
       jwtSecret: config.jwtSecret,
       adminEmail: config.adminEmail,
       adminPassword: config.adminPassword,
-      allowedEmailDomains: parseDomainList(settings.resolve('allowedEmailDomains')),
+      get allowedEmailDomains() {
+        return settings.resolveAllowedEmailDomains();
+      },
       loginPasswordEnabled: config.loginPasswordEnabled,
     },
     ports.accountAdmission,
