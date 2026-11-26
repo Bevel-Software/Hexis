@@ -55,8 +55,9 @@ export type ChangeReadVerdict =
   | {
       allowed: false;
       /**
-       * The repo-relative path the caller cannot read: the target itself when
-       * it exists, otherwise the folder it would land in (`''` = the root).
+       * The repo-relative path being changed (`''` = the root), whether or not
+       * something is at it: a path that is there and one that is not get the
+       * same answer, so a refusal never tells which.
        */
       unreadable: string;
     };

@@ -110,7 +110,13 @@ export class ChangeReadGate implements IChangeReadGate {
       }
       throw err;
     }
-    return { allowed: false, unreadable: await this.unreadablePlace(rel, exists) };
+    // The refusal names the path being changed, whether or not something is
+    // at it. Naming the file when it is there and its folder when it is not
+    // would tell the caller whether a file they may not read exists, one
+    // guessed name at a time. Naming the folder every time would send a
+    // caller who reads the folder, and is refused only the file, to ask for
+    // access they already have.
+    return { allowed: false, unreadable: rel };
   }
 
   async assertMayChange(
@@ -127,17 +133,6 @@ export class ChangeReadGate implements IChangeReadGate {
       eligibleUsers: [],
       unreadable: verdict.unreadable,
     });
-  }
-
-  /**
-   * What to name in the refusal: the target when it is there (a change to
-   * something the caller cannot see), otherwise the folder the new thing
-   * would land in — the place whose rules decided.
-   */
-  private async unreadablePlace(rel: string, exists: (p: string) => Promise<boolean>): Promise<string> {
-    if (await exists(rel)) return rel;
-    const parent = path.posix.dirname(rel);
-    return parent === '.' ? '' : parent;
   }
 
   /**

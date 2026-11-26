@@ -96,7 +96,7 @@ function versionControlOver(repoDir: string) {
         }
       }
       if (!(await mayChange(ws, user.email, repoPath(p)))) {
-        throw new AccessDeniedError({ path: p, eligibleRoles: [], eligibleUsers: [], unreadable: path.posix.dirname(repoPath(p)) });
+        throw new AccessDeniedError({ path: p, eligibleRoles: [], eligibleUsers: [], unreadable: repoPath(p) });
       }
       const holder = held.get(p);
       if (holder !== undefined) return { acquired: false, lock: { holderName: holder } };
@@ -435,7 +435,7 @@ describe.each(doors)('an archive extracted through %s into a folder the person c
     expect(res.status).toBe(200);
     const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
     expect(body.extracted).toEqual([`${KB}/Finance/open.md`]);
-    expect(body.skipped).toEqual([{ path: 'Sealed/peek.md', reason: expect.stringContaining('read access to "Finance/Sealed"') }]);
+    expect(body.skipped).toEqual([{ path: 'Sealed/peek.md', reason: expect.stringContaining('read access to "Finance/Sealed/peek.md"') }]);
     expect(await commitCount()).toBe(before + 1);
     expect(await filesOfHead()).toEqual(['Finance/open.md']);
     expect(await exists('Finance/Sealed/peek.md')).toBe(false);
@@ -456,7 +456,7 @@ describe.each(doors)('an archive extracted through %s into a folder the person c
     expect(body.kind).toBe('archive-refused');
     expect(body.error).toBe(
       `"${KB}/Finance/Sealed/access.md" could not land: You don't have permission to write to "${KB}/Finance/Sealed/access.md". ` +
-        'You don\'t have read access to "Finance/Sealed"; only what you can read can be created, changed or removed. ' +
+        'You don\'t have read access to "Finance/Sealed/access.md"; only what you can read can be created, changed or removed. ' +
         "An archive's access rules land with its files or not at all, so nothing in it was landed.",
     );
     expect(await commitCount()).toBe(before);
