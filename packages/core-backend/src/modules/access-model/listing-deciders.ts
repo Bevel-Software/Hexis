@@ -26,8 +26,8 @@ export const FIXED_NAME_SOURCES = ['roles.yaml', SYNCED_GROUPS_YAML, GROUPS_YAML
 /**
  * Which source of an access model the file at `p` (repository-relative) is:
  * a folder's rules (an `access.md` at any depth), one read by its fixed name
- * at the root (`FIXED_NAME_SOURCES`), a plugin's manifest (in a folder below
- * the plugins root, as plugin discovery finds one), or none. The one answer
+ * at the root (`FIXED_NAME_SOURCES`), a plugin's manifest (a `plugin.json`
+ * in any folder below the plugins root), or none. The one answer
  * for every reader of the set: both builds of a model, the key a commit's
  * model is shared by, and `decidesListing`.
  */
