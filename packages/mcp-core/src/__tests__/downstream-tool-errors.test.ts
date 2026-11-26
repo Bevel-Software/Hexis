@@ -3,12 +3,7 @@ import '@utcp/mcp'; // side effect: registers the stock 'mcp' protocol, which th
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, CommunicationProtocol, type CallTemplate } from '@utcp/sdk';
-import {
-  DownstreamToolError,
-  downstreamErrorText,
-  installDownstreamToolErrors,
-  keepDownstreamToolErrors,
-} from '../downstream-tool-errors.js';
+import { downstreamErrorText, installDownstreamToolErrors } from '../downstream-tool-errors.js';
 import { registerManual, dispatchToolCall } from '../dispatch.js';
 import type { ProxiedTool } from '../proxied-tool.js';
 import { startFakeMcpServer } from './fake-mcp-server.js';
@@ -70,20 +65,10 @@ describe('downstreamErrorText', () => {
   });
 });
 
-describe('keepDownstreamToolErrors', () => {
+describe('the unwrap installDownstreamToolErrors wraps', () => {
   it('finds the unwrap it wraps in the installed @utcp/mcp (fails when a release renames it)', () => {
     const protocol = new McpCommunicationProtocol() as unknown as { _processMcpToolResult?: unknown };
     expect(typeof protocol._processMcpToolResult).toBe('function');
-  });
-
-  it('throws on a reported failure and unwraps everything else as before', () => {
-    const protocol = keepDownstreamToolErrors(new McpCommunicationProtocol()) as unknown as {
-      _processMcpToolResult(result: unknown): unknown;
-    };
-    expect(() =>
-      protocol._processMcpToolResult({ isError: true, content: [{ type: 'text', text: 'No calendar is connected' }] }),
-    ).toThrow(DownstreamToolError);
-    expect(protocol._processMcpToolResult({ content: [{ type: 'text', text: '{"ok":true}' }] })).toEqual({ ok: true });
   });
 });
 

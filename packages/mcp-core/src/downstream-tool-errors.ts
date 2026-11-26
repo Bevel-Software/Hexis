@@ -6,9 +6,10 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
  * A downstream MCP server said its own call failed: it answered a
  * `CallToolResult` with `isError: true` ("This tool requires a Business plan",
  * "No calendar is connected", a validation message). Thrown so the call fails
- * like any other failed call: the hosted surface answers `isError: true` with
- * the server's own words, the Audit log records an error, and a
- * `call_tool_chain` sees a rejected call instead of a value.
+ * as a failed call: the hosted surface answers `isError: true` with the
+ * server's own words, and a `call_tool_chain` sees a rejected call instead of
+ * a value. It is the server's answer, not a transport failure, so it is never
+ * a reason to refresh a token or retry the call.
  */
 export class DownstreamToolError extends Error {
   constructor(
@@ -66,8 +67,8 @@ type ResultProcessor = { _processMcpToolResult?: (this: unknown, result: unknown
  * `@utcp/mcp` 1.2 unwraps a `CallToolResult` into its parsed `content` and
  * drops `isError` on the way (`_processMcpToolResult`), so a downstream
  * server's failure reached our callers as a successful answer whose text was
- * the error. An MCP client that trusts the flag (Microsoft 365 Copilot does)
- * then treats a call that never did anything as done. The unwrap is private to
+ * the error. An MCP client that trusts the flag then treats a call that never
+ * did anything as done. The unwrap is private to
  * the library, so it is wrapped on the instance; `downstream-tool-errors.test`
  * fails if a release renames it.
  */

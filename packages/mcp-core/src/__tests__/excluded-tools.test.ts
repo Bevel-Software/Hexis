@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import '@utcp/mcp'; // side effect: registers the 'mcp' UTCP communication protocol
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
-import { EXCLUDE_TOOLS_KEY, excludedToolNames, removeExcludedTools } from '../excluded-tools.js';
+import { EXCLUDE_TOOLS_KEY, excludedToolNames } from '../excluded-tools.js';
 import { registerManual } from '../dispatch.js';
 import { startFakeMcpServer } from './fake-mcp-server.js';
 
@@ -54,20 +54,28 @@ describe('excludedToolNames', () => {
   });
 });
 
-describe('removeExcludedTools over a real MCP connection', () => {
+describe('registerManual over a real MCP connection', () => {
   it('takes a left-out tool off the client, keeps its siblings, and the client still connects', async () => {
     const server = await startFakeMcpServer('notion');
     cleanups.push(() => server.stop());
     const client = await CodeModeUtcpClient.create(process.cwd(), null);
     cleanups.push(() => client.close());
-    const template = manualTemplate('notion', server.url, ['bump']);
-    const excluded = new Set(excludedToolNames(template));
     // The key rides in the server entry; the MCP client must still accept it.
-    expect(await registerManual(client, template)).toEqual({ ok: true });
+    expect(await registerManual(client, manualTemplate('notion', server.url, ['bump']))).toEqual({ ok: true });
 
-    const kept = await removeExcludedTools(client, await client.getTools(), excluded);
+    expect((await client.getTools()).map((t) => t.name)).toEqual(['notion.srv.echo']);
+  });
 
-    expect(kept.map((t) => t.name)).toEqual(['notion.srv.echo']);
+  it('keeps it off when the manual registers again, as a session recovery or a refresh does', async () => {
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    cleanups.push(() => client.close());
+    expect(await registerManual(client, manualTemplate('notion', server.url, ['bump']))).toEqual({ ok: true });
+
+    await client.deregisterManual('notion');
+    expect(await registerManual(client, manualTemplate('notion', server.url, ['bump']))).toEqual({ ok: true });
+
     expect((await client.getTools()).map((t) => t.name)).toEqual(['notion.srv.echo']);
   });
 });

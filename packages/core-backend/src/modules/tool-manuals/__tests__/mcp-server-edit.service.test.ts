@@ -1,15 +1,15 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_BRANCH, type AuthUser } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { IToolManualService, ToolManualSummary } from '../tool-manuals.contract.js';
 import { McpServerEditService } from '../mcp-server-edit.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 const KB = 'knowledge-base';
 const USER: AuthUser = { id: 'u-1', email: 'ali@example.com', name: 'Ali' } as AuthUser;
@@ -78,7 +78,7 @@ beforeEach(async () => {
     }),
   } as unknown as IToolManualService;
 
-  svc = new McpServerEditService(workspaceService, commits, accessControl, toolManuals, testKbContext({ kbDirName: KB }), new NodeFs());
+  svc = new McpServerEditService(workspaceService, commits, accessControl, toolManuals, testKbContext({ kbDirName: KB }), realDisk());
 });
 
 afterEach(async () => {

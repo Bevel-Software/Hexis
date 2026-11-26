@@ -6,6 +6,7 @@ import { toCallToolResult, toolError, describeToolFailure, renderProgress } from
 import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
 import { DownstreamToolError } from './downstream-tool-errors.js';
+import { removeExcludedTools } from './excluded-tools.js';
 
 /**
  * Register one manual on a client, reduced to a verdict.
@@ -43,6 +44,10 @@ export async function registerManual(
       const errors = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
       return { ok: false, error: errors };
     }
+    // The same one point is where the tools a manual leaves out
+    // (`excludeTools`) come off the client: a session recovery or a catalog
+    // refresh registers through here too, so none of them can bring one back.
+    await removeExcludedTools(client, manual);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

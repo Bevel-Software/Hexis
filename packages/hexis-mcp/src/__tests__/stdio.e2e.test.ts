@@ -8,9 +8,14 @@ import AdmZip from 'adm-zip';
 import '@utcp/mcp'; // side effect: registers the 'mcp' call-template protocol
 import { CallTemplateSerializer, UtcpClientConfigSerializer } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { EXCLUDE_TOOLS_KEY, excludedToolNames, registerManual } from '@bevel-software/platform-mcp-core';
+import { EXCLUDE_TOOLS_KEY, registerManual } from '@bevel-software/platform-mcp-core';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { FALLBACKS_DIR, materializePlugin, prepareStdioSpec } from '../materialize.js';
-import { prepareLocalManuals } from '../server.js';
+import { createHexisMcpServer } from '../server.js';
 import type { HexisMcpConfig } from '../config.js';
 
 /**
@@ -51,6 +56,10 @@ rl.on('line', (line) => {
       name: 'probe',
       description: 'Report the runtime contract as this process sees it.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    }, {
+      name: 'extra',
+      description: 'A second tool, for a server that leaves one out.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     }] } });
   } else if (req.method === 'tools/call') {
     send({ jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: JSON.stringify({
@@ -72,6 +81,22 @@ let priorHexisHome: string | undefined;
 let config: HexisMcpConfig;
 let client: CodeModeUtcpClient | null = null;
 
+/** The plugin's stdio server as the deployment hands it over, leaving its `extra` tool out. */
+const LOCAL_STDIO_MANUAL = {
+  name: 'gtmprobe',
+  call_template_type: 'mcp',
+  config: {
+    mcpServers: {
+      probe: {
+        transport: 'stdio',
+        command: 'node',
+        args: ['${PLUGIN_ROOT}/bin/server.cjs'],
+        [EXCLUDE_TOOLS_KEY]: ['extra'],
+      },
+    },
+  },
+};
+
 beforeAll(async () => {
   home = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-e2e-'));
   priorHexisHome = process.env.HEXIS_HOME;
@@ -90,6 +115,39 @@ beforeAll(async () => {
   const archive = zip.toBuffer();
 
   httpServer = http.createServer((req, res) => {
+    const pathname = (req.url ?? '/').split('?')[0];
+    const json = (payload: unknown): void => {
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
+    };
+    // What `createHexisMcpServer` reads at startup: the deployment's config,
+    // its manuals with the plugin's stdio server among them (local-only), and
+    // its own MCP endpoint, which serves one tool.
+    if (pathname === '/api/config') return json({ mcpUrl: `${config.baseUrl}/api/mcp` });
+    if (pathname === '/api/agent/all-tools') return json({ manuals: [LOCAL_STDIO_MANUAL] });
+    if (pathname === '/api/agent/tools/list_local_tools') {
+      return json({ tools: [{ name: 'gtmprobe', slug: 'gtmprobe', path: 'Plugins/GTM/mcp.json' }] });
+    }
+    if (pathname === '/api/mcp') {
+      let body = '';
+      req.on('data', (chunk: Buffer) => (body += chunk.toString('utf8')));
+      req.on('end', () => {
+        void (async () => {
+          const mcp = new Server({ name: 'stub-deployment', version: '0.0.0' }, { capabilities: { tools: {} } });
+          mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+            tools: [{ name: 'ping', description: 'the ping tool', inputSchema: { type: 'object' as const, properties: {} } }],
+          }));
+          mcp.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          res.on('close', () => {
+            void transport.close();
+            void mcp.close();
+          });
+          await mcp.connect(transport);
+          await transport.handleRequest(req, res, body ? (JSON.parse(body) as unknown) : undefined);
+        })();
+      });
+      return;
+    }
     if (req.url?.startsWith('/api/agent/plugins/GTM/archive')) {
       if (req.headers.authorization !== 'Bearer bevel_e2e') {
         res.writeHead(401).end();
@@ -256,25 +314,22 @@ describe('stdio end-to-end', () => {
     }
   });
 
-  it("keeps a stdio server's left-out tools through local preparation", { timeout: 60_000 }, async () => {
-    const template = new CallTemplateSerializer().validateDict({
-      name: 'gtmprobe',
-      call_template_type: 'mcp',
-      config: {
-        mcpServers: {
-          probe: {
-            transport: 'stdio',
-            command: 'node',
-            args: ['${PLUGIN_ROOT}/bin/server.cjs'],
-            [EXCLUDE_TOOLS_KEY]: ['probe'],
-          },
-        },
-      },
-    });
-    const localOnly = new Map([['gtmprobe', { slug: 'gtmprobe', path: 'Plugins/GTM/mcp.json' }]]);
-    const [prepared] = await prepareLocalManuals(config, [template], localOnly);
-    expect(prepared).toBeDefined();
-    expect(excludedToolNames(prepared!)).toEqual(['gtmprobe.probe.probe']);
+  it("leaves a local stdio server's excluded tool off the list a client sees", { timeout: 60_000 }, async () => {
+    const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: false });
+    const probe = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
+    try {
+      await handle.ready;
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await handle.server.connect(serverTransport);
+      await probe.connect(clientTransport);
+      const names = (await probe.listTools()).tools.map((t) => t.name);
+      expect(names).toContain('ping');
+      expect(names).toContain('gtmprobe_probe_probe');
+      expect(names).not.toContain('gtmprobe_probe_extra');
+    } finally {
+      await probe.close().catch(() => {});
+      await handle.shutdown();
+    }
   });
 
   it('refuses an escaping cwd within the same composed flow', async () => {

@@ -645,9 +645,11 @@ describe('proxied third-party MCP servers: the downstream pool', () => {
     expect(names).toContain('notion_srv_echo');
     expect(names).not.toContain('notion_srv_paid');
 
-    // The chain's bridge takes any name, past the bindings it generates; the
-    // pooled connection behind the route still has the tool. The route refuses
-    // it before it reaches the server.
+    expect(toolText(await client.callTool({ name: 'list_tools', arguments: {} }))).not.toContain('paid');
+
+    // The chain's bridge takes any name, past the bindings it generates.
+    // Neither this request's client nor the pooled connection behind the route
+    // registered the tool, so it never reaches the server.
     const bridged = (name: string, args: unknown) =>
       client.callTool({
         name: 'call_tool_chain',
@@ -770,6 +772,36 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(refreshLines(logs)).toHaveLength(1);
     expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=refreshed');
     valid = 'unused';
+  });
+
+  it("a tool's own failure that reads like a rejected token runs once, refreshes nothing and keeps the sign-in", async () => {
+    quiet();
+    downstream = await startFakeDownstreamMcpServer({
+      acceptsToken: (t) => t === 'token-1',
+      failsWith: 'Upstream API answered 401 Unauthorized: this page is not shared with the integration.',
+    });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null;
+      return 'rejected';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    // The server's own words, marked as the failure they are.
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toBe('Upstream API answered 401 Unauthorized: this page is not shared with the integration.');
+    expect(downstream.executions()).toBe(1);
+    expect(state.refreshes).toBe(0);
+    expect(state.token).toBe('token-1');
+
+    // A chain sees the same failure as a rejected call, not as a value.
+    const chain = await client.callTool({ name: 'call_tool_chain', arguments: { code: "return notion.srv_echo({ text: 'two' });" } });
+    expect(chain.isError).toBe(true);
+    expect(toolText(chain)).toContain('this page is not shared with the integration');
+    expect(downstream.executions()).toBe(2);
+    expect(state.refreshes).toBe(0);
   });
 
   it('401 → refresh → retry: a token revoked mid-life is refreshed and the call succeeds; the caller sees only that', async () => {
@@ -1393,6 +1425,27 @@ describe('a connected tool whose schema is invalid is not offered to agents', ()
       arguments: { code: 'return notion.srv_fine({});' },
     });
     expect(sibling.isError).toBeFalsy();
+  });
+
+  it('does not reach the hidden tool by name through the chain bridge either', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [goodTool('fine'), { name: 'broken', description: 'broken', inputSchema: INVALID_SCHEMA }],
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    // The bindings leave the hidden tool out, but the bridge takes any name,
+    // and the pooled connection behind the route still holds the tool: the
+    // route is what refuses it.
+    const chain = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: "return __callToolRef.applySyncPromise(undefined, ['notion.srv.broken', '{}']);" },
+    });
+    expect(JSON.parse(JSON.parse(toolText(chain)).result as string)).toEqual({
+      success: false,
+      error: "Tool 'notion.srv.broken' not found in the repository.",
+    });
+    expect(downstream.executions()).toBe(0);
   });
 
   it('answers an agent that calls the hidden tool by name, without quoting the schema to it', async () => {

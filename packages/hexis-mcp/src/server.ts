@@ -34,9 +34,6 @@ import {
   toListedTool,
   toolError,
   installDownstreamToolErrors,
-  EXCLUDE_TOOLS_KEY,
-  excludedToolNames,
-  removeExcludedTools,
   seedBevelHostedManualVars,
   printable,
   skillPromptText,
@@ -198,9 +195,7 @@ export async function discoverTools(
       console.error(`[hexis-mcp] skipping local tool "${String(manual.name)}": ${result.error}`);
     }
   }
-  // A local server's `excludeTools` is honoured here; the workspace's own
-  // servers arrive already without theirs, through the deployment's surface.
-  const tools = await removeExcludedTools(client, await client.getTools(), new Set(local.flatMap(excludedToolNames)));
+  const tools = await client.getTools();
   return tools.map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME));
 }
 
@@ -336,9 +331,9 @@ function withReadOnlyHint(tool: ProxiedTool, hints: Readonly<Record<string, bool
  * the rest of the toolset must not pay for one broken server. The one
  * exception is a rejected connection key: that is not one broken server but a
  * dead credential for all of them, so it propagates and fails startup with
- * its own sentence. Exported for the stdio end-to-end test.
+ * its own sentence.
  */
-export async function prepareLocalManuals(
+async function prepareLocalManuals(
   config: HexisMcpConfig,
   templates: CallTemplate[],
   localOnly: ReadonlyMap<string, LocalManualInfo>,
@@ -346,8 +341,8 @@ export async function prepareLocalManuals(
   const out: CallTemplate[] = [];
   const materialized = new Map<string, Awaited<ReturnType<typeof materializePlugin>>>();
   for (const template of templates) {
-    type ServerEntry = StdioServerSpec & { transport?: string } & Partial<Record<typeof EXCLUDE_TOOLS_KEY, unknown>>;
-    const config_ = (template as { config?: { mcpServers?: Record<string, ServerEntry> } }).config;
+    const config_ = (template as { config?: { mcpServers?: Record<string, StdioServerSpec & { transport?: string }> } })
+      .config;
     const servers = config_?.mcpServers ?? {};
     const stdioNames = Object.keys(servers).filter((k) => servers[k]?.transport === 'stdio');
     if (stdioNames.length === 0) {
@@ -368,15 +363,9 @@ export async function prepareLocalManuals(
       for (const name of stdioNames) {
         const entry = servers[name]!;
         const prepared = await prepareStdioSpec(entry, plugin);
-        // The prepared spec is what spawns; the tools the server leaves out
-        // ride beside it, as in every other server entry, so
-        // `excludedToolNames` still finds them when the tool list is built.
-        const exclude = entry[EXCLUDE_TOOLS_KEY];
-        servers[name] = {
-          ...prepared,
-          transport: 'stdio',
-          ...(exclude !== undefined ? { [EXCLUDE_TOOLS_KEY]: exclude } : {}),
-        };
+        // The prepared spec replaces what spawns; every other key of the
+        // entry stays, so registration still reads the tools it leaves out.
+        servers[name] = { ...entry, ...prepared, transport: 'stdio' };
       }
       out.push(template);
     } catch (err) {
@@ -903,9 +892,7 @@ export async function createHexisMcpServer(
         noteManualReregistered(live, name);
       }
       tools = withoutRemoteMetaTools(
-        (await removeExcludedTools(live, await live.getTools(), new Set(local.flatMap(excludedToolNames)))).map(
-          (tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME),
-        ),
+        (await live.getTools()).map((tool: UtcpTool) => flattenManualTool(tool, REMOTE_MANUAL_NAME)),
       );
       // The views go with the tools: a tool that gained or re-pointed its
       // `ui://` view since startup must be listed — and its view served — as

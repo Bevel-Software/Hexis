@@ -42,8 +42,7 @@ import {
   withReadOnlyOverride,
   toolError,
   installDownstreamToolErrors,
-  excludedToolNames,
-  removeExcludedTools,
+  utcpManualName as utcpManualNameOf,
   needsAuthorizationResult,
   skillPromptText,
   ONBOARD_PROMPT,
@@ -1560,9 +1559,6 @@ export class McpService {
       if (manualCatalogNames.get(rewritten) === EXTERNAL_KB_MANUAL_NAME) continue;
       manualCatalogNames.set(rewritten, String(m.name));
     }
-    // The tools each server's manual leaves out (`plugin.json`'s `excludeTools`),
-    // by UTCP name; taken off the surface below once every manual is registered.
-    const excluded = new Set(manuals.flatMap(excludedToolNames));
     // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
     // route by the rewritten prefix, so two manuals whose names rewrite to one
     // identifier would silently share it. Sequential registration used to
@@ -1642,7 +1638,7 @@ export class McpService {
     const kbFailure = outcomes.find((o) => o.isKb && !o.ok);
     if (kbFailure && !kbFailure.ok) throw new Error(`Bevel tool discovery failed: ${kbFailure.error}`);
     if (routes.size > 0) routeToDownstream(client, routes);
-    const utcpTools = await removeExcludedTools(client, await client.getTools(), excluded);
+    const utcpTools = await client.getTools();
     const flattened = utcpTools.map((tool: UtcpTool) => flattenManualTool(tool, EXTERNAL_KB_MANUAL_NAME));
     const { tools, hidden } = await this.hideInvalidSchemas(client, flattened, manualCatalogNames, userId, loadId);
     return { tools, unavailable, catalogNames, hidden, degraded };
@@ -2185,13 +2181,9 @@ function utcpClientConfig(userId: string, variables: Record<string, string>, sec
   });
 }
 
-/**
- * The name a manual is registered under. `UtcpClient.registerManual` rewrites
- * every non-word character to `_`, and tool names are prefixed with the result,
- * so routing has to key on the same rewrite.
- */
+/** The name a manual is registered under, by `utcpManualName`'s rewrite; routing keys on it. */
 function utcpManualName(template: CallTemplate): string {
-  return String(template.name ?? '').replace(/[^\w]/g, '_');
+  return utcpManualNameOf(String(template.name ?? ''));
 }
 
 /**
@@ -2236,9 +2228,9 @@ function routeToDownstream(client: CodeModeUtcpClient, routes: ReadonlyMap<strin
   const callToolStreaming = client.callToolStreaming.bind(client);
   const routeOf = (toolName: string) => routes.get(toolName.split('.')[0] ?? '');
   // A routed call reaches only a tool this request's client still holds, as an
-  // unrouted one does. The pooled client holds every tool its server lists;
-  // this client holds the surface: that list minus what was taken off it (a
-  // manual's `excludeTools`, a tool hidden for an invalid schema). Without the
+  // unrouted one does. The pooled client holds every tool its server
+  // registered; this client holds the surface, which can hold fewer (a tool
+  // hidden for an invalid schema is taken off this client only). Without the
   // check, a chain's tool bridge could still call such a tool by name. The
   // refusal is the one UTCP's own `callTool` gives a tool missing from the repository.
   const assertOnSurface = async (toolName: string) => {

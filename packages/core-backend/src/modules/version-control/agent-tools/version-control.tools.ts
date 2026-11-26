@@ -431,10 +431,11 @@ export function registerVersionControlTools(
           400,
         );
       }
-      // A bare name the caller could not delete later gets their `<you>/`
+      // A bare name the caller could not delete later gets their own draft
       // prefix: an agent rarely knows the person's email, and a draft its
-      // own maker cannot remove is a dead end (Copilot's create-then-delete
-      // ran into exactly that). The answer names the draft as created.
+      // own maker cannot remove is a dead end (an MCP client's
+      // create-then-delete test ran into exactly that). The answer names the
+      // draft as created.
       const workspaceId = workspaceIdForBranch(base);
       const draft = await ctx.versionControlService.draftNameFor(workspaceId, name, ctx.user);
       return {

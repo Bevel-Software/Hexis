@@ -1,35 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import type { AuthUser } from '@bevel-software/platform-shared';
+import { testKbContext } from '../../../__tests__/kb-context.js';
+import { openChangeGate } from '../../../__tests__/open-change-gate.js';
+import type { Database } from '../../database/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { GitService } from '../git/git.service.js';
+import type { PullRequestService } from '../git/pull-request.service.js';
+import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
+import type { FileLockService } from '../file-lock.service.js';
+import type { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlService } from '../version-control.service.js';
 
 /**
- * `draftNameFor`: the name `create_branch` creates a draft under. Called on a
- * stand-in holding only what it consults (the git rule, the protected list and
- * the service's own author-or-Admin helper), so the test pins the naming
- * decision and nothing of the service's wiring.
+ * `draftNameFor`: the name `create_branch` creates a draft under. The service
+ * is built with only the git rule it consults standing in, so the test pins
+ * the naming decision through the method `create_branch` calls.
  */
 function draftNameFor(mayDelete: boolean | 'unreadable', name: string, user: AuthUser): Promise<string> {
-  const self = {
-    git: {
-      mayDeleteBranch: async () => {
-        if (mayDelete === 'unreadable') throw new Error('roles.yaml could not be read');
-        return mayDelete;
-      },
+  const git = {
+    mayDeleteBranch: async () => {
+      if (mayDelete === 'unreadable') throw new Error('roles.yaml could not be read');
+      return mayDelete;
     },
-    kb: { isProtectedBranch: (branch: string) => branch === 'main' },
-    mayDelete: VersionControlService.prototype['mayDelete'],
-  };
-  return VersionControlService.prototype.draftNameFor.call(self as never, 'ws', name, user);
+  } as unknown as GitService;
+  const svc = new VersionControlService(
+    {} as unknown as Database,
+    git,
+    {} as PullRequestService,
+    {} as IChangeRequestReviewService,
+    {} as WorkspaceService,
+    {} as IAccessControl,
+    {} as FileLockService,
+    {} as PendingCommitsService,
+    testKbContext(),
+    openChangeGate(),
+  );
+  return svc.draftNameFor('ws', name, user);
 }
 
 const visitor: AuthUser = { id: 'u1', email: 'demo@example.com', name: 'Demo' };
-const dotted: AuthUser = { id: 'u2', email: 'Paul.Brandt@bevel.software', name: 'Paul' };
+const dotted: AuthUser = { id: 'u2', email: 'Jane.Doe@example.com', name: 'Jane' };
 const noLocalpart: AuthUser = { id: 'abcdef123456', email: '---@example.com', name: 'Dashes' };
 
 describe('draftNameFor', () => {
   it("puts the caller's prefix on a bare name they could not delete once made", async () => {
     expect(await draftNameFor(false, 'copilot-check', visitor)).toBe('demo/copilot-check');
-    expect(await draftNameFor(false, 'fix-typo', dotted)).toBe('paul-brandt/fix-typo');
+    expect(await draftNameFor(false, 'fix-typo', dotted)).toBe('jane-doe/fix-typo');
   });
 
   it('gives an address with no usable localpart its suggestions prefix, which is still theirs to delete', async () => {
@@ -45,7 +62,7 @@ describe('draftNameFor', () => {
   });
 
   it('keeps a protected name as asked, so creating it is refused rather than prefixed', async () => {
-    expect(await draftNameFor(false, 'main', visitor)).toBe('main');
+    expect(await draftNameFor(false, 'target-company-state', visitor)).toBe('target-company-state');
   });
 
   it('keeps every name that already has a prefix, theirs or another', async () => {
