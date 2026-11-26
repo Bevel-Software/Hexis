@@ -1581,8 +1581,9 @@ export async function createCoreServices(
         const caller = await resolveManualCaller(bearer);
         return readInlineManual({ userId: caller.userId, agentPath: caller.agentPath }, slug);
       },
-      // What those two read reaches the tool client through the `direct-call`
-      // protocol, by one function this graph registers, under a name of its own.
+      // The manuals those two read reach the tool client through the
+      // `direct-call` protocol, by one function this graph registers, under a
+      // name of its own.
       manualInHand: new ManualInHand(registerCallable),
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller

@@ -1179,18 +1179,19 @@ export class McpService {
 
   /**
    * A read made in process, made as the loopback request it replaces was:
-   * held to {@link IN_PROCESS_READ_LIMIT_MS} (a limit a held event loop cannot
-   * use up), and its answer passed through JSON, as the route's answer was on
-   * its way here, so the code that reads it is handed what it was always
-   * handed, and a copy of its own: nothing it changes is the reader's.
+   * held to its limit (`inProcessReadLimitMs`, by default
+   * {@link IN_PROCESS_READ_LIMIT_MS}: a limit a held event loop cannot use
+   * up), and its answer passed through JSON, as the route's answer was on its
+   * way here, so the code that reads it is handed what it was always handed,
+   * and a copy of its own: nothing it changes is the reader's.
    *
    * The ONE policy for the four reads this service makes in process (the
    * catalog revision, the manual list, a skill read, a hosted manual). A read
-   * that fails, is refused or passes the limit answers the failure and is
-   * logged under `label`: one line when it was refused with the status its
-   * route answers (a key revoked since the request was admitted, a connection
-   * that loads nothing), as the loopback's refusal was; the error with its
-   * stack otherwise. It never throws.
+   * that fails, is refused or passes the limit is answered as a failure, not
+   * thrown, and is logged under `label`: one line when it was refused with
+   * the status its route answers (a key revoked since the request was
+   * admitted, a connection that loads nothing), as the loopback's refusal
+   * was; the error with its stack otherwise.
    */
   private async readInProcess(
     label: string,
