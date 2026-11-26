@@ -1206,6 +1206,32 @@ describe('apply_file_upload', () => {
     expect(await readdir(join(tempDir, 'outside'))).toEqual([]);
   });
 
+  // A link is a fact about the folder it sits in, so it is asked after the
+  // lock's gates: in a folder the caller cannot read, a path through a link
+  // answers as any path there does, and the link is never named.
+  it('refuses a path through a link in a folder the caller cannot read as `write-denied`, not `symlink`, and follows no link', async () => {
+    const sealed = { ...allowAll, canRead: async (_w: string, _u: string, rel: string) => !rel.startsWith('Sealed/') } as unknown as IAccessControl;
+    const base = await start({ access: sealed });
+    await mkdir(join(tempDir, KB_DIR, 'Sealed'), { recursive: true });
+    await mkdir(join(tempDir, 'outside'), { recursive: true });
+    await symlink(join(tempDir, 'outside'), join(tempDir, KB_DIR, 'Sealed/q3'), 'dir');
+    await symlink(join(tempDir, 'outside'), join(tempDir, KB_DIR, 'Away'), 'dir');
+    const { token } = await request(base);
+    await send(base, token, 'drop.zip', zipOf({ 'Sealed/q3/x.md': 'q3', 'Sealed/q4/x.md': 'q4', 'Away/y.md': 'away', 'open.md': 'open' }));
+    const answer = await apply(base, { branch: DRAFT, token, destination: KB_DIR });
+    const linked = outcomeAt(answer, `${KB_DIR}/Sealed/q3/x.md`);
+    const plain = outcomeAt(answer, `${KB_DIR}/Sealed/q4/x.md`);
+    expect(linked).toMatchObject({ outcome: 'refused', error: 'write-denied' });
+    expect(plain).toMatchObject({ outcome: 'refused', error: 'write-denied' });
+    // One answer for both: only the path each names differs.
+    expect(linked?.message?.replaceAll('q3', 'q4')).toBe(plain?.message);
+    // A link in a folder the caller may read is still refused, and nothing goes through it.
+    expect(outcomeAt(answer, `${KB_DIR}/Away/y.md`)).toMatchObject({ outcome: 'refused', error: 'symlink' });
+    expect(outcomeAt(answer, `${KB_DIR}/open.md`)).toMatchObject({ outcome: 'created' });
+    expect(batches).toEqual([[`${KB_DIR}/open.md`]]);
+    expect(await readdir(join(tempDir, 'outside'))).toEqual([]);
+  });
+
   it('refuses an entry naming the git folder, and lands the others', async () => {
     const base = await start();
     const { token } = await request(base);

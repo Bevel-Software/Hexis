@@ -4244,10 +4244,10 @@ export function registerWorkspaceTools(
    * Each path is put to the archive judge `unzip` uses too (`archiveEntryJudge`:
    * the path rules, the platform's rule files, the run's write policy and the
    * deployment's write hook, and — through each path's lock — the write rule
-   * and read-before-write), then to the link rule. The `mode` is asked only
-   * under the lock, after the lock's gates (unlike `write_files`, which also
-   * asks it before), so a path those gates refuse is never answered `exists`
-   * or `missing`. A path that fails one
+   * and read-before-write). The link rule and the `mode` are asked only under
+   * the lock, after the lock's gates (unlike `write_files`, which also asks
+   * the mode before), so a path those gates refuse is never answered
+   * `symlink`, `exists` or `missing`. A path that fails one
    * is that path's outcome and no more, with one exception the judge decides:
    * when one of the upload's own access rules (`access.md`, `.bevelignore`)
    * will not land, or the upload would land a `roles.yaml` or a groups file at
@@ -4330,17 +4330,6 @@ export function registerWorkspaceTools(
           // route's `validateFilename` accepts), the platform's rule files,
           // the write policy and the write hook.
           await judge.entry(wsPathOf, 'file');
-          // A link already on disk under the destination must not redirect
-          // these bytes — the rule `unzip` applies per entry, applied here on
-          // the path the write will take.
-          const link = await symlinkOnPath(root, wsPathOf);
-          if (link !== undefined) {
-            throw new ToolError(
-              `"${wsPathOf}" goes through the symbolic link "${link}"; an upload never follows links.`,
-              400,
-              { code: 'symlink' },
-            );
-          }
           const write = { path: wsPathOf, content: item.content };
           writes.push(write);
           entryOf.set(write, entry);
@@ -4350,12 +4339,13 @@ export function registerWorkspaceTools(
         }
       }
 
-      // The mode gate, asked only here: with every path's lock held, for the
-      // reason `write_file` states at length, and after the lock's own gates.
-      // A path the lock's gates refuse (the write rule, read-before-write) is
-      // refused there (`refusedAtLock`) and never reaches this, so an
-      // `exists` answers only for a path those gates let the caller change.
-      // A path the mode refuses is dropped from the
+      // The link rule and the mode gate, asked only here: with every path's
+      // lock held (for the mode, the reason `write_file` states at length),
+      // and after the lock's own gates. A path the lock's gates refuse (the
+      // write rule, read-before-write) is refused there (`refusedAtLock`) and
+      // never reaches this, so a `symlink` or an `exists` answers only for a
+      // path those gates let the caller change.
+      // A path either refuses is dropped from the
       // batch and reported refused, leaving the rest to land — unless the
       // judge says it refuses the upload, which then refuses the batch
       // untouched.
@@ -4366,6 +4356,17 @@ export function registerWorkspaceTools(
         for (const write of pending) {
           const entry = entryOf.get(write) as Record<string, unknown>;
           try {
+            // A link already on disk under the destination must not redirect
+            // these bytes — the rule `unzip` applies per entry, applied here on
+            // the path the write will take, before anything follows it.
+            const link = await symlinkOnPath(root, write.path);
+            if (link !== undefined) {
+              throw new ToolError(
+                `"${write.path}" goes through the symbolic link "${link}"; an upload never follows links.`,
+                400,
+                { code: 'symlink' },
+              );
+            }
             // An earlier entry of this same upload counts as existing, as it
             // does in `write_files`: two `create` entries for one path are a
             // mistake the commit would otherwise hide.
