@@ -69,8 +69,8 @@ export function createOnboardingRoutes(
     } catch (err) {
       // The batch write's held-lock refusal: one of the pack's paths is
       // being written by someone else right now. Nothing was committed.
-      // Asked first: it is a domain error too, whose own sentence ("continuing
-      // with other edits") is not this answer.
+      // Asked first: it is a domain error too, and this route answers it in
+      // its own words rather than with its sentence about a path and holder.
       if (err instanceof PathHeldError) {
         res.status(409).json({ error: 'Someone is editing the knowledge base right now. Try again in a moment.' });
         return;

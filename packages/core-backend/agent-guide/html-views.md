@@ -136,9 +136,9 @@ with `apply_file_upload`'s answer, `{ destination, count, total, files }`,
 rejects with the refusal: a file over the deployment's upload limit (the
 message names it), a destination the viewer may not write, or, when nothing
 landed, the first path's refusal, with its code in `error.code` (`exists`
-under `create`, `missing` under `update`). A zip refused whole has no
-`error.code` and its message ends with `{"kind":"archive-refused","entry":…}`,
-the entry that decided it: an `access.md` or `.bevelignore` that cannot land,
+under `create`, `missing` under `update`). A zip that one of its entries
+refuses whole has no `error.code` and its message ends with
+`{"kind":"archive-refused","entry":…}`, the entry that decided it: an `access.md` or `.bevelignore` that cannot land,
 or a `roles.yaml`, `groups.yaml` or `synced-groups.yaml` at the repository
 root. A refused upload writes nothing,
 and the bytes it sent are deleted at once. An upload is a writing call: the

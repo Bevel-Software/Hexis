@@ -2,14 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
 import { ChangeReadGate, isNewTopLevelFolderPath } from '../change-read-gate.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import { SYNCED_GROUPS_YAML } from '../../access-model/group-files.js';
+import { SYNCED_GROUPS_YAML, type AccessDeniedError } from '../../access-model/index.js';
 import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 const KB = 'knowledge-base';
 const WS = 'ws-gate';
@@ -57,8 +56,8 @@ describe('ChangeReadGate', () => {
     }
     await write(repo, 'roles.yaml', ROLES_YAML);
     const ws = stubWorkspaceService(workspaceDir);
-    access = new AccessControlService(ws, KB, new NodeFs());
-    gate = new ChangeReadGate(ws, access, testKbContext({ kbDirName: KB }), new NodeFs());
+    access = new AccessControlService(ws, KB, realDisk());
+    gate = new ChangeReadGate(ws, access, testKbContext({ kbDirName: KB }), realDisk());
   });
 
   afterEach(async () => {
@@ -231,9 +230,9 @@ describe('ChangeReadGate', () => {
       const ws = stubWorkspaceService(path.join(root, WS));
       const owned = new ChangeReadGate(
         ws,
-        new AccessControlService(ws, KB, new NodeFs(), [OWNER]),
+        new AccessControlService(ws, KB, realDisk(), [OWNER]),
         testKbContext({ kbDirName: KB }),
-        new NodeFs(),
+        realDisk(),
       );
       await write(repo, 'KnowledgeBase/Board/access.md', '---\nread:\n  - deny Admin\n---\n');
       expect(await owned.judge(WS, OWNER, `${KB}/KnowledgeBase/notes.md`, 'file')).toEqual({ allowed: true, via: 'readable' });
@@ -280,7 +279,7 @@ describe('ChangeReadGate', () => {
       const err = await gate
         .assertMayChange(WS, ALICE, `${KB}/KnowledgeBase/Sealed/brief.pdf`, 'file')
         .then(() => null, (e: unknown) => e);
-      expect(err).toBeInstanceOf(AccessDeniedError);
+      expect(err).toMatchObject({ status: 403 });
       const denied = err as AccessDeniedError;
       expect(denied.access).toEqual({
         path: `${KB}/KnowledgeBase/Sealed/brief.pdf`,

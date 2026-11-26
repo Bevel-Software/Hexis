@@ -159,7 +159,7 @@ describe('POST /onboarding/starter-pack', () => {
     const base = await listen(svc);
     const res = await post(`${base}/api/onboarding/starter-pack`, { id: 'sales' });
     expect(res.status).toBe(409);
-    expect((await res.json()).error).toMatch(/try again/i);
+    expect(await res.json()).toEqual({ error: 'Someone is editing the knowledge base right now. Try again in a moment.' });
   });
 
   it('answers a failure that only reads like a held lock as the failure it is', async () => {
