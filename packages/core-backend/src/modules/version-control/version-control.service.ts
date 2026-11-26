@@ -1534,6 +1534,9 @@ export class VersionControlService implements IVersionControlService {
     ) {
       return 'restore';
     }
+    // A caller who may not read the path is told that, and not who may write
+    // it: the writers a file's own entries name would say the file is there.
+    await this.changeGate.assertMayChange(workspaceId, userEmail, targetPath, 'file');
     const eligible = await this.accessControl.eligibleWritersAtRef(
       workspaceId,
       `HEAD`,

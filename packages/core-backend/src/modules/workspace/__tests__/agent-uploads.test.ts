@@ -13,7 +13,7 @@ import { createToolHandlerFactory, VersionControlHooks } from '../../../__tests_
 import type { ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import type { IAccessControl } from '../../access/index.js';
-import { AccessDeniedError, toKbRelative } from '../../access-model/index.js';
+import { AccessDeniedError, toKbRelative, type IChangeReadGate } from '../../access-model/index.js';
 import { normalizeWorkspacePath, PathHeldError } from '../../kb-fs/index.js';
 import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { READ_ONLY_CODE, type IWriteAccess } from '../../write-access/index.js';
@@ -115,6 +115,8 @@ let pushNeedsResolution = false;
 
 interface StartOptions {
   access?: IAccessControl;
+  /** The read-before-write gate the tools are handed (none by default, as in most harnesses). */
+  changeGate?: IChangeReadGate;
   userId?: string;
   userEmail?: string;
   ttlMs?: number;
@@ -302,7 +304,7 @@ async function start(options: StartOptions = {}): Promise<string> {
     new RoutineWritePolicyService(),
     {} as never,
     undefined,
-    undefined,
+    options.changeGate,
     uploads,
   );
   router.use(createAgentUploadRoutes({ uploads }));
@@ -982,6 +984,26 @@ describe('apply_file_upload', () => {
     // be sent again to try a draft branch instead.
     const retry = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Skills/my-skill` });
     expect(retry.count).toBe(2);
+  });
+
+  // Scenario: the destination is one the caller may neither write nor read.
+  it('refuses a destination the caller may not read for the read, without naming who may write it', async () => {
+    const changeGate: IChangeReadGate = {
+      judge: async (_ws, _email, wsPath) => ({ allowed: false, unreadable: toKbRelative(wsPath, KB_DIR) ?? wsPath }),
+      assertMayChange: async () => undefined,
+    };
+    const base = await start({ access: denyWritesAtHead(() => true), changeGate });
+    const { token } = await request(base);
+    await send(base, token, 'skill.zip', zipOf({ 'a.md': 'a' }));
+    const res = await call(base, 'apply_file_upload', { branch: PROTECTED, token, destination: `${KB_DIR}/Sealed` });
+    expect(res.status).toBe(403);
+    const body = await json<ApplyAnswer & { kind?: string; canPropose?: boolean; error?: string }>(res);
+    expect(body).toMatchObject({ kind: 'write-denied', canPropose: false });
+    expect(body.error).toContain('read access to "Sealed"');
+    // The writers a folder's or file's own rules name would say what is there.
+    expect(body.error).not.toContain('Eligible');
+    expect(body.error).not.toContain('ada@x');
+    expect(batches).toEqual([]);
   });
 
   // Scenario: one entry targets a folder the caller may not write.

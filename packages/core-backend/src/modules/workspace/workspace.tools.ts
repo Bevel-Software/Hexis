@@ -1169,7 +1169,19 @@ async function writeRefusalAtHead(
   branch: string,
   path: string,
   targetKind: 'file' | 'dir',
+  /**
+   * The read-before-write gate and the caller. A caller who may not read
+   * `path` gets the gate's refusal, not its writers: the writers a file's own
+   * entries name would say the file is there. Asked as the lock asks it.
+   */
+  read: { changeGate?: IChangeReadGate; email: string },
 ): Promise<AccessDeniedError> {
+  if (read.changeGate) {
+    const verdict = await read.changeGate.judge(workspaceIdForBranch(branch), read.email, path, targetKind);
+    if (!verdict.allowed) {
+      return new AccessDeniedError({ path, eligibleRoles: [], eligibleUsers: [], unreadable: verdict.unreadable, targetKind });
+    }
+  }
   const rel = toKbRelative(path, kbDirName);
   const eligible = rel === null
     ? null
@@ -1274,7 +1286,7 @@ export function archiveEntryJudge(
       if (kind === 'file') return;
       try {
         if ((await writeBlockedAtHead(accessControl, kb, branch, email, [wsPath])).length > 0) {
-          throw await writeRefusalAtHead(accessControl, kb.kbDirName, branch, wsPath, 'dir');
+          throw await writeRefusalAtHead(accessControl, kb.kbDirName, branch, wsPath, 'dir', { changeGate, email });
         }
         await changeGate?.assertMayChange(workspaceIdForBranch(branch), email, wsPath, 'dir');
       } catch (err) {
@@ -1784,13 +1796,15 @@ export function registerWorkspaceTools(
   const writeBlocked = (branch: string, ctx: ToolContext, paths: string[]): Promise<string[]> =>
     writeBlockedAtHead(accessControl, kb, branch, ctx.user.email, paths);
 
-  /** {@link writeRefusalAtHead}. */
+  /** {@link writeRefusalAtHead} for the caller. */
   const writeRefusal = (
     branch: string,
+    ctx: ToolContext,
     path: string,
     /** What `path` is — a folder the move or delete was judged on, or a file. See `AccessDeniedDetails.targetKind`. */
     targetKind: 'file' | 'dir' = 'file',
-  ): Promise<AccessDeniedError> => writeRefusalAtHead(accessControl, kbDirName, branch, path, targetKind);
+  ): Promise<AccessDeniedError> =>
+    writeRefusalAtHead(accessControl, kbDirName, branch, path, targetKind, { changeGate, email: ctx.user.email });
 
   /**
    * The branch's filesystem as the batch it lands a set of files through:
@@ -3551,7 +3565,7 @@ export function registerWorkspaceTools(
       const refused = fileDeleteRefusal(onDisk);
       if (refused !== undefined) throw new ToolError(refused, 400);
       await assertNoSymlinkOnPath(root, path, true);
-      if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
+      if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, ctx, path);
       await orNotFound(path, () => fs.deleteFile(path), 'Nothing to delete');
       // Deleting content is not deleting structure: an emptied folder stays.
       await keepFolderOf(fs, ctx, branch, path, kbDirName);
@@ -3654,7 +3668,7 @@ export function registerWorkspaceTools(
         const { files, content, managed, linked, blocked, impact } = await judge();
         if (managed !== undefined) throw new ToolError(managed, 400);
         if (linked !== undefined) throw new ToolError(linked, 400);
-        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0], blocked[0] === path ? 'dir' : 'file');
+        if (blocked.length > 0) throw await writeRefusal(branch, ctx, blocked[0], blocked[0] === path ? 'dir' : 'file');
         if (content.length > 0 && a.confirm !== true) {
           return {
             ...impact,
@@ -3964,7 +3978,7 @@ export function registerWorkspaceTools(
       // directly under a root is proposable where a file there is not.
       if (blocked.length > 0) {
         const folderPath = kind === 'folder' && (blocked[0] === src || blocked[0] === dest);
-        throw await writeRefusal(branch, blocked[0], folderPath ? 'dir' : 'file');
+        throw await writeRefusal(branch, ctx, blocked[0], folderPath ? 'dir' : 'file');
       }
       if (collision) throw new ToolError(reason!, 409);
       if (linkPlan?.overCap !== undefined) throw new ToolError(linkPlan.overCap, 400);
@@ -4088,7 +4102,7 @@ export function registerWorkspaceTools(
       // refuses this copy anyway — but only after the copy had already
       // answered, which is exactly the oracle.
       const blockedDest = await writeBlocked(branch, ctx, [dest]);
-      if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0]);
+      if (blockedDest.length > 0) throw await writeRefusal(branch, ctx, blockedDest[0]);
       await assertCopySourceReadable(branch, ctx, src);
       const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
       if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
@@ -4267,7 +4281,7 @@ export function registerWorkspaceTools(
       // which `rethrowAsWriteDenial` turns into `write-denied` with the
       // change-request steps — and nothing lands.
       const blockedDest = await writeBlocked(branch, ctx, [destination]);
-      if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0], 'dir');
+      if (blockedDest.length > 0) throw await writeRefusal(branch, ctx, blockedDest[0], 'dir');
       if ((await kindOf(fs, destination)) === 'file') {
         throw new ToolError(
           `"${displayPath(destination)}" is a file, not a folder — \`destination\` names the folder the upload lands in.`,

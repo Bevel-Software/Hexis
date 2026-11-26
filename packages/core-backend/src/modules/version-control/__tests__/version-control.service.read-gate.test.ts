@@ -122,12 +122,30 @@ describe('acquireLock asks the read-before-write gate', () => {
     expect(acquire).not.toHaveBeenCalled();
   });
 
-  it('the write gate refuses first, so the read gate is never asked about a path the caller may not write', async () => {
+  it('a path the caller may read but not write is refused by the write gate, naming who may write it', async () => {
     const { gate, assertMayChange } = gateThat({ allowed: true, via: 'readable' });
-    const { svc, acquire } = makeService({ gate, writable: false });
+    const { svc, acquire, accessControl } = makeService({ gate, writable: false });
 
-    await expect(svc.acquireLock(WS, PROTECTED, PATH, USER)).rejects.toBeInstanceOf(AccessDeniedError);
-    expect(assertMayChange).not.toHaveBeenCalled();
+    const err = await svc.acquireLock(WS, PROTECTED, PATH, USER).then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({ status: 403 });
+    expect((err as { access: { unreadable?: string } }).access.unreadable).toBeUndefined();
+    expect((err as Error).message).toContain('Eligible:');
+    expect(assertMayChange).toHaveBeenCalledOnce();
+    expect(accessControl.eligibleWritersAtRef).toHaveBeenCalledOnce();
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('a path the caller may neither write nor read is refused for the read, without its writers', async () => {
+    const { gate } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
+    const { svc, acquire, accessControl } = makeService({ gate, writable: false });
+
+    const err = await svc.acquireLock(WS, PROTECTED, PATH, USER).then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({
+      status: 403,
+      access: { unreadable: 'KnowledgeBase/Sealed/brief.pdf', eligibleRoles: [], eligibleUsers: [] },
+    });
+    // The writers a file's own entries name would say it is there.
+    expect(accessControl.eligibleWritersAtRef).not.toHaveBeenCalled();
     expect(acquire).not.toHaveBeenCalled();
   });
 
