@@ -56,6 +56,18 @@ export interface DiscoveredPlugin {
   /** The raw `mcp.json` text, when it exists on disk (native only). */
   mcpJsonText: string | null;
   /**
+   * The repo-relative FILE the plugin's manifest was read from: the native
+   * `plugin.json`, or a dialect's own file. Whoever may not read it may not
+   * see the plugin. Named here so no consumer has to guess the layout.
+   */
+  manifestPath: string;
+  /**
+   * The repo-relative FILE `mcpServers` was read from: the native
+   * `mcp.json`, or the registry a dialect expands its profile through.
+   * Null when there are no servers. Whoever may not read it gets none of them.
+   */
+  mcpServersPath: string | null;
+  /**
    * Whether hexis manages this plugin's links — writes them, grants the
    * plugin's principal on the skill, reports a missing grant as needing
    * repair. False for a dialect, whose links are plain references and whose

@@ -176,10 +176,11 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   for (const [name, links] of [...membership.byPlugin.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const plugin = byName.get(name);
     if (!plugin || plugin.personal || !plugin.exists) continue;
-    // The plugin itself is its manifest: a caller who may not read it sees
-    // nothing of the plugin, not its name, its servers or its files. The
-    // linked skills they may read still ship, in the leftovers plugin.
-    if (!(await readable(`${plugin.folder}/${PLUGIN_MANIFEST_FILE}`))) continue;
+    // The plugin itself is its manifest, whichever file discovery read it
+    // from: a caller who may not read it sees nothing of the plugin, not its
+    // name, its servers or its files. The skills it links are not withheld
+    // with it: each is judged like any other readable skill.
+    if (!(await readable(plugin.manifestPath))) continue;
     const manifest = plugin.manifest;
     const inline = [...readableSkills.values()].filter((s) => s.path.startsWith(`${plugin.folder}/`));
     const linked = links.linkedSkills
@@ -190,7 +191,9 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
         `${name}: skill "${s.name}" at ${s.path} shares its name with ${other.path} — the second is left out`,
       ),
     );
-    const mcp = (await readable(`${plugin.folder}/${PLUGIN_MCP_FILE}`))
+    // The servers are gated on the file they were read from: the plugin's
+    // `mcp.json`, or the registry a bundle expands its profile through.
+    const mcp = plugin.mcpServersPath !== null && (await readable(plugin.mcpServersPath))
       ? portableMcp(plugin.mcpServers, (name, reason) =>
           warnings.push(`${plugin.folder}: mcp server "${name}" not shipped — ${reason}`),
         )

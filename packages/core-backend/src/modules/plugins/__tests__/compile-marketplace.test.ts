@@ -1,23 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { AccessControlService } from '../../access/access-control.service.js';
-import { SkillService } from '../../skills/skills.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import { registerSkillsTools, type SkillService } from '../../skills/index.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
 import { compileMarketplace } from '../compile/compile-marketplace.js';
-import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
+import { NodeGitRunner } from '../../version-control/index.js';
 import express from 'express';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { registerSkillsTools } from '../../skills/skills.tools.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
+import { realSkillService } from '../../../__tests__/real-skills.js';
 
 /**
  * Source in, distribution out — for one caller. The real resolver decides
@@ -93,11 +93,11 @@ describe('compileMarketplace', () => {
     await write('Skills/Sales/access.md', '---\n---\nread:\n  - everyone\n');
     await write('Skills/Sales/pitch/SKILL.md', '---\ndescription: Pitch.\n---\n');
 
-    const disk = new NodeFs();
+    const disk = realDisk();
     const kb = testKbContext({ kbDirName: KB_DIR });
     source = new KbPluginSource(disk, kb);
-    const access = new AccessControlService(workspaceService, KB_DIR, disk);
-    const skills = new SkillService(workspaceService, access, kb, disk);
+    const access = realAccessControl(workspaceService, KB_DIR, disk);
+    const skills = realSkillService(workspaceService, access, kb, disk);
     catalog = skills;
     links = new PluginLinkIndex(workspaceService, skills, access, kb, source);
     compiler = new MarketplaceCompilerService(
@@ -366,7 +366,7 @@ describe('compileMarketplace', () => {
     const skills = await catalog.listSkills(undefined);
     const compileWith = async (refused: string) =>
       compileMarketplace({
-        disk: new NodeFs(),
+        disk: realDisk(),
         kbRoot: repo,
         skills,
         plugins: (await source.discover(repo)).plugins,
@@ -388,6 +388,46 @@ describe('compileMarketplace', () => {
     const noManifest = await compileWith('Plugins/GTM/plugin.json');
     expect(noManifest.plugins).not.toContain('gtm');
     expect([...noManifest.files.keys()].some((p) => p.startsWith('plugins/gtm/'))).toBe(false);
+  });
+
+  it("a bundle plugin is gated on its own files: the bundle as its manifest, the registry its servers come from", async () => {
+    // A bundle has no `plugin.json` and no `mcp.json`: asking for those
+    // would ask about files that do not exist.
+    await write(
+      'configs/mcp/registry.json',
+      JSON.stringify({
+        servers: [{ id: 'confluence', config: { type: 'http', url: 'https://mcp.confluence.example' } }],
+        profiles: [{ id: 'base', servers: ['confluence'] }],
+      }),
+    );
+    await write(
+      'Plugins/Kit/plugin.bundle.json',
+      JSON.stringify({ name: 'kit', mcpProfile: 'base', sourceSkillRoots: ['Skills/Sales'] }),
+    );
+    const skills = await catalog.listSkills(undefined);
+    const compileWith = async (refused: string | null) =>
+      compileMarketplace({
+        disk: realDisk(),
+        kbRoot: repo,
+        skills,
+        plugins: (await source.discover(repo)).plugins,
+        membership: await links.membership(),
+        readable: async (p) => p !== refused,
+        options: { name: 'acme-hexis', owner: 'Acme', sourceCommit: 'abc' },
+      });
+
+    const all = await compileWith(null);
+    expect(all.plugins).toContain('kit');
+    expect(Object.keys(json(all, 'plugins/kit/mcp.json').mcpServers)).toEqual(['confluence']);
+
+    const noRegistry = await compileWith('configs/mcp/registry.json');
+    expect(noRegistry.plugins).toContain('kit');
+    expect(noRegistry.files.has('plugins/kit/mcp.json')).toBe(false);
+    expect(noRegistry.files.has('plugins/kit/.mcp.json')).toBe(false);
+
+    const noBundle = await compileWith('Plugins/Kit/plugin.bundle.json');
+    expect(noBundle.plugins).not.toContain('kit');
+    expect([...noBundle.files.keys()].some((p) => p.startsWith('plugins/kit/'))).toBe(false);
   });
 
   it('the everyone audience carries the public subset only', async () => {

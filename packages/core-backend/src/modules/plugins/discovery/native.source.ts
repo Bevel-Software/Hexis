@@ -107,6 +107,8 @@ export async function readNativePlugin(
     linkedRoots: linkedSkillRoots(manifest),
     mcpServers,
     mcpJsonText,
+    manifestPath: `${folder}/${PLUGIN_MANIFEST_FILE}`,
+    mcpServersPath: mcpServers ? `${folder}/${PLUGIN_MCP_FILE}` : null,
     linksAreManaged: true,
   };
 }
