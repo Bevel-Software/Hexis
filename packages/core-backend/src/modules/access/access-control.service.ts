@@ -76,7 +76,8 @@ import { OwnEntriesMemo, type IOwnEntriesMemo, type WorkspaceOwnEntries } from '
 import { TreeIndexer, type CommitPaths, type ITreeIndexer } from './tree-index.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import { frontmatterHead } from './frontmatter-head.js';
-import { HEAD_MAP_LIMITS, HeadMaps, type HeadMap, type HeadModelSource, type IHeadMaps } from './head-access-map.js';
+import { DISK_READS_AT_ONCE, HEAD_MAP_LIMITS, HeadMaps, type HeadMap, type HeadModelSource, type IHeadMaps } from './head-access-map.js';
+import { mapPooled } from '../../shared/map-pooled.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -1759,12 +1760,12 @@ export class AccessControlService implements IAccessControl {
     const model = head ? head.model : await this.loadCheckoutModel(workspaceId, repoDir);
     if (!needsPaths(model)) return { model, owns: [], head };
     const memo = fresh ? null : this.ownEntriesMemo.open(workspaceId);
-    const owns = await Promise.all(
-      relativePaths.map((p) => {
-        const own = head?.ownEntries(p);
-        return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
-      }),
-    );
+    // A few files at a time: a batch may name thousands of paths, and each
+    // path no map answers for may be a read of the checkout.
+    const owns = await mapPooled(relativePaths, DISK_READS_AT_ONCE, async (p) => {
+      const own = head?.ownEntries(p);
+      return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
+    });
     return { model, owns, head };
   }
 

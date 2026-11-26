@@ -482,8 +482,8 @@ export class HeadMaps<M> implements IHeadMaps<M> {
   }
 }
 
-/** Files read from the checkout at once. */
-const DISK_READS_AT_ONCE = 16;
+/** Files the access module reads from the checkout at once (`mapPooled`): a head map's versions, a batch's own entries. */
+export const DISK_READS_AT_ONCE = 16;
 /** A file the checkout does not hold as its version's bytes: gone, or other bytes. */
 const UNVOUCHED = Symbol('unvouched');
 
