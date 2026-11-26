@@ -82,6 +82,16 @@ describe('AccessControlService: reads answered from the map of the head commit',
     await git('commit', '-qm', message);
   }
 
+  /**
+   * Make git's stat cache vouch for `rel` as it is on disk now, with the attributes that hold now: dated in the
+   * past, so git never reads it again to check.
+   */
+  async function vouchedFor(rel: string): Promise<void> {
+    const past = new Date(Date.now() - 60_000);
+    await fs.utimes(path.join(repo, rel), past, past);
+    await git('update-index', '-q', '--refresh');
+  }
+
   /** The same files as the repository's checkout, in a folder that is no repository. */
   async function copyToPlain(): Promise<void> {
     await fs.rm(plain, { recursive: true, force: true });
@@ -141,13 +151,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
     opened.length = 0;
   };
 
-  // What git may rewrite on checkout depends on its configuration: these tests read none but the repository's own,
-  // whatever this machine's system and user files say (git-lfs installs a filter driver in one of them).
-  const savedGitConfig = { system: process.env.GIT_CONFIG_NOSYSTEM, global: process.env.GIT_CONFIG_GLOBAL };
-
   beforeEach(async () => {
-    process.env.GIT_CONFIG_NOSYSTEM = '1';
-    process.env.GIT_CONFIG_GLOBAL = os.devNull;
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-head-map-'));
     repo = path.join(root, 'ws', KB);
     plain = path.join(root, 'plain', KB);
@@ -180,10 +184,6 @@ describe('AccessControlService: reads answered from the map of the head commit',
   afterEach(async () => {
     vi.restoreAllMocks();
     await fs.rm(root, { recursive: true, force: true });
-    for (const [name, value] of [['GIT_CONFIG_NOSYSTEM', savedGitConfig.system], ['GIT_CONFIG_GLOBAL', savedGitConfig.global]] as const) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
   });
 
   it('answers every gate as the checkout does, for every person and path', async () => {
@@ -218,9 +218,8 @@ describe('AccessControlService: reads answered from the map of the head commit',
     const paths = [...Object.keys(FILES), 'Team/New.md'];
     expect((await svc.canReadBatch('ws', 'mem@x.io', paths)).get('Team/New.md')).toBe(true);
     // The access files are the ones already held: only the new file is read, from the checkout, which git's stat
-    // cache says holds the commit's version (asked before and after the read), and that git can have written out
-    // only as it is: no filter driver is configured and no attribute converts it.
-    expect(gitLog).toEqual(['ls-tree', 'diff-index', 'config', 'check-attr', 'diff-index']);
+    // cache does not say differs and whose bytes hash to the commit's version.
+    expect(gitLog).toEqual(['ls-tree', 'diff-index']);
     expect(opened).toEqual([path.join('Team', 'New.md')]);
 
     // A commit that changes what a file declares is answered from the new version.
@@ -228,7 +227,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
     await commit('own page opened', { 'Team/Own.md': '# own, now plain\n' });
     reset();
     expect((await svc.canReadBatch('ws', 'nobody@x.io', paths)).get('Team/Own.md')).toBe(true);
-    expect(gitLog).toEqual(['ls-tree', 'diff-index', 'config', 'check-attr', 'diff-index']);
+    expect(gitLog).toEqual(['ls-tree', 'diff-index']);
     expect(opened).toEqual([path.join('Team', 'Own.md')]);
 
     // A commit that changes an access file is read, and its rules decide. An `access.md` is read through git, never
@@ -383,41 +382,68 @@ describe('AccessControlService: reads answered from the map of the head commit',
     );
   }, 120_000);
 
-  // Git says a file is the same on disk as in the commit after its filters have run, so the bytes on disk can
-  // differ from the version's; what they declare is then no fact about the version.
-  it('reads every file through git while a filter driver is configured, even one whose filter attribute is gone', async () => {
+  // Git calls a file the same on disk as in the commit after its filters, end-of-line conversion and encoding have
+  // run, under the attributes and configuration of the day it was written out, so the bytes on disk can be other
+  // than the version's; what they declare is then no fact about the version. Only the bytes' hash proves them.
+  it('keeps a page restricted whose bytes on disk a filter wrote, though its filter attribute is gone', async () => {
     // A filter that hides the page's frontmatter on disk, and puts it back for git: git calls the file unchanged.
     await git('config', 'filter.fence.smudge', "sed -e 's/^---$/+++/'");
     await git('config', 'filter.fence.clean', "sed -e 's/^+++$/---/'");
     await commit('own page filtered', { '.gitattributes': 'Team/Own.md filter=fence\n' });
     await fs.rm(path.join(repo, 'Team', 'Own.md'));
     await git('checkout', '--', 'Team/Own.md');
-    // Git's stat cache vouches for the page while the filter still applies, so nothing later reads it again.
-    const past = new Date(Date.now() - 60_000);
-    await fs.utimes(path.join(repo, 'Team', 'Own.md'), past, past);
-    await git('update-index', '-q', '--refresh');
-    // The attribute goes; the page keeps the bytes the filter wrote, and git still calls it unchanged.
+    await vouchedFor('Team/Own.md');
+    // The attribute goes, then the driver; the page keeps the bytes the filter wrote, of the version's size.
     await write(repo, { '.gitattributes': '# no attributes\n' });
     await git('add', '--', '.gitattributes');
     await git('commit', '-qm', 'filter attribute removed');
+    await git('config', '--unset', 'filter.fence.smudge');
+    await git('config', '--unset', 'filter.fence.clean');
     expect(await git('check-attr', 'filter', '--', 'Team/Own.md')).toBe('Team/Own.md: filter: unspecified');
     expect(await fs.readFile(path.join(repo, 'Team', 'Own.md'), 'utf-8')).toMatch(/^\+\+\+\n/);
     expect(await git('diff-index', '--name-only', 'HEAD', '--')).toBe('');
     reset();
 
-    const svc = service();
     // The commit's page denies everyone but Sales, though the page on disk declares nothing.
-    expect(await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md', 'Top.md'])).toEqual(
+    expect(await service().canReadBatch('ws', 'mem@x.io', ['Team/Own.md', 'Top.md'])).toEqual(
       new Map([
         ['Team/Own.md', false],
         ['Top.md', true],
       ]),
     );
-    // No file is read from the checkout: git may have rewritten any of them.
-    expect(opened).toEqual([]);
+    // The page was read through git; a file whose bytes are its version's was read from the checkout.
+    expect(gitLog).toContain('cat-file');
+    expect(opened).toContain('Top.md');
   }, 120_000);
 
-  it('reads through git a file an end-of-line conversion wrote out, told by its size', async () => {
+  it('keeps a page restricted whose bytes on disk an encoding wrote, though its working-tree-encoding is gone', async () => {
+    // EBCDIC: one byte for each, so the page on disk is its version's size, and no `---` opens it.
+    // Only the attributes are committed: `add -A` would read the page on disk as EBCDIC and commit that.
+    await write(repo, { '.gitattributes': 'Team/Own.md working-tree-encoding=IBM037\n' });
+    await git('add', '--', '.gitattributes');
+    await git('commit', '-qm', 'own page encoded');
+    await fs.rm(path.join(repo, 'Team', 'Own.md'));
+    await git('checkout', '--', 'Team/Own.md');
+    await vouchedFor('Team/Own.md');
+    await write(repo, { '.gitattributes': '# no attributes\n' });
+    await git('add', '--', '.gitattributes');
+    await git('commit', '-qm', 'encoding removed');
+    const onDisk = await fs.readFile(path.join(repo, 'Team', 'Own.md'));
+    expect(onDisk.length).toBe(Buffer.byteLength(FILES['Team/Own.md']!));
+    expect(onDisk.toString('latin1').startsWith('---')).toBe(false);
+    expect(await git('diff-index', '--name-only', 'HEAD', '--')).toBe('');
+    reset();
+
+    expect(await service().canReadBatch('ws', 'mem@x.io', ['Team/Own.md', 'Top.md'])).toEqual(
+      new Map([
+        ['Team/Own.md', false],
+        ['Top.md', true],
+      ]),
+    );
+    expect(gitLog).toContain('cat-file');
+  }, 120_000);
+
+  it('reads through git a file an end-of-line conversion wrote out, without opening it', async () => {
     await commit('notes converted', { '.gitattributes': 'Notes.txt text eol=crlf\n' });
     await fs.rm(path.join(repo, 'Notes.txt'));
     await git('checkout', '--', 'Notes.txt');
@@ -425,35 +451,15 @@ describe('AccessControlService: reads answered from the map of the head commit',
     expect(await git('diff-index', '--name-only', 'HEAD', '--')).toBe('');
     reset();
 
-    const svc = service();
-    expect(await svc.canReadBatch('ws', 'mem@x.io', ['Notes.txt', 'Top.md'])).toEqual(
+    expect(await service().canReadBatch('ws', 'mem@x.io', ['Notes.txt', 'Top.md'])).toEqual(
       new Map([
         ['Notes.txt', true],
         ['Top.md', true],
       ]),
     );
+    // Not its version's size: not worth reading from the checkout.
     expect(opened).not.toContain('Notes.txt');
     expect(opened).toContain('Top.md');
-  }, 120_000);
-
-  it('reads through git a file a working-tree-encoding or ident attribute applies to', async () => {
-    // Both files are plain ASCII with no `$Id$`, so their bytes on disk are the same either way: only the
-    // attributes send them through git.
-    await commit('encoding and ident', { '.gitattributes': 'Team/Write.md working-tree-encoding=ISO-8859-1\nTop.md ident\n' });
-    expect(await git('diff-index', '--name-only', 'HEAD', '--')).toBe('');
-    reset();
-
-    const svc = service();
-    expect(await svc.canWriteBatch('ws', 'mem@x.io', ['Team/Write.md', 'Top.md', 'Team/Doc.md'])).toEqual(
-      new Map([
-        ['Team/Write.md', false],
-        ['Top.md', true],
-        ['Team/Doc.md', true],
-      ]),
-    );
-    expect(opened).not.toContain(path.join('Team', 'Write.md'));
-    expect(opened).not.toContain('Top.md');
-    expect(opened).toContain(path.join('Team', 'Doc.md'));
   }, 120_000);
 
   it('takes no member from a roles or groups file changed on disk and not committed, where the checkout alone would', async () => {
@@ -612,7 +618,7 @@ describe('AccessControlService: reads answered from the map of the head commit',
     const second = service({}, store);
     const all = [...paths, 'Team/Since.md'];
     expect((await second.canReadBatch('ws', 'nobody@x.io', all)).get('Team/Since.md')).toBe(false);
-    expect(gitLog).toEqual(['ls-tree', 'cat-file', 'ls-tree', 'cat-file', 'diff-index', 'config', 'check-attr', 'diff-index']);
+    expect(gitLog).toEqual(['ls-tree', 'cat-file', 'ls-tree', 'cat-file', 'diff-index']);
     expect(opened).toEqual([path.join('Team', 'Since.md')]);
     expect(await answers(second, 'ws', all)).toEqual(await answers(service(), 'plain', all));
   }, 120_000);
