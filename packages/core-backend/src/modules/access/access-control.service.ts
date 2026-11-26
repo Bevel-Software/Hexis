@@ -127,6 +127,23 @@ async function catFileBatch(
 /** The sources of a model that are read by a fixed name at the root, whatever else the tree holds. */
 const FIXED_NAME_SOURCES = ['roles.yaml', SYNCED_GROUPS_YAML, GROUPS_YAML] as const;
 
+/**
+ * Which source of an access model the file at `p` (repository-relative) is:
+ * a folder's rules (an `access.md` at any depth), one read by its fixed name
+ * at the root (`FIXED_NAME_SOURCES`), a plugin's manifest (in a folder below
+ * the plugins root), or none. Both builds of a model ask it: the walk of the
+ * checkout (`accessFileListener`) and the listing of a commit
+ * (`listAccessFilesAtRef`), which makes `sourcesKey` from its answers, so
+ * what a commit's build prefetches is what its key covers. `decidesListing`,
+ * in the access-model module, still names the same set itself.
+ */
+function accessSourceOf(p: string, pluginsDir: string): 'rules' | 'fixed-name' | 'manifest' | null {
+  if (isAccessMdPath(p)) return 'rules';
+  if ((FIXED_NAME_SOURCES as readonly string[]).includes(p)) return 'fixed-name';
+  const cut = p.lastIndexOf('/');
+  return cut > 0 && p.slice(cut + 1) === PLUGIN_MANIFEST_FILE && p.slice(0, cut).startsWith(`${pluginsDir}/`) ? 'manifest' : null;
+}
+
 /** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
 export interface AccessModel {
   roles: RolesIndex;
@@ -321,12 +338,14 @@ function accessFileListener(
   return {
     async onFile(dir, name) {
       const rel = dir ? `${dir}/${name}` : name;
-      if (name === PLUGIN_MANIFEST_FILE && dir.startsWith(`${pluginsDir}/`)) {
+      const source = accessSourceOf(rel, pluginsDir);
+      if (source === 'manifest') {
         const text = await fs.readFile(path.join(repoDir, rel), 'utf-8').catch(() => null);
         pluginDirs.set(dir, pluginIdentityOf(parseManifestText(text), path.posix.basename(dir)));
         return;
       }
-      if (name !== 'access.md') return;
+      // The fixed-name sources are read by name (`loadCheckoutModel`).
+      if (source !== 'rules') return;
       const text = await fs.readFile(path.join(repoDir, rel), 'utf-8');
       const parsed = parseAccessFile(text, rel);
       if (!parsed.ok) {
@@ -3098,21 +3117,19 @@ export class AccessControlService implements IAccessControl {
       // seen by its name even when it is an empty folder object with no
       // file beneath it.
       visitTreeListing(stdout, (p, file) => {
+        const source = accessSourceOf(p, pluginsDir);
         if (file.folder) {
-          if ((FIXED_NAME_SOURCES as readonly string[]).includes(p)) sources.update(`${p}/\0folder\n`);
+          if (source === 'fixed-name') sources.update(`${p}/\0folder\n`);
           return;
         }
         opts.visit?.(p, file);
         // One past the cap is enough to know the tree is not kept.
         if (all.length <= this.treeIndexMaxPaths) all.push(p);
-        if (p === 'access.md' || p.endsWith('/access.md')) {
-          if (!walked(p)) return;
-          out.push(p);
-        } else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
-        else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
-          if (!walked(p)) return;
-          pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
-        } else return;
+        if (source === null) return;
+        if (source === 'fixed-name') named.add(p);
+        else if (!walked(p)) return;
+        else if (source === 'rules') out.push(p);
+        else pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         sources.update(`${p}\0${file.objectId()}\n`);
       });
       return { accessFiles: out, pluginDirs, named, all, sourcesKey: sources.digest('hex') };
@@ -3316,9 +3333,7 @@ export class AccessControlService implements IAccessControl {
     const shared = this.modelsBySources.get(listed.sourcesKey);
     if (shared) return { model: shared.model, resolvedRef: commit, tree: treeOf(), sourcesKey: listed.sourcesKey };
     const wanted = [
-      'roles.yaml',
-      SYNCED_GROUPS_YAML,
-      GROUPS_YAML,
+      ...FIXED_NAME_SOURCES,
       ...listed.accessFiles,
       ...listed.pluginDirs.map((dir) => `${dir}/${PLUGIN_MANIFEST_FILE}`),
     ];
