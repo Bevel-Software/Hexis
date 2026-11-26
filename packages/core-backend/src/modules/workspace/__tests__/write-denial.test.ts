@@ -88,7 +88,7 @@ describe('writeDenial asks the read gate about the refused path as the refuser s
     it('without a gate, no read on an unprotected branch also names the read', async () => {
       const accessControl = { canRead: vi.fn(async () => false) } as unknown as IAccessControl;
       const out = await writeDenial(err(), DRAFT, accessControl, testKbContext({ kbDirName: KB }));
-      expect(accessControl.canRead).toHaveBeenCalledWith('someone/draft', 'alice@example.com', 'KnowledgeBase/Sales/deal.md');
+      expect(accessControl.canRead).toHaveBeenCalledWith('someone%2Fdraft', 'alice@example.com', 'KnowledgeBase/Sales/deal.md');
       expect(out.details).toMatchObject({ canPropose: false, cannotProposeReason: NO_READ });
     });
   });

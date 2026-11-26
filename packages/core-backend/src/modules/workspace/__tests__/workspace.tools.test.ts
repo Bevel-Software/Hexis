@@ -4687,7 +4687,9 @@ describe('a write refused for permissions says whether and how to propose it', (
 
   // The QA finding behind this: on a draft the branch sentence masked the
   // no-read one, sending the agent to another branch for the same refusal.
-  it.each(CALLS)('%s: without read access the no-read sentence wins on a branch that takes no change requests too', async (tool, body) => {
+  // A move must read what it moves, so an unreadable source is a read
+  // refusal before any write is judged: it has no write-denied answer.
+  it.each(CALLS.filter(([tool]) => tool !== 'move_file'))('%s: without read access the no-read sentence wins on a branch that takes no change requests too', async (tool, body) => {
     const { ac } = readVerdict(false);
     const base = await start('write', ac);
     await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
