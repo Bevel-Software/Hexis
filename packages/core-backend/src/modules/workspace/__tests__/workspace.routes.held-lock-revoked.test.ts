@@ -215,6 +215,29 @@ describe('an archive extracted over a file the caller holds the editor lock on',
     expect(enqueue).not.toHaveBeenCalled();
   });
 
+  // With no lock at all the entry meets the acquire before its bytes land, so
+  // a reader who may not write never overwrites it and then gets refused.
+  it('skips that file for a reader who may not write and holds no lock: its bytes never land', async () => {
+    writable = false;
+
+    const res = await unzip();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ extracted: [], skipped: [{ path: FILE, reason: expect.stringContaining('permission to write') }] });
+    expect(await onDisk()).toBe(ORIGINAL);
+    expect(await svc.getLock(WS, WS, FILE)).toBeNull();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('extracts and commits it for a writer who holds no lock, under the lock taken before the write', async () => {
+    const res = await unzip();
+
+    expect(res.status).toBe(200);
+    expect(await onDisk()).toBe(FROM_ARCHIVE);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ path: FILE, authorEmail: USER.email }));
+    expect(await svc.getLock(WS, WS, FILE)).toBeNull();
+  });
+
   it('skips that file under somebody else lock: its bytes never land and their lock stays', async () => {
     const other: AuthUser = { id: '22222222-2222-4222-8222-222222222222', email: 'other@example.com', name: 'Other Editor' };
     expect((await svc.acquireLock(WS, WS, FILE, other)).acquired).toBe(true);

@@ -13,6 +13,7 @@ import { AccessDeniedError } from '../../access-model/index.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
+import { realFileLocks, realLockingVersionControl } from '../../../__tests__/real-version-control.js';
 
 /**
  * HTTP-level contract tests for the revoke route's CLASSIFICATION + MODE logic —
@@ -62,6 +63,8 @@ async function makeHarness(opts: {
   roles?: string[];
   /** The version-control answer to "does the caller hold the edit lock and may still write it". Defaults to not held. */
   holdsEditLock?: () => Promise<boolean>;
+  /** Run the route against the real lock half of the version-control service over these locks, instead of the stubs. */
+  locks?: ReturnType<typeof realFileLocks>['locks'];
 }): Promise<Harness> {
   const files = new Map<string, string>(Object.entries(opts.files ?? {}));
 
@@ -124,13 +127,21 @@ async function makeHarness(opts: {
   const acquireLock = vi.fn(async () => ({ acquired: true, lock: {} }));
   const releaseLock = vi.fn(async () => undefined);
   const releaseLockNoCommit = vi.fn(async () => undefined);
-  const versionControlService = {
-    getLock: vi.fn(async () => null),
-    holdsEditLock: vi.fn(opts.holdsEditLock ?? (async () => false)),
-    acquireLock,
-    releaseLock,
-    releaseLockNoCommit,
-  } as unknown as VersionControlService;
+  const versionControlService = opts.locks
+    ? realLockingVersionControl({
+        locks: opts.locks,
+        accessControl,
+        pendingCommits: { enqueue: vi.fn(async () => undefined) },
+        changeGate: { judge: vi.fn(), assertMayChange: vi.fn(async () => undefined) },
+        kb: testKbContext({ kbDirName: KB }),
+      })
+    : ({
+        getLock: vi.fn(async () => null),
+        holdsEditLock: vi.fn(opts.holdsEditLock ?? (async () => false)),
+        acquireLock,
+        releaseLock,
+        releaseLockNoCommit,
+      } as unknown as VersionControlService);
 
   const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
   const db = usersDbDouble();
@@ -508,5 +519,20 @@ describe('POST /access/revoke under an edit lock the caller already holds', () =
     expect(h.stubs.files.get(SALES)).toBe(BEFORE);
     expect(h.stubs.acquireLock).not.toHaveBeenCalled();
     expect(h.stubs.releaseLock).not.toHaveBeenCalled();
+  });
+
+  // A coordination hold serialises an agent's writes and grants no write
+  // authority, so it is not the editor's lock: the edit goes to the real
+  // acquire, which refuses a live lock even to its own holder.
+  it('is refused as contended under the caller own coordination hold, writes nothing, and leaves the hold', async () => {
+    const { locks } = realFileLocks();
+    h = await makeHarness({ files: { [SALES]: BEFORE }, locks });
+    expect((await locks.acquire(WS, WS, SALES, USER, { coordination: true })).acquired).toBe(true);
+
+    const res = await revoke();
+
+    expect(res.status).toBe(409);
+    expect(h.stubs.files.get(SALES)).toBe(BEFORE);
+    expect((await locks.get(WS, WS, SALES))?.mode).toBe('coordination');
   });
 });

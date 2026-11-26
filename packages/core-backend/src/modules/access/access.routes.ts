@@ -900,12 +900,10 @@ export function createAccessRoutes(
     }
     const acquired = await versionControlService.acquireLock(workspaceId, branch, wsEditPath, user);
     if (!acquired.acquired) {
+      // A domain error, so the access routes' error shape answers its 409 and
+      // words rather than a generic 500.
       const holder = acquired.lock.holderName || 'another user';
-      const err: Error & { status?: number } = new Error(
-        `"${editPath}" is being edited by ${holder}. Try again in a moment.`,
-      );
-      err.status = 409;
-      throw err;
+      throw new VersionControlDomainError(`"${editPath}" is being edited by ${holder}. Try again in a moment.`, 409);
     }
     try {
       await op();
