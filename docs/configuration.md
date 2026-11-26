@@ -82,8 +82,9 @@ at boot, so if you run more than one, restart the others after changing SSO
   unset. A save there applies like the provider settings: at the next sign-in
   on the replica that served it, and on the others after they restart. It
   applies to existing accounts too: after you narrow the list, an account
-  outside it is refused at its next SSO sign-in. Sessions that are already
-  signed in are not ended.
+  outside it is refused at its next SSO sign-in, and an Atlassian panel viewer
+  outside it at their next panel token. Sessions that are already signed in
+  are not ended.
 
 ## The agent guide
 

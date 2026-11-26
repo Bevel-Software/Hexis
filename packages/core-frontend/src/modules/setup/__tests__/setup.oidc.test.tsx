@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
@@ -13,9 +13,6 @@ vi.mock('../services/setup.api', async () => {
   const actual = await vi.importActual<typeof import('../services/setup.api')>('../services/setup.api');
   return { ...actual, ...api };
 });
-// The Deployment page composes the settings module's marketplace card; this
-// suite is about the Single sign-on card, so the composed card stands aside.
-vi.mock('../../settings/components/MarketplaceSection', () => ({ MarketplaceSection: () => null }));
 
 import { SetupGate } from '../components/SetupGate';
 import { SetupScreen } from '../components/SetupScreen';
@@ -43,6 +40,14 @@ const SETTINGS: SettingStatus[] = [
 
 beforeEach(() => {
   for (const fn of Object.values(api)) fn.mockReset();
+  // The Deployment page also composes the settings module's marketplace card,
+  // which asks the server whether this deployment is registered. This suite is
+  // about the Single sign-on card, so the network answers "not registered".
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ registered: false }), { status: 200 })));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 const field = (label: string) => screen.getByLabelText(label, { exact: false });

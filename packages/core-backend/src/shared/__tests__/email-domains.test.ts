@@ -30,13 +30,24 @@ describe('parseEmailDomainList', () => {
     expect(parseEmailDomainList(' , @ . ')).toEqual([]);
   });
 
-  /** The environment, the setup screen and a tenant record must mean the same domains by the same value. */
-  it('is the only place an allow-list is parsed', async () => {
-    const copies: string[] = [];
+  /**
+   * The environment, the setup screen and a tenant record must mean the same
+   * domains by the same value. A shipped file that names the allow-list either
+   * reads it through `parseEmailDomainList` or only hands on the list another
+   * file already parsed; a new reader that does neither fails here, however
+   * its own parsing is written.
+   */
+  it('is how every file that names an allow-list reads it', async () => {
+    const HANDS_ON_A_PARSED_LIST = ['core/create-core-services.ts', 'modules/auth/auth.service.ts'];
+    const readersWithoutParser: string[] = [];
     for (const file of await shippedSources(SRC)) {
+      const name = relative(SRC, file);
+      if (name === 'shared/email-domains.ts' || HANDS_ON_A_PARSED_LIST.includes(name)) continue;
       const text = await readFile(file, 'utf8');
-      if (text.includes("replace(/^[@.]+/, '')")) copies.push(relative(SRC, file));
+      if (/ALLOWED_EMAIL_DOMAINS|allowedEmailDomains/.test(text) && !text.includes('parseEmailDomainList')) {
+        readersWithoutParser.push(name);
+      }
     }
-    expect(copies).toEqual(['shared/email-domains.ts']);
+    expect(readersWithoutParser).toEqual([]);
   });
 });
