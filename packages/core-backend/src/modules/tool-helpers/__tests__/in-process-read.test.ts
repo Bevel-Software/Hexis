@@ -257,8 +257,10 @@ describe('a tool the catalog does not declare a read, called in process', () => 
     expect(ran).toEqual([]);
   });
 
-  it('refuses a tool whose internal def declares a write, though its external def does not', async () => {
-    const catalog = catalogOf(['change_things']);
+  // An internal-only tool has no external def, the one a read-only hint is
+  // read from: its internal def says whether it writes.
+  it('refuses a tool only the internal catalog lists, whose def there declares a write', async () => {
+    const catalog = new ToolRegistry();
     catalog.registerInternalTool(
       toolDef({ name: 'change_things', description: 'd', path: '/api/agent/tools/change_things', write: true, inputs: { type: 'object', properties: {} } }),
     );
@@ -266,6 +268,26 @@ describe('a tool the catalog does not declare a read, called in process', () => 
     const ran: string[] = [];
     expect((await refusalOf(createInProcessToolCaller(resolve, catalog)(hosted('change_things', ran))(caller()))).status).toBe(500);
     expect(ran).toEqual([]);
+  });
+
+  it('runs a tool only the internal catalog lists, whose def there declares a read', async () => {
+    const catalog = new ToolRegistry();
+    catalog.registerInternalTool(
+      toolDef({ name: 'internal_things', description: 'd', path: '/api/agent/tools/internal_things', inputs: { type: 'object', properties: {} } }),
+    );
+    const { resolve } = recording();
+    expect(await createInProcessToolCaller(resolve, catalog)(hosted('internal_things'))(caller())).toEqual({ ran: 'internal_things' });
+  });
+
+  // The external list is the one the read-only hints read with no caller, so
+  // a read is judged from it alone: the internal list is not asked.
+  it('judges a tool the external catalog lists by that def, and does not list the internal catalog for it', async () => {
+    const catalog = catalogOf(['list_things']);
+    catalog.listInternal = async () => {
+      throw new Error('an internal provider that needs a caller');
+    };
+    const { resolve } = recording();
+    expect(await createInProcessToolCaller(resolve, catalog)(hosted('list_things'))(caller())).toEqual({ ran: 'list_things' });
   });
 
   // A tool the catalog does not list cannot be told a read: it is refused, never assumed one.
