@@ -30,6 +30,9 @@ import { AUTH_COOKIE_NAME, createAuthMiddleware } from '../auth.middleware.js';
 const JWT_SECRET = 'test-jwt-secret';
 const ADMIN_EMAIL = 'root@acme.test';
 const MEMBER_EMAIL = 'member@acme.test';
+/** Deployment admins of their own tests, so each starts with no row. */
+const LATE_ADMIN_EMAIL = 'late-root@acme.test';
+const NEXT_ADMIN_EMAIL = 'next-root@acme.test';
 const SYNC_SECRET = 'a-very-long-and-random-sync-secret';
 
 /** No connection key, OAuth token or internal token is presented here: the bearer is always a session. */
@@ -39,7 +42,8 @@ const noKeys = {
 } as unknown as IExternalApiKeyService;
 const noOAuth = { looksLikeAccessToken: () => false } as unknown as Parameters<typeof createMcpAuthMiddleware>[2];
 const internalTokens = new InternalTokenService({ secret: 'test-internal-secret-32-bytes-long!!' });
-const isAdmin = async (email: string) => email === ADMIN_EMAIL || email === MEMBER_EMAIL;
+const ADMINS = new Set([ADMIN_EMAIL, MEMBER_EMAIL, LATE_ADMIN_EMAIL, NEXT_ADMIN_EMAIL]);
+const isAdmin = async (email: string) => ADMINS.has(email);
 const reached = (_req: express.Request, res: express.Response) => {
   res.json({ ok: true });
 };
@@ -60,10 +64,10 @@ describe.skipIf(!PG_ADMIN_URL)('the deployment admin across an ADMIN_PASSWORD ro
   }, PG_TEST_TIMEOUT);
 
   /** The deployment, started with `adminPassword` as its `ADMIN_PASSWORD`: its base URL and auth service. */
-  async function boot(adminPassword: string): Promise<{ base: string; auth: AuthService }> {
+  async function boot(adminPassword: string, adminEmail = ADMIN_EMAIL): Promise<{ base: string; auth: AuthService }> {
     const auth = new AuthService(db, {
       jwtSecret: JWT_SECRET,
-      adminEmail: ADMIN_EMAIL,
+      adminEmail,
       adminPassword,
       allowedEmailDomains: [],
     });
@@ -191,14 +195,57 @@ describe.skipIf(!PG_ADMIN_URL)('the deployment admin across an ADMIN_PASSWORD ro
   );
 
   it(
-    'opens no session on a process still running under the old password once one under the new password has booted',
+    'accepts no session a process still running under the old password opens, by password or single sign-on',
     async () => {
-      const { base: old } = await boot('outgoing-password');
+      const { base: old, auth: oldAuth } = await boot('outgoing-password');
       await signIn(old, 'outgoing-password');
       const { base: next } = await boot('incoming-password');
-      // The old half of a rolling restart: the right password for it, refused.
-      expect((await postLogin(old, ADMIN_EMAIL, 'outgoing-password')).status).toBe(401);
-      expect((await call(next, '/api/auth/me', bearer((await signIn(next, 'incoming-password')).token))).status).toBe(200);
+      // The old half of a rolling restart still runs under the old password
+      // and opens sessions; the new half accepts none of them.
+      const byPassword = await signIn(old, 'outgoing-password');
+      const { token: bySso } = await oldAuth.loginWithSso(ADMIN_EMAIL, 'Root');
+      for (const token of [byPassword.token, bySso]) {
+        for (const path of SURFACES) expect(await call(next, path, bearer(token))).toEqual(ENDED);
+      }
+      expect(await call(next, '/api/auth/me', cookie(byPassword.cookie))).toEqual(ENDED);
+      // Nor does the old half accept the new half's sessions.
+      const fresh = await signIn(next, 'incoming-password');
+      for (const path of SURFACES) expect((await call(next, path, bearer(fresh.token))).status).toBe(200);
+      expect(await call(old, '/api/auth/me', bearer(fresh.token))).toEqual(ENDED);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    'accepts no session of the old password when its process makes the admin row after the new one booted',
+    async () => {
+      const { base: old } = await boot('outgoing-password', LATE_ADMIN_EMAIL);
+      // No row yet when the new process boots: nothing for its boot to move on.
+      const { base: next } = await boot('incoming-password', LATE_ADMIN_EMAIL);
+      const underOld = await signIn(old, 'outgoing-password', LATE_ADMIN_EMAIL);
+      for (const path of SURFACES) expect(await call(next, path, bearer(underOld.token))).toEqual(ENDED);
+      const underNew = await signIn(next, 'incoming-password', LATE_ADMIN_EMAIL);
+      for (const path of SURFACES) expect((await call(next, path, bearer(underNew.token))).status).toBe(200);
+      // A process under the old password that boots later still has its
+      // sessions refused by the new process, which keeps accepting its own.
+      const { base: lateOld } = await boot('outgoing-password', LATE_ADMIN_EMAIL);
+      const afterLateBoot = await signIn(lateOld, 'outgoing-password', LATE_ADMIN_EMAIL);
+      expect(await call(next, '/api/auth/me', bearer(afterLateBoot.token))).toEqual(ENDED);
+      const again = await signIn(next, 'incoming-password', LATE_ADMIN_EMAIL);
+      expect((await call(next, '/api/auth/me', bearer(again.token))).status).toBe(200);
+    },
+    PG_TEST_TIMEOUT,
+  );
+
+  it(
+    "ends the former deployment admin's sessions when ADMIN_EMAIL moves, and moving it back revives none",
+    async () => {
+      const { base } = await boot('moving-email-password', NEXT_ADMIN_EMAIL);
+      const { token } = await signIn(base, 'moving-email-password', NEXT_ADMIN_EMAIL);
+      const { base: moved } = await boot('moving-email-password', 'someone-else@acme.test');
+      expect(await call(moved, '/api/auth/me', bearer(token))).toEqual(ENDED);
+      const { base: back } = await boot('moving-email-password', NEXT_ADMIN_EMAIL);
+      for (const path of SURFACES) expect(await call(back, path, bearer(token))).toEqual(ENDED);
     },
     PG_TEST_TIMEOUT,
   );
