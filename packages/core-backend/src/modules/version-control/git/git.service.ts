@@ -4829,16 +4829,39 @@ export class GitService implements IGitService {
     holds: (content: string) => boolean,
   ): Promise<number | null> {
     const cwd = await this.repoDir(workspaceId);
-    const { stdout } = await this.git(cwd, ['log', '--first-parent', '--format=%H', 'HEAD', '--', repoRelativePath]);
-    // Newest first: the newest commit that touched the file holds HEAD's version.
-    const shas = stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+    // Newest first: the newest commit that touched the file holds HEAD's
+    // version. `--raw` names each version's blob from the commit's own tree
+    // diff, so absence is git's TREE answer (a deletion's zero id), never the
+    // object store's: a version whose blob cannot be read is a broken history
+    // and throws, rather than reading as a claim that ended.
+    const { stdout } = await this.git(cwd, [
+      'log', '--first-parent', '--diff-merges=first-parent', '--no-renames', '--raw', '--no-abbrev',
+      '--format=%H', 'HEAD', '--', repoRelativePath,
+    ]);
+    const touches: { sha: string; blobId: string | null }[] = [];
+    for (const line of stdout.split('\n')) {
+      if (line.startsWith(':')) {
+        // `:<old mode> <new mode> <old id> <new id> <status>\t<path>`: the path
+        // is the literal one asked for. Only a regular file or a link holds
+        // content; a deletion (mode 000000) and a submodule (160000) do not.
+        const [, mode, , blobId] = line.slice(1).split(' ');
+        const touch = touches.at(-1);
+        if (touch) touch.blobId = mode === '100644' || mode === '100755' || mode === '120000' ? blobId ?? null : null;
+      } else if (line.trim() !== '') {
+        touches.push({ sha: line.trim(), blobId: null });
+      }
+    }
+    // The versions back to the newest one where the file was not there.
+    const gap = touches.findIndex((t) => t.blobId === null);
+    const run = gap < 0 ? touches : touches.slice(0, gap);
     // Every version in one process: a long-edited file costs three git calls,
     // not one per edit.
-    const versions = await this.blobsAtSpecs(cwd, shas.map((sha) => `${sha}:${repoRelativePath}`));
+    const versions = await this.blobsAtSpecs(cwd, run.map((t) => t.blobId as string));
     let since: string | null = null;
-    for (const [k, sha] of shas.entries()) {
+    for (const [k, { sha }] of run.entries()) {
       const version = versions[k];
-      if (!version || !holds(version.bytes.toString('utf-8'))) break;
+      if (!version) throw new Error(`git history of ${repoRelativePath} names a version at ${sha} that cannot be read`);
+      if (!holds(version.bytes.toString('utf-8'))) break;
       since = sha;
     }
     if (since === null) return null;

@@ -129,6 +129,43 @@ describe('GitService.heldSince', () => {
     expect(await g.heldSince('ws', 'mcp.json', claims)).toBe(5);
   });
 
+  // Absence is the tree's answer, not the object store's: a deletion ends the
+  // claim, but a version whose blob is gone is a history that cannot be read,
+  // and the catalog leaves both clashing tools out on that throw rather than
+  // picking a winner from half a history.
+  test('a deletion ends the run; a version whose blob cannot be read throws instead of ending it', async () => {
+    await git(['init', '-b', 'main'], 1);
+    const g = new GitService(
+      { getWorkspacePath: async () => join(root, 'ws') } as unknown as WorkspaceService,
+      new VersionControlHooks(),
+      testKbContext({ kbDirName: KB_DIR }),
+    );
+    const claims = (c: string) => c.includes('qa_zen');
+    const commit = async (body: string) => {
+      await writeFile(join(repo, 'mcp.json'), body);
+      await git(['add', 'mcp.json'], 1);
+      await git(['commit', '-m', 'edit'], 1);
+    };
+    await commit('qa_zen old\n'); // 1: the claim, its blob about to be lost
+    await commit('qa_zen kept\n'); // 2
+    await commit('qa_zen newest\n'); // 3
+    expect(await g.heldSince('ws', 'mcp.json', claims)).toBe(1);
+
+    const { stdout: lost } = await git(['rev-parse', 'HEAD~2:mcp.json'], 1);
+    const id = lost.trim();
+    await rm(join(repo, '.git', 'objects', id.slice(0, 2), id.slice(2)));
+    await expect(g.heldSince('ws', 'mcp.json', claims)).rejects.toThrow(/cannot be read/);
+
+    // Deleted on the branch: nothing claims, and the lost blob behind the
+    // deletion is never asked for.
+    await git(['rm', '-q', 'mcp.json'], 1);
+    await git(['commit', '-m', 'remove'], 1);
+    expect(await g.heldSince('ws', 'mcp.json', claims)).toBeNull();
+    // Written again: the run starts at the re-add, behind it a deletion.
+    await commit('qa_zen again\n'); // 5
+    expect(await g.heldSince('ws', 'mcp.json', claims)).toBe(5);
+  });
+
   // A file edited for years is read in one batch, not one `git show` per
   // version: the catalog asks this on every scan while a clash stands.
   test('reads every version in a fixed number of git calls, however long the history; a multi-byte version keeps the rest aligned', async () => {
