@@ -487,6 +487,23 @@ describe.each(doors)('an archive the person cannot read, extracted through %s', 
     expect(await exists('Finance/Notes')).toBe(false);
     expect(lockTable.held.size).toBe(0);
   });
+
+  it('lands nothing when whether they may read it cannot be checked, and names no entry', async () => {
+    const unzip = await start();
+    const before = await commitCount();
+    access.canRead = async () => {
+      throw new Error('the access tree could not be read');
+    };
+
+    const res = await unzip({ path: `${KB}/Finance/Sealed/payroll.zip`, destination: `${KB}/Finance` });
+
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ error: 'Whether this archive may be read could not be checked, so nothing was extracted.' });
+    expect(text).not.toMatch(/Secret|Budget|access\.md|Notes/);
+    expect(await commitCount()).toBe(before);
+    expect((await git(repoDir, 'status', '--porcelain', '--untracked-files=all')).trim()).toBe('');
+  });
 });
 
 describe.each(doors)('an archive extracted through %s that carries a file read by its fixed name at the root', (_door, start) => {

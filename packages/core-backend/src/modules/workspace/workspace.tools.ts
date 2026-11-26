@@ -1672,7 +1672,7 @@ export function registerWorkspaceTools(
    * earned. The two `access` sides are the caller's own four verbs and tell
    * them nothing they could not ask `file_stat` for. Past the write verdict, a
    * source the caller may not read is refused ({@link assertCopySourceReadable})
-   * before it is looked at.
+   * before its kind or its files are looked at.
    */
   const copyImpact = async (branch: string, ctx: ToolContext, src: string, dest: string) => {
     const fromTmp = isTmpRef(src);

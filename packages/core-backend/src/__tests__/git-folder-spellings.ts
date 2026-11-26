@@ -3,7 +3,7 @@
  * that the git-folder security suites refuse through every door (the
  * workspace's in `workspace/__tests__/git-internals.security.test.ts`, the
  * diff module's in `diff/__tests__/git-internals.security.test.ts`). One
- * catalogue, so a family added for one door is asked of every door.
+ * catalogue, so a family added here is asked of both suites' doors.
  *
  * The `symlinked` forms go through links the suites seed: `<kb>/gitlink ->
  * .git`, `<kb>/chained -> gitlink`, and `..link` in the workspace root
