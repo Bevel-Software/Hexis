@@ -24,17 +24,13 @@ export class DownstreamToolError extends Error {
 
   /**
    * The same failure with every secret `redactor` holds taken out of its words:
-   * text blocks, an embedded resource's text and the message. Other blocks
-   * (an image) carry no quoted text and pass as they are.
+   * every string in every content block (a text, a resource's text and uri, a
+   * link's uri, name and description, annotations), and the message. Only a
+   * block's `type`, its `mimeType` and its base64 `data` pass as they are:
+   * they are not text the server wrote.
    */
   redactedWith(redactor: SecretRedactor): DownstreamToolError {
-    const content = this.content.map((block) => {
-      if (block.type === 'text') return { ...block, text: redactor.redact(block.text) };
-      if (block.type === 'resource' && 'text' in block.resource && typeof block.resource.text === 'string') {
-        return { ...block, resource: { ...block.resource, text: redactor.redact(block.resource.text) } };
-      }
-      return block;
-    });
+    const content = this.content.map((block) => redactStrings(block, redactor) as typeof block);
     return new DownstreamToolError(redactor.redact(this.message), content);
   }
 
@@ -48,6 +44,19 @@ export class DownstreamToolError extends Error {
   toCallToolResult(): CallToolResult {
     return { isError: true, content: this.content.length > 0 ? this.content : [{ type: 'text', text: this.message }] };
   }
+}
+
+/** Fields of a content block that are not text the server wrote. */
+const NOT_QUOTED = new Set(['type', 'mimeType', 'data']);
+
+/** `value` with `redactor` applied to every string in it, at any depth, except the {@link NOT_QUOTED} fields. */
+function redactStrings(value: unknown, redactor: SecretRedactor): unknown {
+  if (typeof value === 'string') return redactor.redact(value);
+  if (Array.isArray(value)) return value.map((item) => redactStrings(item, redactor));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, field]) => [key, NOT_QUOTED.has(key) ? field : redactStrings(field, redactor)]),
+  );
 }
 
 /** What a result says when it reports its own failure, or null when it does not. */

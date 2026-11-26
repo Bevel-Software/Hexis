@@ -173,14 +173,29 @@ export function rememberCredentialHeaders(headers: Record<string, unknown>, reda
  * cost more of the message than it protects.
  */
 export function rememberCredentialQuery(url: string, redactor: SecretRedactor): void {
-  let params: URLSearchParams;
+  let query: string;
   try {
-    params = new URL(url).searchParams;
+    query = new URL(url).search.slice(1);
   } catch {
     return;
   }
-  for (const [name, value] of params) {
-    if (carriesCredential(name)) redactor.remember(value);
+  // Both spellings of each value: a provider can quote the url as it was sent
+  // (`a%2Bb`) or as it read it (`a+b`).
+  for (const pair of query.split('&')) {
+    const at = pair.indexOf('=');
+    if (at < 0 || !carriesCredential(decodeQueryPart(pair.slice(0, at)))) continue;
+    const raw = pair.slice(at + 1);
+    redactor.remember(raw);
+    redactor.remember(decodeQueryPart(raw));
+  }
+}
+
+/** A query name or value as `URLSearchParams` reads it (`+` a space, `%xx` decoded); a malformed escape stays as written. */
+function decodeQueryPart(part: string): string {
+  try {
+    return decodeURIComponent(part.replace(/\+/g, ' '));
+  } catch {
+    return part;
   }
 }
 
@@ -190,10 +205,12 @@ export function rememberCredentialQuery(url: string, redactor: SecretRedactor): 
  * stored (`raw`, with its `${VAR}` references):
  *
  * - every value substitution put in: for each string that differs between the
- *   two, the processed string and the span that differs (the text between the
- *   longest shared head and tail). For a string with one reference that span is
- *   exactly the substituted value; for a string with several it is the run from
- *   the first to the last, so an echo of a later value alone is not matched;
+ *   two, the span that differs (the text between the longest shared head and
+ *   tail). For a string with one reference that span is exactly the
+ *   substituted value; for a string with several it is the run from the first
+ *   to the last, so an echo of a later value alone is not matched. The public
+ *   text around it (a url's scheme and host, an auth scheme) is not
+ *   remembered, so it is not blanked out of the message;
  * - every credential a server entry spells out in full: credential-named
  *   headers (and the part after the auth scheme), credential-named query
  *   parameters, credential-named environment variables, and credential-named
@@ -228,7 +245,6 @@ function rememberCredentialFields(fields: object, redactor: SecretRedactor): voi
 function rememberSubstitutions(redactor: SecretRedactor, raw: unknown, processed: unknown): void {
   if (typeof processed === 'string') {
     if (typeof raw !== 'string' || raw === processed) return;
-    redactor.remember(processed);
     let head = 0;
     while (head < raw.length && head < processed.length && raw[head] === processed[head]) head++;
     let tail = 0;

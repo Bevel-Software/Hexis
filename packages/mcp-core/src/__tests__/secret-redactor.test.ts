@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { SecretRedactor } from '../secret-redactor.js';
+import type { CallTemplate } from '@utcp/sdk';
+import { SecretRedactor, rememberCallCredentials, rememberCredentialQuery } from '../secret-redactor.js';
 
 describe('SecretRedactor', () => {
   it('takes out a whole value and, in the same text, a masked head of it', () => {
@@ -14,5 +15,29 @@ describe('SecretRedactor', () => {
     const redactor = new SecretRedactor();
     redactor.remember('us');
     expect(redactor.redact('region us, status 401 for users')).toBe('region [redacted], status 401 for users');
+  });
+
+  it('takes out a query credential in both spellings, as sent and as read', () => {
+    const redactor = new SecretRedactor();
+    rememberCredentialQuery('https://x.example/mcp?region=eu&api_key=a%2Bb%2Fc1234567', redactor);
+    expect(redactor.redact('sent a%2Bb%2Fc1234567, read a+b/c1234567, region eu')).toBe(
+      'sent [redacted], read [redacted], region eu',
+    );
+  });
+});
+
+describe('rememberCallCredentials', () => {
+  it('takes out what substitution put in, and leaves the public text around it', () => {
+    const redactor = new SecretRedactor();
+    const raw = {
+      name: 'n',
+      call_template_type: 'mcp',
+      config: { mcpServers: { s: { url: 'https://api.example.com/${TENANT}/mcp' } } },
+    };
+    const processed = { ...raw, config: { mcpServers: { s: { url: 'https://api.example.com/acme-tenant-01/mcp' } } } };
+    rememberCallCredentials(redactor, processed as unknown as CallTemplate, raw as unknown as CallTemplate);
+    expect(redactor.redact('https://api.example.com/status refused acme-tenant-01')).toBe(
+      'https://api.example.com/status refused [redacted]',
+    );
   });
 });

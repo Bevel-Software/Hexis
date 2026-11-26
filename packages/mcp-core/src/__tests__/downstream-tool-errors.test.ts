@@ -3,7 +3,8 @@ import '@utcp/mcp'; // side effect: registers the stock 'mcp' protocol, which th
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
-import { downstreamErrorText, installDownstreamToolErrors } from '../downstream-tool-errors.js';
+import { DownstreamToolError, downstreamErrorText, installDownstreamToolErrors } from '../downstream-tool-errors.js';
+import { SecretRedactor } from '../secret-redactor.js';
 import { registerManual, dispatchToolCall } from '../dispatch.js';
 import type { ProxiedTool } from '../proxied-tool.js';
 import { startFakeMcpServer } from './fake-mcp-server.js';
@@ -62,6 +63,25 @@ describe('downstreamErrorText', () => {
     expect(downstreamErrorText({ isError: true, content: [{ type: 'image', data: '', mimeType: 'image/png' }] })).toMatch(
       /failed/,
     );
+  });
+});
+
+describe('DownstreamToolError.redactedWith', () => {
+  it("takes the secret out of every string the server wrote, a resource's uri included", () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('sk-live-1234567890abcdef');
+    const failure = new DownstreamToolError('refused sk-live-1234567890abcdef', [
+      { type: 'text', text: 'key sk-live-1234567890abcdef' },
+      { type: 'resource', resource: { uri: 'https://x.example/?k=sk-live-1234567890abcdef', text: 'sk-live-1234567890abcdef' } },
+      { type: 'image', data: 'c2stbGl2ZQ==', mimeType: 'image/png' },
+    ]);
+    const redacted = failure.redactedWith(redactor);
+    expect(redacted.message).toBe('refused [redacted]');
+    expect(redacted.content).toEqual([
+      { type: 'text', text: 'key [redacted]' },
+      { type: 'resource', resource: { uri: 'https://x.example/?k=[redacted]', text: '[redacted]' } },
+      { type: 'image', data: 'c2stbGl2ZQ==', mimeType: 'image/png' },
+    ]);
   });
 });
 
