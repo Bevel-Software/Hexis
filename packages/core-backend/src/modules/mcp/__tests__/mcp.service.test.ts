@@ -16,7 +16,7 @@ import { splitCallLine } from '@bevel-software/platform-mcp-core';
 import { setLogger } from '../../../shared/logging.js';
 import { oneLineError, type ILogger, type LogFields } from '../../../shared/logger.contract.js';
 
-/** The platform-owned part of the handshake text: the header plus the shared file rules. */
+/** The platform-owned part of the handshake text: the guide-first line, the header and the pointer to the shared file rules. */
 const PLATFORM = platformInstructions('');
 
 /**

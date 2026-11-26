@@ -363,8 +363,8 @@ describe('what the write tools tell an agent about escape sequences', () => {
     const { descriptions } = await startPlatform();
     const served = await descriptions();
     // It applies to the three tools that take content as a JSON string, so it is
-    // a SHARED rule: stated in the handshake instructions and in the managed
-    // agent guide, and repeated in no tool description — a description that
+    // a SHARED rule: stated in the agent guide, which the handshake
+    // instructions point at, and repeated in no tool description — a description that
     // carried it was long enough for a client to cut the end off.
     const rule = sharedFileRules(testKbContext().layout, testKbContext().defaultBranch).find((r) => r.id === 'escape-sequences')!;
     expect(rule.body).toContain('some clients decode escape sequences in arguments before sending');

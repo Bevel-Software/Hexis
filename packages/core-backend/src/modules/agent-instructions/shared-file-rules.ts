@@ -84,7 +84,7 @@ export interface SharedFileRule {
   id: string;
   /** The heading this rule gets in the section. */
   heading: string;
-  /** The rule, as both places state it. Markdown paragraphs, blank-line separated. */
+  /** The rule, as the guide states it. Markdown paragraphs, blank-line separated. */
   body: string;
 }
 

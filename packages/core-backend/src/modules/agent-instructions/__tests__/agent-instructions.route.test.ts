@@ -7,7 +7,7 @@ import type { AuthService } from '../../auth/index.js';
 import { createAgentInstructionsRoutes } from '../agent-instructions.routes.js';
 import { GUIDE_FIRST_LINE, TOOL_PREFIX_LINE, platformInstructions } from '../compose.js';
 
-/** The platform-owned text the route leads with: header + the shared file rules. */
+/** The platform-owned text the route leads with: the guide-first line, the header and the pointer to the shared file rules. */
 const PLATFORM = platformInstructions('');
 
 /**

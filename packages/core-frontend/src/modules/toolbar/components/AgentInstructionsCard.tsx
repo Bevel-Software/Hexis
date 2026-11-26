@@ -237,8 +237,9 @@ export function AgentInstructionsCard() {
                 {TOOL_PREFIX_CAP.toLocaleString('en-US')}-character cap
                 ({state.data.toolPrefixChars.toLocaleString('en-US')}): the end is cut off for the clients that read
                 only tool descriptions, claude.ai on the web, the Agent SDK and Cline among them. Clients that honour
-                the handshake, such as Claude Code, Claude Desktop and Cursor, get the whole description above instead
-                and are unaffected. Shorten the first paragraph.
+                the handshake, such as Claude Code, Claude Desktop and Cursor, get the description above instead, up to
+                the length each keeps of it (older Claude Code versions keep about its first 600 characters). Shorten
+                the first paragraph.
               </p>
             )}
             {editor ? (

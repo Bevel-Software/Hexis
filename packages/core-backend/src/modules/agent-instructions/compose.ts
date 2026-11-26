@@ -121,10 +121,18 @@ export function platformInstructions(defaultBranch = ''): string {
 }
 
 /**
- * The ceiling on the WHOLE handshake text: the length Claude Code keeps of a
+ * The ceiling on the composed instructions: the length Claude Code keeps of a
  * server's `instructions`, pinned by a test. Past it Claude Code drops the
  * rest and appends `… [truncated]`, so anything beyond it never reaches the
  * model.
+ *
+ * Not the ceiling on every handshake. A connection made as an agent gets one
+ * more line after these instructions, naming the agent by its name and path
+ * (`describeConnection`, appended by both MCP servers). Neither is bounded,
+ * so with a preamble near its cap a long name or path takes the handshake
+ * past this length, and Claude Code cuts the end of that line. The guide-first
+ * line still sends the agent to the guide, which says what the connection
+ * loads. A test pins the full handshake of a typical agent connection.
  *
  * Measured, not guessed: Claude Code 2.1.332 (2026-11-26) cuts server
  * instructions at 4,096 characters by default (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`

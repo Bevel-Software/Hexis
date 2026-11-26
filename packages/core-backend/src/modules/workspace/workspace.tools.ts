@@ -1905,8 +1905,8 @@ export function registerWorkspaceTools(
     // FULL, which made a description several thousand characters of text the
     // agent had already read on the tool above, and clients cut a long
     // description from the END, where what is specific to the tool sits. The
-    // rules themselves are in the handshake instructions and in the managed
-    // guide (see `shared-file-rules.ts`), stated once and from one text.
+    // rules themselves are in the agent guide, which the handshake
+    // instructions point at (see `shared-file-rules.ts`), stated once.
     const describe = (): string =>
       (typeof spec.description === 'function' ? spec.description() : spec.description) +
       (spec.gated ? agentAccessGate.notes.gatedToolNote() : '');

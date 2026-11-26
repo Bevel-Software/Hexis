@@ -22,9 +22,9 @@
  * template carried (`{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}`,
  * `{{agentsFile}}`), the checkout folder's `{{kbDirName}}` and the default
  * branch's `{{defaultBranch}}`. ONE section is computed rather than read: the
- * rules every file tool shares, which the MCP handshake also sends — the same
- * string in both places, from `shared-file-rules.ts`, so a rule cannot be
- * changed in one and left stale in the other.
+ * rules every file tool shares, built by `shared-file-rules.ts`. The MCP
+ * handshake does not send them: it points at this section by its id, so the
+ * guide is the one place an agent reads them.
  *
  * The guide is LAYERED (see openspec/changes/agent-guide-layers/design.md):
  * `get_agent_guide` with no section answers with the short start section

@@ -164,10 +164,10 @@ export class TemplateSource {
    * the names in effect. Every required file is text; a template without
    * placeholders passes through unchanged.
    *
-   * `{{sharedFileRules}}` is filled from the ONE source text the MCP handshake
-   * also sends (see `shared-file-rules.ts`), so the rules every file tool
-   * shares are stated in the guide and in the instructions without being
-   * written twice. Filled AFTER the layout pass (see
+   * `{{sharedFileRules}}` is filled from the ONE source text the platform's
+   * guide serves (see `shared-file-rules.ts`), so the rules every file tool
+   * shares are stated in both guides without being written twice. The MCP
+   * handshake only points at them. Filled AFTER the layout pass (see
    * {@link renderTemplateText}): the rules come back already rendered for this
    * layout, so a layout pass over them could only misread a name they STATE as
    * a placeholder. The two passes do not collide — the layout renderer touches

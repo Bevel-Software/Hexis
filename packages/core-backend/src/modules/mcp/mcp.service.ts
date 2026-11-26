@@ -873,8 +873,8 @@ export class McpService {
       // two surfaces.
       //
       // What a chain does with a failure, a large result or an image is
-      // stated once, in the shared rules — in the guide and in the handshake
-      // instructions — and not on the chain itself (an EMPTY pointer is how
+      // stated once, in the shared rules in the guide (the handshake
+      // instructions point there), and not on the chain itself (an EMPTY pointer is how
       // `mcp-core` is told the rules are served elsewhere). Like every tool of
       // the platform's own, each meta-tool opens with the one sentence saying
       // what to do before any of them, which is where those rules are. The
