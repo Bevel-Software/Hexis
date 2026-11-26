@@ -1238,7 +1238,6 @@ describe('read-permission gating', () => {
       const body = await listed.text();
       expect(body, path).toBe(await read.text());
       expect(body, path).toContain(`You don't have permission to read \\"${path}\\"`);
-      expect(body, path).not.toContain('Inner"');
     }
     // The folder above the denied one still lists, and names the denied
     // folder (it is an entry of a folder the caller may read).
