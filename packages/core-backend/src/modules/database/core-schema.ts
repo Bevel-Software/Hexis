@@ -932,10 +932,10 @@ export const dataMigrations = pgTable('data_migrations', {
  * otherwise read every file version of the knowledge base once.
  *
  * It holds paths and object ids, and no rule: the rules are read from git
- * again. One row per deployment (`key` is fixed). `version` names the build
- * that wrote it, by its reading of the files and its git sha
- * (`DbHeadSeedStore`); a row another build wrote is not read, because which
- * versions declare something is that build's reading of them.
+ * again. One row per deployment (`key` is fixed). `version` is written as
+ * the saving build's reading of the files and git sha (`DbHeadSeedStore`);
+ * a row whose `version` is not this build's is not read, because which
+ * versions declare something is the saving build's reading of them.
  */
 export const accessHeadSeeds = pgTable('access_head_seeds', {
   key: text('key').primaryKey(),

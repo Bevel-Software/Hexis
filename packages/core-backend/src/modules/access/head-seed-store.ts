@@ -12,9 +12,10 @@ const KEY = 'latest';
  * declare something, and every version it leaves out is taken to declare
  * nothing; another build may read some of those versions otherwise (a fix to
  * a parser in between), so its list is not trusted and that start reads the
- * files again. The row is keyed by the reading (`ACCESS_READING_VERSION`)
- * and the build's git sha. A build whose sha is unknown reads and saves no
- * seed: two such builds could not be told apart.
+ * files again. The row carries the reading (`ACCESS_READING_VERSION`) and
+ * the git sha of the build that saved it, and is read only when both are
+ * this build's. A build whose sha is unknown reads and saves no seed: two
+ * such builds could not be told apart.
  */
 export class DbHeadSeedStore implements IHeadSeedStore {
   /** What this build's row is keyed by, or null when it keeps none. */

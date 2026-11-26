@@ -91,8 +91,9 @@ export interface IHeadSeedStore {
  * `parseOwnAccessEntries`, `accessMdSelfEntries`, `frontmatterHeadOfBytes`,
  * `frontmatterHeadOfWholeFile` and `detachEntries`. A seed lists only the
  * versions that declare something, so a version it leaves out is taken to
- * declare nothing; a store keys the seed by this number (`DbHeadSeedStore`).
- * Raise it with any change to what a version is read to declare.
+ * declare nothing; `DbHeadSeedStore` reads a seed only under the number it
+ * was saved with. Raise it with any change to what a version is read to
+ * declare.
  */
 export const ACCESS_READING_VERSION = 1;
 
@@ -482,7 +483,7 @@ export class HeadMaps<M> implements IHeadMaps<M> {
   }
 }
 
-/** Files the access module reads from the checkout at once (`mapPooled`): a head map's versions, a batch's own entries. */
+/** Files read from the checkout at once (`mapPooled`) by a head map, for its versions, and by a batch check, for its own entries. */
 export const DISK_READS_AT_ONCE = 16;
 /** A file the checkout does not hold as its version's bytes: gone, or other bytes. */
 const UNVOUCHED = Symbol('unvouched');

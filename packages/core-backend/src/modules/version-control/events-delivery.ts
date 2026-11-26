@@ -146,7 +146,7 @@ export function createEventAccess(deps: {
       if (repoPaths.length === 0) return new Set();
       const unique = [...new Set(repoPaths)];
       // The branch's own checkout, when the server has one (the default
-      // branch always): the same read a file event on that branch gets.
+      // branch always): the checkout a file event on that branch is judged from.
       const own = workspaceIdForBranch(targetBranch);
       const verdicts = (await deps.workspaces.hasWorkspace(own))
         ? await deps.accessControl.canReadBatch(own, email, unique)

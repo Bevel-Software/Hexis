@@ -14,7 +14,7 @@ export type CatFileBytes =
 
 /**
  * Read many objects from a git repo in ONE `git cat-file --batch` process:
- * the one reader of that protocol, for the access service's batched reads
+ * the one reader of that protocol, for the access module's batched reads
  * and for a file's bytes at a ref (`GitService`).
  * `specs` are `<ref>:<path>` lines or object ids; the result array is
  * index-aligned with them. Output protocol per request:
