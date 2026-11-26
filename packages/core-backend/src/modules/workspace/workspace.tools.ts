@@ -2519,9 +2519,15 @@ export function registerWorkspaceTools(
     handler: async (a, ctx: ToolContext) => {
       const dir = (a.path as string) || '';
       await notifyAgentRead(agentAccessGate, ctx, a.branch as string, dir);
+      const gate = readGateFor(a.branch as string, ctx);
+      // `read_file`'s own gate, on the requested path, BEFORE the filesystem
+      // is touched: under a folder the caller may not read, a folder, a
+      // subfolder, a file and nothing at all answer the same 403, so the
+      // listing discloses neither names nor existence (see not-found.ts).
+      await assertCanRead(gate, dir);
       const fs = await ctx.getFilesystem(a.branch as string);
       const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
-      const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
+      const filtered = await filterReadableEntries(gate, dir, entries);
       // One batch for the listing. A folder is judged at its own path, whose
       // rules (its `access.md` and those above it) are what a file added
       // directly inside it would get.
