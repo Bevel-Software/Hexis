@@ -323,7 +323,7 @@ describe('compileMarketplace', () => {
 
   it('inside a plugin the caller may read, a file they may not read stays behind', async () => {
     await write('Plugins/GTM/CONVENTIONS.md', '# How we do GTM\n');
-    await write('Plugins/GTM/internal/access.md', '---\n---\nread:\n  - Admin\n');
+    await write('Plugins/GTM/internal/access.md', '---\n---\nread:\n  - deny Sam <sam@x.io>\n');
     await write('Plugins/GTM/internal/pricing.md', 'floor prices');
 
     const person = await compiler.compileFor({ userEmail: 'sam@x.io' });
