@@ -1733,7 +1733,7 @@ describe('VersionControlService.openChangeRequest — when the repository host r
     (prs.listOpenPrs as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     (prs.getPrDetail as ReturnType<typeof vi.fn>).mockResolvedValue({ number: 12, branch: 'ali/x', base: 'main' });
     const values = vi.fn(() => ({ returning: vi.fn(async () => [{ number: 12 }]) }));
-    const db = { insert: vi.fn(() => ({ values })) } as unknown as Database;
+    const db = Object.assign(makeDb(), { insert: vi.fn(() => ({ values })) }) as unknown as Database;
     const svc = new VersionControlService(
       db, git, prs, makeChangeRequestReview(), makeWorkspaceService(), makeAccessControl(),
       makeFileLockService(), makePendingCommits(), testKbContext(), openChangeGate(),
@@ -1873,13 +1873,17 @@ describe('VersionControlService.openChangeRequest — while a request in the rev
     let enter: () => void = () => {};
     let release: () => void = () => {};
     const entered = new Promise<void>((resolve) => { enter = resolve; });
-    const mergeFromOrigin = vi.fn(
-      () =>
-        new Promise((resolve) => {
-          release = () => resolve({ kind: 'clean', alreadyUpToDate: false });
-          enter();
-        }),
-    );
+    // The first refresh is held until released; any later one answers at once.
+    const mergeFromOrigin = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ kind: 'clean', alreadyUpToDate: false });
+            enter();
+          }),
+      )
+      .mockResolvedValue({ kind: 'clean', alreadyUpToDate: false });
     const h = makeOpenHarness([], mergeFromOrigin);
     // x→y is mid-open (inside its own refresh of x from y), its row not yet there.
     const forward = h.svc.openChangeRequest('ali%2Fx', makeUser(), { sourceBranch: 'ali/x', targetBranch: 'ali/y', title: 'Forward' });
@@ -1970,7 +1974,7 @@ describe('VersionControlService.openChangeRequest — tells the change-request l
     const access = makeAccessControl();
     (access.eligibleWritersForPathsAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.eligible ?? null);
     const values = vi.fn(() => ({ returning: vi.fn(async () => [{ number: 12 }]) }));
-    const db = { insert: vi.fn(() => ({ values })) } as unknown as Database;
+    const db = Object.assign(makeDb(), { insert: vi.fn(() => ({ values })) }) as unknown as Database;
     const run = vi.fn<(event: ChangeRequestOpenedEvent) => Promise<string[]>>(async () => ['email']);
     const hooks: IChangeRequestHooks = { onChangeRequestOpened: vi.fn(), runChangeRequestOpened: run };
     const accounts =

@@ -441,7 +441,7 @@ export function registerVersionControlTools(
     description:
       'Open a change request from a draft branch into a target branch. Auto-merges the latest target ' +
       'into the source first (not while a request from the target into the source is open: that merge is ' +
-      "the open request's own), pushes, then creates the CR. On conflicts returns a ' +
+      'the open request\'s own), pushes, then creates the CR. On conflicts returns a ' +
       '`change-request-conflicts` error with affected paths. ' +
       'Answers a SUMMARY, not the request\'s content: `url` first (hand it to the user), then `number`, ' +
       '`title`, `state`, `sourceBranch`, `targetBranch`, `approvals` (who must approve each file), ' +
