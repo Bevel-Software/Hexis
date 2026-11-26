@@ -2437,7 +2437,10 @@ export class WorkspaceService implements IWorkspaceService {
     workspaceId: string,
     zipWsPath: string,
     destDirWsPath: string | undefined,
-    /** How each entry is judged (see {@link ArchiveEntryJudge}); without one, every entry the guards below pass lands. */
+    /**
+     * How the archive's read and each entry are judged (see {@link ArchiveEntryJudge}); without one, the
+     * archive's read is not checked and every entry the guards below pass lands. Both unzip doors pass one.
+     */
     judge: ArchiveEntryJudge | undefined,
     /** Where the files land: one call, for every file that passed. */
     landing: ArchiveLanding,

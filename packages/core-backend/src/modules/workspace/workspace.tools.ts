@@ -4047,7 +4047,7 @@ export function registerWorkspaceTools(
     description:
       'Copy a workspace FILE to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you. `src` may be a `__tmp__/<path>` ref to a file you staged in the workspace\'s tmp folder: the copy is how such a file is kept, as a normal repository file. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination AS IT WILL BE once the copy has landed, with the copy\'s own rules counted at its new place. ' +
-      'One exception to that shape: when the destination is one you may not write, the answer is the refusal (`allowed: false` with `reason`, and the access figures) with no `kind` and no `descendants`, because nothing about the source is read before that verdict.',
+      'Two exceptions to that shape: a destination you may not write gets the refusal (`allowed: false` with `reason`, and the access figures) with no `kind` and no `descendants`, because nothing about the source is read before that verdict; a source you may not read is refused as `read_file` refuses it.',
     inputs: {
       type: 'object',
       properties: {
@@ -4494,12 +4494,12 @@ export function registerWorkspaceTools(
         'Land a file you have already uploaded (see `request_file_upload`) in a folder on a branch, in ONE commit, as you. ' +
         'A single file lands under the name it was sent with; a zip lands as its entries, keeping their folder structure. ' +
         'Returns `{ destination, count, total, files }`: one entry per path, each `{ path, outcome }` — `created` / ' +
-        '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many landed and ' +
-        '`total` how many paths there were; `files` is cut to the first 25 unless you pass `all: true`. ' +
-        'Every path is judged one by one as `write_file` judges it (binary is fine); a refused path does not stop the others. ' +
-        'An `access.md` or `.bevelignore` lands with its files or nothing lands; `roles.yaml` or a groups file at the root refuses the whole upload. ' +
-        'The token is single-use: it is spent by the apply that lands it, and refused if you use it twice, let it ' +
-        'expire, or present one issued to somebody else. `mode` means what it means on `write_file`.',
+        '`replaced` / `updated`, or `refused` with `error` (the code) and `message` (why). `count` is how many of the ' +
+        '`total` paths landed; `files` is cut to the first 25 unless you pass `all: true`. ' +
+        'A refused path does not stop the others, except: an `access.md` or `.bevelignore` lands with its files or nothing lands; ' +
+        '`roles.yaml` or a groups file at the root refuses the whole upload; and if someone is editing any of the paths, nothing lands. ' +
+        'The token is single-use, spent by an apply that answers `files` (even with every path refused) or lands a commit, ' +
+        'and refused if used twice, expired, or issued to somebody else. `mode` means what it means on `write_file`.',
       inputs: {
         type: 'object',
         properties: {
