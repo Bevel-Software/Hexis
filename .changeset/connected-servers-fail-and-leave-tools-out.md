@@ -1,8 +1,8 @@
 ---
-'@bevel-software/platform-mcp-core': patch
-'@bevel-software/platform-core-backend': patch
-'@bevel-software/hexis-mcp': patch
-'@bevel-software/platform-shared': patch
+'@bevel-software/platform-mcp-core': minor
+'@bevel-software/platform-core-backend': minor
+'@bevel-software/hexis-mcp': minor
+'@bevel-software/platform-shared': minor
 ---
 
 Connected MCP servers and drafts:
