@@ -229,7 +229,7 @@ describe('AdminLockedCommits.mapLockContention', () => {
         throw new PathHeldError(`${KB}/roles.yaml`, 'Bo');
       }),
     ).rejects.toMatchObject({ status: 409, message: 'Things are being edited by another admin. Try again in a moment.' });
-    const lookalike = new Error(`Skipped editing "${KB}/roles.yaml" — locked by Bo. Continuing with other edits; try this one again later.`);
+    const lookalike = new Error(`Skipped editing "${KB}/roles.yaml" — locked by Bo. Nothing of this write was written; try again later.`);
     await expect(
       locked.mapLockContention(async () => {
         throw lookalike;

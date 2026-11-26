@@ -1576,7 +1576,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
   it('passes on a landing failure that only reads like a held lock, as it is', async () => {
     await writeZip('worded.zip', { 'page.md': 'page' });
     const worded = new Error(
-      'Skipped editing "knowledge-base/out/page.md" — locked by Bo. Continuing with other edits; try this one again later.',
+      'Skipped editing "knowledge-base/out/page.md" — locked by Bo. Nothing of this write was written; try again later.',
     );
     const landing: ArchiveLanding = {
       writeFiles: async () => {

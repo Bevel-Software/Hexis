@@ -63,10 +63,8 @@ export async function rejectPathsLocked(
     );
   } catch (err) {
     // Fail-closed: writeFiles committed nothing. Surface ONE clean 4xx
-    // sentence (the raw error is status-less → would 500). The contention
-    // case is rebuilt from the refusal's path and holder rather than nested:
-    // writeFiles' own text says "Continuing with other edits", which is wrong
-    // here — the batch aborted.
+    // sentence. The contention case is rebuilt from the refusal's path and
+    // holder rather than nested, in this route's own words.
     const reason =
       err instanceof PathHeldError
         ? `"${err.path}" is being edited by ${err.holderName ?? 'another user'}`

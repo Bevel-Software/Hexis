@@ -166,7 +166,7 @@ describe('POST /onboarding/starter-pack', () => {
     const svc = {
       status: vi.fn(),
       choose: vi.fn(async () => {
-        throw new Error('Skipped editing "kb/KnowledgeBase/About us.md" — locked by Bo. Continuing with other edits; try this one again later.');
+        throw new Error('Skipped editing "kb/KnowledgeBase/About us.md" — locked by Bo. Nothing of this write was written; try again later.');
       }),
     };
     const base = await listen(svc);

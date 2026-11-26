@@ -71,9 +71,9 @@ const FALLBACK_LEASE_MS = 60_000;
  * A write could not take `path`'s lock: another holder kept it past the
  * retries, and nothing of that write was written. A 409 whose payload is
  * `{ kind: 'path-held', path }`, so a route or tool that passes it on answers
- * it as the conflict it is. The message is the sentence the agent tools have
- * always relayed; a caller that answers in its own words reads `path` and
- * `holderName` rather than the message.
+ * it as the conflict it is. The message names the path and its holder and
+ * says nothing was written; a caller that answers in its own words reads
+ * `path` and `holderName` rather than the message.
  */
 export class PathHeldError extends VersionControlDomainError {
   readonly kind = 'path-held' as const;
@@ -83,7 +83,7 @@ export class PathHeldError extends VersionControlDomainError {
   ) {
     super(
       `Skipped editing "${path}" — locked by ${holderName ?? 'another user'}. ` +
-        'Continuing with other edits; try this one again later.',
+        'Nothing of this write was written; try again later.',
       409,
       { kind: 'path-held', path },
     );
