@@ -752,7 +752,7 @@ describe('AuthService.resolveSession — the deployment admin across an ADMIN_PA
     expect((jwt.decode(other.token) as Record<string, unknown>).ap).not.toBe(payload.ap);
   });
 
-  it('leaves every other account's sessions alone in a deployment with an environment admin', async () => {
+  it('leaves the sessions of every other account alone in a deployment with an environment admin', async () => {
     const token = jwt.sign({ userId: ROW.id, email: ROW.email, sv: 0 }, 'test-jwt-secret', { expiresIn: '7d' });
     const { db } = makeFakeDb([[{ ...ROW, deactivatedAt: null }]]);
     await expect(new AuthService(db, envAdmin('rotated-password')).resolveSession(token)).resolves.toEqual({
