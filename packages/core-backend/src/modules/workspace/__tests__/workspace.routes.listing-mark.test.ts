@@ -7,6 +7,7 @@ import express from 'express';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
+import { archiveLandingFor } from '../../../__tests__/archive-landing.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/index.js';
 import type { ICreatorAccess } from '../../access-model/index.js';
@@ -87,6 +88,9 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
         { planForCreate: async () => null, noteAccessFileWritten: () => {} } as unknown as ICreatorAccess,
         { isAdmin: async () => true } as unknown as IAdminAccessService,
         realDisk(),
+        undefined,
+        undefined,
+        archiveLandingFor({ workspaceService, versionControl: versionControlService, kbDirName: KB }),
       ),
     );
     server = await new Promise<Server>((resolve) => {

@@ -10,6 +10,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { realDisk } from '../../../__tests__/real-disk.js';
+import { archiveLandingFor } from '../../../__tests__/archive-landing.js';
 import type { IAccessControl } from '../../access/index.js';
 import type { VersionControlEventBus } from '../../version-control/index.js';
 import type { AuthService } from '../../auth/index.js';
@@ -113,6 +114,9 @@ async function makeHarness(): Promise<Harness> {
       stubCreatorAccess,
       { isAdmin: async () => false } as unknown as IAdminAccessService,
       realDisk(),
+      undefined,
+      undefined,
+      archiveLandingFor({ workspaceService, versionControl: versionControlService, kbDirName: KB, creatorAccess: stubCreatorAccess }),
     ),
   );
   const server = await new Promise<Server>((resolve) => {

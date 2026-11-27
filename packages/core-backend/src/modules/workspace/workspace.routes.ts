@@ -22,7 +22,7 @@ import {
   platformFolderRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
-import { FolderTooLargeError, type ReadTreeFilter, EntryExistsError, type WorkspaceService } from './workspace.service.js';
+import { FolderTooLargeError, type ArchiveLandingFor, type ReadTreeFilter, EntryExistsError, type WorkspaceService } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { AuthService } from '../auth/index.js';
@@ -33,7 +33,7 @@ import type { VersionControlEventBus } from '../version-control/index.js';
 import { PathTraversalError, PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
-import { LockingFilesystem, normalizeWorkspacePath } from '../kb-fs/index.js';
+import { normalizeWorkspacePath } from '../kb-fs/index.js';
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
@@ -99,6 +99,13 @@ export function createWorkspaceRoutes(
    * it.
    */
   changeGate?: IChangeReadGate,
+  /**
+   * Where `POST /unzip` lands an archive: the person's lock-aware filesystem
+   * on that workspace, made by the composition root. Optional so route
+   * harnesses that exercise other behaviour need not wire it; without it the
+   * route answers 501 and extracts nothing.
+   */
+  archiveLandingFor?: ArchiveLandingFor,
 ): express.Router {
   const router = express.Router();
   const { kbDirName } = kb;
@@ -1547,10 +1554,11 @@ export function createWorkspaceRoutes(
       // one commit. A path whose lock is held refuses the whole extraction,
       // with nothing written. Where the creator's read grant is planned for a
       // new folder (`creatorAccess`), the batch lands it in that same commit.
-      const landing = new LockingFilesystem(
-        { basePath: await workspaceService.getWorkspacePath(id), contained: true },
-        { versionControl: versionControlService, workspaceId: id, branch, user, kbDirName, creatorAccess },
-      );
+      if (!archiveLandingFor) {
+        res.status(501).json({ error: 'Extracting an archive is not set up on this server.' });
+        return;
+      }
+      const landing = await archiveLandingFor(id, branch, user);
       try {
         const result = await workspaceService.unzipFile(
           id,

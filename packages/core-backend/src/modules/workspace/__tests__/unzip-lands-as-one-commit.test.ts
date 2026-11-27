@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { creatableRootDirNames, type AuthUser, type IVersionControlService } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
+import { archiveLandingFor } from '../../../__tests__/archive-landing.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 import {
   AccessControlService,
@@ -323,6 +324,7 @@ async function startRoute(
       realDisk(),
       undefined,
       changeGate,
+      archiveLandingFor({ workspaceService, versionControl: lockTable.vcs, kbDirName: kb.kbDirName, creatorAccess }),
     ),
   );
   const base = await listen(app);

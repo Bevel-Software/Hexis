@@ -4,6 +4,7 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
+import { archiveLandingFor } from '../../../__tests__/archive-landing.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/index.js';
 import {
@@ -113,6 +114,12 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
       realDisk(),
       undefined,
       opts.changeGate,
+      archiveLandingFor({
+        workspaceService,
+        versionControl: versionControlService,
+        kbDirName: KB,
+        creatorAccess: creatorAccess as unknown as ICreatorAccess,
+      }),
     ),
   );
   const server = await new Promise<Server>((resolve) => {

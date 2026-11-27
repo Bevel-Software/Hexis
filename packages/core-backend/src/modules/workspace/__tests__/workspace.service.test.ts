@@ -10,7 +10,7 @@ import { ArchiveRefusedError, WorkspaceService, type ArchiveEntryJudge, type Arc
 import { PathHeldError } from '../../kb-fs/index.js';
 import type { IDiffService } from '../../diff/index.js';
 import { AccessDeniedError } from '../../access-model/index.js';
-import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
+import { GitInternalsError, PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
@@ -1276,6 +1276,33 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     const refusing = { ...judgeOf(), destination: async () => { throw Object.assign(new Error('not yours'), { status: 403 }); } };
     await expect(svc.unzipFile(workspaceId, 'knowledge-base/Team/a.zip', 'knowledge-base/Shut', refusing, diskLanding(workspaceDir))).rejects.toThrow('not yours');
     await expect(fs.stat(path.join(repoDir, 'Shut'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('asks the judge about the archive and the destination before it looks at where either resolves on disk', async () => {
+    // A link into the repository's git folder, as only a direct push leaves
+    // one. What a path resolves to is read from the disk, so a caller the
+    // judge refuses must get that refusal and not the git rule's, which would
+    // tell them the link is there.
+    await fs.symlink(path.join(repoDir, '.git'), path.join(repoDir, 'gitlink'), process.platform === 'win32' ? 'junction' : 'dir');
+    await writeZip('a.zip', { 'keep.md': 'ok' });
+    const notYours = () => { throw Object.assign(new Error('not yours'), { status: 403 }); };
+
+    const noArchive = { ...judgeOf(), archive: async () => notYours() };
+    await expect(
+      svc.unzipFile(workspaceId, 'knowledge-base/gitlink/config.zip', undefined, noArchive, diskLanding(workspaceDir)),
+    ).rejects.toThrow('not yours');
+    const noDestination = { ...judgeOf(), destination: async () => notYours() };
+    await expect(
+      svc.unzipFile(workspaceId, 'knowledge-base/a.zip', 'knowledge-base/gitlink/hooks', noDestination, diskLanding(workspaceDir)),
+    ).rejects.toThrow('not yours');
+
+    // A caller the judge lets through is answered by the git rule, as before.
+    await expect(
+      svc.unzipFile(workspaceId, 'knowledge-base/gitlink/config.zip', undefined, judgeOf(), diskLanding(workspaceDir)),
+    ).rejects.toBeInstanceOf(GitInternalsError);
+    await expect(
+      svc.unzipFile(workspaceId, 'knowledge-base/a.zip', 'knowledge-base/gitlink/hooks', judgeOf(), diskLanding(workspaceDir)),
+    ).rejects.toBeInstanceOf(GitInternalsError);
   });
 
   it('skips entries the write guard rejects and never writes them to disk', async () => {

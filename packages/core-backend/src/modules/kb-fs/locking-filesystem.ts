@@ -743,8 +743,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * no discard and no release, since both are keyed on the user and would
    * reset the file and drop the lock its new holder holds; what the batch
    * wrote there stays on disk. A lock the batch knows it lost is never
-   * released, on any of its unwinds. Nothing looks for a lock lost after the
-   * last heartbeat before the commit, during the commit and its push.
+   * released, and a creator seed under one never rolled back, on any of its
+   * unwinds: also when a write or the commit fails after a renewal found the
+   * path taken. A lock lost during the commit and its push is known only if a
+   * renewal comes round in that time; nothing else looks for one then.
    *
    * `writes[].path` is workspace-relative (like `writeFile`). We do the disk
    * write here; `commitChanges` only stages + commits what's on disk (the git
@@ -1032,10 +1034,6 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // pre-image (not to HEAD — the pre-image may be a prior save's queued
     // bytes) so an uncommitted grant can't sit on disk as if it were real.
     const landedSeeds = new Map<string, { current: string; existedBefore: boolean }>();
-    // Set when the check right before the commit refuses the batch: its
-    // unwind then leaves every lost path, bytes and lock, to its new holder.
-    let refusedForLoss = false;
-    const kept = (p: string): boolean => refusedForLoss && leases.lost(p);
     let change: Change | null;
     try {
       // Write/delete every file to disk inside the locks (workspace-relative;
@@ -1111,10 +1109,7 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // Ownership again before the commit: a lock lost while the batch wrote
       // must not have this batch's bytes committed over its new holder's.
       const lostBeforeCommit = await leases.verify();
-      if (lostBeforeCommit !== null) {
-        refusedForLoss = true;
-        throw new PathHeldError(lostBeforeCommit, null, true);
-      }
+      if (lostBeforeCommit !== null) throw new PathHeldError(lostBeforeCommit, null, true);
       // Scope the commit to this batch's own paths (caller paths + landed
       // seeds): on the shared per-branch workspace another save's bytes may be
       // dirty with their commit still queued, and an unscoped commit would
@@ -1147,10 +1142,13 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // pre-image read under its lock (which may be a prior save's queued
       // bytes — a discard to HEAD would destroy those), and only a seed
       // whose rollback ALSO fails joins the discard set, same fail-closed
-      // posture as a failed seed write. A seed whose lock was lost is not
-      // this batch's to roll back.
+      // posture as a failed seed write. A seed whose lock the batch knows it
+      // lost is not its to roll back, whatever made the batch fail: the check
+      // before the commit, or a write or the commit itself failing after a
+      // renewal found the path taken. Its new holder may have saved there
+      // since, and the pre-image would replace what they wrote.
       for (const [p, pre] of landedSeeds) {
-        if (kept(p)) continue;
+        if (leases.lost(p)) continue;
         try {
           if (pre.existedBefore) {
             await super.writeFile(p, pre.current);
@@ -1166,9 +1164,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // The batch's own dirtied paths (and any failed-restore seed) release
       // no-commit (the discard reverts them). Merely-locked paths — rolled-
       // back seeds included — release untouched (see releaseAll). A path
-      // whose lock was lost is not released at all.
+      // whose lock was lost is not released at all: `releaseAll` keeps it,
+      // whatever mode it is handed.
       await releaseAll((p) =>
-        kept(p) ? 'keep' : dirtied.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
+        dirtied.has(p) || failedSeedDiscards.has(p) ? 'discard' : 'untouched',
       );
       throw err;
     }

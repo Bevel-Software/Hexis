@@ -11,6 +11,7 @@ import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { GIT_INTERNALS_MESSAGE, GitInternalsError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
+import { archiveLandingFor } from '../../../__tests__/archive-landing.js';
 import { LockingFilesystem, ReadOnlyFilesystem } from '../../kb-fs/index.js';
 import { ToolRegistry } from '../../tool-registry/index.js';
 import { createToolHandlerFactory, VersionControlHooks } from '../../../__tests__/tool-wiring.js';
@@ -415,6 +416,14 @@ describe('workspace routes refuse the git folder', () => {
         stubCreatorAccess,
         { isAdmin: async () => true } as unknown as IAdminAccessService,
         realDisk(),
+        undefined,
+        undefined,
+        archiveLandingFor({
+          workspaceService: service,
+          versionControl: versionControl as unknown as IVersionControlService,
+          kbDirName: KB,
+          creatorAccess: stubCreatorAccess,
+        }),
       ),
     );
     ({ server, baseUrl } = await listen(app));

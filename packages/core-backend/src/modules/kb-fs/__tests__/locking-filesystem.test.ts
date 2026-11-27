@@ -972,6 +972,56 @@ describe('LockingFilesystem.writeFiles — a batch longer than a lease', () => {
     expect((versionControl.heartbeatLock as ReturnType<typeof vi.fn>).mock.calls.length).toBe(heartbeats);
   });
 
+  it('a creator seed whose lock is lost while the commit runs is not rolled back when that commit fails', async () => {
+    const { versionControl, rows, acquire } = leasingVersionControl(0);
+    const mine = 'knowledge-base/KnowledgeBase/Mine/a.md';
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
+    const editorsBytes = '---\nread:\n  - Bob <bob@example.com>\n---\n';
+    let editorTookIt = false;
+    let begin: () => void = () => {};
+    const committing = new Promise<void>((resolve) => (begin = resolve));
+    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      // While the commit runs, the lease on the seed lapses, the person's own
+      // editor takes the path and saves its own rules there.
+      rows.delete(seedPath);
+      vi.setSystemTime(Date.now() + 1_000);
+      editorTookIt = acquire(seedPath, USER).acquired;
+      await fs.writeFile(path.join(root, seedPath), editorsBytes);
+      begin();
+      // Long enough for a renewal to come round and find the other grant.
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+      throw new Error('commit exploded');
+    });
+    const creatorAccess = {
+      planForCreate: vi.fn(async (_w: string, _u: AuthUser, p: string) =>
+        p === mine
+          ? { kind: 'seed-access-md', wsRelPath: seedPath, apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n' }
+          : null,
+      ),
+      noteAccessFileWritten: vi.fn(),
+    };
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
+    );
+    const settled = fsLayer
+      .writeFiles([{ path: mine, content: 'A' }], 'batch')
+      .then(() => null, (err: unknown) => err);
+    await committing;
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const err = await settled;
+    expect(editorTookIt).toBe(true);
+    expect(err).toMatchObject({ message: 'commit exploded' });
+    // The seed was not there before the batch, so rolling it back would have
+    // removed the file. It holds what the editor saved, under the editor's lock.
+    expect(await fs.readFile(path.join(root, seedPath), 'utf-8')).toBe(editorsBytes);
+    expect(releasesOf(versionControl, seedPath)).toEqual([]);
+    expect(rows.get(seedPath)?.holder).toBe(USER);
+    // The path still the batch's own releases as a failed commit releases it.
+    expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', mine, USER);
+  });
+
   it('a lock lost while the batch writes refuses it before the commit: nothing committed, the lost path neither rolled back nor released', async () => {
     const { versionControl, rows, acquire } = leasingVersionControl(0);
     const mine = 'knowledge-base/KnowledgeBase/Mine/a.md';

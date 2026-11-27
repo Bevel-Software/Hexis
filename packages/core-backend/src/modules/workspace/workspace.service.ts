@@ -119,6 +119,13 @@ export interface ArchiveLanding {
 }
 
 /**
+ * Makes the landing of one person's extraction on one workspace. The app's
+ * unzip route is handed one by the composition root, which is where the
+ * lock-aware filesystem behind it is constructed.
+ */
+export type ArchiveLandingFor = (workspaceId: string, branch: string, user: AuthUser) => Promise<ArchiveLanding>;
+
+/**
  * An archive refused whole: nothing in it was written or committed, and no
  * lock taken for it is still held.
  *
@@ -1586,17 +1593,48 @@ export class WorkspaceService implements IWorkspaceService {
    * error messages — so what is checked is what is written. Nine inline
    * `path.resolve(workspaceDir, …)` calls used to do this, none of them
    * checking the repository root; a drift-guard test now fails if one returns.
+   *
+   * `gate` is for a caller that asks who may have the path looked at HERE and
+   * not at its door (`unzipFile`): see {@link gitRuleThenGate}.
    */
   private async resolveInsideRepo(
     workspaceId: string,
     wsPath: string,
+    gate?: (relativePath: string) => Promise<void>,
   ): Promise<{ workspaceDir: string; relativePath: string; absolutePath: string }> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    await assertNotGitInternals(workspaceDir, wsPath); // The RAW spelling, first — see above.
+    if (gate) await this.gitRuleThenGate(workspaceDir, wsPath, gate);
+    else await assertNotGitInternals(workspaceDir, wsPath); // The RAW spelling, first — see above.
     const relativePath = normalizeWorkspacePath(wsPath, this.kbDirName);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     assertWithinDirectory(absolutePath, this.repoRoot(workspaceDir));
     return { workspaceDir, relativePath, absolutePath };
+  }
+
+  /**
+   * The git rule on a raw spelling, with `gate` asked between its two halves:
+   * the spelling check first, then `gate` with the normalised path, and only
+   * then the rule's look at the disk (a link that resolves into the git
+   * folder). A caller `gate` refuses so learns nothing of what the path
+   * resolves to. One case is put to the disk unasked: a spelling the
+   * normaliser refuses names no workspace path anyone could be asked about,
+   * and the git rule must still answer it before the path rule does.
+   */
+  private async gitRuleThenGate(
+    workspaceDir: string,
+    wsPath: string,
+    gate: (relativePath: string) => Promise<void>,
+  ): Promise<void> {
+    assertNoGitInternalsSegment(wsPath);
+    let asked: string;
+    try {
+      asked = normalizeWorkspacePath(wsPath, this.kbDirName);
+    } catch (err) {
+      await assertNotGitInternals(workspaceDir, wsPath);
+      throw err;
+    }
+    await gate(asked);
+    await assertNotGitInternals(workspaceDir, wsPath);
   }
 
   /** The resolution above, for a method this file declares before it. */
@@ -2491,31 +2529,36 @@ export class WorkspaceService implements IWorkspaceService {
     /** Where the files land: one call, for every file that passed. */
     landing: ArchiveLanding,
   ): Promise<UnzipResult> {
-    // The checks about the archive and the destination that read the disk at
-    // their resolved paths (the git folder they resolve into, a link on the
-    // way) come after the judge's question about each: what is on disk at a
-    // path the caller may not read is not theirs to learn from the answer.
-    // `resolveInsideRepo` still applies the git rule to the raw spelling
-    // first (see there), so that rule, not the normaliser, answers a git path
-    // spelled oddly.
+    // Every check about the archive and the destination that reads the disk
+    // (the git folder a path resolves into, a link on the way) comes after
+    // the judge's question about that path: what is on disk at a path the
+    // caller may not read is not theirs to learn from the answer. So the
+    // judge is asked inside the resolution itself (`resolveInsideRepo`'s
+    // `gate`), after the path is judged by its spelling and before the git
+    // rule resolves it on disk.
     const { workspaceDir, relativePath: zipRelativePath, absolutePath: zipAbsolute } =
-      await this.resolveInsideRepo(workspaceId, zipWsPath);
-    assertNoGitInternalsSegment(zipRelativePath);
-    if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
-      throw new VersionControlValidationError('Only .zip files can be extracted');
-    }
-    // Extracting an archive reads it: one the caller may not read is refused
-    // before its bytes, or the disk at its resolved path, are looked at.
-    await judge.archive(zipRelativePath);
+      await this.resolveInsideRepo(workspaceId, zipWsPath, async (relativePath) => {
+        assertNoGitInternalsSegment(relativePath);
+        if (!relativePath.toLowerCase().endsWith('.zip')) {
+          throw new VersionControlValidationError('Only .zip files can be extracted');
+        }
+        // Extracting an archive reads it: one the caller may not read is
+        // refused before its bytes, or the disk at its path, are looked at.
+        await judge.archive(relativePath);
+      });
     await assertNotGitInternals(workspaceDir, zipRelativePath, zipAbsolute);
     // Inferred from the NORMALISED archive path, so an archive named without
     // the prefix extracts beside itself inside the repository rather than at
     // the workspace root.
-    const { relativePath: destRel, absolutePath: destAbsolute } =
-      await this.resolveInsideRepo(workspaceId, destDirWsPath ?? path.posix.dirname(zipRelativePath));
-    assertValidPath(destRel);
-    assertNoGitInternalsSegment(destRel);
-    await judge.destination(destRel);
+    const { relativePath: destRel, absolutePath: destAbsolute } = await this.resolveInsideRepo(
+      workspaceId,
+      destDirWsPath ?? path.posix.dirname(zipRelativePath),
+      async (relativePath) => {
+        assertValidPath(relativePath);
+        assertNoGitInternalsSegment(relativePath);
+        await judge.destination(relativePath);
+      },
+    );
     await assertNotGitInternals(workspaceDir, destRel, destAbsolute);
     // Neither the archive nor the destination may sit behind a link; each
     // entry's own target is checked under its lock, below.

@@ -5,6 +5,7 @@ import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { authCookieSecure } from '../modules/auth/auth.middleware.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import { LockingFilesystem } from '../modules/kb-fs/index.js';
 import {
   createAgentUploadRoutes,
   isAgentUploadRawBodyPath,
@@ -707,6 +708,20 @@ export async function createCoreServer(
     core.disk,
     allowedToolsChecker,
     core.changeGate,
+    // Where the app's unzip lands an archive: the person's own lock-aware
+    // filesystem on that workspace, so the extraction is one commit of theirs.
+    async (workspaceId, branch, user) =>
+      new LockingFilesystem(
+        { basePath: await core.workspaceService.getWorkspacePath(workspaceId), contained: true },
+        {
+          versionControl: core.versionControlService,
+          workspaceId,
+          branch,
+          user,
+          kbDirName: core.kb.kbDirName,
+          creatorAccess: core.creatorAccess,
+        },
+      ),
   ));
   // Version control is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
