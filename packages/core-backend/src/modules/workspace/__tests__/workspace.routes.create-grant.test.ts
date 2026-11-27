@@ -253,12 +253,12 @@ describe('creator read-grant hooks on the creation routes', () => {
 });
 
 /**
- * Archive extraction asks the lock's read gate about the destination first,
- * and extracts nothing when it refuses; then each entry meets the archive
- * judge (a directory entry asked as a folder, a file at its own lock), so an
- * entry the gate refuses is skipped rather than refusing the whole batch.
+ * The route hands the extraction the archive judge, which asks the lock's read
+ * gate about the destination as a folder and about each directory entry as a
+ * folder, and leaves a file to its own lock, so an entry the gate refuses is
+ * skipped rather than refusing the whole batch.
  */
-describe('POST /unzip asks the read-before-write gate about its destination first', () => {
+describe('POST /unzip hands the extraction the archive judge, which asks the read-before-write gate', () => {
   let h: Harness | null = null;
   afterEach(async () => {
     if (h) await close(h.server);
@@ -278,34 +278,22 @@ describe('POST /unzip asks the read-before-write gate about its destination firs
     return { gate, judge };
   }
 
-  it('a destination the caller cannot read is refused whole — nothing is extracted or locked', async () => {
+  it('hands the extraction the archive judge, whose destination question asks the gate about the folder as a folder', async () => {
     const { gate, judge } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed' });
-    h = await makeHarness({ extracted: [`${KB}/KnowledgeBase/Sealed/a.md`], changeGate: gate });
+    h = await makeHarness({ extracted: [], changeGate: gate });
     const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path: `${KB}/KnowledgeBase/drop.zip`, destination: `${KB}/KnowledgeBase/Sealed` }),
     });
-    expect(res.status).toBe(403);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain('You don\'t have read access to "KnowledgeBase/Sealed"');
-    // Asked about the DESTINATION as a folder, and nothing happened after the refusal.
-    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Sealed`, 'dir');
-    expect(h.unzipFileMock).not.toHaveBeenCalled();
-    expect(h.lockedPaths).toEqual([]);
-  });
-
-  it('without a destination the archive\'s own folder is what is asked about', async () => {
-    const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
-    h = await makeHarness({ extracted: [`${KB}/KnowledgeBase/Open/a.md`], changeGate: gate });
-    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: `${KB}/KnowledgeBase/Open/drop.zip` }),
-    });
+    // The question is the extraction's to ask, before it looks at the folder
+    // (unzip-lands-as-one-commit.test.ts lands nothing when it refuses).
     expect(res.status).toBe(200);
-    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Open`, 'dir');
-    expect(h.unzipFileMock).toHaveBeenCalledOnce();
+    const archiveJudge = h.unzipFileMock.mock.calls[0]![3] as ArchiveEntryJudge;
+    const err = await archiveJudge.destination(`${KB}/KnowledgeBase/Sealed`).then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({ status: 403 });
+    expect((err as Error).message).toContain('You don\'t have read access to "KnowledgeBase/Sealed"');
+    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Sealed`, 'dir');
   });
 
   it('hands the extraction the archive judge: a directory entry is asked about as a folder, a file is left to its lock', async () => {

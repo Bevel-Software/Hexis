@@ -27,6 +27,7 @@ import { NodeGitRunner } from '../version-control/index.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { planZipEntries, type ZipPlanLimits, type ZipPlanSkip } from './zip-entry-rules.js';
+import { landingObstacle, type LandingObstacle } from './landing-obstacle.js';
 import {
   GitInternalsError,
   PathNotFoundError,
@@ -111,7 +112,8 @@ export interface ArchiveLanding {
     writes: { path: string; content: Buffer }[],
     summary: string,
     deletes?: string[],
-    check?: undefined,
+    /** Run with every lock held, after the locks' gates and before any byte lands: the writes that may still land. */
+    check?: (writes: readonly { path: string; content: Buffer }[]) => Promise<{ path: string; content: Buffer }[]>,
     refused?: (path: string, err: unknown) => void,
   ): Promise<unknown>;
 }
@@ -141,14 +143,18 @@ export class ArchiveRefusedError extends VersionControlDomainError {
 /**
  * How one archive's entries are judged, by both doors that land an archive
  * (the agent `unzip` tool and the app's unzip route, through `unzipFile`) and
- * by `apply_file_upload`. An extraction first asks one question about the
- * archive itself:
+ * by `apply_file_upload`. An extraction first asks two questions, each
+ * before anything on disk at its path is looked at:
  *
  *  - `archive`: may the caller read the archive at `wsPath`, asked by
  *    `unzipFile` before it reads a byte of it. Throwing refuses the
  *    extraction with what was thrown: nothing is written and no entry is
  *    named. (`apply_file_upload` lands the caller's own upload, which is no
  *    file of the knowledge base, and does not ask it.)
+ *  - `destination`: may the caller change the folder at `wsPath` the archive
+ *    extracts into, asked by `unzipFile` before the folder is probed.
+ *    Throwing refuses the extraction as `archive` does. (`apply_file_upload`
+ *    asks its destination its own way.)
  *
  * Then one judge answers three questions about an entry:
  *
@@ -167,6 +173,7 @@ export class ArchiveRefusedError extends VersionControlDomainError {
  */
 export interface ArchiveEntryJudge {
   archive(wsPath: string): Promise<void>;
+  destination(wsPath: string): Promise<void>;
   entry(wsPath: string, kind: 'file' | 'dir'): Promise<void>;
   refusedAtLock(wsPath: string, err: unknown): void;
   skipped(wsPath: string | null, entryName: string, why: unknown): ArchiveRefusedError | null;
@@ -201,6 +208,11 @@ export const ONE_COMMIT_LIMITS: ZipPlanLimits = {
   totalBytes: ONE_COMMIT_MAX_TOTAL_BYTES,
   entryBytes: 100 * 1024 * 1024, // 100 MB per file
 };
+
+/** The refusal `unzipFile` reports for an entry whose target meets a link or the git folder. */
+function obstacleRefusal(obstacle: LandingObstacle): Error {
+  return obstacle.kind === 'link' ? new PathTraversalError() : new GitInternalsError();
+}
 
 /** What `unzipFile` reports, as `skipped[].reason`, for an entry the planner skipped. */
 function unzipSkipReason(step: ZipPlanSkip): string {
@@ -2476,28 +2488,34 @@ export class WorkspaceService implements IWorkspaceService {
     /** Where the files land: one call, for every file that passed. */
     landing: ArchiveLanding,
   ): Promise<UnzipResult> {
+    // The checks about the archive and the destination that read the disk at
+    // their resolved paths (the git folder they resolve into, a link on the
+    // way) come after the judge's question about each: what is on disk at a
+    // path the caller may not read is not theirs to learn from the answer.
+    // `resolveInsideRepo` still applies the git rule to the raw spelling
+    // first (see there), so that rule, not the normaliser, answers a git path
+    // spelled oddly.
     const { workspaceDir, relativePath: zipRelativePath, absolutePath: zipAbsolute } =
       await this.resolveInsideRepo(workspaceId, zipWsPath);
     assertNoGitInternalsSegment(zipRelativePath);
-    await assertNotGitInternals(workspaceDir, zipRelativePath, zipAbsolute);
     if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
       throw new VersionControlValidationError('Only .zip files can be extracted');
     }
     // Extracting an archive reads it: one the caller may not read is refused
-    // before its bytes, or the place it would land, are looked at.
+    // before its bytes, or the disk at its resolved path, are looked at.
     await judge?.archive(zipRelativePath);
-
+    await assertNotGitInternals(workspaceDir, zipRelativePath, zipAbsolute);
     // Inferred from the NORMALISED archive path, so an archive named without
     // the prefix extracts beside itself inside the repository rather than at
     // the workspace root.
-    const inferredDest = path.posix.dirname(zipRelativePath);
     const { relativePath: destRel, absolutePath: destAbsolute } =
-      await this.resolveInsideRepo(workspaceId, destDirWsPath ?? inferredDest);
+      await this.resolveInsideRepo(workspaceId, destDirWsPath ?? path.posix.dirname(zipRelativePath));
     assertValidPath(destRel);
     assertNoGitInternalsSegment(destRel);
+    await judge?.destination(destRel);
     await assertNotGitInternals(workspaceDir, destRel, destAbsolute);
     // Neither the archive nor the destination may sit behind a link; each
-    // entry's own target is checked again below, once it is known.
+    // entry's own target is checked under its lock, below.
     await this.assertNotThroughLink(zipAbsolute, workspaceDir);
     if (destAbsolute !== this.repoRoot(workspaceDir)) await this.assertNotThroughLink(destAbsolute, workspaceDir);
 
@@ -2541,7 +2559,7 @@ export class WorkspaceService implements IWorkspaceService {
     const entryNameAt = new Map<string, string>();
     /** Files the landing dropped because the lock's gates refused their lock. */
     const refusedAtLock = new Set<string>();
-    const directories: string[] = [];
+    const directories: { name: string; absolute: string }[] = [];
     const destination = path.relative(workspaceDir, destAbsolute).replace(/\\/g, '/');
 
     /**
@@ -2565,8 +2583,6 @@ export class WorkspaceService implements IWorkspaceService {
         skip(step.name, step.target, unzipSkipReason(step));
         continue;
       }
-      // The plan's target is the destination plus the entry's own path.
-      const targetAbsolute = path.resolve(destAbsolute, step.target.slice(destination.length + 1));
       // An entry the judge refuses is skipped, not extracted, so an archive
       // can't be a way around whatever the judge enforces. Every entry is
       // judged before anything is written, so a refused entry leaves nothing
@@ -2583,23 +2599,19 @@ export class WorkspaceService implements IWorkspaceService {
         }
       };
 
-      // The symbolic-link rule, per entry: a link already on disk under the
-      // destination must not redirect this entry's bytes. Reported like the
-      // other per-entry refusals, so one such entry does not fail the rest.
-      try {
-        await assertNotGitInternals(workspaceDir, step.name.replace(/\/+$/, ''), targetAbsolute);
-        await this.assertNotThroughLink(targetAbsolute, workspaceDir);
-      } catch (err) {
-        if (err instanceof PathTraversalError || err instanceof GitInternalsError) {
-          skip(step.name, step.target, err);
-          continue;
-        }
-        throw err;
-      }
-
+      // What is on disk at and above an entry's target (a link on the way,
+      // the git folder) is asked only once the entry's own gates have let it
+      // through: a directory entry's here, after the judge; a file's under
+      // its lock, in the landing's check below.
       if (step.kind === 'dir') {
         if (!(await allowEntry('dir'))) continue;
-        directories.push(targetAbsolute);
+        const obstacle = await landingObstacle(workspaceDir, this.kbDirName, step.target);
+        if (obstacle !== null) {
+          skip(step.name, step.target, obstacleRefusal(obstacle));
+          continue;
+        }
+        // The plan's target is the destination plus the entry's own path.
+        directories.push({ name: step.name, absolute: path.resolve(destAbsolute, step.target.slice(destination.length + 1)) });
         continue;
       }
 
@@ -2619,6 +2631,26 @@ export class WorkspaceService implements IWorkspaceService {
           refusedAtLock.add(wsPath);
         }
       : undefined;
+    // Each file's landing target, asked with every lock held and after the
+    // lock's gates (see the directory entries above): a file that meets a
+    // link or the git folder is skipped, or refuses the extraction when the
+    // judge says so, and is never written.
+    const obstructed = new Set<string>();
+    const targetCheck = async (
+      pending: readonly { path: string; content: Buffer }[],
+    ): Promise<{ path: string; content: Buffer }[]> => {
+      const kept: { path: string; content: Buffer }[] = [];
+      for (const write of pending) {
+        const obstacle = await landingObstacle(workspaceDir, this.kbDirName, write.path);
+        if (obstacle === null) {
+          kept.push(write);
+          continue;
+        }
+        skip(entryNameAt.get(write.path) ?? write.path, write.path, obstacleRefusal(obstacle));
+        obstructed.add(write.path);
+      }
+      return kept;
+    };
     let sharingPending: PushNeedsAgentResolutionError | undefined;
     // In the destination folder's turn, which `delete_folder` takes over the
     // same subtree: a folder delete running between the landing creating the
@@ -2631,7 +2663,7 @@ export class WorkspaceService implements IWorkspaceService {
             writes,
             `Extract ${zipRelativePath} (${writes.length} file${writes.length === 1 ? '' : 's'})`,
             [],
-            undefined,
+            targetCheck,
             refused,
           );
         } catch (err) {
@@ -2642,9 +2674,24 @@ export class WorkspaceService implements IWorkspaceService {
           sharingPending = err;
         }
       }
-      for (const dir of directories) await fs.mkdir(dir, { recursive: true });
+      // Past the commit nothing may throw: the files have landed, and the
+      // caller is owed the answer, the sync and the tree event. A directory
+      // entry that cannot be created (a file already sits at its path) is a
+      // skipped entry, reported without a server path.
+      for (const dir of directories) {
+        try {
+          await fs.mkdir(dir.absolute, { recursive: true });
+        } catch (err) {
+          const code = (err as { code?: unknown }).code;
+          if (code !== 'EEXIST' && code !== 'ENOTDIR') log.warn(`could not create a folder an archive carries:`, { err });
+          skipped.push({
+            path: dir.name,
+            reason: code === 'EEXIST' || code === 'ENOTDIR' ? 'A file is already at this path, so the folder was not created' : 'The folder could not be created',
+          });
+        }
+      }
     });
-    const landed = extracted.filter((p) => !refusedAtLock.has(p));
+    const landed = extracted.filter((p) => !refusedAtLock.has(p) && !obstructed.has(p));
     for (const written of new Set(landed)) await this.diffService?.syncFromDisk(workspaceId, written);
     if (sharingPending) throw sharingPending;
 

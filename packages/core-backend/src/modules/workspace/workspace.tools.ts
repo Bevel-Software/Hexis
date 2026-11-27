@@ -16,6 +16,7 @@ import type { ToolHandlerFactory } from '../tool-helpers/index.js';
 import { requireInternalSource, requireExternalSource } from '../tool-auth/index.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { GitInternalsError, PushNeedsAgentResolutionError, VersionControlValidationError } from '../../shared/domain-errors.js';
+import { landingObstacle } from './landing-obstacle.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a version-control service, so this stays inside the module boundary.
 import {
@@ -1209,6 +1210,16 @@ export function archiveEntryJudge(
       } catch (err) {
         if (isCallerRefusal(err)) throw err;
         throw unchecked('Whether this archive may be read could not be checked, so nothing was extracted.', wsPath, err);
+      }
+    },
+    destination: async (wsPath) => {
+      // The folder the archive extracts into, as a folder: one inside a
+      // folder the caller cannot read is refused whole.
+      try {
+        await changeGate?.assertMayChange(workspaceIdForBranch(branch), email, wsPath, 'dir');
+      } catch (err) {
+        if (isCallerRefusal(err)) throw err;
+        throw unchecked('Whether this folder may be extracted into could not be checked, so nothing was extracted.', wsPath, err);
       }
     },
     entry: async (wsPath, kind) => {
@@ -4292,17 +4303,18 @@ export function registerWorkspaceTools(
         for (const write of pending) {
           const entry = entryOf.get(write) as Record<string, unknown>;
           try {
-            // A link already on disk under the destination must not redirect
-            // these bytes — the rule `unzip` applies per entry, applied here on
-            // the path the write will take, before anything follows it.
-            const link = await symlinkOnPath(root, write.path);
-            if (link !== undefined) {
+            // What is on disk at and above the target: a link already there
+            // must not redirect these bytes, and the git folder is no target.
+            // The one landing check `unzip` asks of each file under its lock.
+            const obstacle = await landingObstacle(root, kbDirName, write.path);
+            if (obstacle?.kind === 'link') {
               throw new ToolError(
-                `"${write.path}" goes through the symbolic link "${link}"; an upload never follows links.`,
+                `"${write.path}" goes through the symbolic link "${obstacle.link}"; an upload never follows links.`,
                 400,
                 { code: 'symlink' },
               );
             }
+            if (obstacle?.kind === 'git-internals') throw new GitInternalsError();
             // An earlier entry of this same upload counts as existing, as it
             // does in `write_files`: two `create` entries for one path are a
             // mistake the commit would otherwise hide.

@@ -1533,22 +1533,16 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
-      // The destination is asked about first, as a folder: one inside a
-      // folder the caller cannot read is refused whole, before the archive
-      // is opened. Both spellings are already repository paths, so the
-      // inferred parent is one too — the same destination the service
-      // resolves.
-      const destDir = destination ?? path.posix.dirname(zipPath);
-      await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
       const branch = branchForWorkspaceId(id);
       // The archive is judged by the judge the agent `unzip` tool hands the
       // extraction (`archiveEntryJudge`, without the agent's own write hook
       // and policy, which a person in the app never meets): whether the
-      // person may read the archive, before a byte of it is read; the path
-      // rules and the platform's rule files before anything is written; and each
-      // file's write rule and read-before-write at its lock (an archive can
-      // carry a path into a nested folder the caller cannot read, which the
-      // destination check above cannot see). The files that pass go through
+      // person may read the archive, before a byte of it is read; whether
+      // they may change the folder it extracts into, before that folder is
+      // looked at; the path rules and the platform's rule files before
+      // anything is written; and each file's write rule and read-before-write
+      // at its lock (an archive can carry a path into a nested folder the
+      // caller cannot read, which the destination's check cannot see). The files that pass go through
       // the lock-aware filesystem's batch as this person: every lock, then
       // one commit. A path whose lock is held refuses the whole extraction,
       // with nothing written. Where the creator's read grant is planned for a

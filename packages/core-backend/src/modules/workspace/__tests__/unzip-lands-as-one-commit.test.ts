@@ -20,7 +20,7 @@ import {
   registerWorkspaceTools,
 } from '../../../__tests__/tool-wiring.js';
 import { LockingFilesystem } from '../../kb-fs/index.js';
-import { AccessDeniedError, type CreationGrantPlan, type ICreatorAccess } from '../../access-model/index.js';
+import { AccessDeniedError, type CreationGrantPlan, type IChangeReadGate, type ICreatorAccess } from '../../access-model/index.js';
 import type { ToolContext } from '../../tool-helpers/index.js';
 import type { ToolAuth } from '../../tool-auth/index.js';
 import { ToolRegistry } from '../../tool-registry/index.js';
@@ -131,7 +131,7 @@ function versionControlOver(repoDir: string) {
       return null;
     },
   };
-  return { held, queued, push, vcs: vcs as unknown as IVersionControlService };
+  return { held, queued, push, mayChange, vcs: vcs as unknown as IVersionControlService };
 }
 
 /**
@@ -241,6 +241,7 @@ const NO_GRANTS: ICreatorAccess = { planForCreate: async () => null, noteAccessF
 /** The agent `unzip` tool, mounted as the platform mounts it, writing through the lock-aware filesystem. */
 async function startTools(
   creatorAccess: ICreatorAccess = NO_GRANTS,
+  changeGate?: IChangeReadGate,
 ): Promise<(body: Record<string, unknown>) => Promise<Response>> {
   const lockingFs = new LockingFilesystem(
     { basePath: workspaceDir, contained: true },
@@ -275,6 +276,8 @@ async function startTools(
     { recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
     new RoutineWritePolicyService(),
     {} as never,
+    undefined,
+    changeGate,
   );
   const app = express();
   app.use(express.json());
@@ -291,6 +294,7 @@ async function startTools(
 /** The app's unzip route, as the app mounts it. */
 async function startRoute(
   creatorAccess: ICreatorAccess = NO_GRANTS,
+  changeGate?: IChangeReadGate,
 ): Promise<(body: Record<string, unknown>) => Promise<Response>> {
   const app = express();
   app.use(express.json());
@@ -310,6 +314,8 @@ async function startRoute(
       creatorAccess,
       { isAdmin: async () => false } as unknown as IAdminAccessService,
       realDisk(),
+      undefined,
+      changeGate,
     ),
   );
   const base = await listen(app);
@@ -325,6 +331,24 @@ const commitCount = async (): Promise<number> => Number((await git(repoDir, 'rev
 const filesOfHead = async (): Promise<string[]> =>
   (await git(repoDir, 'show', '--name-only', '--format=', 'HEAD')).trim().split('\n').sort();
 const exists = (rel: string) => fs.stat(path.join(repoDir, rel)).then(() => true, () => false);
+
+/** Read-before-write as the platform's gate answers it, by the rule the lock table's acquire asks. */
+const gateOverLocks = (): IChangeReadGate => {
+  const repoPath = (wsPath: string) => wsPath.slice(KB.length + 1);
+  const judge: IChangeReadGate['judge'] = async (ws, email, wsPath) =>
+    (await lockTable.mayChange(ws, email, repoPath(wsPath)))
+      ? { allowed: true, via: 'readable' }
+      : { allowed: false, unreadable: repoPath(wsPath) };
+  return {
+    judge,
+    assertMayChange: async (ws, email, wsPath, kind) => {
+      const verdict = await judge(ws, email, wsPath, kind);
+      if (!verdict.allowed) {
+        throw new AccessDeniedError({ path: wsPath, eligibleRoles: [], eligibleUsers: [], unreadable: verdict.unreadable, targetKind: kind });
+      }
+    },
+  };
+};
 
 const doors = [
   ['the agent unzip tool', startTools],
@@ -471,6 +495,127 @@ describe.each(doors)('an archive extracted through %s into a folder the person c
     expect(await exists('Finance/open.md')).toBe(false);
     // Nothing on disk besides the archive the test put there.
     expect((await git(repoDir, 'status', '--porcelain', '--untracked-files=all')).trim()).toBe('?? Finance/opener.zip');
+    expect(lockTable.held.size).toBe(0);
+  });
+});
+
+describe.each(doors)('an archive extracted through %s: under a folder the person cannot read, the disk is never what answers', (_door, start) => {
+  let elsewhere = '';
+  beforeEach(async () => {
+    await seed(BRANCH, DRAFT_TREE);
+    elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), 'unzip-elsewhere-'));
+    await fs.symlink(elsewhere, path.join(repoDir, 'Finance/Sealed/link'), process.platform === 'win32' ? 'junction' : 'dir');
+  });
+
+  it('answers an entry under it the same, file or folder, whether a link is on its path or not', async () => {
+    const unzip = await start(NO_GRANTS, gateOverLocks());
+    const zip = new AdmZip();
+    zip.addFile('Sealed/link/through.md', Buffer.from('# Through\n'));
+    zip.addFile('Sealed/plain.md', Buffer.from('# Plain\n'));
+    zip.addFile('Sealed/link/sub/', Buffer.alloc(0));
+    zip.addFile('Sealed/fresh/', Buffer.alloc(0));
+    zip.addFile('open.md', Buffer.from('# Open\n'));
+    await fs.writeFile(path.join(repoDir, 'Finance/links.zip'), zip.toBuffer());
+
+    const res = await unzip({ path: `${KB}/Finance/links.zip` });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB}/Finance/open.md`]);
+    const reasonOf = (name: string) => body.skipped.find((s) => s.path === name)?.reason ?? '';
+    expect(reasonOf('Sealed/link/through.md')).toContain('read access to "Finance/Sealed/link/through.md"');
+    expect(reasonOf('Sealed/link/through.md').replaceAll('link/through', 'X')).toBe(reasonOf('Sealed/plain.md').replaceAll('plain', 'X'));
+    expect(reasonOf('Sealed/link/sub/')).toContain('read access to "Finance/Sealed/link/sub"');
+    expect(reasonOf('Sealed/link/sub/').replaceAll('link/sub', 'X')).toBe(reasonOf('Sealed/fresh/').replaceAll('fresh', 'X'));
+    expect(await fs.readdir(elsewhere)).toEqual([]);
+  });
+
+  it('refuses a destination inside it whole, before looking at it: through a link or not, nothing lands and no lock is taken', async () => {
+    const unzip = await start(NO_GRANTS, gateOverLocks());
+    const before = await commitCount();
+    for (const destination of [`${KB}/Finance/Sealed/link/out`, `${KB}/Finance/Sealed/out`]) {
+      const res = await unzip({ path: `${KB}/Finance/drop.zip`, destination });
+      expect(res.status, destination).toBe(403);
+      const text = await res.text();
+      expect(text, destination).toContain('read access to');
+      expect(text, destination).not.toMatch(/traversal|Secret|Budget/i);
+    }
+    expect(await commitCount()).toBe(before);
+    expect(await fs.readdir(elsewhere)).toEqual([]);
+    expect(await exists('Finance/Sealed/out')).toBe(false);
+    expect(lockTable.held.size).toBe(0);
+  });
+
+  it('refuses an archive inside it as read_file refuses it, before a byte is read: one that is no zip, or not there, is not told apart', async () => {
+    await fs.writeFile(path.join(repoDir, 'Finance/Sealed/broken.zip'), Buffer.from('not a zip at all'));
+    const unzip = await start(NO_GRANTS, gateOverLocks());
+    for (const name of ['broken.zip', 'missing.zip', 'link/through.zip']) {
+      const res = await unzip({ path: `${KB}/Finance/Sealed/${name}`, destination: `${KB}/Finance` });
+      expect(res.status, name).toBe(403);
+      expect(await res.json(), name).toEqual({ error: `You don't have permission to read "${KB}/Finance/Sealed/${name}".` });
+    }
+  });
+});
+
+describe.each(doors)('an archive extracted through %s, past its commit', (door, start) => {
+  beforeEach(() => seed(BRANCH, DRAFT_TREE));
+
+  it('answers as usual when a directory entry sits where a file already is: the files land, the entry is skipped, the tree event is sent', async () => {
+    const unzip = await start();
+    const zip = new AdmZip();
+    zip.addFile('plan.md/', Buffer.alloc(0));
+    zip.addFile('new.md', Buffer.from('# New\n'));
+    await fs.writeFile(path.join(repoDir, 'Finance/folder-over-file.zip'), zip.toBuffer());
+    routeEvents = [];
+
+    const res = await unzip({ path: `${KB}/Finance/folder-over-file.zip` });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const body = JSON.parse(text) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB}/Finance/new.md`]);
+    expect(body.skipped).toEqual([{ path: 'plan.md/', reason: 'A file is already at this path, so the folder was not created' }]);
+    // No server path in the answer.
+    expect(text).not.toContain(root);
+    expect(await filesOfHead()).toEqual(['Finance/new.md']);
+    expect(await fs.readFile(path.join(repoDir, 'Finance/plan.md'), 'utf8')).toBe('# Plan\n');
+    if (door === 'the app unzip route') expect(routeEvents.map((e) => e.kind)).toContain('fs-tree-changed');
+  });
+});
+
+describe.each(doors)('an archive extracted through %s that carries a .bevelignore', (_door, start) => {
+  beforeEach(() => seed(BRANCH, DRAFT_TREE));
+
+  it('lands it in the same commit as the files beside it', async () => {
+    const unzip = await start();
+    const zip = new AdmZip();
+    zip.addFile('Team/.bevelignore', Buffer.from('drafts/\n'));
+    zip.addFile('Team/page.md', Buffer.from('# Page\n'));
+    await fs.writeFile(path.join(repoDir, 'Finance/team.zip'), zip.toBuffer());
+    const before = await commitCount();
+
+    const res = await unzip({ path: `${KB}/Finance/team.zip` });
+
+    expect(res.status).toBe(200);
+    expect(await commitCount()).toBe(before + 1);
+    expect(await filesOfHead()).toEqual(['Finance/Team/.bevelignore', 'Finance/Team/page.md']);
+  });
+
+  it('lands nothing when its .bevelignore cannot land', async () => {
+    const unzip = await start();
+    const zip = new AdmZip();
+    zip.addFile('Sealed/.bevelignore', Buffer.from('*\n'));
+    zip.addFile('open.md', Buffer.from('# Open\n'));
+    await fs.writeFile(path.join(repoDir, 'Finance/ignore.zip'), zip.toBuffer());
+    const before = await commitCount();
+
+    const res = await unzip({ path: `${KB}/Finance/ignore.zip` });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; kind: string; entry: string };
+    expect(body).toMatchObject({ kind: 'archive-refused', entry: `${KB}/Finance/Sealed/.bevelignore` });
+    expect(await commitCount()).toBe(before);
+    expect(await exists('Finance/open.md')).toBe(false);
     expect(lockTable.held.size).toBe(0);
   });
 });

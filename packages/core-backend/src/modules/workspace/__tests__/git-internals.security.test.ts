@@ -136,6 +136,8 @@ function makeVersionControl() {
   return {
     getLock: vi.fn(async () => null),
     acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderUserId: USER.id, holderName: USER.name } })),
+    // A batch's ownership check answers the lock the acquire granted.
+    heartbeatLock: vi.fn(async () => ({ holderUserId: USER.id, holderName: USER.name })),
     releaseLock: vi.fn(async () => null),
     releaseLockNoCommit: vi.fn(async () => undefined),
     releaseLockUntouched: vi.fn(async () => undefined),
@@ -520,9 +522,10 @@ describe('workspace routes refuse the git folder', () => {
 
 describe('WorkspaceService refuses the git folder on its own', () => {
   let service: WorkspaceService;
-  /** What `LockingFilesystem.writeFiles` does on disk once it holds every lock: each file written, in order. */
+  /** What `LockingFilesystem.writeFiles` does on disk once it holds every lock: the caller's `check` asked, then each file it kept written, in order. */
   const diskLanding: ArchiveLanding = {
-    writeFiles: async (writes) => {
+    writeFiles: async (handed, _summary, _deletes, check) => {
+      const writes = check ? await check(handed) : handed;
       for (const w of writes) {
         await mkdir(join(workspaceDir, w.path, '..'), { recursive: true });
         await writeFile(join(workspaceDir, w.path), w.content);
@@ -741,6 +744,31 @@ describe('the route guard on its own', () => {
 });
 
 describe('agent filesystems refuse the git folder on their own', () => {
+  it('LockingFilesystem.writeFiles leaves a path its lock\'s gates refuse to those gates: the git rule\'s disk probe answers only what they let through', async () => {
+    const versionControl = makeVersionControl();
+    const gateRefusal = Object.assign(new Error('You don\'t have read access to this path.'), { status: 403 });
+    versionControl.acquireLock.mockImplementation(async (_w: string, _b: string, p: string) => {
+      if (p.startsWith(`${KB}/gitlink`)) throw gateRefusal;
+      return { acquired: true, lock: { holderUserId: USER.id, holderName: USER.name } };
+    });
+    const lockingFs = new LockingFilesystem(
+      { basePath: workspaceDir, contained: true },
+      { versionControl: versionControl as unknown as IVersionControlService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
+    );
+    const refused: [string, unknown][] = [];
+    // `gitlink` is a link into the git folder: its lock is refused by the gates, and the batch drops it as that path's alone.
+    await lockingFs.writeFiles(
+      [{ path: `${KB}/gitlink/config`, content: 'x' }, { path: `${KB}/Notes/kept.md`, content: 'k' }],
+      'batch',
+      [],
+      undefined,
+      (p, err) => void refused.push([p, err]),
+    );
+    expect(refused).toEqual([[`${KB}/gitlink/config`, gateRefusal]]);
+    expect(await readFile(join(workspaceDir, KB, 'Notes', 'kept.md'), 'utf-8')).toBe('k');
+    expect(await snapshotGit()).toBe(gitSnapshot);
+  });
+
   it('LockingFilesystem refuses before taking a lock', async () => {
     const versionControl = makeVersionControl();
     const lockingFs = new LockingFilesystem(
@@ -755,13 +783,43 @@ describe('agent filesystems refuse the git folder on their own', () => {
       await expect(lockingFs.deleteFile(p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(lockingFs.copyFile(`${KB}/Notes/a.md`, p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(lockingFs.moveFile(p, `${KB}/Notes/b.md`)).rejects.toBeInstanceOf(GitInternalsError);
-      await expect(lockingFs.writeFiles([{ path: p, content: 'x' }], 'batch')).rejects.toBeInstanceOf(GitInternalsError);
     }
     for (const p of Object.values(DIR_FORMS).map(resolved)) {
       await expect(lockingFs.readdir(p)).rejects.toBeInstanceOf(GitInternalsError);
       await expect(lockingFs.mkdir(`${p}/new`)).rejects.toBeInstanceOf(GitInternalsError);
     }
     expect(versionControl.acquireLock).not.toHaveBeenCalled();
+    expect(await snapshotGit()).toBe(gitSnapshot);
+  });
+
+  it('LockingFilesystem.writeFiles refuses a git path whole: before any lock when the spelling says so, under its lock when the disk does, and gives every lock back untouched', async () => {
+    const versionControl = makeVersionControl();
+    const lockingFs = new LockingFilesystem(
+      { basePath: workspaceDir, contained: true },
+      { versionControl: versionControl as unknown as IVersionControlService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
+    );
+    for (const [form, spelled] of Object.entries(FILE_FORMS)) {
+      const before = versionControl.acquireLock.mock.calls.length;
+      const err = await lockingFs
+        .writeFiles([{ path: resolved(spelled), content: 'x' }, { path: `${KB}/Notes/c.md`, content: 'c' }], 'batch')
+        .then(() => null, (e: unknown) => e);
+      // A spelling that names the folder, or that the path rules refuse (a
+      // climb, a dot segment, a backslash, an absolute path), is refused
+      // before any lock, reading nothing; a link into the folder is the git
+      // rule's, asked under the lock.
+      if (versionControl.acquireLock.mock.calls.length === before) {
+        expect(err instanceof GitInternalsError || (err as { status?: number }).status === 400, form).toBe(true);
+      } else {
+        expect(err, form).toBeInstanceOf(GitInternalsError);
+      }
+    }
+    // Every lock it took went back untouched: nothing was written or committed.
+    const taken = versionControl.acquireLock.mock.calls.length;
+    expect(versionControl.releaseLockUntouched.mock.calls.length).toBe(taken);
+    expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(versionControl.releaseLock).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    await expect(readFile(join(workspaceDir, KB, 'Notes', 'c.md'))).rejects.toThrow();
     expect(await snapshotGit()).toBe(gitSnapshot);
   });
 

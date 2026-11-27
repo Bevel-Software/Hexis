@@ -53,6 +53,7 @@ import { isAbsence } from '../../shared/fs.contract.js';
 import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { linkedAncestor } from '../../shared/no-link-below.js';
 import { mapPooled } from '../../shared/map-pooled.js';
+import { assertNoGitInternalsSegment } from '../../shared/git-internals.js';
 import { assertInsideRepo } from './repo-path.js';
 import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/index.js';
@@ -777,9 +778,11 @@ export class LockingFilesystem extends GitGuardedFilesystem {
   ): Promise<Change | null> {
     const { versionControl, workspaceId, branch, user } = this.lockContext;
     // Fail the whole batch before any plan, validator or lock: one stray path
-    // must not let its siblings land while it silently misses git.
-    for (const w of writes) await this.assertNotGitInternals(w.path);
-    for (const d of deletes) await this.assertNotGitInternals(d);
+    // must not let its siblings land while it silently misses git. Here only
+    // what the spelling says; where a path resolves on disk is asked once its
+    // lock is held (below).
+    for (const w of writes) assertNoGitInternalsSegment(w.path);
+    for (const d of deletes) assertNoGitInternalsSegment(d);
     for (const w of writes) this.assertInsideRepo(w.path);
     // Creator read grants for the batch: fold any new-root-folder access.md
     // seeds into the SAME atomic batch (deduped — several files landing in
@@ -973,6 +976,19 @@ export class LockingFilesystem extends GitGuardedFilesystem {
         await releaseAll(() => 'untouched');
         return null;
       }
+    }
+
+    // The git-folder rule on disk (a path that resolves into the folder, a
+    // link on the way included), once every lock is held and the locks'
+    // gates and the caller's check have let the paths through: where a path
+    // resolves is a fact about its folders, not for an answer to a caller
+    // those gates refuse. It still refuses the whole batch, untouched.
+    try {
+      for (const w of writes) await this.assertNotGitInternals(w.path);
+      for (const d of deletes) await this.assertNotGitInternals(d);
+    } catch (err) {
+      await releaseAll(() => 'untouched');
+      throw err;
     }
 
     // Creator-grant seed locks: single attempt, acquired after the caller's

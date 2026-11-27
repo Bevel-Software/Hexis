@@ -56,8 +56,8 @@ async function seedBranchWorkspace(
 
 /**
  * What `LockingFilesystem.writeFiles` does on disk once it holds every lock:
- * each file written, in order, with its folders. `calls` records the batches
- * it was handed. The commit it then makes is asserted where it lives
+ * the caller's `check` asked first, then each file it kept written, in order,
+ * with its folders. `calls` records the batches it was handed. The commit it then makes is asserted where it lives
  * (`locking-filesystem.test.ts`), and for an archive end to end in
  * `unzip-lands-as-one-commit.test.ts`.
  */
@@ -65,8 +65,9 @@ function diskLanding(workspaceDir: string): ArchiveLanding & { calls: string[][]
   const calls: string[][] = [];
   return {
     calls,
-    writeFiles: async (writes) => {
-      calls.push(writes.map((w) => w.path));
+    writeFiles: async (handed, _summary, _deletes, check) => {
+      calls.push(handed.map((w) => w.path));
+      const writes = check ? await check(handed) : handed;
       for (const w of writes) {
         const absolute = path.join(workspaceDir, w.path);
         await fs.mkdir(path.dirname(absolute), { recursive: true });
@@ -87,6 +88,7 @@ function judgeOf(
 ): ArchiveEntryJudge {
   return {
     archive: async () => undefined,
+    destination: async () => undefined,
     entry: guard,
     refusedAtLock: (_wsPath, err) => {
       if (!(err instanceof AccessDeniedError)) throw err;
@@ -1241,6 +1243,21 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     for (const [name, content] of Object.entries(files)) zip.addFile(name, Buffer.from(content));
     await fs.writeFile(path.join(repoDir, rel), zip.toBuffer());
   }
+
+  it('asks the judge about the folder it extracts into, the archive\'s own when no destination is named, before anything else of it', async () => {
+    await fs.mkdir(path.join(repoDir, 'Team'), { recursive: true });
+    await writeZip('Team/a.zip', { 'keep.md': 'ok' });
+    const asked: string[] = [];
+    const judge = { ...judgeOf(), destination: async (wsPath: string) => void asked.push(wsPath) };
+    await svc.unzipFile(workspaceId, 'knowledge-base/Team/a.zip', undefined, judge, diskLanding(workspaceDir));
+    await svc.unzipFile(workspaceId, 'knowledge-base/Team/a.zip', 'knowledge-base/Elsewhere', judge, diskLanding(workspaceDir));
+    expect(asked).toEqual(['knowledge-base/Team', 'knowledge-base/Elsewhere']);
+
+    // A refusal there lands nothing.
+    const refusing = { ...judgeOf(), destination: async () => { throw Object.assign(new Error('not yours'), { status: 403 }); } };
+    await expect(svc.unzipFile(workspaceId, 'knowledge-base/Team/a.zip', 'knowledge-base/Shut', refusing, diskLanding(workspaceDir))).rejects.toThrow('not yours');
+    await expect(fs.stat(path.join(repoDir, 'Shut'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 
   it('skips entries the write guard rejects and never writes them to disk', async () => {
     await writeZip('a.zip', { 'keep.md': 'ok', 'blocked.md': 'no' });
