@@ -11,7 +11,8 @@ import type {
 // admin-membership signal). Default the mock to `canWrite: false` so the
 // existing author-only / dropdown tests keep their non-admin semantics;
 // admin-specific cases below override the resolved value in `beforeEach`.
-vi.mock('../../access/api', () => ({
+vi.mock('../../access', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../access')>()),
   fetchFileAccess: vi.fn().mockResolvedValue({
     canWrite: false,
       canDownload: false,
@@ -19,18 +20,15 @@ vi.mock('../../access/api', () => ({
   }),
 }));
 import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
-import { fetchFileAccess } from '../../access/api';
+import { fetchFileAccess } from '../../access';
 
 import { BranchSwitcher } from '../components/BranchSwitcher';
 import { ConfirmProvider } from '../../../shared/components';
 import { askBeforeBranchDelete } from '../state/branch-delete-confirm';
 import { GitContext, type GitContextValue } from '../state/git.context';
-import { ReviewContext, type ReviewContextValue } from '../../review/state/review.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
+import { ReviewContext, type ReviewContextValue } from '../../review';
+import { AuthContext, type AuthContextValue } from '../../auth';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
 
 function makeStatus(overrides: Partial<WorkingTreeStatus> = {}): WorkingTreeStatus {
   return {

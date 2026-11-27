@@ -19,11 +19,12 @@ const MIN_ECHOED_PREFIX_CHARS = 8;
 /** The shortest string the caller sent that is taken out where it is quoted back — see {@link SecretRedactor}. */
 const MIN_CALLER_CHARS = 4;
 /**
- * How many characters `redact` compares at most. A caller can send a long run
- * of one character for a server to echo, and every start in it would be
- * followed to its end; past this, none of the text is quoted.
+ * How many characters `redact` compares at most following a secret's echoed
+ * heads, and reads at most of what the caller sent. Past either, none of the
+ * text is quoted: a bound on the work that depends on nothing secret.
  */
 const MAX_COMPARED_CHARS = 1_000_000;
+const MAX_CALLER_CHARS_READ = 4_000_000;
 const REDACTED = '[redacted]';
 
 /**
@@ -56,19 +57,18 @@ const REDACTED = '[redacted]';
  * makes the verdict useful, so a SHORT one of those may only match a run of
  * its own. Six characters or more, it is taken out wherever it appears too.
  *
- * Text the CALLER sent ({@link redact}'s `callerText`) is taken out too,
- * wherever the quote repeats it or a leading part of it (four characters or
- * more, where the quote stops, as a server that shortens what it quotes
- * leaves it, not inside a longer word that merely starts the same way), as
- * sent or in one of the spellings above, whether or not a secret is in it. Otherwise the
- * quote would answer the caller's guesses: a guess at a key echoed back, or a
- * list of candidates sent alongside a server that quotes the key itself,
- * would come back `[redacted]` or as sent depending on whether it was right.
- * Taken out every time, it comes back the same either way. A string shorter
- * than four characters is left to the rules above, since blanking every `a`
- * or `1` would destroy the message; a credential that short could still be
- * guessed. So is a quote that keeps only the end or the middle of what the
- * caller sent.
+ * Text the CALLER sent ({@link redact}'s `callerText`) is taken out too:
+ * every four characters of the quote that also occur, case aside, in a string
+ * the caller sent (as sent or in one of the spellings above), whether or not
+ * a secret is in them. Otherwise the quote would answer the caller's guesses:
+ * a guess at a key echoed back, whole, shortened at either end or re-cased,
+ * or a list of candidates sent alongside a server that quotes the key itself,
+ * would come back `[redacted]` or not depending on whether it was right.
+ * Nothing taken out there depends on a secret, so it comes back the same
+ * either way. The price is paid in the message, which loses every piece it
+ * shares with what the caller sent. A string shorter than four characters is
+ * left to the rules above, since blanking every `a` or `1` would destroy the
+ * message; a credential that short could still be guessed.
  */
 export class SecretRedactor {
   /** Taken out wherever they appear. */
@@ -111,16 +111,29 @@ export class SecretRedactor {
       budget -= end - at - matched + 1;
       return end;
     };
-    for (const sent of callerText) {
-      for (const spelling of spellings(sent)) {
-        if (spelling.length < MIN_CALLER_CHARS) continue;
-        // Each run that starts with its first characters, as far as it goes
-        // on matching: a repeat of it anywhere, or the part a server kept
-        // where the quote stops (followed by no letter or digit).
-        for (const at of occurrences(text, spelling.slice(0, MIN_CALLER_CHARS))) {
-          const end = runEnd(at, spelling, MIN_CALLER_CHARS);
-          if (end - at === spelling.length || !/[\p{L}\p{N}]/u.test(text[end] ?? '')) hide(at, end);
-          if (budget < 0) return REDACTED;
+    // What the caller sent, in any piece of four characters, case aside: each
+    // four characters of the text found so folded in one of their strings.
+    if (callerText.length > 0 && text.length >= MIN_CALLER_CHARS) {
+      const folded = foldCase(text);
+      const startsOf = new Map<string, number[]>();
+      for (let i = 0; i + MIN_CALLER_CHARS <= folded.length; i++) {
+        const piece = folded.slice(i, i + MIN_CALLER_CHARS);
+        const starts = startsOf.get(piece);
+        if (starts) starts.push(i);
+        else startsOf.set(piece, [i]);
+      }
+      let read = 0;
+      reading: for (const sent of callerText) {
+        for (const spelling of new Set(spellings(sent))) {
+          if (startsOf.size === 0) break reading;
+          read += spelling.length;
+          if (read > MAX_CALLER_CHARS_READ) return REDACTED;
+          const sentFolded = foldCase(spelling);
+          for (let i = 0; i + MIN_CALLER_CHARS <= sentFolded.length && startsOf.size > 0; i++) {
+            const piece = sentFolded.slice(i, i + MIN_CALLER_CHARS);
+            for (const start of startsOf.get(piece) ?? []) hide(start, start + MIN_CALLER_CHARS);
+            startsOf.delete(piece);
+          }
         }
       }
     }
@@ -155,6 +168,14 @@ function spellings(value: string): string[] {
   return [value, trimmed, urlEncoded(value), escaped, escaped.replaceAll('/', '\\/')].filter(
     (spelling): spelling is string => !!spelling?.trim(),
   );
+}
+
+/** `text` with each character lower-cased where that keeps it one character, so every position stays where it was. */
+function foldCase(text: string): string {
+  return text.replace(/[\s\S]/g, (ch) => {
+    const lower = ch.toLowerCase();
+    return lower.length === 1 ? lower : ch;
+  });
 }
 
 /** `value` url-encoded, or null for one that cannot be (a lone surrogate): no request could carry it that way. */

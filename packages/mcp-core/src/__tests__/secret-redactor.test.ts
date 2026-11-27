@@ -88,18 +88,26 @@ describe('SecretRedactor', () => {
     expect(redactor.redact("Project 'sk-live-Q7xA-and-…' not found", ['sk-live-Q7xA-and-some-padding'])).toBe(
       "Project '[redacted]…' not found",
     );
-    // A word that only starts like the caller's text is not a shortened quote of it.
-    expect(redactor.redact('Invalid property', ['properties'])).toBe('Invalid property');
+    // A server that keeps only the end or the middle of what it quotes, or re-cases it.
+    expect(redactor.redact("Project '…sk-live-Q7xZ' not found", ['padding-padding-sk-live-Q7xZ'])).toBe("Project '…[redacted]' not found");
+    expect(redactor.redact("Project '…sk-live-Q7xA' not found", ['padding-padding-sk-live-Q7xA'])).toBe("Project '…[redacted]' not found");
+    expect(redactor.redact("near 'sk-live-Q7xZ' only", ['aaaa-sk-live-Q7xZ-bbbb'])).toBe("near '[redacted]' only");
+    expect(redactor.redact('SK-LIVE-Q7XZ refused', ['sk-live-q7xz'])).toBe('[redacted] refused');
     // Text the caller sent that no secret is in is taken out all the same.
     expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named '[redacted]'");
     // Shorter than four characters, the caller's text is left to the other rules.
     expect(redactor.redact('field id is wrong', ['id'])).toBe('field id is wrong');
   });
 
-  it('quotes nothing of a text whose matching would run past its bound', () => {
+  it('takes out a long echoed run of one character without going over its bound', () => {
     const redactor = new SecretRedactor();
     const run = 'a'.repeat(20_000);
-    expect(redactor.redact(`bad value ${run}`, [run])).toBe('[redacted]');
+    expect(redactor.redact(`bad value ${run}`, [run])).toBe('bad value [redacted]');
+  });
+
+  it('quotes nothing when what the caller sent is too long to read', () => {
+    const redactor = new SecretRedactor();
+    expect(redactor.redact('bad value', ['z'.repeat(4_000_001)])).toBe('[redacted]');
   });
 
   it('never matches a value inside a marker it has already put in', () => {
