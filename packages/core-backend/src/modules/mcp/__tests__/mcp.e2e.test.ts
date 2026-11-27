@@ -828,9 +828,8 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
 
     await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
     await client.callTool({ name: 'call_tool_chain', arguments: { code: "return notion.srv_echo({ text: 'two' });" } });
-    // Recording is fire-and-forget behind the call; give the microtasks a turn.
-    await new Promise((resolve) => setTimeout(resolve, 20));
 
+    // Each call is recorded before its answer goes back, so the events are all here.
     expect(events.map((e) => `${e.kind}|${e.manual}|${e.name}|${e.outcome}`)).toEqual([
       // The direct call.
       'tool|notion|srv.echo|error',
@@ -1482,6 +1481,41 @@ describe('a connected tool whose schema is invalid is not offered to agents', ()
       error: "Tool 'notion.srv.broken' not found in the repository.",
     });
     expect(downstream.executions()).toBe(0);
+  });
+
+  it('does not reach, through the chain bridge, a tool the pooled connection found after the surface was built', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let listed = [goodTool('fine')];
+    downstream = await startFakeDownstreamMcpServer({ tools: () => listed });
+    const { baseUrl } = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    const notionTools = async () => (await client.listTools()).tools.map((t) => t.name).filter((n) => n.startsWith('notion'));
+    expect(await notionTools()).toEqual(['notion_srv_fine']);
+
+    // The server gains a tool and forgets its sessions. Nothing has called it
+    // since, so the pooled connection still holds what it first discovered,
+    // and the chain's request is built with that surface: `fine` alone. The
+    // chain's first call then heals the pooled connection, which registers
+    // again and discovers `late` there, mid-request. The bridge takes any
+    // name; the route is what refuses the one this request's surface lacks.
+    listed = [goodTool('fine'), goodTool('late')];
+    await downstream.restart();
+    const ranBefore = downstream.executions();
+    const chain = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: {
+        code: "notion.srv_fine({}); return __callToolRef.applySyncPromise(undefined, ['notion.srv.late', '{}']);",
+      },
+    });
+    expect(JSON.parse(JSON.parse(toolText(chain)).result as string)).toEqual({
+      success: false,
+      error: "Tool 'notion.srv.late' not found in the repository.",
+    });
+    // `fine` ran, healed; `late` did not run.
+    expect(downstream.executions()).toBe(ranBefore + 1);
+
+    // The pooled connection does hold it by now: the next request's surface is built with it.
+    expect(await notionTools()).toEqual(['notion_srv_fine', 'notion_srv_late']);
   });
 
   it('answers an agent that calls the hidden tool by name, without quoting the schema to it', async () => {

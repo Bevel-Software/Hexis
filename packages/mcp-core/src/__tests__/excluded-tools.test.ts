@@ -73,6 +73,17 @@ describe('registerManual over a real MCP connection', () => {
     expect((await client.getTools()).map((t) => t.name)).toEqual(['my_notion.srv.echo']);
   });
 
+  it('registers a manual that leaves out a name the server does not list, and keeps every tool it does list', async () => {
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    cleanups.push(() => client.close());
+
+    expect(await registerManual(client, manualTemplate('notion', server.url, ['no-such-tool']))).toEqual({ ok: true });
+
+    expect((await client.getTools()).map((t) => t.name).sort()).toEqual(['notion.srv.bump', 'notion.srv.echo']);
+  });
+
   it('keeps it off when the manual registers again, as a session recovery or a refresh does', async () => {
     const server = await startFakeMcpServer('notion');
     cleanups.push(() => server.stop());
