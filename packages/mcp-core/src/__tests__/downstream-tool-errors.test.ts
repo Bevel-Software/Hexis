@@ -117,9 +117,24 @@ describe('a downstream isError over a real MCP connection', () => {
     await expect(client.callTool('notion.srv.echo', { text: 'hi' })).rejects.toThrow(DownstreamToolError);
     await expect(client.callTool('notion.srv.echo', { text: 'hi' })).rejects.toThrow('This tool requires a Business plan or higher.');
 
-    // An answer with no text at all still rejects with words a person can read.
+    // An answer whose blocks are all non-text has no text to give: it rejects with the proxy's own sentence.
     server.reportToolErrors({ isError: true, content: [{ type: 'image', data: 'aGk=', mimeType: 'image/png' }] });
     await expect(client.callTool('notion.srv.echo', { text: 'hi' })).rejects.toThrow(/failed and gave no details/);
+  });
+
+  it("keeps the server's whole answer off the error's own fields, where a logger that copies them would write it", async () => {
+    installDownstreamToolErrors();
+    const server = await startServer();
+    const client = await clientFor(server);
+
+    server.reportToolErrors({ isError: true, content: [{ type: 'text', text: 'denied' }], structuredContent: { account: 'acct-123' } });
+    const err = await client.callTool('notion.srv.echo', { text: 'hi' }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(DownstreamToolError);
+    expect(Object.keys(err as object)).toEqual(['name']);
+    expect(JSON.stringify(err)).not.toContain('acct-123');
+    // The answer is still what a direct call is served.
+    expect(JSON.stringify((err as DownstreamToolError).toCallToolResult())).toContain('acct-123');
   });
 
   it('leaves a successful call untouched once installed', async () => {

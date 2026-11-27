@@ -58,10 +58,14 @@ export interface HexisMcpServerExtension {
   /** Only reachable from a user's machine (e.g. localhost) — remote proxy skips it. */
   local?: boolean;
   /**
-   * Tools of this server agents are NOT offered, by the name the server lists
-   * them under (`notion-spawn-session`). For a server that offers more than
-   * its use here needs, or tools the connected account cannot run (a plan
-   * the workspace does not have): listed, each would only ever fail.
+   * Tools of this server agents are NOT offered on the surfaces Hexis serves
+   * (the hosted endpoint and `hexis-mcp`), by the name the server lists them
+   * under (`notion-spawn-session`). For a server that offers more than its
+   * use here needs, or tools the connected account cannot run (a plan the
+   * workspace does not have): listed, each would only ever fail. A compiled
+   * marketplace plugin ships the server as `mcp.json` declares it: a client
+   * that installs it dials the server itself, and this list does not apply
+   * there.
    */
   excludeTools?: string[];
 }

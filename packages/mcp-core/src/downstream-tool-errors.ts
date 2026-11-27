@@ -12,12 +12,18 @@ import { toCallToolResult } from './results.js';
  * refresh a token or retry the call.
  */
 export class DownstreamToolError extends Error {
-  constructor(
-    /** What `@utcp/mcp`'s unwrap made of the server's answer: the value this call returned before the flag was kept. */
-    private readonly answer: unknown,
-  ) {
+  /**
+   * What `@utcp/mcp`'s unwrap made of the server's answer: the value this
+   * call returned before the flag was kept. A `#` field, so it is no property
+   * of the error: a logger or a serialiser that copies an error's own fields
+   * does not copy a provider's whole answer with it.
+   */
+  readonly #answer: unknown;
+
+  constructor(answer: unknown) {
     super(textOf(answer));
     this.name = 'DownstreamToolError';
+    this.#answer = answer;
   }
 
   /**
@@ -29,7 +35,7 @@ export class DownstreamToolError extends Error {
    * twice.
    */
   toCallToolResult(options?: Parameters<typeof toCallToolResult>[1]): CallToolResult {
-    return { ...toCallToolResult(this.answer, options), isError: true };
+    return { ...toCallToolResult(this.#answer, options), isError: true };
   }
 }
 
