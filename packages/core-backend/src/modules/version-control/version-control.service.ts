@@ -2216,10 +2216,11 @@ export class VersionControlService implements IVersionControlService {
   }
 
   /**
-   * Put `targetPath` back to what HEAD holds: a tracked file gets HEAD's
-   * bytes, an untracked one is removed. The rollback of an inline commit
-   * that failed: a commit that landed before its push failed IS HEAD, so its
-   * bytes stay; one that never landed leaves HEAD's. Throws when the path
+   * Put `targetPath` back to what HEAD holds: a file in HEAD gets HEAD's
+   * bytes, one HEAD lacks (untracked, or new and left staged) is removed.
+   * The rollback of an inline commit that failed: a commit that landed
+   * before its push failed IS HEAD, so its bytes stay; one that never
+   * landed leaves HEAD's. Throws when the path
    * could not be put back.
    */
   async discardPath(workspaceId: string, targetPath: string): Promise<void> {

@@ -1222,31 +1222,29 @@ export class GitService implements IGitService {
    * Reset the file's working-tree state to HEAD — used when a write
    * partially completed but the surrounding flow can't commit it
    * (validator was advisory so this is rare, but op-throws + push-
-   * blocked-by-access-control still hit this path). Tracked files
-   * `git checkout HEAD --` reverts to the committed content; untracked
-   * files (a half-written new file) are deleted outright. Either way
-   * the working tree returns to a clean state so the next acquirer
-   * doesn't inherit half-finished bytes.
+   * blocked-by-access-control still hit this path). A path the index
+   * knows is restored to HEAD in the index and the working tree (`git
+   * restore --source=HEAD --staged --worktree`), which also drops a new
+   * file a failed commit left staged; a path the index does not know (a
+   * half-written new file) is deleted outright. Either way the working
+   * tree returns to a clean state so the next acquirer doesn't inherit
+   * half-finished bytes.
    *
    * Idempotent: a path that's already clean stays clean. Missing paths
-   * are silently ignored. A checkout or removal that fails throws, so a
-   * caller never takes a path that is still dirty for one put back.
+   * are silently ignored. Any git call or removal that fails throws, the
+   * index probe included, so a caller never takes a path that is still
+   * dirty for one put back, and a failed probe never deletes a tracked file.
    */
   async discardPath(workspaceId: string, relativePath: string): Promise<void> {
     assertValidRelativePath(relativePath);
     const repoRelativePath = this.stripRepoPrefix(relativePath);
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
-      // Tracked-at-HEAD? `ls-files --error-unmatch` returns 0 if so.
-      let trackedAtHead = false;
-      try {
-        await this.git(cwd, ['ls-files', '--error-unmatch', '--', repoRelativePath]);
-        trackedAtHead = true;
-      } catch {
-        trackedAtHead = false;
-      }
-      if (trackedAtHead) {
-        await this.git(cwd, ['checkout', 'HEAD', '--', repoRelativePath]);
+      // Known to the index? `ls-files` lists the path if so and exits 0
+      // either way, so a non-zero exit is a real failure and throws.
+      const { stdout: known } = await this.git(cwd, ['ls-files', '--', repoRelativePath]);
+      if (known.trim()) {
+        await this.git(cwd, ['restore', '--source=HEAD', '--staged', '--worktree', '--', repoRelativePath]);
       } else {
         // Untracked new file — remove from working tree.
         await fs.rm(path.join(cwd, repoRelativePath), { force: true });
