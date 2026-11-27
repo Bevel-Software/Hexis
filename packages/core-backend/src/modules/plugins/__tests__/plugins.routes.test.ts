@@ -11,6 +11,7 @@ import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import type { ChangeRequest, IVersionControlService } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import type { ISkillService, SkillSummary } from '../../skills/index.js';
@@ -368,6 +369,31 @@ describe('/api/plugins routes', () => {
     const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'Plugin discovery is incomplete' });
+  });
+
+  it('create, name and delete answer a push-only failure as saved locally (409 and its kind), never a 500', async () => {
+    const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
+    server = h.server;
+    const pushOnly = () => new PushNeedsAgentResolutionError(DEFAULT_BRANCH, 'knowledge-base/Plugins/X', 'rejected', '(not attempted)', 'refused');
+    h.provision.createPlugin.mockRejectedValueOnce(pushOnly());
+    h.provision.ensurePersonalPlugin.mockRejectedValueOnce(pushOnly());
+    h.provision.deletePlugin.mockRejectedValueOnce(pushOnly());
+    const json = { 'content-type': 'application/json' };
+    const calls = [
+      ['POST /api/plugins', fetch(`${h.baseUrl}/api/plugins`, { method: 'POST', headers: json, body: JSON.stringify({ name: 'Sales' }) })],
+      ['POST /api/plugins/personal', fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST', headers: json, body: JSON.stringify({ name: 'Mine' }) })],
+      ['DELETE /api/plugins/gtm', fetch(`${h.baseUrl}/api/plugins/gtm`, { method: 'DELETE' })],
+    ] as const;
+    for (const [route, pending] of calls) {
+      const res = await pending;
+      expect(res.status, route).toBe(409);
+      expect(await res.json(), route).toEqual({
+        kind: 'push-needs-resolution',
+        branch: DEFAULT_BRANCH,
+        path: 'knowledge-base/Plugins/X',
+        error: pushOnly().message,
+      });
+    }
   });
 
   it('lists member plugins sorted, counting by pluginOfPath', async () => {

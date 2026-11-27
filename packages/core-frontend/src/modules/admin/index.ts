@@ -5,3 +5,4 @@
  */
 export { addMember, fetchRoles } from './services/roles.api';
 export { AdminContext, useAdmin, type AdminContextValue } from './state/admin.context';
+export { pathForGroupMembers } from './components/group-members-path';

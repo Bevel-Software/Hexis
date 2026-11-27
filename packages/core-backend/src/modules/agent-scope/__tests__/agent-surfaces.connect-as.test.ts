@@ -25,7 +25,7 @@ import {
   type ToolManualSummary,
 } from '../../tool-manuals/index.js';
 import { registerAgentGuideTool } from '../../agent-guide/index.js';
-import { agentFile, agentScopeOver, inMemoryKb } from '../../../__tests__/in-memory-agent-scope.js';
+import { agentFile, agentScopeOver, inMemoryKb } from './in-memory-kb.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { tmpdir } from 'node:os';

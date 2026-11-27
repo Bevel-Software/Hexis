@@ -87,6 +87,28 @@ function refuseMismatchedArguments(req: express.Request, res: express.Response):
 }
 
 /**
+ * THE failure answer of every route that provisions, names or deletes through
+ * `IPluginProvisioning`. The service's own refusals keep their status (a 503
+ * for incomplete discovery tells the caller to try again). A version-control
+ * refusal keeps its status and payload through `domainErrorBody`, so a commit
+ * that landed locally but was not pushed (`PushNeedsAgentResolutionError`,
+ * which the service rethrows with the change kept) answers its saved-locally
+ * `kind` rather than a 500. Anything else is logged and answers a 500.
+ */
+function sendProvisionFailure(res: express.Response, err: unknown, what: string): void {
+  if (err instanceof PluginProvisionError) {
+    res.status(err.status).json({ error: err.message });
+    return;
+  }
+  if (err instanceof VersionControlDomainError) {
+    res.status(err.status).json(domainErrorBody(err));
+    return;
+  }
+  log.error(`${what} failed:`, { err });
+  res.status(500).json({ error: `Failed to ${what}` });
+}
+
+/**
  * Answer the connection-scope refusal when the caller's connection was made
  * as an agent configuration that does not list `toolName`; `true` when it answered.
  * These routes ARE the `create_plugin` and `my_plugin` tools but are not
@@ -168,12 +190,7 @@ export function createPluginCreationRoutes(
       const result = await provision.createPlugin(user, name, parent);
       res.status(201).json(result);
     } catch (err) {
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      log.error('create failed:', { err });
-      res.status(500).json({ error: 'Failed to create the plugin' });
+      sendProvisionFailure(res, err, 'create the plugin');
     }
   });
 
@@ -200,14 +217,7 @@ export function createPluginCreationRoutes(
     try {
       res.json(await provision.ensurePersonalPlugin(user, name));
     } catch (err) {
-      // The service's own refusals keep their status — a 503 for incomplete
-      // discovery tells the caller to try again, which a 500 would not.
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      log.error('personal-folder ensure failed:', { err });
-      res.status(500).json({ error: 'Failed to prepare your personal folder' });
+      sendProvisionFailure(res, err, 'prepare your personal folder');
     }
   });
 
@@ -399,12 +409,7 @@ export function createPluginsRoutes(
     try {
       res.json({ name: await provision.personalPluginName(user) });
     } catch (err) {
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      log.error('personal plugin name read failed:', { err });
-      res.status(500).json({ error: "Failed to read your personal plugin's name" });
+      sendProvisionFailure(res, err, "read your personal plugin's name");
     }
   });
 
@@ -594,12 +599,7 @@ export function createPluginsRoutes(
       pluginIndex.invalidate();
       res.json({ ok: true });
     } catch (err) {
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      log.error('delete failed:', { err });
-      res.status(500).json({ error: 'Failed to delete the plugin' });
+      sendProvisionFailure(res, err, 'delete the plugin');
     }
   });
 
