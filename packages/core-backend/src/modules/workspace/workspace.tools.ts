@@ -452,10 +452,9 @@ async function assertNotBinaryOverwrite(
 }
 
 /**
- * The same refusal, over bytes the caller already holds. Split out so a tool
- * that reads the file more than once — `edit_file`, before the lock and again
- * under it — judges EVERY reading with the one rule, and the bytes it replaces
- * are always bytes this gate has seen.
+ * The same refusal, over bytes the caller already holds. Split out for a tool
+ * that reads the file itself — `edit_file`, once, under the path's lock — so
+ * the bytes it replaces are judged by the one rule the gate above applies.
  */
 function assertBytesTextEditable(readers: FileReaderRegistry, path: string, existing: Buffer): void {
   const refusal = readers.readerFor(path).editRefusalForExisting?.(existing, path) ?? null;
@@ -3269,11 +3268,9 @@ export function registerWorkspaceTools(
       const path = a.path as string;
       const oldStr = a.old_string as string;
       const newStr = a.new_string as string;
-      // Everything the tool decides about ONE reading of the file: may these
-      // bytes be edited as text at all, is `old_string` there, is it unique,
-      // and what the file becomes. One function, because the file is read
-      // twice — before the lock and under it — and a reading that skipped any
-      // of these questions would let bytes land that were never judged.
+      // Everything the tool decides about the file, asked of the one reading
+      // taken under the lock (below): may these bytes be edited as text at
+      // all, is `old_string` there, is it unique, and what the file becomes.
       // `split`/`join`, not `String.replace`, which reads `$&`, `$'`, `` $` ``
       // and `$$` in `new_string` as patterns and writes something the caller
       // never sent.
@@ -3288,29 +3285,31 @@ export function registerWorkspaceTools(
         }
         return { updated: pieces.join(newStr), replaced: count };
       };
-      // A first verdict before any lock is taken, so an ordinary refusal costs
-      // no lock cycle. It is a verdict about a file anyone may still change.
-      let result = edit(await orNotFound(path, async () => asBytes(await fs.readFile(path))));
-      // The one the answer carries is taken again with the path's lock HELD,
-      // over the bytes read there (`write: true` guarantees the locking
-      // filesystem): read, verdict and write are one step nobody can get
-      // between. Taken before the lock only, two callers replacing the same
-      // text — two runners claiming a work item by filling its empty owner
-      // field — were BOTH told their edit landed, and the second silently
-      // overwrote the first. A filesystem without the method has no lock to
-      // read under, so the first verdict stands.
+      // The verdict is taken ONLY with the path's lock HELD, over the bytes
+      // read there (`write: true` guarantees the locking filesystem). Two
+      // reasons, one per thing the lock does first:
+      // - Acquiring it is the access gate — write on a protected branch, read
+      //   on every branch. Matching `old_string` before it answered "present"
+      //   with the write refusal and "absent" with `not found`: a yes/no
+      //   oracle on a file the caller may neither write nor read. Under the
+      //   lock, a caller it refuses gets the one refusal whatever they sent.
+      // - Read, verdict and write are one step nobody can get between. Taken
+      //   before the lock, two callers replacing the same text — two runners
+      //   claiming a work item by filling its empty owner field — were BOTH
+      //   told their edit landed, and the second overwrote the first.
+      // No path reads without the lock: the method is called unconditionally,
+      // as `write_file` and `write_files` call theirs, so a filesystem without
+      // it fails before anything is read.
       const locking = fs as unknown as {
-        rewriteFile?(path: string, rewrite: (current: Buffer | null) => string): Promise<void>;
+        rewriteFile(path: string, rewrite: (current: Buffer | null) => string): Promise<void>;
       };
-      if (typeof locking.rewriteFile === 'function') {
-        await locking.rewriteFile(path, (current) => {
-          if (current === null) throw notFound(path);
-          result = edit(current);
-          return result.updated;
-        });
-      } else {
-        await fs.writeFile(path, result.updated);
-      }
+      // Assigned inside the rewrite, which runs before it returns.
+      let result!: { updated: string; replaced: number };
+      await locking.rewriteFile(path, (current) => {
+        if (current === null) throw notFound(path);
+        result = edit(current);
+        return result.updated;
+      });
       return { path, replaced: result.replaced, ...(await saveWarnings(ctx, path, result.updated)) };
     },
   });

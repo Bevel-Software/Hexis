@@ -18,6 +18,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { withRewriteFile } from '../../../__tests__/rewrite-file.js';
 import { sharedFileRules, sharedFileRulesSection } from '../../agent-instructions/index.js';
 
 /**
@@ -94,7 +95,7 @@ const running: Platform[] = [];
 
 async function startPlatform(): Promise<Platform> {
   const tempDir = await mkdtemp(join(tmpdir(), 'escape-seq-'));
-  const fs = new LocalFilesystem({ basePath: tempDir, contained: true });
+  const fs = withRewriteFile(new LocalFilesystem({ basePath: tempDir, contained: true }));
   // `write_files` lands its batch through the locking filesystem's `writeFiles`
   // (re-judge every path under the lock, then write what is kept). This plain
   // filesystem has none, so the same contract is honoured by hand.
