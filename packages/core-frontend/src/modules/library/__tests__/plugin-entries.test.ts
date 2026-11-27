@@ -119,7 +119,7 @@ describe('pluginEntriesFor', () => {
     expect(names(pluginEntriesFor([], [summary({})], { kind: 'all' }, [], 'personal plug', 'Atelier'))).toEqual([null]);
     expect(names(pluginEntriesFor([], [summary({})], { kind: 'all' }, [], 'atel', 'Atelier'))).toEqual([null]);
     // The alias is the own space's alone: no plugin row is found by it.
-    expect(names(pluginEntriesFor([], [summary({ displayName: 'GTM' })], { kind: 'owned' }, [], 'personal', 'Atelier'))).toEqual([null]);
+    expect(names(pluginEntriesFor([], [summary({ displayName: 'GTM' })], { kind: 'all' }, [], 'personal', 'Atelier'))).toEqual([null]);
   });
 
   it('lists no plugins for a plugin page or the personal page', () => {
