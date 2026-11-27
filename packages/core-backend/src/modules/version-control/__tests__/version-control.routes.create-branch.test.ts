@@ -80,6 +80,29 @@ async function createBranch(baseUrl: string, body: unknown): Promise<{ status: n
 }
 
 describe('POST /workspace/:id/workflow/branches', () => {
+  it.each([
+    ['a list', ['main']],
+    ['an object', { ref: 'main' }],
+    ['a number', 7],
+  ])('answers a base that is %s with a 400, and asks the service nothing', async (_what, fromBase) => {
+    const { baseUrl, asked, created } = await serve();
+
+    const res = await createBranch(baseUrl, { name: 'copilot-check', fromBase });
+
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'fromBase must be a branch name' });
+    expect(asked).toEqual([]);
+    expect(created).toEqual([]);
+  });
+
+  it('reads a base that is absent or null as none', async () => {
+    const { baseUrl, created } = await serve();
+
+    expect((await createBranch(baseUrl, { name: 'one' })).status).toBe(200);
+    expect((await createBranch(baseUrl, { name: 'two', fromBase: null })).status).toBe(200);
+    expect(created.map((c) => c.fromBase)).toEqual([undefined, undefined]);
+  });
+
   it('creates the branch under the name the service gives the asked name for this person, and answers it', async () => {
     const { baseUrl, asked, created } = await serve();
 

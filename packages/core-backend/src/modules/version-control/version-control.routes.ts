@@ -248,9 +248,15 @@ export function createVersionControlRoutes(
   router.post('/workspace/:id/workflow/branches', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
-    const { name, fromBase } = req.body as { name?: unknown; fromBase?: string };
+    // Both fields are checked before anything is asked of the service: what
+    // the body holds is the client's, and only a string is a branch name.
+    const { name, fromBase } = (req.body ?? {}) as { name?: unknown; fromBase?: unknown };
     if (typeof name !== 'string' || !name) {
       res.status(400).json({ error: 'name is required' });
+      return;
+    }
+    if (fromBase !== undefined && fromBase !== null && typeof fromBase !== 'string') {
+      res.status(400).json({ error: 'fromBase must be a branch name' });
       return;
     }
     try {
@@ -260,7 +266,7 @@ export function createVersionControlRoutes(
       // the name from the answer; the app's own clients send names that
       // already carry a prefix, which come back as sent.
       const draft = await versionControl.draftNameFor(req.params.id, name, user);
-      res.json(await versionControl.createBranch(req.params.id, draft, fromBase));
+      res.json(await versionControl.createBranch(req.params.id, draft, fromBase ?? undefined));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
