@@ -336,6 +336,12 @@ export interface ChangeRequestMergeFailedEvent {
    */
   conflicts: boolean;
   /**
+   * On a conflict, the files git could not combine — sent only when the
+   * clicker may read every one of them, so the UI can name them. Not
+   * persisted: other viewers read `lastApplyFailure`, which names no file.
+   */
+  conflictedPaths?: string[];
+  /**
    * When the attempt failed (ISO) — the same instant persisted as
    * `lastApplyFailure.at` when the refusal is recorded, so the clicker's tab
    * can tell its own refusal from a later one somebody else's attempt made.

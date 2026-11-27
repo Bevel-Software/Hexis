@@ -1172,19 +1172,31 @@ export function createVersionControlRoutes(
     // What the clicker's reason is scoped against, once the request is loaded.
     // Unset (a failure before that) means read access is unproven: withheld.
     let readScope: { workspaceId: string; paths: string[] } | null = null;
-    const reportFailure = async (reason: string, kind: ChangeRequestApplyFailureKind, persist = true) => {
+    const reportFailure = async (
+      reason: string,
+      kind: ChangeRequestApplyFailureKind,
+      persist = true,
+      conflictedPaths: string[] = [],
+    ) => {
       const conflicts = kind === 'conflicts';
       const at = new Date();
       // The raw reason is persisted below and scoped per viewer on read; the
       // clicker's direct answer must not bypass that scope.
       const clickerMayRead =
         readScope !== null && (await mayReadApplyFailureReason(user, readScope.workspaceId, readScope.paths));
+      // A conflict's file names go to a clicker who may read every one of
+      // them — the same check, over the names themselves.
+      const namesConflicts =
+        readScope !== null &&
+        conflictedPaths.length > 0 &&
+        (await mayReadApplyFailureReason(user, readScope.workspaceId, conflictedPaths));
       events.emit({
         kind: 'change-request-merge-failed',
         forUserId: user.id,
         number: num,
         reason: clickerMayRead ? reason : APPLY_FAILURE_REASON_WITHHELD,
         conflicts,
+        ...(namesConflicts ? { conflictedPaths } : {}),
         at: at.toISOString(),
       });
       if (!persist) return;
@@ -1226,7 +1238,12 @@ export function createVersionControlRoutes(
           { bypass },
         );
         if (outcome.kind === 'conflicts-need-resolution') {
-          await reportFailure('This draft conflicts with the target and needs resolving first.', 'conflicts');
+          await reportFailure(
+            'This draft conflicts with the target and needs resolving first.',
+            'conflicts',
+            true,
+            outcome.conflictedPaths,
+          );
         }
         // Success path: `versionControl.mergeChangeRequest` emits `change-request-merged`.
       } catch (err) {

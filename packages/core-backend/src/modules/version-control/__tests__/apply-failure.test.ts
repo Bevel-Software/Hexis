@@ -6,10 +6,10 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import type { AuthUser, FileApprovalState, IVersionControlService, VersionControlEvent } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { Database } from '../../database/connection.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import { changeRequests, type Database } from '../../database/index.js';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import { PullRequestService as RealPullRequestService } from '../git/pull-request.service.js';
@@ -20,7 +20,6 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { changeRequests } from '../../database/schema.js';
 import { coreMigrationsDir } from '../../../assets.js';
 import { VersionControlService } from '../version-control.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createVersionControlRoutes } from '../version-control.routes.js';
@@ -222,6 +221,40 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
       ADMIN,
       1,
     );
+  });
+
+  it("a conflict names its files in the clicker's answer when the clicker may read every one", async () => {
+    const SPACED = 'Plugins/x/Launch plan.md';
+    h = await routeHarness(async () => ({ kind: 'conflicts-need-resolution', conflictedPaths: [SPACED] }), {
+      touchedNodePaths: [SPACED, 'Plugins/x/SKILL.md'],
+    });
+    await post(h.baseUrl);
+    await vi.waitFor(() => expect(h!.versionControl.recordApplyFailure).toHaveBeenCalled());
+    expect(h.emitted).toContainEqual(
+      expect.objectContaining({ kind: 'change-request-merge-failed', conflicts: true, conflictedPaths: [SPACED] }),
+    );
+    // What every other viewer reads names no file.
+    expect(h.versionControl.recordApplyFailure).toHaveBeenCalledWith(
+      7,
+      expect.not.objectContaining({ conflictedPaths: expect.anything() }),
+      ADMIN,
+      1,
+    );
+  });
+
+  it('a conflict names no file to a clicker who may not read one of them', async () => {
+    h = await routeHarness(
+      async () => ({ kind: 'conflicts-need-resolution', conflictedPaths: ['Plugins/x/SKILL.md', 'Secret/a.md'] }),
+      {
+        touchedNodePaths: ['Plugins/x/SKILL.md'],
+        canReadBatch: async (paths) => new Map(paths.map((p) => [p, !p.startsWith('Secret/')])),
+      },
+    );
+    await post(h.baseUrl);
+    await vi.waitFor(() => expect(h!.versionControl.recordApplyFailure).toHaveBeenCalled());
+    const answer = h.emitted.find((e) => e.kind === 'change-request-merge-failed');
+    expect(answer).toMatchObject({ conflicts: true });
+    expect(answer).not.toHaveProperty('conflictedPaths');
   });
 
   it('a landed apply records no failure', async () => {

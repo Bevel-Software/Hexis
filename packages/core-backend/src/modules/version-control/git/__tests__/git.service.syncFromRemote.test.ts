@@ -176,6 +176,30 @@ describe('GitService.syncFromRemote — the cases git exits 0 on but should not 
     expect((await gitOut(repo, ['stash', 'list'])).split('\n').filter(Boolean)).toHaveLength(1);
   });
 
+  it('a conflict names each file as git stores it, a space or a non-ASCII letter included', async () => {
+    // The list the sync-conflict banner shows. Read without `-z`, git wrote
+    // the non-ASCII name as a quoted octal escape that names no file.
+    const SPACED = 'Projects/Customer Programmes/Region APAC/Launch plan.md';
+    const UMLAUT = 'Übersicht Preise.md';
+    const upstream = await bareUpstream(root, true);
+    const { workspaceDir, repo } = await cloneWorkspace(root, upstream, 'ws');
+    await fs.mkdir(path.dirname(path.join(repo, SPACED)), { recursive: true });
+    await fs.writeFile(path.join(repo, SPACED), 'saved here\n');
+    await fs.writeFile(path.join(repo, UMLAUT), 'saved here\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'saved here']);
+    await pushFromElsewhere(root, upstream, async (dir) => {
+      await fs.mkdir(path.dirname(path.join(dir, SPACED)), { recursive: true });
+      await fs.writeFile(path.join(dir, SPACED), 'saved on the host\n');
+      await fs.writeFile(path.join(dir, UMLAUT), 'saved on the host\n');
+    });
+    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubVersionControlHooks(), testKbContext());
+
+    const err = await git.syncFromRemote('ws').catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: 'PullRebaseConflictError' });
+    expect([...(err as { conflictedPaths: string[] }).conflictedPaths].sort()).toEqual([SPACED, UMLAUT].sort());
+  });
+
   it('an unborn clone whose branch was created and deleted on an origin that has other branches is remote gone, not fresh', async () => {
     const upstream = await bareUpstream(root, true); // origin has BRANCH
     const workspaceDir = path.join(root, 'ws');

@@ -1,6 +1,8 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DEFAULT_BRANCH,
+  moreConflictFiles,
+  namedConflictFiles,
   type FileDiffPayload,
   type PullRequestDetail,
   type PullRequestSummary,
@@ -26,7 +28,13 @@ import { GitApiError, friendlyGitError, friendlyGitMessage } from '../../git';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { WorkspaceApiError } from '../../workspace';
+import {
+  WorkspaceApiError,
+  displayFileName,
+  hasFileViewer,
+  isBinaryFile,
+  rendersAsText,
+} from '../../workspace';
 import { describeReadFailure } from '../services/denied-file.api';
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
@@ -35,7 +43,6 @@ import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { useForkPointFileRead } from '../hooks/useForkPointFile';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace/components/renderers';
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
@@ -122,8 +129,15 @@ export function ChangeRequestDialog({
    * the proposal against the text as it stands), so both carry `ConflictHelp`,
    * but telling someone their request "can't be applied" when nobody tried to
    * apply it sends them looking for a decision that was never made.
+   *
+   * `conflictedPaths` are the files the refusal named. The update's 409
+   * carries them, and so does this tab's own apply refusal when its clicker
+   * may read every one; otherwise it names none.
    */
-  const [blockedBy, setBlockedBy] = useState<null | 'apply' | 'update'>(null);
+  const [blockedBy, setBlockedBy] = useState<null | {
+    attempt: 'apply' | 'update';
+    conflictedPaths: readonly string[];
+  }>(null);
   const blocked = blockedBy !== null;
   /**
    * The automatic bring-up-to-date this open owes has finished.
@@ -843,6 +857,7 @@ export function ChangeRequestDialog({
         status: statusByPath.get(path),
         approval: approvalByPath.get(path),
         deniedNote: failure?.kind === 'denied' ? deniedSentence(failure.folder) : undefined,
+        conflicted: blockedBy?.conflictedPaths.includes(path) === true,
       };
     });
   }, [
@@ -854,6 +869,7 @@ export function ChangeRequestDialog({
     branchFailure,
     selected,
     selectedFailure,
+    blockedBy,
   ]);
 
   /** The footer's verdicts: apply plainly, apply by covering, or wait. */
@@ -970,8 +986,11 @@ export function ChangeRequestDialog({
       // other refusal (an approval the gate is still waiting on, a transient
       // git error) can change under the reader, so it is reported with the
       // button intact.
-      if (refusal.conflicts) setBlockedBy('apply');
-      else setError(refusal.reason);
+      if (refusal.conflicts) {
+        setBlockedBy({ attempt: 'apply', conflictedPaths: refusal.conflictedPaths ?? [] });
+      } else {
+        setError(refusal.reason);
+      }
     },
   });
   const applyBusy = applying.activeCr === cr.number;
@@ -1041,12 +1060,18 @@ export function ChangeRequestDialog({
       // go out of date on files nobody changed, with no reason given.
       setCarryNotice(result.approvalCarryNotice ?? null);
     } catch (err) {
-      const conflicts =
-        err instanceof GitApiError &&
-        err.status === 409 &&
-        (err.body as { kind?: unknown } | undefined)?.kind === 'change-request-conflicts';
-      if (conflicts) setBlockedBy('update');
-      else setError(err instanceof Error ? err.message : "Couldn't update this change request.");
+      const body =
+        err instanceof GitApiError && err.status === 409
+          ? (err.body as { kind?: unknown; conflictedPaths?: unknown } | undefined)
+          : undefined;
+      if (body?.kind === 'change-request-conflicts') {
+        const paths = Array.isArray(body.conflictedPaths)
+          ? body.conflictedPaths.filter((p): p is string => typeof p === 'string')
+          : [];
+        setBlockedBy({ attempt: 'update', conflictedPaths: paths });
+      } else {
+        setError(err instanceof Error ? err.message : "Couldn't update this change request.");
+      }
     } finally {
       setUpdating(false);
       // Settled either way, and settled for good on this open: a refusal that
@@ -1158,6 +1183,11 @@ export function ChangeRequestDialog({
           </Button>
         </div>
 
+        {/* Everything between the header and the verdict scrolls as one: a
+            tall banner (many conflicting files, an open prompt) pushes the
+            files down instead of squeezing them to nothing, and the verdict
+            below stays whole. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {/* Why, in the author's words. Omitted rather than faked when the
             request carries no description — an empty quote block reads as the
             author having said nothing worth reading.
@@ -1282,7 +1312,7 @@ export function ChangeRequestDialog({
             sentence names a branch. */}
         {blockedBy !== null && (
           <Banner tone="wait" role="alert" className="mx-8 mt-4">
-            {blockedBy === 'update' ? (
+            {blockedBy.attempt === 'update' ? (
               <>
                 <b className="font-semibold">Can't bring this up to date</b>: what everyone sees
                 has changed since this was proposed, and the two can't be combined
@@ -1295,8 +1325,15 @@ export function ChangeRequestDialog({
                 against the current text.
               </>
             )}
+            {blockedBy.conflictedPaths.length > 0 && (
+              <ConflictedFileNames
+                paths={blockedBy.conflictedPaths}
+                inRequest={allFiles}
+                onOpen={(p) => setSelected(p)}
+              />
+            )}
             <div className="mt-2.5">
-              <ConflictHelp prompt={conflictResolutionPrompt(cr)} />
+              <ConflictHelp prompt={conflictResolutionPrompt(cr, blockedBy.conflictedPaths)} />
             </div>
           </Banner>
         )}
@@ -1364,7 +1401,11 @@ export function ChangeRequestDialog({
         <>
         {/* The folder on the left, the file with the change marked in it on the
             right — the same reading as version history. */}
-        <div className="mt-4 grid min-h-0 flex-1 grid-cols-[17rem_minmax(0,1fr)] gap-7 px-8">
+        {/* A floor under the files, so the body scrolls before they shrink. */}
+        <div
+          data-testid="cr-files"
+          className="mt-4 grid min-h-80 flex-1 grid-cols-[17rem_minmax(0,1fr)] gap-7 px-8"
+        >
           <Surface
             tone="surface"
             radius="lg"
@@ -1520,6 +1561,7 @@ export function ChangeRequestDialog({
         </div>
         </>
         )}
+        </div>
 
         {/* The verdict. Fixed to the bottom of the surface — a decision the
             reader has to scroll to find is one they will make without reading. */}
@@ -1713,5 +1755,62 @@ function MarkedFile({
         ),
       )}
     </pre>
+  );
+}
+
+/**
+ * The files a conflict names, in its banner. At most three, then "and N
+ * more" — the rule the server's sync-conflict sentence follows — so the
+ * banner stays short however many there are; the full list goes to the
+ * agent in the prompt, and the tree marks each file it has a row for.
+ *
+ * One per line, because a file name may hold spaces and several on one line
+ * read as one. Each is named as the tree names it, with its folder beside it
+ * when two of the names shown would read the same, and the full path as its
+ * tooltip. A file of the request opens in the dialog when clicked.
+ */
+function ConflictedFileNames({
+  paths,
+  inRequest,
+  onOpen,
+}: {
+  paths: readonly string[];
+  inRequest: readonly string[];
+  onOpen(path: string): void;
+}) {
+  const { named, more } = namedConflictFiles(paths);
+  const names = named.map((p) => displayFileName(p));
+  return (
+    <div className="mt-1.5">
+      {paths.length === 1 ? "The file that can't be combined:" : "The files that can't be combined:"}
+      <ul className="mt-0.5 space-y-0.5">
+        {named.map((p, i) => {
+          const sameName = names.filter((n) => n === names[i]).length > 1;
+          const folder = sameName ? p.slice(0, Math.max(0, p.lastIndexOf('/'))) : '';
+          const label = (
+            <>
+              <span className="font-mono">{names[i]}</span>
+              {folder && <span className="ml-2 font-mono text-ink-muted">{folder}</span>}
+            </>
+          );
+          return (
+            <li key={p} title={p}>
+              {inRequest.includes(p) ? (
+                <button
+                  type="button"
+                  className="text-left underline underline-offset-2 transition-colors hover:text-ink"
+                  onClick={() => onOpen(p)}
+                >
+                  {label}
+                </button>
+              ) : (
+                label
+              )}
+            </li>
+          );
+        })}
+        {more > 0 && <li className="text-ink-muted">{moreConflictFiles(more)}</li>}
+      </ul>
+    </div>
   );
 }

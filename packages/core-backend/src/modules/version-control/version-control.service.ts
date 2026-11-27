@@ -65,6 +65,8 @@ import {
   isPlatformRestoreShape,
   CHANGE_REQUEST_DESCRIPTION_MAX,
   CHANGE_REQUEST_TITLE_MAX,
+  moreConflictFiles,
+  namedConflictFiles,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { readableAtCommits, ReadOnBranchDeniedError } from './read-on-branch.js';
@@ -184,23 +186,21 @@ function isOpenPairViolation(err: unknown): boolean {
 export function syncConflictMessage(branch: string, conflictedPaths: string[]): string {
   // Bounded: the same sentence goes to the response, the banner and the log,
   // and it must be one sentence in all three whatever the conflict's size.
-  // The full path list rides beside it as `conflictedPaths`.
-  const shown = conflictedPaths.slice(0, SYNC_CONFLICT_FILES_NAMED);
-  const more = conflictedPaths.length - shown.length;
+  // The full path list rides beside it as `conflictedPaths`. How many are
+  // named, and how the rest are said, is the rule the change-request dialog
+  // states conflicting files by too.
+  const { named, more } = namedConflictFiles(conflictedPaths);
   const files =
     conflictedPaths.length === 0
       ? 'some files'
       : more > 0
-        ? `${shown.join(', ')} and ${more} more file${more === 1 ? '' : 's'}`
-        : shown.join(', ');
+        ? `${named.join(', ')} ${moreConflictFiles(more)}`
+        : named.join(', ');
   return (
     `${branch} is not in sync yet: ${files} changed both in Hexis and on the git host. ` +
     `Recovery is queued; if this stays, open the files on ${branch} in Hexis, keep what you want, and save.`
   );
 }
-
-/** How many conflicted files the sync-conflict sentence names before "and N more". */
-const SYNC_CONFLICT_FILES_NAMED = 3;
 
 /**
  * Redact a git token from an error string before surfacing it: the one the

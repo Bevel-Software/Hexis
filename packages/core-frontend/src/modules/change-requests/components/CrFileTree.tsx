@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowRightLeft,
   Check,
   ChevronRight,
@@ -55,6 +56,8 @@ export interface CrTreeFileState {
    * one whose read merely broke: that is retryable and says so in the pane.
    */
   deniedNote?: string;
+  /** Named by the server as conflicting with the request's target. */
+  conflicted?: boolean;
 }
 
 interface CrFileTreeProps {
@@ -248,6 +251,7 @@ function Level({
             >
               {name}
             </button>
+            {file.conflicted && <ConflictMark />}
             {file.deniedNote && <DeniedMark note={file.deniedNote} />}
             {viewerMark ? (
               <ViewerApprovalMark state={viewerMark} />
@@ -295,6 +299,21 @@ function DeniedMark({ note }: { note: string }) {
       className="flex flex-none items-center text-ink-faint"
     >
       <Lock size={11} />
+    </span>
+  );
+}
+
+/**
+ * A file the server named as conflicting with the request's target. Beside
+ * the name, like the lock: what the request did to the file is still true,
+ * and the conflict is the extra fact. In `urgent`, not `wait`: the mark is
+ * the only sign on the row, and `wait` is too light (under 3:1) to carry it.
+ */
+function ConflictMark() {
+  const label = "Can't be combined with what everyone sees";
+  return (
+    <span role="img" aria-label={label} title={label} className="flex flex-none items-center text-urgent">
+      <AlertTriangle size={11} />
     </span>
   );
 }

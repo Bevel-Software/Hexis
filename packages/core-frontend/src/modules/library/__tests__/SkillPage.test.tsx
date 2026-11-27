@@ -1356,13 +1356,14 @@ describe('SkillPage: deciding on a change', () => {
     ).toBeInTheDocument();
     // A change that cannot land must not keep offering the button that fails.
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
-    // The way out is handed over ready to paste: the exact agent prompt,
-    // request number and branches filled in, with a Copy button beside it.
-    expect(screen.getByText(/ask your agent to resolve it/i)).toBeInTheDocument();
+    // The way out is handed over ready to paste: one button copies the exact
+    // agent prompt, request number and branches filled in, and the text
+    // itself opens behind Show prompt.
+    expect(screen.getByRole('button', { name: 'Copy prompt for your agent' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show prompt' }));
     expect(
       screen.getByText(/Change request #7 can no longer be applied[\s\S]*`suggestions\/olga\/newsletter`/),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
   });
 
   /**
