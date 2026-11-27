@@ -576,6 +576,37 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
     expect(manifest.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
   });
 
+  it('a folder holding no file at any depth is no plugin: it is cleared and made as new, with no repair claimed', async () => {
+    const folder = personalPluginFolderName(USER.id);
+    // What a refused write could leave behind: empty directories — one in
+    // the folder's own spelling, one in another casing — that git never saw.
+    for (const leftover of [`${folder}/sub/deeper`, `Personal-${USER.id}/x`]) {
+      const h = await makeHarness();
+      await fs.mkdir(path.join(h.dir, KB, 'Plugins', leftover), { recursive: true });
+
+      const result = await h.svc.ensurePersonalPlugin(USER);
+      expect(result, leftover).toMatchObject({ folder, created: true, repaired: false });
+      const entries = await fs.readdir(path.join(h.dir, KB, 'Plugins'));
+      expect(entries, leftover).toEqual([folder]);
+      expect((await fs.readdir(path.join(h.dir, KB, 'Plugins', folder))).sort()).toEqual(['access.md', 'plugin.json']);
+      expect(await fs.readFile(path.join(h.dir, KB, 'Plugins', folder, 'access.md'), 'utf-8')).toBe(personalAccessMd(USER));
+      expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('a file anywhere in the folder makes it already there — never cleared', async () => {
+    const h = await makeHarness();
+    const folder = personalPluginFolderName(USER.id);
+    const deep = path.join(h.dir, KB, 'Plugins', folder, 'skills', 'diary', 'SKILL.md');
+    await fs.mkdir(path.dirname(deep), { recursive: true });
+    await fs.writeFile(deep, '# Diary\n', 'utf-8');
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins', folder, 'empty'), { recursive: true });
+
+    const result = await h.svc.ensurePersonalPlugin(USER);
+    expect(result).toMatchObject({ created: false, repaired: true });
+    expect(await fs.readFile(deep, 'utf-8')).toBe('# Diary\n');
+  });
+
   it('two concurrent ensures both succeed — one creates, the other reports existing', async () => {
     const h = await makeHarness();
     const folder = personalPluginFolderName(USER.id);
