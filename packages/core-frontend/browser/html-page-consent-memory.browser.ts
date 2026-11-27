@@ -1,8 +1,6 @@
 import { createHash } from 'node:crypto';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
-import { build, type Rollup } from 'vite';
+import { bundleFixture } from './harness';
 
 /**
  * An Allow remembered across a reload, round-tripped through the real
@@ -23,7 +21,6 @@ import { build, type Rollup } from 'vite';
  * reached it.
  */
 
-const here = path.dirname(fileURLToPath(import.meta.url));
 const APP_ORIGIN = 'http://app.example';
 const CARD = "You're allowing changes using your account. Do you want to allow that?";
 const TOKEN_KEY = 'bevel_token';
@@ -43,29 +40,8 @@ document.getElementById('write').addEventListener('click', () => {
 
 const HOST = '<!doctype html><html><body style="margin:0"><div id="root"></div></body></html>';
 
-let pageBundle: string | undefined;
 /** The renderer's page entry (`fixtures/html-renderer-page.tsx`), bundled once per run. */
-async function bundle(): Promise<string> {
-  if (pageBundle) return pageBundle;
-  const built = (await build({
-    configFile: false,
-    root: path.resolve(here, 'fixtures'),
-    logLevel: 'silent',
-    esbuild: { jsx: 'automatic' },
-    define: { 'process.env.NODE_ENV': '"production"' },
-    build: {
-      write: false,
-      minify: false,
-      lib: { entry: path.resolve(here, 'fixtures/html-renderer-page.tsx'), formats: ['iife'], name: 'HtmlRendererPage', fileName: () => 'html-page.js' },
-      rollupOptions: { output: { inlineDynamicImports: true } },
-    },
-  })) as Rollup.RollupOutput | Rollup.RollupOutput[];
-  const outputs = Array.isArray(built) ? built : [built];
-  const chunk = outputs.flatMap((o) => o.output).find((o): o is Rollup.OutputChunk => o.type === 'chunk');
-  if (!chunk) throw new Error('the page bundle produced no chunk');
-  pageBundle = chunk.code;
-  return pageBundle;
-}
+const bundle = () => bundleFixture('html-renderer-page.tsx');
 
 /** Answer the app's origin: the host page, whose token this is (the token names the account), the manual (edit_file writes), and the MCP endpoint. */
 async function serve(page: Page): Promise<string[]> {

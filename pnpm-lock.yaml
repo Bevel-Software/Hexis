@@ -308,6 +308,9 @@ importers:
       '@playwright/test':
         specifier: ^1.64.0
         version: 1.64.0
+      '@tailwindcss/oxide':
+        specifier: ^4.3.3
+        version: 4.3.3
       '@testing-library/jest-dom':
         specifier: ^6.9.1
         version: 6.10.0(@testing-library/dom@10.4.1)

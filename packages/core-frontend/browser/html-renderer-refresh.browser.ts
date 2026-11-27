@@ -1,7 +1,5 @@
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
-import { build, type Rollup } from 'vite';
+import { bundleFixture } from './harness';
 
 /**
  * Refresh paints the page again, in a real browser.
@@ -15,30 +13,7 @@ import { build, type Rollup } from 'vite';
  * asked of a browser, over the real renderer on a stand-in file page.
  */
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-
-let pageBundle: string | undefined;
-async function bundle(): Promise<string> {
-  if (pageBundle) return pageBundle;
-  const built = (await build({
-    configFile: false,
-    root: path.resolve(here, 'fixtures'),
-    logLevel: 'silent',
-    esbuild: { jsx: 'automatic' },
-    define: { 'process.env.NODE_ENV': '"production"' },
-    build: {
-      write: false,
-      minify: false,
-      lib: { entry: path.resolve(here, 'fixtures/html-renderer-page.tsx'), formats: ['iife'], name: 'HtmlRendererPage', fileName: () => 'html-page.js' },
-      rollupOptions: { output: { inlineDynamicImports: true } },
-    },
-  })) as Rollup.RollupOutput | Rollup.RollupOutput[];
-  const outputs = Array.isArray(built) ? built : [built];
-  const chunk = outputs.flatMap((o) => o.output).find((o): o is Rollup.OutputChunk => o.type === 'chunk');
-  if (!chunk) throw new Error('the page bundle produced no chunk');
-  pageBundle = chunk.code;
-  return pageBundle;
-}
+const bundle = () => bundleFixture('html-renderer-page.tsx');
 
 async function mount(page: Page) {
   await page.setViewportSize({ width: 1000, height: 800 });

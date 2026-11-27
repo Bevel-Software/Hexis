@@ -1,7 +1,5 @@
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
-import { build, type Rollup } from 'vite';
+import { bundleFixture } from './harness';
 
 /**
  * A link written in an HTML page opens its target in a new tab, in a real
@@ -16,35 +14,12 @@ import { build, type Rollup } from 'vite';
  * this one stays where it is.
  */
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-
 /** The origin the stand-in app is served from, so the tab the link opens has a real address to be read back. */
 const ORIGIN = 'http://app.test';
 const PAGE_URL = `${ORIGIN}/workspace/main/knowledge-base/Dashboards/Roadmap.html`;
 const TARGET_URL = `${ORIGIN}/workspace/main/knowledge-base/Plans/roadmap.md`;
 
-let pageBundle: string | undefined;
-async function bundle(): Promise<string> {
-  if (pageBundle) return pageBundle;
-  const built = (await build({
-    configFile: false,
-    root: path.resolve(here, 'fixtures'),
-    logLevel: 'silent',
-    esbuild: { jsx: 'automatic' },
-    define: { 'process.env.NODE_ENV': '"production"' },
-    build: {
-      write: false,
-      minify: false,
-      lib: { entry: path.resolve(here, 'fixtures/html-renderer-page.tsx'), formats: ['iife'], name: 'HtmlRendererPage', fileName: () => 'html-page.js' },
-      rollupOptions: { output: { inlineDynamicImports: true } },
-    },
-  })) as Rollup.RollupOutput | Rollup.RollupOutput[];
-  const outputs = Array.isArray(built) ? built : [built];
-  const chunk = outputs.flatMap((o) => o.output).find((o): o is Rollup.OutputChunk => o.type === 'chunk');
-  if (!chunk) throw new Error('the page bundle produced no chunk');
-  pageBundle = chunk.code;
-  return pageBundle;
-}
+const bundle = () => bundleFixture('html-renderer-page.tsx');
 
 /**
  * Serve the stand-in app at a real origin: the file page's shell, and a plain
