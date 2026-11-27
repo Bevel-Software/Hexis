@@ -6,7 +6,7 @@ vi.mock('../../../../lib/api', () => ({
   authFetch: vi.fn(),
 }));
 
-import { uploadFile, createDirectory, moveEntry, rawFileUrl, writeFile, WorkspaceApiError } from '../workspace.api';
+import { uploadFile, createDirectory, moveEntry, rawFileUrl, writeFile, getOrCreateWorkspace, WorkspaceApiError } from '../workspace.api';
 import { authFetch } from '../../../../lib/api';
 
 const mockedFetch = vi.mocked(authFetch);
@@ -201,5 +201,35 @@ describe('moveEntry carries the destination-taken refusal through unchanged', ()
     } as unknown as Response);
 
     await expect(moveEntry('ws-1', 'kb/a.md', 'kb/b.md')).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * A 410 the server once sent for a branch, without a caching rule, is one
+ * Chromium kept and read back on the next request for the same address, never
+ * asking the server: a person who opened their own applied request (its
+ * suggestions branch removed) could not propose again from that browser, since
+ * proposing reopens that branch under the same name. The server now says its
+ * answer may not be stored; a browser that stored one before it did is only
+ * reached by the request itself refusing the cache.
+ */
+describe('getOrCreateWorkspace', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('asks the server every time, never the browser cache', async () => {
+    mockedFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ workspace: { id: 'suggestions%2Frae%2Fknowledge' }, fileTree: {} }),
+    } as unknown as Response);
+
+    await getOrCreateWorkspace('suggestions/rae/knowledge');
+
+    expect(mockedFetch).toHaveBeenCalledWith(
+      '/api/workspace?branch=suggestions%2Frae%2Fknowledge',
+      expect.objectContaining({ cache: 'no-store' }),
+    );
   });
 });

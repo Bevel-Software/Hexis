@@ -1,22 +1,34 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// Each module is replaced at its entry, which is where the propose flow reaches
+// it; the rest of each entry, the error classes included, stays real.
 const gitApi = vi.hoisted(() => ({
   createBranch: vi.fn(),
   deleteBranch: vi.fn(),
 }));
-vi.mock('../../git/services/git.api', () => gitApi);
+vi.mock('../../git', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../git')>()),
+  ...gitApi,
+}));
 const wsApi = vi.hoisted(() => ({
   getOrCreateWorkspace: vi.fn(async () => ({
     workspace: { id: 'sugg-ws', kbDirName: 'knowledge-base' },
   })),
   writeFile: vi.fn(async () => {}),
 }));
-vi.mock('../../workspace/services/workspace.api', () => wsApi);
-vi.mock('../../pr/services/pr-open.api', () => ({ openChangeRequest: vi.fn(async () => null) }));
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
+  ...wsApi,
+}));
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  openChangeRequest: vi.fn(async () => null),
+}));
 const listMine = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
 vi.mock('../services/change-requests.api', () => ({ listMyChangeRequests: listMine }));
 
-import { ensureKnowledgeSuggestionWorkspace } from '../services/propose.api';
+import { ensureKnowledgeSuggestionWorkspace, proposeKnowledgeChange } from '../services/propose.api';
+import { WorkspaceApiError } from '../../workspace';
 
 const rae = { email: 'reader@example.com', id: 'u9-1234-abcd' };
 
@@ -89,5 +101,53 @@ describe('ensureKnowledgeSuggestionWorkspace: branch reuse', () => {
     expect(target.existingCr).not.toBeNull();
     expect(gitApi.createBranch).not.toHaveBeenCalled();
     expect(gitApi.deleteBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe('proposeKnowledgeChange: the branch the proposal goes to cannot be opened', () => {
+  beforeEach(() => {
+    gitApi.createBranch.mockReset().mockResolvedValue(undefined);
+    listMine.mockReset().mockResolvedValue([]);
+    wsApi.writeFile.mockClear();
+  });
+
+  /**
+   * The workspace read answers a failure with its bare status, and the file
+   * page shows a failed proposal's message as it is: "HTTP 410" told the
+   * person nothing about why or what to do.
+   */
+  const propose = () =>
+    proposeKnowledgeChange({
+      repoRelativePath: 'KnowledgeBase/Finance/month-end-close.md',
+      content: 'four days',
+      userEmail: rae.email,
+      userId: rae.id,
+      userName: 'Rae',
+    });
+
+  it.each([
+    ['the branch is gone (410)', new WorkspaceApiError(410)],
+    ['the branch is not there (404)', new WorkspaceApiError(404)],
+    ['the server failed (503)', new WorkspaceApiError(503)],
+    ['no answer came back', new TypeError('Failed to fetch')],
+  ])('says that nothing was sent and to try again, not the bare status, when %s', async (_case, failure) => {
+    wsApi.getOrCreateWorkspace.mockRejectedValueOnce(failure);
+
+    await expect(propose()).rejects.toThrow(
+      "Nothing was sent: your proposal couldn't be saved for review just now. Try again in a moment.",
+    );
+    expect(wsApi.writeFile).not.toHaveBeenCalled();
+  });
+
+  /**
+   * "Try again in a moment" is only true where a second attempt can work. A
+   * lapsed session's 401 is not one of those, and keeps its own answer.
+   */
+  it('passes an answer that trying again cannot fix through as it came', async () => {
+    const lapsed = new WorkspaceApiError(401);
+    wsApi.getOrCreateWorkspace.mockRejectedValueOnce(lapsed);
+
+    await expect(propose()).rejects.toBe(lapsed);
+    expect(wsApi.writeFile).not.toHaveBeenCalled();
   });
 });

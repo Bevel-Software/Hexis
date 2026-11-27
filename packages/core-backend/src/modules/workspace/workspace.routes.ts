@@ -500,6 +500,13 @@ export function createWorkspaceRoutes(
   // matches the previous "just give me a workspace" behavior except now
   // the workspace is keyed by branch instead of by user.
   router.get('/workspace', async (req, res) => {
+    // Never stored, whatever the answer. It is the branch as it is NOW, and a
+    // branch answered 410 here can be created again under the same name: the
+    // propose flow creates a person's suggestions branch again after applying
+    // their request removed it. Sent without this header, Chromium kept that
+    // 410 and answered later reads of this address from its cache, so the
+    // branch created again could not be opened from that browser.
+    res.setHeader('Cache-Control', 'no-store');
     try {
       if (!req.userId) {
         res.status(401).json({ error: 'Unauthenticated' });
