@@ -4541,8 +4541,10 @@ export class VersionControlService implements IVersionControlService {
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-merged', number });
     // AFTER the event: the applying UI is waiting on `change-request-merged`,
-    // and branch retirement is git IO it must never wait behind.
-    await this.retireMergedSourceBranch(number, baseBranch, user);
+    // and branch retirement is git IO it must never wait behind. Only at the
+    // head the merge landed: a push that reached the branch after the merge
+    // read it is on no other branch, and must not be deleted with this one.
+    await this.retireMergedSourceBranch(number, baseBranch, user, mergeHeadSha);
     // A merge can empty OTHER open requests into the same target; the sweep's
     // tidy-up closes those. Detached and coalesced, like every kick.
     this.kickDeletedBranchSweep();
@@ -4954,11 +4956,18 @@ export class VersionControlService implements IVersionControlService {
    * merger need not be the branch's author — the merge itself was the
    * authorization. Never throws: the merge has already succeeded, and a
    * cleanup failure only means the next proposal falls back to branch reuse.
+   *
+   * `mergedTip` is the commit of the branch a merge has just landed. When it
+   * is given, the shared repository deletes the branch only while it is still
+   * at that commit (`expectTip`), so a commit pushed to the branch after the
+   * merge read it keeps its branch. The two callers that close a request
+   * without merging its head here pass none.
    */
   private async retireMergedSourceBranch(
     number: number,
     baseBranch: string,
     user: AuthUser,
+    mergedTip?: string,
   ): Promise<void> {
     try {
       const rows = await this.db
@@ -4986,7 +4995,10 @@ export class VersionControlService implements IVersionControlService {
         // The remote-tracking ref must be current, or deleteBranch's
         // "does origin still have it?" probe skips the remote delete.
         await this.workspaceService.ensureRemotesFetched(targetWs.id).catch(() => {});
-        await this.deleteBranchUnlocked(targetWs.id, sourceBranch, user, { systemCleanup: true });
+        await this.deleteBranchUnlocked(targetWs.id, sourceBranch, user, {
+          systemCleanup: true,
+          ...(mergedTip ? { expectTip: mergedTip } : {}),
+        });
         mergeLog.info(`retired merged source branch "${sourceBranch}"`);
       });
     } catch (err) {

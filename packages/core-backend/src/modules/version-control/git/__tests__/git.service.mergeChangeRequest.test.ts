@@ -752,7 +752,7 @@ describe('GitService.mergeChangeRequest: the source commit the caller names', ()
     expect((await gitOut(upstream, ['rev-parse', `${BASE}^2`])).trim()).toBe(readHead);
   });
 
-  it('refuses, and leaves the target and the clone as they were, when the source was pushed to after its head was read', async () => {
+  it('refuses, with nothing merged or pushed and the clone clean on the target, when the source was pushed to after its head was read', async () => {
     const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
     await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {
       await fs.writeFile(path.join(dir, 'approved.md'), 'approved\n');
@@ -773,6 +773,51 @@ describe('GitService.mergeChangeRequest: the source commit the caller names', ()
     expect(await tipOf(upstream, BASE)).toBe(targetBefore);
     expect((await gitOut(baseRepo, ['rev-parse', 'HEAD'])).trim()).toBe(cloneBefore);
     expect(await gitOut(baseRepo, ['status', '--porcelain'])).toBe('');
+  });
+
+  it('leaves no unpushed merge in the clone when the source moves while a rejected push is retried', async () => {
+    const { upstream, seedDir, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {
+      await fs.writeFile(path.join(dir, 'approved.md'), 'approved\n');
+    });
+    const readHead = await tipOf(upstream, FEATURE);
+    // A runner like the real one, except that just before the first push a
+    // teammate's commit lands on the target (so that push is rejected and the
+    // merge is tried again) and a later commit lands on the source.
+    const real = new NodeGitRunner();
+    let pushes = 0;
+    const racing: IGitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: (async (cwd: string, args: string[], opts?: unknown) => {
+        if (args[0] === 'push' && pushes++ === 0) {
+          await fs.writeFile(path.join(seedDir, 'teammate.md'), 'meanwhile\n');
+          await runGit(seedDir, ['add', '-A']);
+          await runGit(seedDir, ['commit', '-m', 'teammate']);
+          await runGit(seedDir, ['push', 'origin', BASE]);
+          await pushLater('unapproved.md');
+        }
+        return real.run(cwd, args, opts as never);
+      }) as IGitRunner['run'],
+    };
+    const git = new GitService(
+      stubWorkspaceService(baseWsId, baseRepo), new VersionControlHooks(), testKbContext(), undefined, null, racing,
+    );
+
+    await expect(
+      git.mergeChangeRequest(
+        baseWsId, FEATURE, BASE, { subject: 'Add (#1)', body: 'Merged via Bevel' }, USER,
+        { expectedSourceHead: readHead },
+      ),
+    ).rejects.toMatchObject({ payload: { kind: 'source-head-moved' } });
+
+    // The first attempt committed a merge and its push was rejected. The
+    // refusal on the second attempt must not leave that commit in the clone.
+    expect(pushes).toBe(1);
+    const published = await tipOf(upstream, BASE);
+    expect((await gitOut(baseRepo, ['rev-parse', 'HEAD'])).trim()).toBe(published);
+    expect(await gitOut(baseRepo, ['status', '--porcelain'])).toBe('');
+    expect((await gitOut(upstream, ['ls-tree', '-r', '--name-only', BASE])).split('\n')).not.toContain('approved.md');
   });
 
   it('merges the later commit once the caller names it', async () => {

@@ -2176,8 +2176,8 @@ export class GitService implements IGitService {
        * The source commit the caller's approval gate judged. When given, the
        * merge lands that commit or nothing: if the published source is at any
        * other commit once the fetch below has run, it refuses with
-       * {@link SourceHeadMovedError} before anything is checked out, merged or
-       * pushed.
+       * {@link SourceHeadMovedError} before anything is merged or pushed, and
+       * leaves the clone on the published target with nothing uncommitted.
        *
        * Compared HERE, inside the reservation, and not by the caller: the
        * caller read the head before it asked the gate, and a push landing
@@ -2240,22 +2240,26 @@ export class GitService implements IGitService {
           `+refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`,
           `+refs/heads/${sourceBranch}:refs/remotes/origin/${sourceBranch}`,
         ]);
+        // Match the published base tip exactly. Protected base branches never
+        // carry local commits (save=share + no direct commits), so this only
+        // discards a prior attempt's state, never real work.
+        await this.git(cwd, ['checkout', targetBranch]);
+        await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
         // The source commit this attempt merges, read once from the ref the
         // fetch above just wrote and named by its id from here on. The ref
         // itself can move again under this reservation: `resolvePrShas`
         // fetches into a clone before it takes the clone's turn. So the paths
         // `authorize` judges and the commit merged are one commit, and it is
         // the commit a caller's `expectedSourceHead` was compared with.
+        //
+        // After the reset above, so a refusal on a LATER attempt leaves the
+        // clone on the published target too: the attempt before it committed
+        // a merge whose push was rejected, and that commit is gone by here.
         const { stdout: sourceTipOut } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}`]);
         const sourceTip = sourceTipOut.trim();
         if (opts.expectedSourceHead !== undefined && sourceTip !== opts.expectedSourceHead) {
           throw new SourceHeadMovedError(sourceBranch);
         }
-        // Match the published base tip exactly. Protected base branches never
-        // carry local commits (save=share + no direct commits), so this only
-        // discards a prior attempt's state, never real work.
-        await this.git(cwd, ['checkout', targetBranch]);
-        await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
 
         if (opts.authorize) {
           // The tip this attempt merges into, and the paths it writes against

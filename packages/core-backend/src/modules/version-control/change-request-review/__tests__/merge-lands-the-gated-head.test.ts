@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import type { AuthUser, FileApprovalState } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
 import type { IAccessControl } from '../../../access/index.js';
@@ -36,9 +38,9 @@ const CR_ROW = {
   state: 'open',
 };
 
-/** One file, approved by its owner on the head the caller read: all the gate needs. */
-const APPROVED: FileApprovalState = {
-  path: 'approved.md',
+/** A file approved by its owner on the head the caller read, as the gate is handed it. */
+const approvalOf = (file: string): FileApprovalState => ({
+  path: file,
   eligibleApprovers: { roles: ['Ops'], users: [] },
   approvedBy: [
     {
@@ -53,20 +55,31 @@ const APPROVED: FileApprovalState = {
   isApproved: true,
   viewerCanApprove: false,
   inMergeGate: true,
-};
+});
 
 type LogWrite = { succeeded?: boolean; error?: string | null };
 
-/** The request's row, and a merge log that keeps what was written to it. */
+/**
+ * The request's row, and a merge log that keeps what was written to it. The
+ * row is answered only to a lookup that asks for this request's number, read
+ * from the predicate itself, so a lookup of another request finds nothing.
+ */
 function makeDb(logWrites: LogWrite[]): Database {
   const rows = (data: unknown) => {
     const p = Promise.resolve(data) as Promise<unknown> & { limit: () => Promise<unknown> };
     p.limit = () => Promise.resolve(data);
     return p;
   };
+  const asksForThisRequest = (predicate: SQL): boolean => {
+    const { sql, params } = new PgDialect().sqlToQuery(predicate);
+    return /"number"/.test(sql) && params.includes(NUMBER);
+  };
   return {
     select: () => ({
-      from: (table: unknown) => ({ where: () => rows(table === changeRequests ? [CR_ROW] : []) }),
+      from: (table: unknown) => ({
+        where: (predicate: SQL) =>
+          rows(table === changeRequests && asksForThisRequest(predicate) ? [CR_ROW] : []),
+      }),
     }),
     insert: () => ({ values: () => ({ returning: async () => [{ id: 'merge-log-1' }] }) }),
     update: (table: unknown) => ({
@@ -100,8 +113,9 @@ describe('mergePr: the head the gate judged is the head that lands', () => {
     await runGit(dir, ['commit', '-m', `add ${file}`]);
     await runGit(dir, ['push', 'origin', branch]);
   };
-  const merge = (headSha: string) =>
-    service.mergePr(NUMBER, USER, headSha, [APPROVED], 'open', CR_ROW.title, BASE, 'ws-viewer');
+  /** Apply, with the head the caller read and the approvals given on that head. */
+  const merge = (headSha: string, approvedFiles: string[] = ['approved.md']) =>
+    service.mergePr(NUMBER, USER, headSha, approvedFiles.map(approvalOf), 'open', CR_ROW.title, BASE, 'ws-viewer');
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-gated-head-'));
@@ -174,7 +188,9 @@ describe('mergePr: the head the gate judged is the head that lands', () => {
     await commitAndPush(featureDir, 'second.md', FEATURE);
     await merge(first).catch(() => undefined);
 
-    await merge(await tipOf(FEATURE));
+    // The caller reads the request again: the later head, and an approval on
+    // that head for each of its two files.
+    await merge(await tipOf(FEATURE), ['approved.md', 'second.md']);
 
     expect(await filesOn(BASE)).toEqual(expect.arrayContaining(['approved.md', 'second.md']));
   });
