@@ -56,6 +56,37 @@ import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from '../access/index.js';
 import { creatorPrincipal, spliceGrant } from '../access-model/index.js';
 import { WorkspaceMutex } from '../kb-fs/index.js';
+import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
+
+/**
+ * Every commit this service makes goes through here, so each of them draws
+ * the same line between a commit that did not land and one that did.
+ * `commit` failing means nothing landed: `undo` puts the disk back,
+ * best-effort (the commit's own error is the one the caller needs), and the
+ * error goes up. `PushNeedsAgentResolutionError` is the one failure that is
+ * NOT a failed commit: the commit landed locally and only its push did not.
+ * Undoing then would leave the tree disagreeing with a real commit and break
+ * the push recovery, so the tree is left as committed, `landed` runs as on
+ * success, and the error goes up for the recovery flow (as
+ * `PluginRenameService` does).
+ */
+async function commitOrUndo(
+  commit: () => Promise<void>,
+  undo: () => Promise<void>,
+  landed: () => Promise<void> | void,
+): Promise<void> {
+  try {
+    await commit();
+  } catch (err) {
+    if (err instanceof PushNeedsAgentResolutionError) {
+      await landed();
+      throw err;
+    }
+    await undo().catch(() => {});
+    throw err;
+  }
+  await landed();
+}
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
 export interface ProvisionCommitDriver {
@@ -352,14 +383,18 @@ export class PluginProvisionService {
    * label (or its identifier): what the ensure writes when no name is asked
    * for, and what the startup backfill wrote into older manifests. Reads,
    * never creates: a person with no personal folder yet has no name either.
+   * Reads in the ensure's slug lock, so it never sees a name `my_plugin`
+   * has written but not yet committed.
    */
   async personalPluginName(user: AuthUser): Promise<string | null> {
     const folder = personalPluginFolderName(user.id);
-    const existing = await this.existingFolder(folder);
-    if (existing === null) return null;
-    const shown = (await this.persistedNames(existing, folder)).displayName;
-    const unnamed = [folder, pluginManifestName(folder)].some((label) => label.toLowerCase() === shown.toLowerCase());
-    return unnamed ? null : shown;
+    return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
+      const existing = await this.existingFolder(folder);
+      if (existing === null) return null;
+      const shown = (await this.persistedNames(existing, folder)).displayName;
+      const unnamed = [folder, pluginManifestName(folder)].some((label) => label.toLowerCase() === shown.toLowerCase());
+      return unnamed ? null : shown;
+    });
   }
 
   /**
@@ -370,7 +405,8 @@ export class PluginProvisionService {
    * but is not a JSON object is refused rather than replaced: overwriting it
    * would destroy whatever its owner wrote. A commit that does not land puts
    * the file back as it was, so the next call does not read an uncommitted
-   * name as stored.
+   * name as stored; one that landed but could not be pushed keeps it (see
+   * {@link commitOrUndo}).
    */
   private async namePersonalPlugin(user: AuthUser, folder: string, displayName: string): Promise<void> {
     const wsId = await this.readyWorkspaceId();
@@ -393,17 +429,11 @@ export class PluginProvisionService {
       ? renderPluginManifest(folder, displayName)
       : `${JSON.stringify({ ...manifest, displayName }, null, 2)}\n`;
     await this.workspaceService.writeFile(wsId, rel, next);
-    try {
-      await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, rel, user, {
-        summary: 'Name personal plugin',
-      });
-    } catch (err) {
-      // Best-effort, as `provision`'s rollback is: the commit's own error is
-      // the one the caller needs, never a failure to restore.
-      await (before === null ? fs.rm(abs, { force: true }) : fs.writeFile(abs, before, 'utf-8')).catch(() => {});
-      throw err;
-    }
-    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+    await commitOrUndo(
+      () => this.commits.runPendingCommit(wsId, this.kb.defaultBranch, rel, user, { summary: 'Name personal plugin' }),
+      () => (before === null ? fs.rm(abs, { force: true }) : fs.writeFile(abs, before, 'utf-8')),
+      () => this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch }),
+    );
   }
 
   /**
@@ -484,7 +514,7 @@ export class PluginProvisionService {
       // the filesystem's component limit parks as well as a short one.
       const parkedDir = path.join(path.dirname(folderDir), `.deleting-${randomUUID()}`);
       await fs.rename(folderDir, parkedDir);
-      try {
+      await commitOrUndo(
         // Inline and `systemAuthorized`, for `provision`'s reasons in
         // reverse: the gate reads rules at HEAD, and the endpoint has
         // already authorized the delete (owner verdict), so the per-user
@@ -492,28 +522,26 @@ export class PluginProvisionService {
         // removes — is skipped for exactly this commit. `commitFile` is
         // path-scoped (`git add -- <path>`), and a folder path stages every
         // deletion under it: one commit, one removed plugin.
-        await this.commits.runPendingCommit(
-          wsId,
-          this.kb.defaultBranch,
-          `${this.kbDirName}/${this.pluginsRoot}/${name}`,
-          user,
-          { systemAuthorized: true },
-        );
-      } catch (err) {
+        () =>
+          this.commits.runPendingCommit(
+            wsId,
+            this.kb.defaultBranch,
+            `${this.kbDirName}/${this.pluginsRoot}/${name}`,
+            user,
+            { systemAuthorized: true },
+          ),
         // The commit did not land: put the folder back, so a failed delete
         // is a no-op rather than a plugin that exists at origin but not here.
-        try {
-          await fs.rename(parkedDir, folderDir);
-        } catch {
-          /* the park survives for the next attempt — better than masking the real error */
-        }
-        throw err;
-      }
-      await fs.rm(parkedDir, { recursive: true, force: true }).catch(() => {});
-      // The folder's rules left the access model — drop the resolver cache
-      // so the very next check runs against a tree without them.
-      this.accessControl.invalidate(wsId);
-      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+        // A rename that fails leaves the park for the next attempt.
+        () => fs.rename(parkedDir, folderDir),
+        async () => {
+          await fs.rm(parkedDir, { recursive: true, force: true }).catch(() => {});
+          // The folder's rules left the access model — drop the resolver cache
+          // so the very next check runs against a tree without them.
+          this.accessControl.invalidate(wsId);
+          this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+        },
+      );
     });
   }
 
@@ -638,7 +666,7 @@ export class PluginProvisionService {
       }
       throw err;
     }
-    try {
+    const seedAndCommit = async (): Promise<void> => {
       // The manifest is what makes the folder a PLUGIN to anything outside
       // this app, so it lands in the same commit as the access rules — and
       // INSIDE the rollback scope: a manifest write that fails must clean up
@@ -666,27 +694,29 @@ export class PluginProvisionService {
       await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, folderPath, user, {
         systemAuthorized: true,
       });
-    } catch (err) {
+    };
+    await commitOrUndo(
+      seedAndCommit,
       // The commit did not land: roll the seeded file back off the disk,
       // best-effort, so a retry doesn't find a half-made plugin and report
       // "already exists" for something that never got committed. Only OUR
       // file and — when that leaves it empty — the folder; never recursive,
-      // so a concurrent writer's bytes can't be collateral.
-      try {
+      // so a concurrent writer's bytes can't be collateral. A removal that
+      // fails is left for the next attempt's wx conflict.
+      async () => {
         const wsDir = await this.workspaceService.getWorkspacePath(wsId);
         const folderDir = path.join(wsDir, this.kbDirName, this.pluginsRoot, folder);
         await fs.rm(path.join(folderDir, 'access.md'), { force: true });
         await fs.rm(path.join(folderDir, PLUGIN_MANIFEST_FILE), { force: true });
         await fs.rmdir(folderDir).catch(() => {});
-      } catch {
-        /* leave it for the next attempt's wx conflict — better than masking the real error */
-      }
-      throw err;
-    }
-    // The folder's rules changed the access model — drop the resolver cache
-    // so the very next check (the creator's first skill write) sees them.
-    this.accessControl.invalidate(wsId);
-    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+      },
+      () => {
+        // The folder's rules changed the access model — drop the resolver cache
+        // so the very next check (the creator's first skill write) sees them.
+        this.accessControl.invalidate(wsId);
+        this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+      },
+    );
   }
 
   private async readyWorkspaceId(): Promise<string> {
