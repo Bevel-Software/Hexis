@@ -371,7 +371,7 @@ describe('/api/plugins routes', () => {
     expect(await res.json()).toEqual({ error: 'Plugin discovery is incomplete' });
   });
 
-  it('create, name and delete answer a push-only failure as saved locally (409 and its kind), never a 500', async () => {
+  it('create, personal plugin (with its name) and delete answer a push-only failure as saved locally (409 and its kind), never a 500', async () => {
     const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
     server = h.server;
     const pushOnly = () => new PushNeedsAgentResolutionError(DEFAULT_BRANCH, 'knowledge-base/Plugins/X', 'rejected', '(not attempted)', 'refused');
