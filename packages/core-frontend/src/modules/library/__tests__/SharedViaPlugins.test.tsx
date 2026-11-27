@@ -50,6 +50,7 @@ function lib(items: LibraryItem[]): LibraryContextValue {
     teams: [],
     teamsLoading: false,
     teamsError: null,
+    personalName: null,
     reloadPlugins: vi.fn(),
   };
 }

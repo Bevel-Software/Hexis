@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { useState, type ReactNode } from 'react';
 import {
@@ -41,6 +42,9 @@ vi.mock('../services/plugins.api', () => ({
 
 const teamsMock = vi.hoisted(() => ({ listTeams: vi.fn() }));
 vi.mock('../services/teams.api', () => ({ listTeams: teamsMock.listTeams }));
+
+const personalMock = vi.hoisted(() => ({ getPersonalPluginName: vi.fn() }));
+vi.mock('../services/personal-plugin.api', () => ({ getPersonalPluginName: personalMock.getPersonalPluginName }));
 // The sidebar's change-request dock pulls in git wiring these routes do not exercise.
 vi.mock('../../git/components/PullRequestsForMe', () => ({ PullRequestsForMe: () => null }));
 
@@ -190,6 +194,39 @@ describe('LibraryRoutes', () => {
     teamsMock.listTeams.mockResolvedValue(TEAMS);
     toolPageMock.useToolPage.mockReturnValue(TOOL_PAGE_STATE);
     pluginsMock.listJoinRequests.mockResolvedValue([]);
+    // No name given: the app's own default, which every test below expects.
+    personalMock.getPersonalPluginName.mockResolvedValue(null);
+  });
+
+  /**
+   * The name its owner gave the personal plugin — `my_plugin`'s `name`, or a
+   * `displayName` written into its manifest later, which the server reads
+   * back the same way — is what the card and the page call it.
+   */
+  it("the personal plugin's card and page show the name its owner gave it", async () => {
+    personalMock.getPersonalPluginName.mockResolvedValue("QA User's Toolkit");
+    const gallery = renderAt('/skills-and-tools');
+    expect(await within(main()).findByRole('button', { name: /^QA User's Toolkit/ })).toBeInTheDocument();
+    expect(within(main()).queryByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeNull();
+    gallery.unmount();
+
+    renderAt('/skills-and-tools/yours');
+    expect(await screen.findByRole('heading', { name: "QA User's Toolkit", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: TEST_PERSONAL_GROUP, level: 1 })).toBeNull();
+  });
+
+  it('a name set later is what the page shows once the Library reloads', async () => {
+    // Nothing named yet when the page opens.
+    renderAt('/skills-and-tools/yours');
+    expect(await screen.findByRole('heading', { name: TEST_PERSONAL_GROUP, level: 1 })).toBeInTheDocument();
+
+    // The name is set afterwards (in the manifest); the Library's next reload
+    // — any of them, here the one a saved credential sends — learns it.
+    personalMock.getPersonalPluginName.mockResolvedValue('Razvan Tools');
+    act(() => {
+      window.dispatchEvent(new Event(TOOL_CREDENTIALS_STALE_EVENT));
+    });
+    expect(await screen.findByRole('heading', { name: 'Razvan Tools', level: 1 })).toBeInTheDocument();
   });
 
   it('opens on Everything at /skills-and-tools — plugins as rows above the cards', async () => {

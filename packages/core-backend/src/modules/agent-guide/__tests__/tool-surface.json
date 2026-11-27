@@ -346,7 +346,9 @@
       "MCP",
       "in-app agent"
     ],
-    "arguments": []
+    "arguments": [
+      "body.name"
+    ]
   },
   "open_change_request": {
     "servedTo": [

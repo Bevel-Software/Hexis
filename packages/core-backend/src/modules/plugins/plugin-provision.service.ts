@@ -395,7 +395,7 @@ export class PluginProvisionService {
     await this.workspaceService.writeFile(wsId, rel, next);
     try {
       await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, rel, user, {
-        summary: `Name personal plugin "${displayName}"`,
+        summary: 'Name personal plugin',
       });
     } catch (err) {
       // Best-effort, as `provision`'s rollback is: the commit's own error is

@@ -149,19 +149,22 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
     );
   });
 
-  /** Only the description changed: the call an agent makes is the call it made. */
-  it('keeps its endpoint, inputs, outputs and tags exactly as they were', () => {
+  /** The call an agent made still works: one optional input, the same endpoint, outputs and tags. */
+  it('keeps its endpoint, outputs and tags, and takes only an optional name', () => {
     const def = myPluginDef(DEFAULT_KB_LAYOUT);
     expect((def.tool_call_template as { url: string; http_method: string }).url).toBe('${API_URL}/api/plugins/personal');
     expect((def.tool_call_template as { http_method: string }).http_method).toBe('POST');
-    // The flat inputs are wrapped under `body` by `toolDef`; `my_plugin` takes
-    // none, so the envelope is optional too and `my_plugin({})` is a call
-    // that matches (see `bodyEnvelope`).
-    expect(def.inputs).toEqual({
-      type: 'object',
-      properties: { body: { type: 'object', properties: {}, additionalProperties: false } },
-      additionalProperties: false,
-    });
+    // The flat inputs are wrapped under `body` by `toolDef`; `my_plugin`'s one
+    // input is optional, so the envelope is optional too and `my_plugin({})`
+    // is still a call that matches (see `bodyEnvelope`).
+    const inputs = def.inputs as {
+      required?: string[];
+      properties: { body: { required?: string[]; additionalProperties: boolean; properties: Record<string, unknown> } };
+    };
+    expect(inputs.required ?? []).toEqual([]);
+    expect(inputs.properties.body.required ?? []).toEqual([]);
+    expect(inputs.properties.body.additionalProperties).toBe(false);
+    expect(Object.keys(inputs.properties.body.properties)).toEqual(['name']);
     expect(Object.keys((def.outputs as { properties: Record<string, unknown> }).properties)).toEqual([
       'path',
       'skillsDir',
@@ -276,7 +279,8 @@ describe('the creation endpoints behind the key-or-session gate', () => {
     const res = await post(base, '/api/plugins/personal', {}, 'bevel_alice');
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ path: 'Plugins/personal-user-alice', skillsDir: 'Plugins/personal-user-alice/skills' });
-    expect(ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ id: ALICE.id }));
+    // No `name` sent: the service keeps whatever name the plugin has.
+    expect(ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ id: ALICE.id }), undefined);
   });
 
   it("refuses a bad key and a bad session alike, and passes the service's refusal through with its status", async () => {

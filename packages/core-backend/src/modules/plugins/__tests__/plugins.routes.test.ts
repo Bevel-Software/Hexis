@@ -207,7 +207,8 @@ async function makeHarness(opts: HarnessOpts = {}) {
   // here only need to prove what they hand it and when they refuse to.
   const provision = {
     createPlugin: vi.fn(async () => ({ folder: 'GTM', created: true })),
-    ensurePersonalPlugin: vi.fn(async () => ({ folder: 'personal-u-1', created: false })),
+    ensurePersonalPlugin: vi.fn<(...args: unknown[]) => Promise<{ folder: string; created: boolean }>>(async () => ({ folder: 'personal-u-1', created: false })),
+    personalPluginName: vi.fn<(...args: unknown[]) => Promise<string | null>>(async () => 'Razvan Tools'),
     deletePlugin: vi.fn(async () => undefined),
   };
 
@@ -309,12 +310,51 @@ describe('/api/plugins routes', () => {
     const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ folder: 'personal-u-1', created: false });
-    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }));
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }), undefined);
 
     const anon = await makeHarness({ email: null });
     try {
       expect((await fetch(`${anon.baseUrl}/api/plugins/personal`, { method: 'POST' })).status).toBe(401);
       expect(anon.provision.ensurePersonalPlugin).not.toHaveBeenCalled();
+    } finally {
+      await close(anon.server);
+    }
+  });
+
+  it('POST /plugins/personal hands the service the name its owner gave; a name that is not a string is a 400', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const post = (body: unknown) =>
+      fetch(`${h.baseUrl}/api/plugins/personal`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    expect((await post({ name: 'Razvan Tools' })).status).toBe(200);
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenLastCalledWith(expect.objectContaining({ email: ALI }), 'Razvan Tools');
+    expect((await post({ name: 7 })).status).toBe(400);
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledTimes(1);
+  });
+
+  it("GET /plugins/personal answers the caller's given name, reading only; no caller, no answer", async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ name: 'Razvan Tools' });
+    expect(h.provision.personalPluginName).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }));
+    expect(h.provision.ensurePersonalPlugin).not.toHaveBeenCalled();
+
+    h.provision.personalPluginName.mockResolvedValueOnce(null);
+    expect(await (await fetch(`${h.baseUrl}/api/plugins/personal`)).json()).toEqual({ name: null });
+
+    h.provision.personalPluginName.mockRejectedValueOnce(new Error('disk gone'));
+    expect((await fetch(`${h.baseUrl}/api/plugins/personal`)).status).toBe(500);
+
+    const anon = await makeHarness({ email: null });
+    try {
+      expect((await fetch(`${anon.baseUrl}/api/plugins/personal`)).status).toBe(401);
+      expect(anon.provision.personalPluginName).not.toHaveBeenCalled();
     } finally {
       await close(anon.server);
     }
