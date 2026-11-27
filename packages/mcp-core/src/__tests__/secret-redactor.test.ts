@@ -77,9 +77,12 @@ describe('SecretRedactor', () => {
     // A guess at a head of the key, echoed back: right and wrong read the same.
     expect(redactor.redact("Project 'sk-live-Q7xZ' not found", ['sk-live-Q7xZ'])).toBe("Project '[redacted]' not found");
     expect(redactor.redact("Project 'sk-live-Q7xA' not found", ['sk-live-Q7xA'])).toBe("Project '[redacted]' not found");
-    // The server quoting the key itself: the same with or without the right candidate among the caller's strings.
+    // The server quoting the key itself: the same with or without the right candidate among the caller's strings
+    // (when the caller's text was exempt, the right candidate printed the key).
     expect(redactor.redact('key a9B2 refused', ['a9B2', 'zzzz'])).toBe('key [redacted] refused');
     expect(redactor.redact('key a9B2 refused', ['a9B3', 'zzzz'])).toBe('key [redacted] refused');
+    // Text the caller sent that no secret is in is taken out all the same.
+    expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named '[redacted]'");
     // Shorter than four characters, the caller's text is left to the other rules.
     expect(redactor.redact('field id is wrong', ['id'])).toBe('field id is wrong');
   });
