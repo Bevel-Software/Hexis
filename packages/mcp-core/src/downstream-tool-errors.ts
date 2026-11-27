@@ -137,7 +137,9 @@ type ResultProcessor = {
  * `Error` with its name, code and cause. Text the caller sent in the
  * call's arguments, keys and numbers included, is taken out wherever it is
  * quoted back, so the answer does not depend on whether it matched a secret
- * (`SecretRedactor.redact`). Streaming goes through `callTool` in
+ * (`SecretRedactor.redact`); the names and values the tool's own input
+ * schema declares are its public vocabulary, not the caller's text, so a
+ * validation error keeps the field it names. Streaming goes through `callTool` in
  * this protocol, so the same wrap covers it.
  */
 export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
@@ -159,7 +161,8 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
         return await call.call(this, caller, toolName, args, template);
       } catch (err) {
         const redactor = callRedactor(manualSecrets(caller, utcpManualName(String(template.name ?? ''))), template);
-        const sent = stringsIn(args);
+        const vocabulary = await schemaWordsOf(caller, toolName);
+        const sent = stringsIn(args).filter((text) => !vocabulary.has(text));
         const redact = (text: string) => redactor.redact(text, sent);
         if (err instanceof DownstreamToolError) throw err.redactedWith(redact);
         if (err instanceof Error) throw redactedInPlace(err, redact);
@@ -187,6 +190,32 @@ function redactedInPlace(err: Error, redact: (text: string) => string): Error {
     replacement.name = err.name;
     return replacement;
   }
+}
+
+/**
+ * The property names and the `enum` and `const` strings `toolName`'s input
+ * schema declares, at any depth; empty when the tool cannot be read.
+ */
+async function schemaWordsOf(caller: unknown, toolName: string): Promise<Set<string>> {
+  const words = new Set<string>();
+  type Repository = { getTool(name: string): Promise<{ inputs?: unknown } | undefined> };
+  const repository = (caller as { config?: { tool_repository?: Repository } } | undefined)?.config?.tool_repository;
+  const schema = await repository?.getTool(toolName).then((tool) => tool?.inputs, () => undefined);
+  const pending: unknown[] = [schema];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!node || typeof node !== 'object' || seen.has(node)) continue;
+    seen.add(node);
+    const { properties, enum: choices, const: only } = node as { properties?: unknown; enum?: unknown; const?: unknown };
+    if (properties && typeof properties === 'object' && !Array.isArray(properties)) {
+      for (const name of Object.keys(properties)) words.add(name);
+    }
+    if (Array.isArray(choices)) for (const choice of choices) if (typeof choice === 'string') words.add(choice);
+    if (typeof only === 'string') words.add(only);
+    for (const child of Array.isArray(node) ? node : Object.values(node)) pending.push(child);
+  }
+  return words;
 }
 
 /**

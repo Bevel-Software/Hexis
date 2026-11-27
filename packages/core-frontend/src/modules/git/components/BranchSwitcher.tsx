@@ -516,7 +516,8 @@ export function BranchSwitcher() {
               //      auto-deletes the head). Pure local tidy-up, anyone can
               //      do it because there's nothing left on origin to push
               //      the delete to.
-              //   2. Authored draft — branch matches `<my-localpart>/...`.
+              //   2. Authored draft — branch matches `<my-localpart>/...`, or
+              //      their own `suggestions/<who>-<id8>/...` prefix.
               //      The current user owns it; delete pushes the remote
               //      ref away too so the discard is total. Confirm dialog
               //      lives in doDelete because this is destructive for

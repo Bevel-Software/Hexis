@@ -18,6 +18,12 @@ const MIN_SECRET_CHARS = 6;
 const MIN_ECHOED_PREFIX_CHARS = 8;
 /** The shortest string the caller sent that is taken out where it is quoted back — see {@link SecretRedactor}. */
 const MIN_CALLER_CHARS = 4;
+/**
+ * How many characters `redact` compares at most. A caller can send a long run
+ * of one character for a server to echo, and every start in it would be
+ * followed to its end; past this, none of the text is quoted.
+ */
+const MAX_COMPARED_CHARS = 1_000_000;
 const REDACTED = '[redacted]';
 
 /**
@@ -52,8 +58,9 @@ const REDACTED = '[redacted]';
  *
  * Text the CALLER sent ({@link redact}'s `callerText`) is taken out too,
  * wherever the quote repeats it or a leading part of it (four characters or
- * more, as a server that shortens what it quotes leaves it), as sent or in
- * one of the spellings above, whether or not a secret is in it. Otherwise the
+ * more, where the quote stops, as a server that shortens what it quotes
+ * leaves it, not inside a longer word that merely starts the same way), as
+ * sent or in one of the spellings above, whether or not a secret is in it. Otherwise the
  * quote would answer the caller's guesses: a guess at a key echoed back, or a
  * list of candidates sent alongside a server that quotes the key itself,
  * would come back `[redacted]` or as sent depending on whether it was right.
@@ -96,15 +103,24 @@ export class SecretRedactor {
   redact(text: string, callerText: readonly string[] = []): string {
     const hidden = new Uint8Array(text.length);
     const hide = (start: number, end: number) => hidden.fill(1, start, end);
+    let budget = MAX_COMPARED_CHARS;
+    /** Where the run of `needle` that starts at `at`, `matched` characters known, stops matching `text`. */
+    const runEnd = (at: number, needle: string, matched: number): number => {
+      let end = at + matched;
+      while (end - at < needle.length && text[end] === needle[end - at]) end++;
+      budget -= end - at - matched + 1;
+      return end;
+    };
     for (const sent of callerText) {
       for (const spelling of spellings(sent)) {
         if (spelling.length < MIN_CALLER_CHARS) continue;
         // Each run that starts with its first characters, as far as it goes
-        // on matching: a repeat of it, or of the part a server kept.
+        // on matching: a repeat of it anywhere, or the part a server kept
+        // where the quote stops (followed by no letter or digit).
         for (const at of occurrences(text, spelling.slice(0, MIN_CALLER_CHARS))) {
-          let end = at + MIN_CALLER_CHARS;
-          while (end - at < spelling.length && text[end] === spelling[end - at]) end++;
-          hide(at, end);
+          const end = runEnd(at, spelling, MIN_CALLER_CHARS);
+          if (end - at === spelling.length || !/[\p{L}\p{N}]/u.test(text[end] ?? '')) hide(at, end);
+          if (budget < 0) return REDACTED;
         }
       }
     }
@@ -117,9 +133,8 @@ export class SecretRedactor {
       // its first characters, taken as far as it goes on matching.
       const head = secret.length > MIN_ECHOED_PREFIX_CHARS ? secret.slice(0, MIN_ECHOED_PREFIX_CHARS) : secret;
       for (const at of occurrences(text, head)) {
-        let end = at + head.length;
-        while (end - at < secret.length && text[end] === secret[end - at]) end++;
-        hide(at, end);
+        hide(at, runEnd(at, secret, head.length));
+        if (budget < 0) return REDACTED;
       }
     }
     let out = '';

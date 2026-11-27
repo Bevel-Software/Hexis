@@ -88,10 +88,18 @@ describe('SecretRedactor', () => {
     expect(redactor.redact("Project 'sk-live-Q7xA-and-…' not found", ['sk-live-Q7xA-and-some-padding'])).toBe(
       "Project '[redacted]…' not found",
     );
+    // A word that only starts like the caller's text is not a shortened quote of it.
+    expect(redactor.redact('Invalid property', ['properties'])).toBe('Invalid property');
     // Text the caller sent that no secret is in is taken out all the same.
     expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named '[redacted]'");
     // Shorter than four characters, the caller's text is left to the other rules.
     expect(redactor.redact('field id is wrong', ['id'])).toBe('field id is wrong');
+  });
+
+  it('quotes nothing of a text whose matching would run past its bound', () => {
+    const redactor = new SecretRedactor();
+    const run = 'a'.repeat(20_000);
+    expect(redactor.redact(`bad value ${run}`, [run])).toBe('[redacted]');
   });
 
   it('never matches a value inside a marker it has already put in', () => {

@@ -384,6 +384,23 @@ describe('a downstream isError over a real MCP connection', () => {
     expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: "Project '[redacted]' not found" }]);
   });
 
+  it("keeps the field names the tool's own schema declares, and takes out the caller's value", async () => {
+    installDownstreamToolErrors();
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const { client } = await registerWithToken('schema', server.url, 'sk-live-1234567890abcdef');
+    server.reportToolErrors('text: {text} is not a page');
+
+    const result = await dispatchToolCall(
+      client,
+      { ...echo, utcpName: 'schema.srv.echo', mcpName: 'schema_srv_echo', manualName: 'schema' },
+      { text: 'Quarterly plan' },
+    );
+
+    // `text` is the echo tool's declared property: an agent needs it to fix the call.
+    expect(result.content).toEqual([{ type: 'text', text: 'text: [redacted] is not a page' }]);
+  });
+
   it('refuses a value every call would read as another variable, naming the variable and not the value', async () => {
     const server = await startFakeMcpServer('notion');
     cleanups.push(() => server.stop());
