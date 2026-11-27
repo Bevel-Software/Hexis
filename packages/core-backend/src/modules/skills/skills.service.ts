@@ -11,6 +11,7 @@ import type { IAccessControl } from '../access/index.js';
 import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/frontmatter-id.js';
 import type { IgnoreRules, ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
+import { isInPersonalPluginDir } from '@bevel-software/platform-shared';
 import type {
   GetSkillOptions,
   ISkillService,
@@ -166,7 +167,11 @@ export class SkillService implements ISkillService {
       // being written on a branch the caller cannot read there is one they
       // must not learn exists either, and the listing already hides it — a
       // load that answered `forbidden` would confirm it by the back door.
-      return { ok: false, error: branch === undefined ? 'forbidden' : 'not_found' };
+      //
+      // In someone's personal shelf, on any branch: the same. A private skill
+      // is nobody else's to know about, so its name is not in their catalog.
+      const hidden = branch !== undefined || isInPersonalPluginDir(found.summary.path, this.kb.layout);
+      return { ok: false, error: hidden ? 'not_found' : 'forbidden' };
     }
 
     const result = await this.serve(catalog, found, name, file, options.version);

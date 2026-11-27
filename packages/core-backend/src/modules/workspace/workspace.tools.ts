@@ -46,6 +46,7 @@ import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
   folderPlaceholderPath,
   isFolderPlaceholder,
+  isInPersonalPluginDir,
   isPlatformFile,
   isPlatformFolder,
   platformFileCreationRefusal,
@@ -151,33 +152,34 @@ async function assertCanRead(gate: ReadGate, wsPath: string): Promise<void> {
 }
 
 /**
- * Drop the file entries the caller may not read from a directory listing.
- * Directory entries and non-KB files are always kept (a directory itself has
- * no `read:` verdict; its restricted children are filtered when read/listed) —
- * this is the AGENT's inclusion policy and differs from the explorer tree,
+ * Drop the entries the caller may not read from a directory listing: every
+ * file, and every folder that is a personal shelf or lies inside one
+ * (`isInPersonalPluginDir`), where what a person may not read does not exist
+ * for them. Other directory entries and non-KB files are always kept (such a
+ * directory is listed; its restricted children are filtered when read/listed)
+ * — this is the AGENT's inclusion policy and differs from the explorer tree,
  * which hides restricted directories outright. Uses the FULL `canReadBatch`
  * (per-node frontmatter honoured), via the shared `resolveReadableMap`. One
  * batched ACL load per directory.
  */
 async function filterReadableEntries(
   gate: ReadGate,
+  isShelfPath: (wsPath: string) => boolean,
   dir: string,
   entries: DirEntry[],
 ): Promise<DirEntry[]> {
-  const fileWsPaths: string[] = [];
-  for (const e of entries) {
-    if (e.type === 'directory') continue;
-    fileWsPaths.push(dir ? `${dir}/${e.name}` : e.name);
-  }
-  if (fileWsPaths.length === 0) return entries;
-  const readable = await readableFiles(gate, fileWsPaths);
-  return entries.filter((e) => e.type === 'directory' || readable.has(dir ? `${dir}/${e.name}` : e.name));
+  const wsPathOf = (e: DirEntry): string => (dir ? `${dir}/${e.name}` : e.name);
+  const judged = new Set(entries.filter((e) => e.type !== 'directory' || isShelfPath(wsPathOf(e))).map(wsPathOf));
+  if (judged.size === 0) return entries;
+  const readable = await readableFiles(gate, [...judged]);
+  return entries.filter((e) => !judged.has(wsPathOf(e)) || readable.has(wsPathOf(e)));
 }
 
 /**
- * The FILES among `wsPaths` the caller may read, judged in one batched ACL
- * load by the FULL `canReadBatch` (per-node frontmatter honoured), via the
- * shared `resolveReadableMap`. A path the verdict does not name is unreadable.
+ * The paths among `wsPaths` the caller may read, judged in one batched ACL
+ * load by the FULL `canReadBatch` (per-node frontmatter honoured; a folder is
+ * judged by its own `access.md` and those above it), via the shared
+ * `resolveReadableMap`. A path the verdict does not name is unreadable.
  */
 async function readableFiles(gate: ReadGate, wsPaths: string[]): Promise<Set<string>> {
   if (wsPaths.length === 0) return new Set();
@@ -1375,6 +1377,12 @@ export function registerWorkspaceTools(
     userEmail: ctx.user.email,
   });
 
+  /** Whether a workspace path is a personal shelf or lies inside one (see `isInPersonalPluginDir`). */
+  const isShelfPath = (wsPath: string): boolean => {
+    const rel = toKbRelative(wsPath, kbDirName);
+    return rel !== null && isInPersonalPluginDir(rel, kb.layout);
+  };
+
   /** A repo-relative path in the workspace-relative form every tool speaks. */
   const toWs = (rel: string): string => (rel ? `${kbDirName}/${rel}` : kbDirName);
 
@@ -1825,11 +1833,18 @@ export function registerWorkspaceTools(
    * On a case-sensitive disk an existing path comes back unchanged; on a
    * case-insensitive one `knowledge-base/skills` comes back as the
    * `knowledge-base/Skills` it opens, so the platform checks see the real item.
+   * `beforeEntering`, when given, is awaited with each folder (on-disk
+   * spelling) before that folder is read, and may throw to stop the walk.
    */
-  const onDiskSpelling = async (root: string, path: string): Promise<string> => {
+  const onDiskSpelling = async (
+    root: string,
+    path: string,
+    beforeEntering?: (dir: string) => Promise<void>,
+  ): Promise<string> => {
     const segments = path.replace(/^\.?\/+/, '').replace(/\/+$/, '').split('/').filter(Boolean);
     const out: string[] = [];
     for (const segment of segments) {
+      await beforeEntering?.(out.join('/'));
       let names: string[];
       try {
         names = await nodeFs.readdir(join(root, ...out));
@@ -2684,15 +2699,29 @@ export function registerWorkspaceTools(
       const dir = (a.path as string) || '';
       await notifyAgentRead(agentAccessGate, ctx, a.branch as string, dir);
       const fs = await ctx.getFilesystem(a.branch as string);
+      const gate = readGateFor(a.branch as string, ctx);
+      // Inside a personal shelf, a folder the caller may not read is not
+      // there: the same not_found a missing path gets. It is decided before
+      // that folder, or any shelf folder on the way to it, is listed, so no
+      // folder in the shelf is listed for a caller who may not read it. Judged on the on-disk
+      // spelling: on a case-insensitive disk `plugins/Personal-x` opens the
+      // shelf and must be judged as it.
+      const enter = async (folder: string): Promise<void> => {
+        if (isShelfPath(folder) && !(await readableFiles(gate, [folder])).has(folder)) throw notFound(dir, 'Nothing to list');
+      };
+      const onDisk = dir ? await onDiskSpelling(await workspaceRoot(a.branch as string, ctx), dir, enter) : dir;
+      await enter(onDisk);
       // A missing folder (ENOENT) and a file named as one (ENOTDIR) are both
       // the caller's path to correct: the one not_found answer, not a 500.
-      // No read gate stands in front: folders are never gated (a listing
-      // shows every subfolder), so the 404 tells nothing the parent's
-      // listing does not; only files are filtered, below.
+      // Outside personal shelves no read gate stands in front: such folders
+      // are never gated (a listing shows them), so the 404 tells nothing the
+      // parent's listing does not; files are filtered, below.
       const entries = withoutPlaceholder(
         (await orNotFound(dir, () => fs.readdir(dir || '.'), 'Nothing to list')) as DirEntry[],
       );
-      const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
+      // Judged on the on-disk spelling too, so an alternate-cased ancestor
+      // (`plugins/`) still sees the shelves under it as shelves.
+      const filtered = await filterReadableEntries(gate, isShelfPath, onDisk, entries);
       // One batch for the listing. A folder is judged at its own path, whose
       // rules (its `access.md` and those above it) are what a file added
       // directly inside it would get.
