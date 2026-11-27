@@ -2224,6 +2224,16 @@ export class VersionControlService implements IVersionControlService {
    * its catch arm so a thrown op (path traversal, validator 422,
    * permission denied) doesn't end up committing.
    */
+  /**
+   * Put `targetPath` back to what HEAD holds: a tracked file gets HEAD's
+   * bytes, an untracked one is removed. The rollback of an inline commit
+   * that failed: a commit that landed before its push failed IS HEAD, so its
+   * bytes stay; one that never landed leaves HEAD's.
+   */
+  async discardPath(workspaceId: string, targetPath: string): Promise<void> {
+    await this.git.discardPath(workspaceId, targetPath);
+  }
+
   async releaseLockNoCommit(
     workspaceId: string,
     branch: string,

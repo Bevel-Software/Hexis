@@ -2790,19 +2790,30 @@ export class AccessControlService implements IAccessControl {
     const target = platformRestoreDestination(destinationRelativePath, this.kb.layout);
     if (target === null) return false;
     const email = canonicalEmail(userEmail);
+    const destination =
+      target.kind === 'root' ? target.name : path.join(target.dir, 'access.md');
 
-    let admin: boolean;
+    let model: AccessModel | null;
     try {
-      admin = isAdminEmail(await this.loadModel(workspaceId), email);
+      model = await this.loadModel(workspaceId);
     } catch {
       // The repository this rescue exists for is exactly the one whose
       // `roles.yaml` may be the file that went missing, and `loadModel`
       // throws when it cannot be read. With no model to ask, the deployment
       // owner is the only admin left — and they are the person who sets
       // `ADMIN_EMAIL`, so admitting them concedes nothing they did not have.
-      admin = this.deploymentOwners.has(email);
+      model = null;
     }
-    if (!admin) return false;
+    if (!(model ? isAdminEmail(model, email) : this.deploymentOwners.has(email))) return false;
+
+    // The restore is a way past the write gate, never past the rule that only
+    // the owner's `my_plugin` brings a personal folder into being: a
+    // destination the gate refuses as an unprovisioned personal folder is
+    // refused here too. With no model to say which folders are provisioned,
+    // every personal folder is refused.
+    if (model ? writesUnprovisionedPersonalSpace(model, 'write', destination) : personalSpaceOf(destination, this.kb.layout.pluginsDir) !== null) {
+      return false;
+    }
 
     // A restore puts back what is MISSING, so the place it lands must be
     // empty. An `access.md` goes back only into a folder that has none —
@@ -2812,8 +2823,6 @@ export class AccessControlService implements IAccessControl {
     // the root: a move is a rename on disk, so landing `.bevelignore` on a
     // root that already has one would silently replace it, and the repository
     // was never missing that file to begin with.
-    const destination =
-      target.kind === 'root' ? target.name : path.join(target.dir, 'access.md');
     const repoDir = await this.repoDir(workspaceId);
     try {
       await fs.stat(path.join(repoDir, destination));

@@ -781,7 +781,9 @@ export interface IAccessControl {
    *
    * Narrow on purpose, and the narrowness lives here rather than in the
    * caller: false for any other path, for any other destination, for a
-   * destination spelled with `..`, and for anyone who is not an admin. It
+   * destination spelled with `..`, for a destination in a personal plugin
+   * folder its owner has not provisioned (the write gate's own refusal, which
+   * no restore gets past), and for anyone who is not an admin. It
    * grants no write anywhere else, and it is asked only about where a move
    * LANDS — never about what a move takes away, which is why a caller that
    * could take one away (the move route, the lock gate) also checks the

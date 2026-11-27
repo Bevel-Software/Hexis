@@ -145,6 +145,23 @@ describe('the seeded access templates, resolved', () => {
       for (const p of ORDINARY) expect(await svc.canWrite(workspaceId, 'admin@x.io', p), p).toBe(true);
     });
 
+    it('the platform-file restore is no way in either: a misplaced access.md is not put back into one', async () => {
+      const svc = await makeService({ 'roles.yaml': ROLES_YAML, 'access.md': ROOT_RULES, 'Plugins/personal-ali/skills/.gitkeep': '' });
+      for (const p of ['Plugins/personal-ali/access.md', 'Plugins/Personal-Ali/access.md', 'Plugins/personal-bo/access.md']) {
+        expect(await svc.canRestorePlatformFile(workspaceId, 'admin@x.io', p), p).toBe(false);
+      }
+      // The rescue itself is unchanged elsewhere.
+      expect(await svc.canRestorePlatformFile(workspaceId, 'admin@x.io', 'Plugins/GTM2/access.md')).toBe(true);
+    });
+
+    it('with no model to ask, the deployment owner restores into no personal folder at all', async () => {
+      // No roles.yaml: the model cannot load, and the deployment owner is the only admin left.
+      await makeService({ 'Plugins/personal-ali/skills/.gitkeep': '' });
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, path.join(root, workspaceId)), KB_DIR, realDisk(), ['boss@x.io']);
+      expect(await svc.canRestorePlatformFile(workspaceId, 'boss@x.io', 'Plugins/personal-ali/access.md')).toBe(false);
+      expect(await svc.canRestorePlatformFile(workspaceId, 'boss@x.io', 'roles.yaml')).toBe(true);
+    });
+
     it('the lock refuses it too: the verdict at HEAD, which every file write asks before it lands', async () => {
       await makeService({ 'roles.yaml': ROLES_YAML, 'access.md': ROOT_RULES });
       await commitAll();
@@ -172,6 +189,11 @@ describe('the seeded access templates, resolved', () => {
         'Plugins/personal-ali/access.md': '---\nread: [\n',
       });
       expect(await svc.canWrite(workspaceId, 'admin@x.io', 'Plugins/personal-ali/access.md')).toBe(true);
+    });
+
+    it('once provisioned, a restore into one of its subfolders is the write gate\'s ordinary admin rescue', async () => {
+      const svc = await makeService({ ...PERSONAL, 'access.md': ROOT_RULES });
+      expect(await svc.canRestorePlatformFile(workspaceId, 'admin@x.io', 'Plugins/personal-ali/skills/access.md')).toBe(true);
     });
   });
 });

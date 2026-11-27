@@ -78,7 +78,7 @@ async function makeHarness(
   await fs.writeFile(path.join(dir, KB, 'roles.yaml'), 'roles:\n  Admin:\n    - admin@example.com\n');
   const svc = new PluginProvisionService(
     workspaceService,
-    { runPendingCommit: vi.fn(async () => undefined) },
+    { runPendingCommit: vi.fn(async () => undefined), discardPath: vi.fn(async () => undefined) },
     realAccessControl(workspaceService, KB, realDisk()),
     testKbContext({ kbDirName: KB }),
     undefined,

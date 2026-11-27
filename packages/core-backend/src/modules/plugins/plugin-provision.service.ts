@@ -34,7 +34,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isAbsence, type IFsProbe } from '../../shared/fs.contract.js';
+import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { Discovery, PluginSource } from './discovery/plugin-source.js';
 
 import {
@@ -67,6 +67,11 @@ export interface ProvisionCommitDriver {
     /** `summary` overrides the path-derived commit subject — see `GitService.commitFile`. */
     opts?: { systemAuthorized?: boolean; summary?: string },
   ): Promise<void>;
+}
+
+/** How a failed inline commit is rolled back: the path put back to HEAD (`VersionControlService.discardPath`). */
+export interface ProvisionRollback {
+  discardPath(workspaceId: string, targetPath: string): Promise<void>;
 }
 
 /**
@@ -175,7 +180,7 @@ export class PluginProvisionService {
 
   constructor(
     private readonly workspaceService: WorkspaceService,
-    private readonly commits: ProvisionCommitDriver,
+    private readonly commits: ProvisionCommitDriver & ProvisionRollback,
     private readonly accessControl: IAccessControl,
     private readonly kb: KbContext,
     private readonly events: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void } | undefined,
@@ -555,22 +560,15 @@ export class PluginProvisionService {
    * folder gets, written and committed as a provision's are — inline and
    * `systemAuthorized`, because the rules being replaced may not let the
    * owner write them, and the caller is the owner by the folder's very name.
-   * A commit that does not land puts the old bytes back and throws.
+   * A failure puts the file back to HEAD and throws: a repair committed
+   * before its push failed is HEAD, so it stays, and goes out with the
+   * branch's next push; a repair that never committed leaves HEAD's rules,
+   * which the next `my_plugin` repairs again.
    */
   private async repairPersonalRules(user: AuthUser, folder: string): Promise<boolean> {
     const wsId = await this.readyWorkspaceId();
-    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    const repoRel = `${this.pluginsRoot}/${folder}/access.md`;
-    const abs = path.join(wsDir, this.kbDirName, this.pluginsRoot, folder, 'access.md');
     if (await this.isOwnersAlone(wsId, `${this.pluginsRoot}/${folder}`, user.email)) return false;
-    let current: string | null;
-    try {
-      current = await this.disk.readTextFile(abs);
-    } catch (err) {
-      if (!isAbsence(err)) throw err;
-      current = null;
-    }
-    const wsRel = `${this.kbDirName}/${repoRel}`;
+    const wsRel = `${this.kbDirName}/${this.pluginsRoot}/${folder}/access.md`;
     await this.workspaceService.writeFile(wsId, wsRel, personalAccessMd(user));
     try {
       await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, wsRel, user, {
@@ -578,12 +576,9 @@ export class PluginProvisionService {
         summary: `Make ${this.pluginsRoot}/${folder} private to its owner again`,
       });
     } catch (err) {
-      try {
-        if (current === null) await fs.rm(abs, { force: true });
-        else await fs.writeFile(abs, current, 'utf-8');
-      } catch {
+      await this.commits.discardPath(wsId, wsRel).catch(() => {
         /* the commit's own error is the one to report */
-      }
+      });
       throw err;
     }
     this.accessControl.invalidate(wsId);

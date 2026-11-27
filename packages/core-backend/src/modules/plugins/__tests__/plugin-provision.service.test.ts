@@ -16,6 +16,11 @@ import {
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
 import { realAccessControl } from '../../../__tests__/real-access.js';
+import { realGitService, realVersionControlHooks } from '../../../__tests__/real-version-control.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const exec = promisify(execFile);
 
 const KB = 'knowledge-base';
 const USER: AuthUser = { id: 'u1-abcd', email: 'ali@example.com', name: 'Ali Vega' } as AuthUser;
@@ -49,7 +54,12 @@ async function makeHarness() {
     ensureRemotesFetched: vi.fn(async () => undefined),
     writeFile,
   } as unknown as WorkspaceService;
-  const commits = { runPendingCommit: vi.fn(async () => undefined) };
+  const commits = {
+    runPendingCommit: vi.fn<(ws: string, branch: string, rel: string, user: AuthUser, opts?: { summary?: string }) => Promise<void>>(
+      async () => undefined,
+    ),
+    discardPath: vi.fn<(ws: string, rel: string) => Promise<void>>(async () => undefined),
+  };
   // The real resolver over the temp tree: whether a personal folder is its
   // owner's alone is what the rules resolve to, inherited ones included.
   await fs.mkdir(path.join(dir, KB), { recursive: true });
@@ -725,21 +735,65 @@ describe('PluginProvisionService.ensurePersonalPlugin on a folder somebody else 
     expect(h.commits.runPendingCommit).not.toHaveBeenCalled();
   });
 
+  /**
+   * Back the harness's commits with a REAL repository at the knowledge base:
+   * the seeded tree is committed, the rollback is the git layer's own
+   * `discardPath`, and the commit driver lands a real commit (`landsCommit`)
+   * or not before it fails as a refused push does.
+   */
+  async function overRealGit(h: Awaited<ReturnType<typeof makeHarness>>, landsCommit: boolean) {
+    const repo = path.join(h.dir, KB);
+    const git = async (...args: string[]) => (await exec('git', args, { cwd: repo })).stdout;
+    await git('init', '-q', '-b', DEFAULT_BRANCH);
+    await git('config', 'user.email', 'test@bevel.local');
+    await git('config', 'user.name', 'Test Runner');
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'seed');
+    const hooks = realVersionControlHooks();
+    hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
+    const service = realGitService(
+      { getWorkspacePath: async () => h.dir } as unknown as WorkspaceService,
+      hooks,
+      testKbContext({ kbDirName: KB }),
+    );
+    h.commits.runPendingCommit.mockImplementationOnce(async (ws, _branch, rel, user, opts) => {
+      if (landsCommit) await service.commitFile(ws, user, rel, opts?.summary);
+      throw new Error('push refused');
+    });
+    h.commits.discardPath.mockImplementation((ws, rel) => service.discardPath(ws, rel));
+    return { atHead: (rel: string) => git('show', `HEAD:Plugins/${folder}/${rel}`).catch(() => null), status: () => git('status', '--porcelain') };
+  }
+
   it('a repair whose commit does not land puts the old rules back and fails, so nothing claims a repair that did not happen', async () => {
     const h = await makeHarness();
     await seed(h.dir, { 'access.md': PRE_SEEDED });
-    h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
+    const repo = await overRealGit(h, false);
     await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
     expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(PRE_SEEDED);
+    expect(await repo.status()).toBe('');
     expect(h.accessControl.invalidate).not.toHaveBeenCalled();
   });
 
   it('a repair of missing rules whose commit does not land leaves no rules behind', async () => {
     const h = await makeHarness();
     await seed(h.dir, { 'skills/.gitkeep': '' });
-    h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
+    const repo = await overRealGit(h, false);
     await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
     await expect(fs.stat(rulesPath(h.dir))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await repo.status()).toBe('');
+  });
+
+  it('a repair committed before its push failed stays: the rules on disk are the ones at HEAD, never the old ones back', async () => {
+    for (const seeded of [{ 'access.md': PRE_SEEDED }, { 'skills/.gitkeep': '' }]) {
+      const h = await makeHarness();
+      await seed(h.dir, seeded);
+      const repo = await overRealGit(h, true);
+      await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
+      expect(await repo.atHead('access.md')).toBe(personalAccessMd(USER));
+      expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+      // Nothing uncommitted for a later commit of the path to carry back.
+      expect(await repo.status()).toBe('');
+    }
   });
 });
 
