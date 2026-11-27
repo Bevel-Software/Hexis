@@ -1022,6 +1022,65 @@ describe('LockingFilesystem.writeFiles — a batch longer than a lease', () => {
     expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', mine, USER);
   });
 
+  it('a creator seed whose write fails after its lock is lost is not put back to what it was', async () => {
+    const { versionControl, rows, acquire } = leasingVersionControl(0);
+    const mine = 'knowledge-base/KnowledgeBase/Mine/a.md';
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
+    const editorsBytes = '---\nread:\n  - Bob <bob@example.com>\n---\n';
+    let editorTookIt = false;
+    let begin: () => void = () => {};
+    const seeding = new Promise<void>((resolve) => (begin = resolve));
+    const original = LocalFilesystem.prototype.writeFile;
+    const spy = vi
+      .spyOn(LocalFilesystem.prototype, 'writeFile')
+      .mockImplementation(async function (this: unknown, p, c, o) {
+        if (p !== seedPath) return original.call(this as LocalFilesystem, p, c, o);
+        // While the seed write runs, its lease lapses, the person's own editor
+        // takes the path and saves its own rules there. Then the write dies.
+        rows.delete(seedPath);
+        vi.setSystemTime(Date.now() + 1_000);
+        editorTookIt = acquire(seedPath, USER).acquired;
+        await fs.writeFile(path.join(root, seedPath), editorsBytes);
+        begin();
+        // Long enough for a renewal to come round and find the other grant.
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
+        throw new Error('disk exploded mid-write');
+      });
+    const creatorAccess = {
+      planForCreate: vi.fn(async (_w: string, _u: AuthUser, p: string) =>
+        p === mine
+          ? { kind: 'seed-access-md', wsRelPath: seedPath, apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n' }
+          : null,
+      ),
+      noteAccessFileWritten: vi.fn(),
+    };
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
+    );
+    let err: unknown;
+    try {
+      const settled = fsLayer
+        .writeFiles([{ path: mine, content: 'A' }], 'batch')
+        .then(() => null, (e: unknown) => e);
+      await seeding;
+      await vi.advanceTimersByTimeAsync(30_000);
+      err = await settled;
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(editorTookIt).toBe(true);
+    // The batch is refused for the lock it lost, with nothing committed.
+    expect(err).toMatchObject({ path: seedPath });
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    // The seed was not there before the batch, so putting it back would have
+    // removed the file. It holds what the editor saved, under the editor's lock.
+    expect(await fs.readFile(path.join(root, seedPath), 'utf-8')).toBe(editorsBytes);
+    expect(releasesOf(versionControl, seedPath)).toEqual([]);
+    expect(rows.get(seedPath)?.holder).toBe(USER);
+  });
+
   it('a lock lost while the batch writes refuses it before the commit: nothing committed, the lost path neither rolled back nor released', async () => {
     const { versionControl, rows, acquire } = leasingVersionControl(0);
     const mine = 'knowledge-base/KnowledgeBase/Mine/a.md';

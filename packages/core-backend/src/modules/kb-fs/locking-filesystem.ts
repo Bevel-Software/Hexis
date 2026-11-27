@@ -1087,6 +1087,11 @@ export class LockingFilesystem extends GitGuardedFilesystem {
           // on this path are lost to the discard — accepted, because the
           // alternative is committing known-corrupt bytes under their name.
           log.warn(`creator access.md seed failed for "${p}":`, { err });
+          // Not when a renewal found this seed's lock taken while the write
+          // ran: the path is its new holder's now, and the pre-image (or the
+          // removal) would replace what they saved there. The same rule the
+          // rollback below keeps, and `releaseAll` keeps a lost lock too.
+          if (leases.lost(p)) continue;
           let restored = false;
           try {
             if (existedBefore) {
