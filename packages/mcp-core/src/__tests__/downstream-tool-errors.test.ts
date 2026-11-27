@@ -143,11 +143,11 @@ describe('every failure a wrapped protocol lets through', () => {
   it("takes out the caller's keys, numbers and escaped strings where the server quotes them, matched or not", async () => {
     const quoting = (text: string) => new DownstreamToolError(text, [{ type: 'text', text }]);
     const answer = async (failure: DownstreamToolError, args: unknown) => ((await failingWith(failure)(args)) as DownstreamToolError).message;
-    expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe("Unrecognized key '[redacted]'");
-    expect(await answer(quoting("Unrecognized key 'zz-none-9999'"), { 'zz-none-9999': 1 })).toBe("Unrecognized key '[redacted]'");
+    expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe('Unrecognized key [redacted]');
+    expect(await answer(quoting("Unrecognized key 'zz-none-9999'"), { 'zz-none-9999': 1 })).toBe('Unrecognized key [redacted]');
     // Sent as `sk-live-1234"x`, quoted JSON-escaped.
     expect(await answer(quoting('{"error":"No project sk-live-1234\\"x"}'), { text: 'sk-live-1234"x' })).toBe(
-      '{"error":"No project [redacted]"}',
+      '{"error":"No project [redacted]',
     );
     // The server quoting the PIN itself reads the same whichever PIN the caller sent (`PIN` is their key, too).
     expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted] [redacted] is wrong');
@@ -380,8 +380,8 @@ describe('a downstream isError over a real MCP connection', () => {
       dispatchToolCall(client, { ...echo, utcpName: 'quoted.srv.echo', mcpName: 'quoted_srv_echo', manualName: 'quoted' }, { text });
 
     // `sk-live-Q7xZ` is a head of the key, `sk-live-Q7xA` is not: both come back the same.
-    expect((await call('sk-live-Q7xZ')).content).toEqual([{ type: 'text', text: "Project '[redacted]' not found" }]);
-    expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: "Project '[redacted]' not found" }]);
+    expect((await call('sk-live-Q7xZ')).content).toEqual([{ type: 'text', text: 'Project [redacted] not found' }]);
+    expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: 'Project [redacted] not found' }]);
   });
 
   it("takes out the caller's keys with their values, a field the tool's schema declares included", async () => {
@@ -398,7 +398,7 @@ describe('a downstream isError over a real MCP connection', () => {
     );
 
     // `text` is the caller's key as much as the tool's field: a guess sent as a key reads the same either way.
-    expect(result.content).toEqual([{ type: 'text', text: '[redacted]: [redacted] is not a page' }]);
+    expect(result.content).toEqual([{ type: 'text', text: '[redacted] [redacted] is not a page' }]);
   });
 
   it('refuses a value every call would read as another variable, naming the variable and not the value', async () => {

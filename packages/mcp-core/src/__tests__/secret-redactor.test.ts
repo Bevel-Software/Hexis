@@ -75,23 +75,23 @@ describe('SecretRedactor', () => {
     redactor.remember('sk-live-Q7xZ2abcdefgh');
     redactor.remember('a9B2');
     // A guess at a head of the key, echoed back: right and wrong read the same.
-    expect(redactor.redact("Project 'sk-live-Q7xZ' not found", ['sk-live-Q7xZ'])).toBe("Project '[redacted]' not found");
-    expect(redactor.redact("Project 'sk-live-Q7xA' not found", ['sk-live-Q7xA'])).toBe("Project '[redacted]' not found");
+    expect(redactor.redact("Project 'sk-live-Q7xZ' not found", ['sk-live-Q7xZ'])).toBe('Project [redacted] not found');
+    expect(redactor.redact("Project 'sk-live-Q7xA' not found", ['sk-live-Q7xA'])).toBe('Project [redacted] not found');
     // The server quoting the key itself: the same with or without the right candidate among the caller's strings
     // (when the caller's text was exempt, the right candidate printed the key).
     expect(redactor.redact('key a9B2 refused', ['a9B2', 'zzzz'])).toBe('key [redacted] refused');
     expect(redactor.redact('key a9B2 refused', ['a9B3', 'zzzz'])).toBe('key [redacted] refused');
     // A server that shortens what it quotes: the part it kept, right guess or wrong.
     expect(redactor.redact("Project 'sk-live-Q7xZ-and-…' not found", ['sk-live-Q7xZ-and-some-padding'])).toBe(
-      "Project '[redacted]…' not found",
+      'Project [redacted] not found',
     );
     expect(redactor.redact("Project 'sk-live-Q7xA-and-…' not found", ['sk-live-Q7xA-and-some-padding'])).toBe(
-      "Project '[redacted]…' not found",
+      'Project [redacted] not found',
     );
     // A server that keeps only the end or the middle of what it quotes, or re-cases it.
-    expect(redactor.redact("Project '…sk-live-Q7xZ' not found", ['padding-padding-sk-live-Q7xZ'])).toBe("Project '…[redacted]' not found");
-    expect(redactor.redact("Project '…sk-live-Q7xA' not found", ['padding-padding-sk-live-Q7xA'])).toBe("Project '…[redacted]' not found");
-    expect(redactor.redact("near 'sk-live-Q7xZ' only", ['aaaa-sk-live-Q7xZ-bbbb'])).toBe("near '[redacted]' only");
+    expect(redactor.redact("Project '…sk-live-Q7xZ' not found", ['padding-padding-sk-live-Q7xZ'])).toBe('Project [redacted] not found');
+    expect(redactor.redact("Project '…sk-live-Q7xA' not found", ['padding-padding-sk-live-Q7xA'])).toBe('Project [redacted] not found');
+    expect(redactor.redact("near 'sk-live-Q7xZ' only", ['aaaa-sk-live-Q7xZ-bbbb'])).toBe('near [redacted] only');
     expect(redactor.redact('SK-LIVE-Q7XZ refused', ['sk-live-q7xz'])).toBe('[redacted] refused');
     // Case changes that change a character's length: `ß` upper-cased is `SS`, `İ` lower-cased is `i̇`.
     expect(redactor.redact('no STRASSE here', ['straße'])).toBe('no [redacted] here');
@@ -99,7 +99,7 @@ describe('SecretRedactor', () => {
     // A text of three characters whose folding makes four.
     expect(redactor.redact('ßxx', ['SSxx'])).toBe('[redacted]');
     // Text the caller sent that no secret is in is taken out all the same.
-    expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named '[redacted]'");
+    expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe('No page named [redacted]');
     // A short string of the caller's is taken out where it stands alone, not inside other words.
     expect(redactor.redact('Invalid value: 42 (max 420)', ['42'])).toBe('Invalid value: [redacted] (max 420)');
   });
@@ -173,6 +173,19 @@ describe('SecretRedactor', () => {
     redactor.remember('sk-live-Q7xZ2abc');
     expect(redactor.redact('key sk-live-Q7xZ2abc refused', ['live-Q7xZ'])).toBe('key [redacted] refused');
     expect(redactor.redact('key sk-live-Q7xZ2abc refused', ['Q7xZ2a'])).toBe('key [redacted] refused');
+  });
+
+  it("hides what the caller's text leaves of a word, punctuation too, so a guess at a key ending in it reads the same", () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('abcd!?');
+    expect(redactor.redact('key abcd!? refused', ['abcd'])).toBe('key [redacted] refused');
+    expect(redactor.redact('key abcd!? refused', ['abce'])).toBe('key [redacted] refused');
+  });
+
+  it('counts what is left of a word in characters, so seven with one outside the BMP go too', () => {
+    const redactor = new SecretRedactor();
+    expect(redactor.redact('key sk-live-Q7xZ\u{10400}bcdefg refused', ['sk-live-Q7xZ'])).toBe('key [redacted] refused');
+    expect(redactor.redact('key sk-live-Q7xZ\u{10400}bcdefgh refused', ['sk-live-Q7xZ'])).toBe('key [redacted]\u{10400}bcdefgh refused');
   });
 
   it('fills overlapping pieces once, so a megabyte of echoes stays fast', () => {

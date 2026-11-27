@@ -98,8 +98,8 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * the server's own words is taken out never depends on what the caller sent
  * next to it. A caller who sends part of a key does not shield the rest
  * either: any eight characters of it are a piece, and in a run without spaces
- * that holds any of the caller's text, every other part shorter than that
- * (with a letter or digit in it) is taken out too, whatever the secrets.
+ * that holds any of the caller's text, every other part shorter than that,
+ * punctuation too, is taken out, whatever the secrets.
  *
  * Nothing here gives up on a long text: each secret is matched in time linear
  * in the text and the secret, and in space linear in the secret, so no bound
@@ -197,10 +197,11 @@ export class SecretRedactor {
       }
     }
     // What the caller's text leaves of a word: in a run without spaces that
-    // holds any of it, every other part shorter than a piece, with a letter or
-    // digit in it, goes too, whatever the secrets. A key the server printed
-    // and the caller's text cut into leaves nothing of it, and a short tail
-    // the server glued to a guess reads the same right or wrong.
+    // holds any of it, every other part shorter than a piece, punctuation
+    // too and counted by code point, goes too, whatever the secrets. A key
+    // the server printed and the caller's text cut into leaves nothing of it,
+    // and a short tail the server glued to a guess reads the same right or
+    // wrong.
     if (callerText.length > 0) {
       const caller = hidden.slice();
       for (const word of text.matchAll(/\S+/g)) {
@@ -213,7 +214,7 @@ export class SecretRedactor {
           }
           let to = from;
           while (to < end && !caller[to]) to++;
-          if (to - from < MIN_ECHOED_PIECE_CHARS && /[\p{L}\p{N}]/u.test(text.slice(from, to))) hide(from, to);
+          if ([...text.slice(from, to)].length < MIN_ECHOED_PIECE_CHARS) hide(from, to);
           from = to;
         }
       }
