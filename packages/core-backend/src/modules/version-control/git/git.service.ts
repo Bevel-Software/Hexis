@@ -132,6 +132,17 @@ export function parsePorcelainZDetailed(stdout: string): {
 }
 
 /**
+ * Every path a {@link parsePorcelainZDetailed} listing names, with each
+ * rename's old path beside its new one, so every file a commit of everything
+ * listed changes is named; taken with `--untracked-files=all`, a new folder is
+ * named by its files. What a commit is reported with when the read of its own
+ * files fails (`committedPaths`).
+ */
+function everyPathOf(listing: { paths: string[]; renameOldByNew: Map<string, string> }): string[] {
+  return [...new Set([...listing.paths, ...listing.renameOldByNew.values()])];
+}
+
+/**
  * Default commit subject used when a caller (typically `LockingFilesystem`'s
  * auto-commit on lock release) doesn't supply one. Must stay within the 200-
  * char subject limit enforced just below — deep KB paths can themselves exceed
@@ -436,7 +447,9 @@ export class GitService implements IGitService {
    * itself rather than from the status listing that preceded it: every file
    * of a new folder (status shows the folder), both ends of a rename (status
    * shows one entry). A read that fails must not lose the report, so callers
-   * fall back to what they knew before the commit.
+   * fall back to what they staged the commit from: a single-file save its one
+   * path, the others the listing taken before it, which names every file of
+   * a new folder and both ends of a rename.
    */
   private async committedPaths(cwd: string): Promise<string[]> {
     const { stdout } = await this.git(cwd, ['diff-tree', '--root', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', 'HEAD']);
@@ -1169,6 +1182,16 @@ export class GitService implements IGitService {
           `[git] commit on workspace=${workspaceId} branch=${branch} landing with ${report.mustFix.length} unresolved KB validator issue(s); the editor surfaces them but commit is no longer blocked.`,
       );
 
+      // The paths this commit may change, listed just before it is staged,
+      // for its report should the read of its files after it fail. Every
+      // file it changes is named; a listed path it leaves as it was (a staged
+      // change the working tree has since undone) costs a reactor one read.
+      // `touched` names a new folder as the folder — the one entry the rule
+      // above counts — and a rename by its new path; this listing names every
+      // untracked file, and `everyPathOf` both ends of each rename.
+      const { stdout: everyFile } = await this.git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+      const pending = everyPathOf(parsePorcelainZDetailed(everyFile));
+
       await this.git(cwd, ['add', '-A']);
 
       const args = [
@@ -1183,8 +1206,8 @@ export class GitService implements IGitService {
       await this.git(cwd, args);
       // The commit exists from here on: reported now, before the attribution
       // read, which can fail without unmaking it — with the files the commit
-      // holds, or the status listing if even that read fails.
-      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => touched));
+      // holds, or the listing taken just before it if even that read fails.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => pending));
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1535,9 +1558,11 @@ export class GitService implements IGitService {
       // a compensating revert of a commit that DID land. The attribution read
       // is best-effort; on failure fall back to what we already know.
       // The commit exists: report it, with the files it holds — both ends of a
-      // rename, every file of a new folder — or the scoped status listing if
-      // that read fails. Neither the read nor the hooks can throw here.
-      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => touched));
+      // rename, every file of a new folder — or, if that read fails, the
+      // listing it was made from: the scoped paths with their renames' old
+      // ends, or without a scope everything listed, renames expanded.
+      // Neither the read nor the hooks can throw here.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => (onlyPaths ? touched : everyPathOf(detailed))));
       let sha = '';
       let authorName = user.name;
       let authorEmail = user.email;

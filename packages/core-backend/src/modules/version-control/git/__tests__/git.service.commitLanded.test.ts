@@ -92,30 +92,95 @@ describe('GitService reports every commit it lands through onCommitLanded', () =
     expect(heard().map((c) => c.paths)).toEqual([[`${KB}/B.md`], [`${KB}/Ünïcode ñ.md`]]);
   });
 
-  it('a commit is reported with the paths known before it when the read of its files fails', async () => {
-    const real = new NodeGitRunner();
-    const diffTreeFails: IGitRunner = {
-      defaultTimeoutMs: real.defaultTimeoutMs,
-      credentials: real.credentials,
-      run: ((cwd: string, args: string[], opts?: unknown) =>
-        args[0] === 'diff-tree' ? Promise.reject(new Error('diff-tree unavailable')) : real.run(cwd, args, opts as never)) as IGitRunner['run'],
+  describe('when the read of its files fails, a commit is reported from the listing taken before it, which names the same files', () => {
+    let fragile: GitService;
+    let heardHere: FilesChange[];
+    const heardPaths = () => heardHere.map((c) => [...c.paths].sort());
+    /** The files each of the last `n` commits holds, oldest first, read by a git whose `diff-tree` works. */
+    const lastCommits = async (n: number) => {
+      const files: string[][] = [];
+      for (let back = n - 1; back >= 0; back--) {
+        const out = await gitOut(repo, ['diff-tree', '--root', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', `HEAD~${back}`]);
+        files.push(out.split('\0').filter(Boolean).map((p) => `${KB}/${p}`).sort());
+      }
+      return files;
     };
-    const hooks = new VersionControlHooks();
-    hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
-    const heardHere: FilesChange[] = [];
-    hooks.onCommitLanded((change) => heardHere.push(change));
-    const fragile = new GitService(stubWorkspaceService({ [WS]: path.join(root, WS) }), hooks, testKbContext({ kbDirName: KB }), undefined, null, diffTreeFails);
 
-    await write('L.md', 'l\n');
-    await fragile.commit(WS, USER, { summary: 'add L' });
-    await write('M.md', 'm\n');
-    await write('N.md', 'n\n');
-    await fragile.commitChanges(WS, USER, 'add M and N', [`${KB}/M.md`, `${KB}/N.md`]);
-    await write('O.md', 'o\n');
-    await fragile.commitFile(WS, USER, `${KB}/O.md`);
+    beforeEach(() => {
+      // A runner like the real one, except that `diff-tree` — the read of a
+      // landed commit's files — fails.
+      const real = new NodeGitRunner();
+      const diffTreeFails: IGitRunner = {
+        defaultTimeoutMs: real.defaultTimeoutMs,
+        credentials: real.credentials,
+        run: ((cwd: string, args: string[], opts?: unknown) =>
+          args[0] === 'diff-tree' ? Promise.reject(new Error('diff-tree unavailable')) : real.run(cwd, args, opts as never)) as IGitRunner['run'],
+      };
+      const hooks = new VersionControlHooks();
+      hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
+      heardHere = [];
+      hooks.onCommitLanded((change) => heardHere.push(change));
+      fragile = new GitService(stubWorkspaceService({ [WS]: path.join(root, WS) }), hooks, testKbContext({ kbDirName: KB }), undefined, null, diffTreeFails);
+    });
 
-    // The status listing stands in: the files are still named, the report still made.
-    expect(heardHere.map((c) => [...c.paths].sort())).toEqual([[`${KB}/L.md`], [`${KB}/M.md`, `${KB}/N.md`], [`${KB}/O.md`]]);
+    it('the report is still made, each file named', async () => {
+      await write('L.md', 'l\n');
+      await fragile.commit(WS, USER, { summary: 'add L' });
+      await write('M.md', 'm\n');
+      await write('N.md', 'n\n');
+      await fragile.commitChanges(WS, USER, 'add M and N', [`${KB}/M.md`, `${KB}/N.md`]);
+      await write('O.md', 'o\n');
+      await fragile.commitFile(WS, USER, `${KB}/O.md`);
+      expect(heardPaths()).toEqual([[`${KB}/L.md`], [`${KB}/M.md`, `${KB}/N.md`], [`${KB}/O.md`]]);
+      expect(heardPaths()).toEqual(await lastCommits(3));
+    });
+
+    it('commit: every file of a new folder, never the folder, a non-ASCII name verbatim; both ends of a rename', async () => {
+      await write('Folder/one.md', '1\n');
+      await write('Folder/twö ñ.md', '2\n');
+      await fragile.commit(WS, USER, { summary: 'add a folder' });
+      await runGit(repo, ['mv', 'Old.md', 'New.md']);
+      await fragile.commit(WS, USER, { summary: 'rename' });
+      expect(heardPaths()).toEqual([
+        [`${KB}/Folder/one.md`, `${KB}/Folder/twö ñ.md`],
+        [`${KB}/New.md`, `${KB}/Old.md`],
+      ]);
+      expect(heardPaths()).toEqual(await lastCommits(2));
+    });
+
+    it('commitChanges without a scope: both ends of a rename, every file of a new folder, an added file', async () => {
+      await runGit(repo, ['mv', 'Old.md', 'Moved.md']);
+      await write('K.md', 'k\n');
+      await write('Dir/x.md', 'x\n');
+      await write('Dir/y.md', 'y\n');
+      await fragile.commitChanges(WS, USER, 'move and add');
+      expect(heardPaths()).toEqual([[`${KB}/Dir/x.md`, `${KB}/Dir/y.md`, `${KB}/K.md`, `${KB}/Moved.md`, `${KB}/Old.md`]]);
+      expect(heardPaths()).toEqual(await lastCommits(1));
+    });
+
+    it('commitChanges with a scope: both ends of a rename in it, every file of a new folder in it, nothing outside it', async () => {
+      await runGit(repo, ['mv', 'Old.md', 'New.md']);
+      await write('Dir/x.md', 'x\n');
+      await write('Dir/y.md', 'y\n');
+      await write('Outside.md', 'not this batch\n');
+      await fragile.commitChanges(WS, USER, 'scoped', [`${KB}/New.md`, `${KB}/Dir/x.md`, `${KB}/Dir/y.md`]);
+      expect(heardPaths()).toEqual([[`${KB}/Dir/x.md`, `${KB}/Dir/y.md`, `${KB}/New.md`, `${KB}/Old.md`]]);
+      expect(heardPaths()).toEqual(await lastCommits(1));
+    });
+
+    it('commitFile: a lock-released save names its one file — each file of a new folder, each end of a move, in its own save', async () => {
+      await write('Folder/one.md', '1\n');
+      await write('Folder/two.md', '2\n');
+      await fragile.commitFile(WS, USER, `${KB}/Folder/one.md`);
+      await fragile.commitFile(WS, USER, `${KB}/Folder/two.md`);
+      // The lock-aware filesystem moves a file on disk and releases both
+      // paths: one save deletes the old path, the other adds the new one.
+      await fs.rename(path.join(repo, 'Old.md'), path.join(repo, 'New.md'));
+      await fragile.commitFile(WS, USER, `${KB}/Old.md`);
+      await fragile.commitFile(WS, USER, `${KB}/New.md`);
+      expect(heardPaths()).toEqual([[`${KB}/Folder/one.md`], [`${KB}/Folder/two.md`], [`${KB}/Old.md`], [`${KB}/New.md`]]);
+      expect(heardPaths()).toEqual(await lastCommits(4));
+    });
   });
 
   it('commitChanges: exactly the scoped dirty set — a dirty path outside the scope stays out', async () => {
