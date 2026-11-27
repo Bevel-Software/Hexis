@@ -167,7 +167,10 @@ describe('BranchSwitcher dropdown', () => {
 describe('BranchSwitcher: naming a new draft', () => {
   it.each([
     ['alice@example.com', 'alice/fix-the-typo'],
-    ['+++@example.com', null],
+    // No usable local-part: the person's own `suggestions/` prefix, which they can delete.
+    ['+++@example.com', 'suggestions/user-u1/fix-the-typo'],
+    // A local-part no branch name can start with (`-ops`) is no prefix either.
+    ['_ops@example.com', 'suggestions/_ops-u1/fix-the-typo'],
   ])("gives a draft made as %s the prefix that makes it its maker's own", async (email, expected) => {
     const user = { id: 'u1', email, name: 'Someone' };
     const createBranch = vi.fn(async () => {});
@@ -177,8 +180,7 @@ describe('BranchSwitcher: naming a new draft', () => {
     const input = screen.getByPlaceholderText('e.g. Add owner to Checkout process');
     fireEvent.change(input, { target: { value: 'Fix the typo' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    // With no usable local-part, the person's own `suggestions/` prefix, which they can delete.
-    await waitFor(() => expect(createBranch).toHaveBeenCalledWith(expected ?? `${suggestionsBranchPrefixFor(user)}fix-the-typo`));
+    await waitFor(() => expect(createBranch).toHaveBeenCalledWith(expected));
   });
 
   it('never sends a name without a prefix: with nobody signed in it creates nothing', async () => {

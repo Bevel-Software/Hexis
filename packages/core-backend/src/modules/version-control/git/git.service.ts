@@ -990,10 +990,12 @@ export class GitService implements IGitService {
    * predicate is the existing source of truth for `Admin`-role membership
    * inside the access model — no separate `isAdmin()` plumbing needed.
    *
-   * Two authorship conventions: `<localpart>/…` UI drafts, and the
-   * `suggestions/<who>-<id8>/…` namespace the propose flow files its branches
-   * under — a user resetting THEIR OWN suggestion bundle is deleting their
-   * own branch.
+   * Authorship is read by `isOwnBranch`, the one predicate the branch
+   * switcher's delete button reads too. Two conventions make a branch
+   * theirs: `<localpart>/…` drafts, and their `suggestions/<who>-<id8>/…`
+   * prefix, which holds the Knowledge bundle the propose flow files (a user
+   * resetting THEIR OWN bundle is deleting their own branch) and the drafts
+   * of a person whose address has no usable localpart.
    */
   async mayDeleteBranch(workspaceId: string, name: string, user: AuthUser): Promise<boolean> {
     if (isOwnBranch(name, { email: user.email, id: user.id })) return true;

@@ -6,7 +6,7 @@ import { toCallToolResult, toolError, describeToolFailure, renderProgress } from
 import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
 import { DownstreamToolError } from './downstream-tool-errors.js';
-import { EXCLUDE_TOOLS_KEY, excludedToolNames, removeExcludedTools } from './excluded-tools.js';
+import { EXCLUDE_TOOLS_KEY, excludedTools, removeExcludedTools } from './excluded-tools.js';
 
 /**
  * Register one manual on a client, reduced to a verdict.
@@ -45,7 +45,7 @@ export async function registerManual(
   // through here too, so none of them can bring one back. The list is read
   // before anything registers: one that is not a list of tool names registers
   // nothing, rather than every tool it was written to leave out.
-  const excluded = excludedToolNames(manual);
+  const excluded = excludedTools(manual);
   if (excluded === null) {
     return {
       ok: false,
@@ -58,7 +58,18 @@ export async function registerManual(
       const errors = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
       return { ok: false, error: errors };
     }
-    await removeExcludedTools(client, excluded);
+    // UTCP wrote the name it registered the manual under onto the template,
+    // so the tools are taken off under that name and not one worked out here.
+    const registered = String(manual.name);
+    try {
+      await removeExcludedTools(client, registered, excluded);
+    } catch (err) {
+      // A manual whose left-out tools could not be taken off does not stay
+      // registered with every tool: it comes off whole, and the registration
+      // answers the failure.
+      await client.deregisterManual(registered).catch(() => undefined);
+      throw err;
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
