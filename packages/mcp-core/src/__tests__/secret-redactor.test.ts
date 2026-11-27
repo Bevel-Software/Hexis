@@ -158,7 +158,7 @@ describe('SecretRedactor', () => {
     redactor.remember('sk-live-Q7xZ2abcdefgh');
     for (const guess of ['sk-live-Q7xZ', 'sk-live-Q7xA']) {
       expect(redactor.redact(`${guess}2abcdefgh!`, [guess])).toBe('[redacted]!');
-      expect(redactor.redact(`${guess}2ab!`, [guess])).toBe('[redacted]2ab!');
+      expect(redactor.redact(`${guess}2ab!`, [guess])).toBe('[redacted]');
     }
   });
 
@@ -166,6 +166,13 @@ describe('SecretRedactor', () => {
     const redactor = new SecretRedactor();
     redactor.remember('sk-live-Q7xZ2abcdefgh');
     expect(redactor.redact('key sk-live-Q7xZ2abcdefgh refused', ['sk-l'])).toBe('key [redacted] refused');
+  });
+
+  it('leaves nothing of a key the caller\'s text cuts into short pieces', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('sk-live-Q7xZ2abc');
+    expect(redactor.redact('key sk-live-Q7xZ2abc refused', ['live-Q7xZ'])).toBe('key [redacted] refused');
+    expect(redactor.redact('key sk-live-Q7xZ2abc refused', ['Q7xZ2a'])).toBe('key [redacted] refused');
   });
 
   it('fills overlapping pieces once, so a megabyte of echoes stays fast', () => {
