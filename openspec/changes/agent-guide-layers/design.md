@@ -45,8 +45,8 @@ The customer's agent called `get_agent_guide` 15 times across the session and it
 | **Always** | Server instructions (platform part) | Every conversation on clients that honour them | 2,000 |
 | **Always** | The platform's own tool list as served | Every conversation, every client, every sub-agent | 18,000 (47 tools: 17,500 until `merge_change_request` came back), and 1,200 characters per description (unchanged) |
 | **First contact** | `start-here`: what `get_agent_guide` returns with no section | Once per conversation and per sub-agent | 1,200 |
-| **On demand** | Every other section, fetched by id | Only the tasks that need it | 2,500 per section; `tool-manuals` 2,750 (how a tool sends a file, as one part of a form too); `html-views` 5,600 (the page contract, which `dev` grew with pages that load live data) |
-| **On demand** | The whole guide (`section: "all"`) | An agent that asks for everything; the enterprise in-app agent's prompt | 23,350: 23,250 until `drafts-and-change-requests` said how an agent applies a request (about 75), 23,100 until `tool-manuals` said how a tool sends a file as one part of a form (about 120), 23,000 until `where-a-new-file-goes` opened with the rule to read an area's README first (about 90), 21,500 until the `onboarding` section (about 1,200) was added, 19,000 until `html-views` grew by about 2,600 |
+| **On demand** | Every other section, fetched by id | Only the tasks that need it | 2,500 per section; `access-control` 2,525 (2,500 until it said which writes to a path you cannot read get `read_file`'s refusal); `tool-manuals` 2,750 (how a tool sends a file, as one part of a form too); `html-views` 5,650 (the page contract, which `dev` grew with pages that load live data: 5,600 until `uploadFile` listed the refusal of a whole zip, 5,500 until an Allow was remembered by the page's content) |
+| **On demand** | The whole guide (`section: "all"`) | An agent that asks for everything; the enterprise in-app agent's prompt | 23,450: 23,425 until `access-control` said which writes to a path you cannot read get `read_file`'s refusal (about 15), 23,350 until `html-views` listed the refusal of a whole zip to a page's `uploadFile` (about 70), 23,250 until `drafts-and-change-requests` said how an agent applies a request (about 75), 23,100 until `tool-manuals` said how a tool sends a file as one part of a form (about 120), 23,000 until `where-a-new-file-goes` opened with the rule to read an area's README first (about 90), 21,500 until the `onboarding` section (about 1,200) was added, 19,000 until `html-views` grew by about 2,600 |
 | Per task | `start-here` plus the sections it routes a task to | One task | 6,000 |
 
 The admin's preamble keeps its own cap (6,000 characters, `PREAMBLE_CAP`). Each budget is a number a reviewer may move, like the description cap: the point is that growing the guide is a decision, not a paragraph someone appends.
@@ -100,7 +100,7 @@ Measured the same way, on this change's last commit (after merging `dev` at `75f
 | Server instructions (platform part) | 1,852 | 1,969 | 2,000 |
 | Tool list as served (46 tools; the figures before 0.35.0 counted 41, leaving out the change-request readers and `open_page`) | 15,829 | 17,278 | 18,000 (47 tools since) |
 | First contact (`get_agent_guide` with no section) | 19,342 (the whole guide) | 1,061 (`start-here`) | 1,200 |
-| The whole guide (`section: "all"`) | 19,342 | 21,265 (22,500 with the `onboarding` section added after this measurement) | 23,350 |
+| The whole guide (`section: "all"`) | 19,342 | 21,265 (22,500 with the `onboarding` section added after this measurement) | 23,450 |
 | A `read_file` of `AGENTS.md` | 19,342 (the whole guide) | 1,268 (`start-here` and the list) | |
 | One evaluation task | 19,342 | 1,061 to 3,479 | 6,000 |
 | Evaluation facts stated | 27 of 53 | 53 of 53 | all |
