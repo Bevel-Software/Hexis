@@ -51,7 +51,10 @@ interface Harness {
 const open: (() => Promise<void>)[] = [];
 
 /** The real provisioning service over a real temp tree, behind the real route. */
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(
+  /** Runs before each workspace write: what another process does in between. */
+  beforeWrite?: (abs: string) => Promise<void>,
+): Promise<Harness> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-create-names-'));
   const workspaceService = {
     getOrCreateForBranch: async () => ({ id: 'ws-main' }),
@@ -59,6 +62,7 @@ async function makeHarness(): Promise<Harness> {
     writeFile: async (_id: string, rel: string, content: string, opts?: { failIfExists?: boolean }) => {
       const abs = path.join(dir, rel);
       await fs.mkdir(path.dirname(abs), { recursive: true });
+      await beforeWrite?.(abs);
       try {
         await fs.writeFile(abs, content, { encoding: 'utf-8', flag: opts?.failIfExists ? 'wx' : 'w' });
       } catch (err) {
@@ -259,14 +263,24 @@ describe('creation derives and stores the display name the same way through ever
   });
 
   it('an ensure that loses the creation race answers with the persisted manifest names too', async () => {
-    const h = await relabelledPersonal();
-    // The existence check misses the folder (another process made it between
-    // check and write), so the exclusive write is what finds it: the 409 path.
-    const svc = h.svc as unknown as { existingFolder: () => Promise<string | null> };
-    const missed = vi.spyOn(svc, 'existingFolder').mockResolvedValueOnce(null);
-    const again = await h.svc.ensurePersonalPlugin(ALICE);
-    expect(missed).toHaveBeenCalledTimes(1);
-    expect(again).toMatchObject({ created: false, name: 'qa-toolkit', displayName: 'QA Toolkit' });
+    // Another process makes the folder, with a relabelled manifest, after the
+    // existence check found nothing and just before the exclusive write: the
+    // write is what finds it, and the ensure takes its 409 path.
+    let raced = false;
+    const h = await makeHarness(async (abs) => {
+      if (raced || !abs.endsWith(path.join('personal-u-alice', 'access.md'))) return;
+      raced = true;
+      await fs.writeFile(abs, 'theirs');
+      await fs.writeFile(
+        path.join(path.dirname(abs), 'plugin.json'),
+        JSON.stringify({ name: 'qa-toolkit', displayName: 'QA Toolkit' }),
+      );
+    });
+    const answer = await h.svc.ensurePersonalPlugin(ALICE);
+    expect(raced).toBe(true);
+    expect(answer).toMatchObject({ created: false, name: 'qa-toolkit', displayName: 'QA Toolkit' });
+    // The winner's files are untouched.
+    expect(await h.manifestOf('personal-u-alice')).toEqual({ name: 'qa-toolkit', displayName: 'QA Toolkit' });
   });
 
   it('a manifest `name` that is not an identifier is not echoed; the folder identity stands in, as discovery does', async () => {
