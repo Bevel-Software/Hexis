@@ -97,9 +97,16 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * taken out first, and no match runs into or out of it, so whether a piece of
  * the server's own words is taken out never depends on what the caller sent
  * next to it. A caller who sends part of a key does not shield the rest
- * either: any eight characters of it are a piece, and in a run without spaces
- * that holds any of the caller's text, every other part shorter than that,
- * punctuation too, is taken out, whatever the secrets.
+ * either: any eight characters of it are a piece, and next to each run of
+ * their text, the longest stretch shorter than a piece (counted by code point)
+ * that occurs inside a secret on that side is taken out too, spaces and
+ * punctuation included. The run stands for any characters there, so that rule
+ * reads where the caller's text is, never what it was: a guess that covers
+ * part of a key the server printed leaves none of the rest, and a piece of a
+ * key the server glues to a guess goes whether the guess was right or not.
+ * The server's own words next to either stay, though a short stretch of them
+ * that happens to occur in a secret goes too; spaces at the edges of what is
+ * taken out are left in.
  *
  * Nothing here gives up on a long text: each secret is matched in time linear
  * in the text and the secret, and in space linear in the secret, so no bound
@@ -196,38 +203,16 @@ export class SecretRedactor {
         }
       }
     }
-    // What the caller's text leaves of a word: in a run without spaces that
-    // holds any of it, every other part shorter than a piece, punctuation
-    // too and counted by code point, goes too, whatever the secrets. A key
-    // the server printed and the caller's text cut into leaves nothing of it,
-    // and a short tail the server glued to a guess reads the same right or
-    // wrong.
-    if (callerText.length > 0) {
-      const caller = hidden.slice();
-      for (const word of text.matchAll(/\S+/g)) {
-        const end = word.index + word[0].length;
-        if (!caller.subarray(word.index, end).includes(1)) continue;
-        for (let from = word.index; from < end; ) {
-          if (caller[from]) {
-            from++;
-            continue;
-          }
-          let to = from;
-          while (to < end && !caller[to]) to++;
-          if ([...text.slice(from, to)].length < MIN_ECHOED_PIECE_CHARS) hide(from, to);
-          from = to;
-        }
-      }
-    }
     // Secrets, in the server's own words only: the caller's text is blocked
     // out, so no match runs into or out of it.
     const blocked = hidden.slice();
+    const secrets = new Set([...this.credentials, ...this.substituted]);
     /** Take out `start` to `end` unless any of it is the caller's (already out). */
     const hideClear = (start: number, end: number) => {
       for (let i = start; i < end; i++) if (blocked[i]) return;
       hide(start, end);
     };
-    for (const secret of new Set([...this.credentials, ...this.substituted])) {
+    for (const secret of secrets) {
       if (secret.length < MIN_SECRET_CHARS && !this.credentials.has(secret)) {
         for (const match of text.matchAll(standingAlone(secret))) hideClear(match.index, match.index + secret.length);
       } else if (secret.length < MIN_ECHOED_PIECE_CHARS) {
@@ -250,6 +235,41 @@ export class SecretRedactor {
         }
       }
     }
+    // Next to each run of the caller's text, the longest stretch shorter than
+    // a piece that occurs inside a secret on that side (after the run: with a
+    // character of the secret before it; before the run: with one after it)
+    // goes too, spaces and punctuation included; then the spaces at the edges
+    // of what is out are left in. The run stands for any characters, so this
+    // reads where the caller's text is but not what it was: a guess that
+    // covers part of a key the server printed leaves none of the rest, a key
+    // the server printed reads the same whatever the guess, and a piece of the
+    // key the server glued to the guess goes whether the guess was right or not.
+    if (callerText.length > 0 && blocked.includes(1)) {
+      const { after, before } = reachOf(secrets, text, blocked);
+      for (let at = 1; at < text.length; at++) {
+        if (blocked[at - 1] && !blocked[at] && after[at]) {
+          let end = at;
+          while (end < at + after[at]! && !blocked[end]) end++;
+          hide(at, end);
+        }
+        if (blocked[at] && !blocked[at - 1] && before[at]) {
+          let start = at;
+          while (start > at - before[at]! && !blocked[start - 1]) start--;
+          hide(start, at);
+        }
+      }
+      for (let at = 0; at < text.length; ) {
+        if (!hidden[at]) {
+          at++;
+          continue;
+        }
+        let end = at;
+        while (end < text.length && hidden[end]) end++;
+        for (let edge = at; edge < end && /\s/.test(text[edge]!); edge++) hidden[edge] = 0;
+        for (let edge = end - 1; edge >= at && hidden[edge] && /\s/.test(text[edge]!); edge--) hidden[edge] = 0;
+        at = end;
+      }
+    }
     let out = '';
     for (let i = 0; i < text.length; i++) {
       if (!hidden[i]) out += text[i];
@@ -268,6 +288,68 @@ function spellings(value: string): string[] {
   return [value, trimmed, urlEncoded(value), escaped, escaped.replaceAll('/', '\\/')].filter(
     (spelling): spelling is string => !!spelling?.trim(),
   );
+}
+
+/** Whether `text` from `from` to `to` is shorter than a piece, counted by code point. */
+function shorterThanPiece(text: string, from: number, to: number): boolean {
+  return to - from < 2 * MIN_ECHOED_PIECE_CHARS && [...text.slice(from, to)].length < MIN_ECHOED_PIECE_CHARS;
+}
+
+/**
+ * How far each run of `blocked` reaches into `text`, in units: for a run
+ * ending at `p`, `after[p]` is the longest stretch from `p`, shorter than a
+ * piece and clear of the runs, that occurs in a secret with a character of it
+ * before; for a run starting at `p`, `before[p]` the longest one ending at `p`
+ * that occurs in a secret with a character of it after. Only the stretches at
+ * the runs' edges are looked up, each secret rolled over once per length.
+ */
+function reachOf(secrets: Iterable<string>, text: string, blocked: Uint8Array): { after: Uint8Array; before: Uint8Array } {
+  const after = new Uint8Array(text.length + 1);
+  const before = new Uint8Array(text.length + 1);
+  const most = 2 * (MIN_ECHOED_PIECE_CHARS - 1);
+  /** Whether a stretch may end at `at`: not between the halves of a character. */
+  const cleanCut = (at: number) => !/[\uDC00-\uDFFF]/.test(text[at] ?? '') || !/[\uD800-\uDBFF]/.test(text[at - 1] ?? '');
+  /** Each stretch from the edge at `at` on `side` that may be taken out, shortest first, as [from, to]. */
+  const stretches = function* (side: 'after' | 'before', at: number): Generator<readonly [number, number]> {
+    if (side === 'after') {
+      for (let end = at + 1; end <= text.length && end - at <= most && !blocked[end - 1] && shorterThanPiece(text, at, end); end++) {
+        if (cleanCut(end)) yield [at, end];
+      }
+    } else {
+      for (let start = at - 1; start >= 0 && at - start <= most && !blocked[start] && shorterThanPiece(text, start, at); start--) {
+        if (cleanCut(start)) yield [start, at];
+      }
+    }
+  };
+  const edges: Array<readonly ['after' | 'before', number]> = [];
+  for (let at = 1; at < text.length; at++) {
+    if (blocked[at - 1] && !blocked[at]) edges.push(['after', at]);
+    if (!blocked[at - 1] && blocked[at]) edges.push(['before', at]);
+  }
+  const wanted = new Map<number, Set<string>>();
+  for (const [side, at] of edges) {
+    for (const [from, to] of stretches(side, at)) wanted.set(to - from, (wanted.get(to - from) ?? new Set<string>()).add(text.slice(from, to)));
+  }
+  const followsOne = new Set<string>();
+  const precedesOne = new Set<string>();
+  for (const [size, pieces] of wanted) {
+    const list = [...pieces];
+    for (const secret of secrets) {
+      if (secret.length <= size) continue;
+      const { first, last } = placesIn(list, secret, size);
+      list.forEach((piece, i) => {
+        if (last[i]! >= 1) followsOne.add(piece);
+        if (first[i]! >= 0 && first[i]! + size < secret.length) precedesOne.add(piece);
+      });
+    }
+  }
+  for (const [side, at] of edges) {
+    for (const [from, to] of stretches(side, at)) {
+      if (side === 'after' && followsOne.has(text.slice(from, to))) after[at] = to - from;
+      if (side === 'before' && precedesOne.has(text.slice(from, to))) before[at] = to - from;
+    }
+  }
+  return { after, before };
 }
 
 /**
@@ -330,48 +412,98 @@ function windowsOf(pattern: string, text: string, blocked: Uint8Array): Uint8Arr
   const size = MIN_ECHOED_PIECE_CHARS;
   const covered = new Uint8Array(text.length);
   if (pattern.length < size || text.length < size) return covered;
-  const [baseA, baseB] = [0x01000193, 0x5bd1e995];
-  let [dropA, dropB] = [1, 1];
-  for (let i = 1; i < size; i++) [dropA, dropB] = [Math.imul(dropA, baseA), Math.imul(dropB, baseB)];
-  /** Each window's two hashes, rolled one unit at a time over `of`. */
-  const roll = function* (of: string): Generator<readonly [number, number, number]> {
-    let [a, b] = [0, 0];
-    for (let i = 0; i < of.length; i++) {
-      if (i >= size) {
-        const out = of.charCodeAt(i - size);
-        [a, b] = [(a - Math.imul(out, dropA)) | 0, (b - Math.imul(out, dropB)) | 0];
-      }
-      const unit = of.charCodeAt(i);
-      [a, b] = [(Math.imul(a, baseA) + unit) | 0, (Math.imul(b, baseB) + unit) | 0];
-      if (i >= size - 1) yield [i + 1 - size, a, b];
-    }
-  };
-  let slots = 1;
-  while (slots < 2 * pattern.length) slots *= 2;
-  const mask = slots - 1;
-  const keyA = new Int32Array(slots);
-  const keyB = new Int32Array(slots);
-  const used = new Uint8Array(slots);
-  /** The slot of hashes `a`, `b`: theirs, or the empty one where they would go. */
-  const slotOf = (a: number, b: number): number => {
-    let slot = (a ^ (a >>> 15)) & mask;
-    while (used[slot] && !(keyA[slot] === a && keyB[slot] === b)) slot = (slot + 1) & mask;
-    return slot;
-  };
-  for (const [, a, b] of roll(pattern)) {
-    const slot = slotOf(a, b);
-    [keyA[slot], keyB[slot], used[slot]] = [a, b, 1];
-  }
-  let blockedIn = 0;
-  for (let i = 0; i < size - 1; i++) blockedIn += blocked[i]!;
-  for (const [start, a, b] of roll(text)) {
-    blockedIn += blocked[start + size - 1]!;
-    if (blockedIn === 0 && used[slotOf(a, b)]) covered.fill(1, start, start + size);
-    blockedIn -= blocked[start]!;
+  const table = new HashTable(pattern.length);
+  for (const [, a, b] of rolled(pattern, size)) table.add(a, b);
+  const blockedBefore = new Int32Array(text.length + 1);
+  for (let i = 0; i < text.length; i++) blockedBefore[i + 1] = blockedBefore[i]! + blocked[i]!;
+  for (const [start, a, b] of rolled(text, size)) {
+    if (blockedBefore[start + size] === blockedBefore[start] && table.has(a, b)) covered.fill(1, start, start + size);
   }
   return covered;
 }
 
+/**
+ * For each of `wanted`, strings of `size` units, the first and the last place
+ * it starts in `within`, or -1: the wanted strings go into a table under two
+ * rolling hashes and `within` is rolled over once.
+ */
+function placesIn(wanted: readonly string[], within: string, size: number): { first: Int32Array; last: Int32Array } {
+  const first = new Int32Array(wanted.length).fill(-1);
+  const last = new Int32Array(wanted.length).fill(-1);
+  const table = new HashTable(wanted.length);
+  wanted.forEach((piece, i) => {
+    for (const [, a, b] of rolled(piece, size)) table.add(a, b, i);
+  });
+  for (const [start, a, b] of rolled(within, size)) {
+    const i = table.get(a, b);
+    if (i < 0) continue;
+    if (first[i] === -1) first[i] = start;
+    last[i] = start;
+  }
+  return { first, last };
+}
+
+/**
+ * Each stretch of `size` units of `of`: where it starts, and its two rolling
+ * hashes. Two hashes, so a collision can only match more.
+ */
+function* rolled(of: string, size: number): Generator<readonly [number, number, number]> {
+  const [baseA, baseB] = [0x01000193, 0x5bd1e995];
+  let [dropA, dropB] = [1, 1];
+  for (let i = 1; i < size; i++) [dropA, dropB] = [Math.imul(dropA, baseA), Math.imul(dropB, baseB)];
+  let [a, b] = [0, 0];
+  for (let i = 0; i < of.length; i++) {
+    if (i >= size) {
+      const out = of.charCodeAt(i - size);
+      [a, b] = [(a - Math.imul(out, dropA)) | 0, (b - Math.imul(out, dropB)) | 0];
+    }
+    const unit = of.charCodeAt(i);
+    [a, b] = [(Math.imul(a, baseA) + unit) | 0, (Math.imul(b, baseB) + unit) | 0];
+    if (i >= size - 1) yield [i + 1 - size, a, b];
+  }
+}
+
+/** Pairs of hashes, each with a number, in an open-addressing table of typed arrays sized for `entries`. */
+class HashTable {
+  private readonly keyA: Int32Array;
+  private readonly keyB: Int32Array;
+  private readonly value: Int32Array;
+  private readonly used: Uint8Array;
+  private readonly mask: number;
+
+  constructor(entries: number) {
+    let slots = 1;
+    while (slots < 2 * entries) slots *= 2;
+    this.mask = slots - 1;
+    this.keyA = new Int32Array(slots);
+    this.keyB = new Int32Array(slots);
+    this.value = new Int32Array(slots);
+    this.used = new Uint8Array(slots);
+  }
+
+  add(a: number, b: number, value = 0): void {
+    const slot = this.slotOf(a, b);
+    if (this.used[slot]) return;
+    [this.keyA[slot], this.keyB[slot], this.value[slot], this.used[slot]] = [a, b, value, 1];
+  }
+
+  has(a: number, b: number): boolean {
+    return this.used[this.slotOf(a, b)] === 1;
+  }
+
+  /** The number stored with `a`, `b`, or -1. */
+  get(a: number, b: number): number {
+    const slot = this.slotOf(a, b);
+    return this.used[slot] ? this.value[slot]! : -1;
+  }
+
+  /** The slot of hashes `a`, `b`: theirs, or the empty one where they would go. */
+  private slotOf(a: number, b: number): number {
+    let slot = (a ^ (a >>> 15)) & this.mask;
+    while (this.used[slot] && !(this.keyA[slot] === a && this.keyB[slot] === b)) slot = (slot + 1) & this.mask;
+    return slot;
+  }
+}
 
 /**
  * `value`, wherever it appears as a run of its own.

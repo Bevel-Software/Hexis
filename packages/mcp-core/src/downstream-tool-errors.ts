@@ -190,9 +190,9 @@ function redactedInPlace(err: Error, redact: (text: string) => string): Error {
 }
 
 /**
- * Every string, object key and number in a call's arguments, however deeply
- * nested (walked without recursion). Not a boolean: `true` can guess nothing,
- * and blanking it would only cost the message.
+ * Every string, object key, number, boolean and null in a call's arguments,
+ * however deeply nested (walked without recursion): any of them can be a
+ * guess at a secret that reads the same.
  */
 function stringsIn(args: unknown): string[] {
   const found: string[] = [];
@@ -201,7 +201,7 @@ function stringsIn(args: unknown): string[] {
   while (pending.length > 0) {
     const value = pending.pop();
     if (typeof value === 'string') found.push(value);
-    else if (typeof value === 'number' || typeof value === 'bigint') found.push(String(value));
+    else if (typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean' || value === null) found.push(String(value));
     else if (value && typeof value === 'object' && !seen.has(value)) {
       seen.add(value);
       if (Array.isArray(value)) for (const item of value) pending.push(item);

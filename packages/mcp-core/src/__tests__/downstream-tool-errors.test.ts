@@ -114,14 +114,14 @@ describe('every failure a wrapped protocol lets through', () => {
     config: { mcpServers: { srv: { url: 'https://x.example/mcp', headers: { Authorization: `Bearer ${KEY}`, 'X-Pin': '4821' } } } },
   } as unknown as CallTemplate;
   /** A protocol whose call fails with `failure`, wrapped; its `callTool` answers what the wrap throws. */
-  const failingWith = (failure: unknown) => {
+  const failingWith = (failure: unknown, through: CallTemplate = template) => {
     const protocol = keepDownstreamToolErrors({
       _processMcpToolResult: (result: unknown) => result,
       callTool: async () => {
         throw failure;
       },
     }) as unknown as { callTool: (caller: unknown, tool: string, args: unknown, template: CallTemplate) => Promise<unknown> };
-    return (args: unknown = {}) => protocol.callTool({}, 'stub.srv.echo', args, template).catch((err: unknown) => err);
+    return (args: unknown = {}) => protocol.callTool({}, 'stub.srv.echo', args, through).catch((err: unknown) => err);
   };
 
   it('keeps an AbortError the DOMException it was, its message and stack redacted', async () => {
@@ -143,15 +143,28 @@ describe('every failure a wrapped protocol lets through', () => {
   it("takes out the caller's keys, numbers and escaped strings where the server quotes them, matched or not", async () => {
     const quoting = (text: string) => new DownstreamToolError(text, [{ type: 'text', text }]);
     const answer = async (failure: DownstreamToolError, args: unknown) => ((await failingWith(failure)(args)) as DownstreamToolError).message;
-    expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe('Unrecognized key [redacted]');
-    expect(await answer(quoting("Unrecognized key 'zz-none-9999'"), { 'zz-none-9999': 1 })).toBe('Unrecognized key [redacted]');
+    expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe("Unrecognized key '[redacted]'");
+    expect(await answer(quoting("Unrecognized key 'zz-none-9999'"), { 'zz-none-9999': 1 })).toBe("Unrecognized key '[redacted]'");
     // Sent as `sk-live-1234"x`, quoted JSON-escaped.
     expect(await answer(quoting('{"error":"No project sk-live-1234\\"x"}'), { text: 'sk-live-1234"x' })).toBe(
-      '{"error":"No project [redacted]',
+      '{"error":"No project [redacted]"}',
     );
     // The server quoting the PIN itself reads the same whichever PIN the caller sent (`PIN` is their key, too).
-    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted] [redacted] is wrong');
-    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('[redacted] [redacted] is wrong');
+    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted] is wrong');
+    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('[redacted] is wrong');
+  });
+
+  it('takes out a boolean or null the caller sent, so a guess at a key spelled the same reads the same right or wrong', async () => {
+    const keyed = {
+      name: 'stub',
+      call_template_type: 'mcp',
+      config: { mcpServers: { srv: { url: 'https://x.example/mcp', headers: { 'X-Api-Key': 'true' } } } },
+    } as unknown as CallTemplate;
+    const answer = async (text: string, args: unknown) =>
+      ((await failingWith(new DownstreamToolError(text, [{ type: 'text', text }]), keyed)(args)) as DownstreamToolError).message;
+    expect(await answer('flag true is invalid', { flag: true })).toBe('[redacted] [redacted] is invalid');
+    expect(await answer('flag false is invalid', { flag: false })).toBe('[redacted] [redacted] is invalid');
+    expect(await answer('flag null is invalid', { flag: null })).toBe('[redacted] [redacted] is invalid');
   });
 });
 
@@ -380,8 +393,8 @@ describe('a downstream isError over a real MCP connection', () => {
       dispatchToolCall(client, { ...echo, utcpName: 'quoted.srv.echo', mcpName: 'quoted_srv_echo', manualName: 'quoted' }, { text });
 
     // `sk-live-Q7xZ` is a head of the key, `sk-live-Q7xA` is not: both come back the same.
-    expect((await call('sk-live-Q7xZ')).content).toEqual([{ type: 'text', text: 'Project [redacted] not found' }]);
-    expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: 'Project [redacted] not found' }]);
+    expect((await call('sk-live-Q7xZ')).content).toEqual([{ type: 'text', text: "Project '[redacted]' not found" }]);
+    expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: "Project '[redacted]' not found" }]);
   });
 
   it("takes out the caller's keys with their values, a field the tool's schema declares included", async () => {
@@ -398,7 +411,7 @@ describe('a downstream isError over a real MCP connection', () => {
     );
 
     // `text` is the caller's key as much as the tool's field: a guess sent as a key reads the same either way.
-    expect(result.content).toEqual([{ type: 'text', text: '[redacted] [redacted] is not a page' }]);
+    expect(result.content).toEqual([{ type: 'text', text: '[redacted]: [redacted] is not a page' }]);
   });
 
   it('refuses a value every call would read as another variable, naming the variable and not the value', async () => {
