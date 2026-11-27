@@ -93,6 +93,9 @@ describe('SecretRedactor', () => {
     expect(redactor.redact("Project '…sk-live-Q7xA' not found", ['padding-padding-sk-live-Q7xA'])).toBe("Project '…[redacted]' not found");
     expect(redactor.redact("near 'sk-live-Q7xZ' only", ['aaaa-sk-live-Q7xZ-bbbb'])).toBe("near '[redacted]' only");
     expect(redactor.redact('SK-LIVE-Q7XZ refused', ['sk-live-q7xz'])).toBe('[redacted] refused');
+    // Case changes that change a character's length: `ß` upper-cased is `SS`, `İ` lower-cased is `i̇`.
+    expect(redactor.redact('no STRASSE here', ['straße'])).toBe('no [redacted] here');
+    expect(redactor.redact('no i̇stanbul here', ['İSTANBUL'])).toBe('no [redacted] here');
     // Text the caller sent that no secret is in is taken out all the same.
     expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named '[redacted]'");
     // Shorter than four characters, the caller's text is left to the other rules.

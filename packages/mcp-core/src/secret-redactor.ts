@@ -112,9 +112,10 @@ export class SecretRedactor {
       return end;
     };
     // What the caller sent, in any piece of four characters, case aside: each
-    // four characters of the text found so folded in one of their strings.
+    // four characters of the folded text found in a folded string of theirs,
+    // taken out over the characters of the text it came from.
     if (callerText.length > 0 && text.length >= MIN_CALLER_CHARS) {
-      const folded = foldCase(text);
+      const { folded, from, to } = foldWithSpans(text);
       const startsOf = new Map<string, number[]>();
       for (let i = 0; i + MIN_CALLER_CHARS <= folded.length; i++) {
         const piece = folded.slice(i, i + MIN_CALLER_CHARS);
@@ -131,7 +132,7 @@ export class SecretRedactor {
           const sentFolded = foldCase(spelling);
           for (let i = 0; i + MIN_CALLER_CHARS <= sentFolded.length && startsOf.size > 0; i++) {
             const piece = sentFolded.slice(i, i + MIN_CALLER_CHARS);
-            for (const start of startsOf.get(piece) ?? []) hide(start, start + MIN_CALLER_CHARS);
+            for (const start of startsOf.get(piece) ?? []) hide(from[start]!, to[start + MIN_CALLER_CHARS - 1]!);
             startsOf.delete(piece);
           }
         }
@@ -170,12 +171,43 @@ function spellings(value: string): string[] {
   );
 }
 
-/** `text` with each character lower-cased where that keeps it one character, so every position stays where it was. */
+/**
+ * One character case-folded: upper- then lower-cased, so the pairs a case
+ * change expands or shrinks meet (`ß` and `SS`, `İ` and `i̇`).
+ */
+function foldChar(ch: string): string {
+  return ch.toUpperCase().toLowerCase();
+}
+
+/** `text` case-folded one character at a time ({@link foldChar}); printable ASCII takes the short way, to the same result. */
 function foldCase(text: string): string {
-  return text.replace(/[\s\S]/g, (ch) => {
-    const lower = ch.toLowerCase();
-    return lower.length === 1 ? lower : ch;
-  });
+  if (/^[ -~]*$/.test(text)) return text.toLowerCase();
+  let folded = '';
+  for (const ch of text) folded += foldChar(ch);
+  return folded;
+}
+
+/**
+ * `text` case-folded as {@link foldCase} does, with, for each unit of the
+ * folded text, where the character it came from starts (`from`) and ends
+ * (`to`) in `text`: a piece found in the folded text is taken out over the
+ * characters it came from, however long their folding made it.
+ */
+function foldWithSpans(text: string): { folded: string; from: number[]; to: number[] } {
+  let folded = '';
+  const from: number[] = [];
+  const to: number[] = [];
+  let at = 0;
+  for (const ch of text) {
+    const fold = foldChar(ch);
+    for (let unit = 0; unit < fold.length; unit++) {
+      from.push(at);
+      to.push(at + ch.length);
+    }
+    folded += fold;
+    at += ch.length;
+  }
+  return { folded, from, to };
 }
 
 /** `value` url-encoded, or null for one that cannot be (a lone surrogate): no request could carry it that way. */
