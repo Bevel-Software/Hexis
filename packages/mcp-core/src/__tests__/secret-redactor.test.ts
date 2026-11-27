@@ -81,6 +81,13 @@ describe('SecretRedactor', () => {
     // (when the caller's text was exempt, the right candidate printed the key).
     expect(redactor.redact('key a9B2 refused', ['a9B2', 'zzzz'])).toBe('key [redacted] refused');
     expect(redactor.redact('key a9B2 refused', ['a9B3', 'zzzz'])).toBe('key [redacted] refused');
+    // A server that shortens what it quotes: the part it kept, right guess or wrong.
+    expect(redactor.redact("Project 'sk-live-Q7xZ-and-…' not found", ['sk-live-Q7xZ-and-some-padding'])).toBe(
+      "Project '[redacted]…' not found",
+    );
+    expect(redactor.redact("Project 'sk-live-Q7xA-and-…' not found", ['sk-live-Q7xA-and-some-padding'])).toBe(
+      "Project '[redacted]…' not found",
+    );
     // Text the caller sent that no secret is in is taken out all the same.
     expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named '[redacted]'");
     // Shorter than four characters, the caller's text is left to the other rules.

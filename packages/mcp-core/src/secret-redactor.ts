@@ -51,14 +51,17 @@ const REDACTED = '[redacted]';
  * its own. Six characters or more, it is taken out wherever it appears too.
  *
  * Text the CALLER sent ({@link redact}'s `callerText`) is taken out too,
- * wherever the quote repeats it, as sent or in one of the spellings above,
- * whether or not a secret is in it. Otherwise the quote would answer the
- * caller's guesses: a guess at a key echoed back, or a list of candidates
- * sent alongside a server that quotes the key itself, would come back
- * `[redacted]` or as sent depending on whether it was right. Taken out every
- * time, it comes back the same either way. A string shorter than four
- * characters is left to the rules above, since blanking every `a` or `1`
- * would destroy the message; a credential that short could still be guessed.
+ * wherever the quote repeats it or a leading part of it (four characters or
+ * more, as a server that shortens what it quotes leaves it), as sent or in
+ * one of the spellings above, whether or not a secret is in it. Otherwise the
+ * quote would answer the caller's guesses: a guess at a key echoed back, or a
+ * list of candidates sent alongside a server that quotes the key itself,
+ * would come back `[redacted]` or as sent depending on whether it was right.
+ * Taken out every time, it comes back the same either way. A string shorter
+ * than four characters is left to the rules above, since blanking every `a`
+ * or `1` would destroy the message; a credential that short could still be
+ * guessed. So is a quote that keeps only the end or the middle of what the
+ * caller sent.
  */
 export class SecretRedactor {
   /** Taken out wherever they appear. */
@@ -96,7 +99,13 @@ export class SecretRedactor {
     for (const sent of callerText) {
       for (const spelling of spellings(sent)) {
         if (spelling.length < MIN_CALLER_CHARS) continue;
-        for (const at of occurrences(text, spelling)) hide(at, at + spelling.length);
+        // Each run that starts with its first characters, as far as it goes
+        // on matching: a repeat of it, or of the part a server kept.
+        for (const at of occurrences(text, spelling.slice(0, MIN_CALLER_CHARS))) {
+          let end = at + MIN_CALLER_CHARS;
+          while (end - at < spelling.length && text[end] === spelling[end - at]) end++;
+          hide(at, end);
+        }
       }
     }
     for (const secret of new Set([...this.credentials, ...this.substituted])) {

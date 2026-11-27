@@ -5,8 +5,9 @@ import { ChevronDown, GitBranch, Plus, Lock, Check, GitPullRequest, Trash2, Load
 import {
   protectedBranchDisplayName,
   currentBranchModel,
-  branchAuthorLocalpart,
   isBranchAuthoredBy,
+  isOwnSuggestionsBranch,
+  ownDraftPrefixFor,
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
@@ -20,20 +21,17 @@ import { fetchFileAccess } from '../../access';
 
 /**
  * Convert a free-text "what are you changing?" answer into a branch name slug.
- * Non-technical users type a sentence; we kebab-case it and prefix the user's
- * email local-part so the name still matches the documented convention.
+ * Non-technical users type a sentence; we kebab-case it and give it the
+ * prefix that makes a draft its maker's own (`ownDraftPrefixFor`, the rule the
+ * server uses too): their email local-part, or their own `suggestions/` prefix
+ * when the address has no usable local-part, so they can always delete it.
  */
-function slugifyDraftName(email: string, text: string): string {
-  // `branchAuthorLocalpart` returns null for missing / unsanitizable emails;
-  // the UI keeps a friendly `user` placeholder so the create form never blocks
-  // on a malformed identity. Authorship checks elsewhere use the strict
-  // helper and refuse delete when localpart is null.
-  const localPart = branchAuthorLocalpart(email) ?? 'user';
+function slugifyDraftName(user: { email: string; id: string }, text: string): string {
   const slug = text
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return `${localPart}/${slug || 'draft'}`;
+  return `${ownDraftPrefixFor(user)}${slug || 'draft'}`;
 }
 
 /**
@@ -283,7 +281,7 @@ export function BranchSwitcher() {
   async function doCreate() {
     const text = newBranchName.trim();
     if (!text) return;
-    const name = user?.email ? slugifyDraftName(user.email, text) : text;
+    const name = user?.email ? slugifyDraftName(user, text) : text;
     try {
       // Create the branch server-side on the current workspace's clone, then
       // navigate to the new branch's URL. The URL change triggers the
@@ -530,7 +528,9 @@ export function BranchSwitcher() {
               //      `GitService.deleteBranch` is the authoritative check.
               // The current branch and protected branches are never
               // deletable (regression-guarded server-side too).
-              const isAuthoredByMe = isBranchAuthoredBy(b.name, user?.email);
+              const isAuthoredByMe =
+                isBranchAuthoredBy(b.name, user?.email) ||
+                isOwnSuggestionsBranch(b.name, { email: user?.email, id: user?.id });
               const isOrphan = b.hasRemote === false;
               const canDelete =
                 !b.isProtected && !current && (isOrphan || isAuthoredByMe || isAdmin);

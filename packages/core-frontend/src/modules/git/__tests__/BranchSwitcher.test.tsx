@@ -18,6 +18,7 @@ vi.mock('../../access/api', () => ({
     eligible: { roles: [], users: [] },
   }),
 }));
+import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { fetchFileAccess } from '../../access/api';
 
 import { BranchSwitcher } from '../components/BranchSwitcher';
@@ -187,6 +188,24 @@ describe('BranchSwitcher dropdown', () => {
 // (the orphan-cleanup mental model). Now the picker also offers delete for
 // drafts authored by the current user (per `<email-localpart>/...` naming),
 // and routes the destructive remote-delete through a confirm dialog.
+describe('BranchSwitcher: naming a new draft', () => {
+  it.each([
+    ['alice@example.com', 'alice/fix-the-typo'],
+    ['+++@example.com', null],
+  ])("gives a draft made as %s the prefix that makes it its maker's own", async (email, expected) => {
+    const user = { id: 'u1', email, name: 'Someone' };
+    const createBranch = vi.fn(async () => {});
+    renderSwitcher(makeGit({ createBranch }), { ...auth, user } as unknown as AuthContextValue);
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+    fireEvent.click(screen.getByText('Start a shared draft…'));
+    const input = screen.getByPlaceholderText('e.g. Add owner to Checkout process');
+    fireEvent.change(input, { target: { value: 'Fix the typo' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    // With no usable local-part, the person's own `suggestions/` prefix, which they can delete.
+    await waitFor(() => expect(createBranch).toHaveBeenCalledWith(expected ?? `${suggestionsBranchPrefixFor(user)}fix-the-typo`));
+  });
+});
+
 describe('BranchSwitcher: author-can-delete affordance', () => {
   beforeEach(() => {
     vi.mocked(fetchFileAccess).mockResolvedValue({
@@ -246,6 +265,17 @@ describe('BranchSwitcher: author-can-delete affordance', () => {
         'Delete shared draft "bob/other-draft": removes it for everyone',
       ),
     ).toBeNull();
+  });
+
+  it("shows the delete button for the user's own suggestions draft", () => {
+    const user = { id: 'u1', email: '+++@example.com', name: 'No localpart' };
+    const own = `${suggestionsBranchPrefixFor(user)}fix-typo`;
+    renderSwitcher(
+      makeGitWithBranches([{ name: own, isProtected: false, hasRemote: true }]),
+      { ...auth, user } as unknown as AuthContextValue,
+    );
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+    expect(screen.getByLabelText(`Delete shared draft "${own}": removes it for everyone`)).toBeInTheDocument();
   });
 
   it('keeps the orphan-cleanup path (hasRemote=false) deletable for anyone', () => {
