@@ -3,6 +3,7 @@ import { HttpCommunicationProtocol, type HttpCallTemplate } from '@utcp/http';
 import { isGoogleServiceAccountAuth } from './google-service-account.auth.js';
 import { GoogleServiceAccountTokenSource } from './google-service-account.token-source.js';
 import type { IServiceAccountTokenSource } from './service-account-token.contract.js';
+import { printable } from '../printable.js';
 
 /**
  * The stock UTCP `http` protocol, taught one more auth type. A call whose
@@ -15,10 +16,11 @@ import type { IServiceAccountTokenSource } from './service-account-token.contrac
  * protocol's log lines, and the stock ones carry credentials: a failure prints
  * the raw axios error, whose request config and socket header hold the
  * `Authorization: Bearer <shared key>` three times over, and every call and
- * discovery prints its full URL, where a key written into the query or the
- * path travels. Here a URL is logged by its origin only, and a failure by its
- * message, error class, code and HTTP status only, so neither reaches stdout
- * or stderr.
+ * discovery prints its full URL, where a key written anywhere in it (the host,
+ * the user info, the path, the query) travels. Here a URL is not logged at
+ * all, and a failure by its message, error class, code and HTTP status only,
+ * so neither reaches stdout or stderr. Each message is one `printable` token,
+ * so a tool or provider name cannot forge or colour the line.
  */
 export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
   constructor(private readonly tokens: IServiceAccountTokenSource) {
@@ -33,10 +35,10 @@ export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
       throw new Error('@utcp/http no longer exposes _logInfo and _logError; its log lines would carry credentials');
     }
     hooks._logInfo = (message: string): void => {
-      console.log(`[HttpCommunicationProtocol] ${originsOnly(message)}`);
+      console.log(`[HttpCommunicationProtocol] ${printable(withoutUrls(message))}`);
     };
     hooks._logError = (message: string, error: unknown): void => {
-      console.error(`[HttpCommunicationProtocol Error] ${originsOnly(message)} ${describeFailure(error)}`);
+      console.error(`[HttpCommunicationProtocol Error] ${printable(withoutUrls(message))} ${describeFailure(error)}`);
     };
   }
 
@@ -67,19 +69,14 @@ export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
 }
 
 /**
- * Every URL in a log line cut down to its origin, as the URL parser the request
- * itself uses reads it: the user info, path, query and fragment, where a key
- * can be written, are dropped. A word that only looks like a URL and does not
- * parse is dropped whole.
+ * A log line cut at its first URL: the URL and everything after it become
+ * `<url>`. A substituted key can sit in any part of a URL, the host included
+ * (`https://${API_KEY}.example.com`), and may itself hold a space, so no part
+ * of it is kept, and no guess is made where it ends. The stock lines name the
+ * tool or provider before the URL, so the line still says what it concerns.
  */
-function originsOnly(message: string): string {
-  return message.replace(/\bhttps?:\/\/\S+/gi, (url) => {
-    try {
-      return new URL(url).origin;
-    } catch {
-      return '<url>';
-    }
-  });
+function withoutUrls(message: string): string {
+  return message.replace(/\bhttps?:\/\/[\s\S]*/i, '<url>');
 }
 
 /**

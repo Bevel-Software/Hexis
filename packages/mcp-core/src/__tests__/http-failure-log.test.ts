@@ -22,9 +22,12 @@ let server: HttpServer;
 let base: string;
 /** A loopback port nothing listens on: the transport failure. */
 let deadBase: string;
+/** Every request path the provider received, decoded, so a case can show the key was really sent. */
+let received: string[] = [];
 
 beforeAll(async () => {
   server = createServer((req, res) => {
+    received.push(decodeURIComponent(req.url ?? ''));
     if (req.url === '/manual') return void res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(manual()));
     // The provider echoes what it was sent, as providers echo a rejected key,
     // so a log that quoted the response body would show it too.
@@ -51,6 +54,7 @@ let printed: string[];
 
 beforeEach(() => {
   printed = [];
+  received = [];
   const keep = (...args: unknown[]) => void printed.push(format(...args));
   for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
     vi.spyOn(console, level).mockImplementation(keep);
@@ -98,6 +102,9 @@ function manual() {
       }),
       tool('key_in_query', `${base}/unauthorized?key=\${API_KEY}`, undefined),
       tool('key_in_path', `${base}/bad-gateway/hooks/\${API_KEY}`, undefined),
+      // `.invalid` never resolves (RFC 6761): the call fails, after the line
+      // naming its URL has been written.
+      tool('key_in_host', `https://\${API_KEY}.invalid/anything`, undefined),
     ],
   };
 }
@@ -157,15 +164,39 @@ describe('a failed http tool call', () => {
     expect(printed.join('\n')).toMatch(/status 401/);
   });
 
-  it('logs no part of a key written into the URL, in the query or the path, and still names the host', async () => {
+  it('logs no part of a key written into the URL, in the query, the path or the host, and still names the tool', async () => {
     const secret = key();
     const client = await clientWith({ svc_API_KEY: secret });
 
     await expect(client.callTool('svc.key_in_query', {})).rejects.toThrow();
     await expect(client.callTool('svc.key_in_path', {})).rejects.toThrow();
+    await expect(client.callTool('svc.key_in_host', {})).rejects.toThrow();
 
+    // The key really was in the URL the provider received, so the absence below is not a missed substitution.
+    expect(received).toContain(`/unauthorized?key=${secret}`);
+    expect(received).toContain(`/bad-gateway/hooks/${secret}`);
     expectNotPrinted(secret);
-    expect(printed.join('\n')).toContain(`Executing HTTP tool 'svc.key_in_query' with URL: ${base} and method: GET`);
+    const all = printed.join('\n');
+    for (const name of ['key_in_query', 'key_in_path', 'key_in_host']) {
+      expect(all).toContain(`Executing HTTP tool 'svc.${name}' with URL: <url>`);
+    }
+  });
+
+  it('writes a name that holds a newline or an escape as one escaped token, not a line of its own', () => {
+    // The installed protocol's two sinks, called as `@utcp/http` calls them,
+    // with a provider-chosen name interpolated into the message.
+    const sinks = CommunicationProtocol.communicationProtocols['http'] as unknown as Record<
+      '_logInfo' | '_logError',
+      (message: string, error?: unknown) => void
+    >;
+    const forged = "Executing HTTP tool 'svc.x\n[HttpCommunicationProtocol] all clear\u001b[2J\u009b31m'";
+    sinks._logInfo(forged);
+    sinks._logError(forged, new Error('boom'));
+
+    const lines = printed.join('\n').split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines.some((line) => line.startsWith('[HttpCommunicationProtocol] all clear'))).toBe(false);
+    for (const control of ['\u001b', '\u009b']) expect(printed.join('')).not.toContain(control);
   });
 
   it('logs no part of the client secret when the OAuth token fetch is refused', async () => {
