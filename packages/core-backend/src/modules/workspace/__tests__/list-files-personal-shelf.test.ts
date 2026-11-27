@@ -177,13 +177,16 @@ describe("list_files on another person's personal shelf", () => {
     it(`${c.who} gets that answer without any folder in the other shelf being read`, async () => {
       // The gate stands before the disk: no folder inside the shelf is read on
       // the way to the path, so nothing in it shapes the answer or its time.
-      const shelf = join(root, KB, 'Plugins', c.other).toLowerCase();
+      // Compared with forward slashes and in one case, so the prefix check
+      // holds on any platform's separator and on a case-insensitive disk.
+      const norm = (dir: string) => dir.replaceAll('\\', '/').toLowerCase();
+      const shelf = norm(join(root, KB, 'Plugins', c.other));
       const spy = vi.spyOn(nodeFs, 'readdir');
       try {
         for (const path of [`Plugins/${c.other}/skills/${c.otherSkill}`, `plugins/${c.other.toUpperCase()}/skills`]) {
           expect((await list(c.as, path)).status, path).toBe(404);
         }
-        const read = spy.mock.calls.map(([dir]) => String(dir).toLowerCase());
+        const read = spy.mock.calls.map(([dir]) => norm(String(dir)));
         expect(read.length).toBeGreaterThan(0);
         expect(read.filter((dir) => dir === shelf || dir.startsWith(`${shelf}/`))).toEqual([]);
       } finally {
