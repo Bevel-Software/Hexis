@@ -1,6 +1,7 @@
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { CallTemplate } from '@utcp/sdk';
 import { registerManual } from './dispatch.js';
+import { statesSessionLoss } from './session-signal.js';
 
 /**
  * Client-side recovery from MCP session loss: when a remote MCP server has
@@ -24,8 +25,6 @@ import { registerManual } from './dispatch.js';
  * {@link isSessionLoss} is deliberately narrow and separately testable.
  */
 
-/** The JSON-RPC code the Streamable HTTP transport reserves for a missing session. */
-const SESSION_NOT_FOUND_CODE = -32001;
 
 /** How far up a `cause` chain to look before giving up. */
 const MAX_CAUSE_DEPTH = 8;
@@ -40,41 +39,6 @@ function* errorChain(err: unknown): Generator<Record<string, unknown>> {
     yield current as Record<string, unknown>;
     current = (current as { cause?: unknown }).cause;
   }
-}
-
-/**
- * The HTTP status an error carries, or undefined when it carries none.
- *
- * The MCP SDK's `StreamableHTTPError` puts the HTTP status in `code`, which is
- * also where `McpError` puts its JSON-RPC code — and those two namespaces
- * OVERLAP on the very number this module cares about: `-32001` is "Session not
- * found" on the wire but `ErrorCode.RequestTimeout` in the SDK's own enum. The
- * range test is what keeps them apart: a JSON-RPC code is negative and can
- * never be read as a status, so a local request timeout never looks like a
- * session miss (and is never retried).
- */
-function httpStatusOf(err: Record<string, unknown>): number | undefined {
-  for (const key of ['code', 'status', 'statusCode'] as const) {
-    const value = err[key];
-    if (typeof value === 'number' && value >= 100 && value <= 599) return value;
-  }
-  return undefined;
-}
-
-/**
- * Does this error's text carry the session-not-found signal?
- *
- * The transport surfaces a failed POST as `Error POSTing to endpoint: <body>`,
- * so the server's JSON-RPC body rides along in the message and is the only
- * place the `-32001` is visible. Both halves of the spec's signal are accepted
- * — the code (structural) and the reserved message — because a server may send
- * either; requiring the 404 alongside is what keeps this from over-matching.
- */
-function saysSessionNotFound(message: string): boolean {
-  return (
-    new RegExp(`"code"\\s*:\\s*${SESSION_NOT_FOUND_CODE}\\b`).test(message) ||
-    /\bsession not found\b/i.test(message)
-  );
 }
 
 /**
@@ -94,11 +58,7 @@ function saysSessionNotFound(message: string): boolean {
  * rather than inferred from the recovery path around it.
  */
 export function isSessionLoss(err: unknown): boolean {
-  for (const candidate of errorChain(err)) {
-    if (httpStatusOf(candidate) !== 404) continue;
-    const message = candidate.message;
-    if (typeof message === 'string' && saysSessionNotFound(message)) return true;
-  }
+  for (const candidate of errorChain(err)) if (statesSessionLoss(candidate)) return true;
   return false;
 }
 

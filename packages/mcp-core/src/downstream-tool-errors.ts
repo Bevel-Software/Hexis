@@ -3,6 +3,7 @@ import { McpCommunicationProtocol } from '@utcp/mcp';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { callRedactor, manualSecrets } from './call-secrets.js';
 import { utcpManualName } from './utcp-namespace.js';
+import { SESSION_LOST_MESSAGE, statesSessionLoss } from './session-signal.js';
 
 /**
  * A downstream MCP server said its own call failed: it answered a
@@ -233,7 +234,9 @@ function redactedCopy(value: unknown, redact: (text: string) => string): unknown
       statusHolders.add(item);
       const response = fields.find(([key]) => key === 'response')?.[2];
       if (response && typeof response === 'object') statusHolders.add(response);
-      const message = redact(item.message);
+      // A lost session keeps the reserved message, so session recovery still
+      // reads it (`session-signal.ts`); nothing of the server's words goes.
+      const message = statesSessionLoss(item as unknown as Record<string, unknown>) ? SESSION_LOST_MESSAGE : redact(item.message);
       // Replaced in place only when every field can be, so a frozen error, or
       // one with a field it will not give up, is left as it was and answered
       // by the replacement below.

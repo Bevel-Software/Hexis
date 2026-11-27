@@ -4,6 +4,8 @@ import { McpCommunicationProtocol } from '@utcp/mcp';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
 import { McpError, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { isSessionLoss } from '../session-recovery.js';
 import {
   DownstreamToolError,
   downstreamErrorText,
@@ -228,6 +230,19 @@ describe('every failure a wrapped protocol lets through', () => {
     } as unknown as CallTemplate;
     const flagged = (await failingWith(new McpError(-32603, 'rejected', { ok: false }), keyed)()) as McpError;
     expect(flagged.data).toEqual({ ok: '[redacted]' });
+  });
+
+  it('keeps a lost session readable for recovery when it withholds the rest, and nothing of the server\'s words', async () => {
+    const lost = new StreamableHTTPError(404, `Error POSTing to endpoint: {"error":{"code":-32001,"message":"Session not found for ${KEY}"}}`);
+    const thrown = (await failingWith(lost)({ q: 'x' })) as StreamableHTTPError;
+    expect(thrown).toBeInstanceOf(StreamableHTTPError);
+    expect(thrown.code).toBe(404);
+    expect(thrown.message).toBe('Session not found');
+    expect(isSessionLoss(thrown)).toBe(true);
+    // A 404 that is an ordinary not-found is withheld like any other failure.
+    const missing = (await failingWith(new StreamableHTTPError(404, 'Not Found'))({ q: 'x' })) as Error;
+    expect(missing.message).toBe('[redacted]');
+    expect(isSessionLoss(missing)).toBe(false);
   });
 
   it('redacts a thrown string', async () => {
