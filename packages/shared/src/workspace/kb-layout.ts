@@ -694,6 +694,18 @@ export function isPersonalPluginDir(repoRelDir: string, layout: KbLayout): boole
 }
 
 /**
+ * Whether a repo-relative path is a personal shelf or lies inside one — the
+ * same structural rule as {@link isPersonalPluginDir}, asked of the path's
+ * first two segments. Inside a shelf, what a person may not read does not
+ * exist for them: listings omit it and lookups answer `not_found`, never a
+ * refusal that would confirm it is there.
+ */
+export function isInPersonalPluginDir(repoRelPath: string, layout: KbLayout): boolean {
+  const segments = repoRelPath.split('/').filter(Boolean);
+  return segments.length >= 2 && isPersonalPluginDir(`${segments[0]}/${segments[1]}`, layout);
+}
+
+/**
  * The plugin a repo-root-relative path belongs to, or `null` for content that
  * sits outside any plugin.
  *

@@ -15,6 +15,9 @@ import { promisify } from 'node:util';
 import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
 import { GitService } from '../../version-control/git/git.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+// The resolver has no module-index entry: only the composition root builds it.
+import { AccessControlService } from '../../access/access-control.service.js';
+import { personalAccessMd } from '../../plugins/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -736,6 +739,63 @@ describe('SkillService', () => {
       await writeDeck();
       const list = await svc().listSkills(undefined, { branch: DRAFT });
       expect(list.find((s) => s.name === 'make-deck')).toMatchObject({ unmerged: true, branch: DRAFT });
+    });
+  });
+
+  /**
+   * A skill in someone's personal shelf is nobody else's to know about: to
+   * another person `getSkill` answers `not_found`, exactly as for a name
+   * nobody used — never `forbidden`, which would confirm it exists. Over the
+   * REAL resolver and the access.md the provisioning service seeds, in both
+   * directions, with the owner still loading their own.
+   */
+  describe("another person's personal skill", () => {
+    const ADMIN = { name: 'Ada Admin', email: 'admin@x.io' };
+    const BIZ = { name: 'Bea Business', email: 'biz@x.io' };
+
+    const realAccess = (): IAccessControl =>
+      new AccessControlService(
+        { ...workspaceService, ensureRemotesFetched: async () => undefined } as unknown as WorkspaceService,
+        KB_DIR,
+        new NodeFs(),
+      );
+
+    beforeEach(async () => {
+      const kb = join(root, wsId, KB_DIR);
+      const files: Record<string, string> = {
+        'roles.yaml': `roles:\n  Admin:\n    - ${ADMIN.email}\n`,
+        'access.md': '---\nread:\n  - everyone\nwrite:\n  - Admin\n---\n',
+        'Plugins/personal-biz/access.md': personalAccessMd(BIZ),
+        'Plugins/personal-biz/skills/weekly-summary/SKILL.md': '---\nname: weekly-summary\n---\n# Weekly\n',
+        'Plugins/personal-adm/access.md': personalAccessMd(ADMIN),
+        'Plugins/personal-adm/skills/admin-standup/SKILL.md': '---\nname: admin-standup\n---\n# Standup\n',
+        // An ordinary plugin only Admin reads: its refusal stays `forbidden`.
+        'Plugins/Locked/access.md': '---\nread:\n  - deny everyone\n  - Admin\n---\n',
+        'Plugins/Locked/skills/locked-skill/SKILL.md': '---\nname: locked-skill\n---\n# Locked\n',
+      };
+      for (const [rel, text] of Object.entries(files)) {
+        await mkdir(join(kb, rel, '..'), { recursive: true });
+        await writeFile(join(kb, rel), text);
+      }
+    });
+
+    for (const c of [
+      { who: 'the Admin', as: ADMIN.email, own: 'admin-standup', other: 'weekly-summary' },
+      { who: 'the Business user', as: BIZ.email, own: 'weekly-summary', other: 'admin-standup' },
+    ]) {
+      test(`${c.who} gets not_found for the other's skill, as for an unknown name, and loads their own`, async () => {
+        const service = svc(realAccess());
+        expect(await service.getSkill(c.as, 'zzz-none')).toEqual({ ok: false, error: 'not_found' });
+        expect(await service.getSkill(c.as, c.other)).toEqual({ ok: false, error: 'not_found' });
+        expect(await service.getSkill(c.as, c.other, 'SKILL.md')).toEqual({ ok: false, error: 'not_found' });
+        const own = await service.getSkill(c.as, c.own);
+        expect(own.ok && own.kind === 'skill' ? own.skill.name : own).toBe(c.own);
+        expect((await service.listSkills(c.as)).map((s) => s.name)).not.toContain(c.other);
+      });
+    }
+
+    test('an ordinary skill the caller may not read still answers forbidden', async () => {
+      expect(await svc(realAccess()).getSkill(BIZ.email, 'locked-skill')).toEqual({ ok: false, error: 'forbidden' });
     });
   });
 });
