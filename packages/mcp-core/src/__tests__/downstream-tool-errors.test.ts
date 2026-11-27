@@ -155,6 +155,13 @@ describe('every failure a wrapped protocol lets through', () => {
     // A frozen error comes back as an Error carrying the same fields, redacted.
     const frozen = Object.freeze(Object.assign(new Error(`refused ${KEY}`), { code: 401, data: { echoed: KEY } }));
     expect(await failingWith(frozen)()).toMatchObject({ code: 401, message: 'refused [redacted]', data: { echoed: '[redacted]' } });
+    // One with a single field it will not give up is answered the same way, and left as it was.
+    const stubborn = Object.assign(new Error(`refused ${KEY}`), { data: { echoed: KEY } });
+    Object.defineProperty(stubborn, 'fixed', { value: KEY, enumerable: true });
+    const answered = (await failingWith(stubborn)()) as Error & { data: unknown; fixed: unknown };
+    expect(answered).not.toBe(stubborn);
+    expect(answered).toMatchObject({ message: 'refused [redacted]', data: { echoed: '[redacted]' }, fixed: '[redacted]' });
+    expect(stubborn).toMatchObject({ message: `refused ${KEY}`, data: { echoed: KEY }, fixed: KEY });
   });
 
   it("redacts an error's hidden fields, keeps a payload's kinds and a `__proto__` key as a key, and leaves binary out", async () => {

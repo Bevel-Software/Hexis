@@ -215,15 +215,20 @@ function redactedCopy(value: unknown, redact: (text: string) => string): unknown
       const hasCause = Object.prototype.hasOwnProperty.call(item, 'cause');
       const cause = hasCause ? readField(item, 'cause') : undefined;
       const message = redact(item.message);
+      // Replaced in place only when every field can be, so a frozen error, or
+      // one with a field it will not give up, is left as it was and answered
+      // by the replacement below.
+      const replaceable =
+        Object.isExtensible(item) &&
+        ['message', 'stack', 'cause', ...fields.map(([key]) => key)].every((key) => Object.getOwnPropertyDescriptor(item, key)?.configurable ?? true);
       let target = item;
-      try {
+      if (replaceable) {
         Object.defineProperty(item, 'message', { value: message, writable: true, configurable: true });
         if (typeof item.stack === 'string') Object.defineProperty(item, 'stack', { value: redact(item.stack), writable: true, configurable: true });
-        // Emptied now, filled redacted as the walk reaches them: a field that
-        // cannot be replaced sends the whole error to the replacement below.
+        // Emptied now, filled redacted as the walk reaches them.
         for (const [key] of fields) Object.defineProperty(item, key, { value: undefined, writable: true, configurable: true });
         if (hasCause) Object.defineProperty(item, 'cause', { value: undefined, writable: true, configurable: true });
-      } catch {
+      } else {
         target = Object.assign(new Error(message), { code: (item as { code?: unknown }).code });
         target.name = item.name;
       }
