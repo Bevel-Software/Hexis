@@ -64,8 +64,8 @@ export interface HexisMcpServerExtension {
    * use here needs, or tools the connected account cannot run (a plan the
    * workspace does not have): listed, each would only ever fail. A compiled
    * marketplace plugin ships the server as `mcp.json` declares it: a client
-   * that installs it dials the server itself, and this list does not apply
-   * there.
+   * that installs it connects to or launches the server itself, and this
+   * list does not apply there.
    */
   excludeTools?: string[];
 }

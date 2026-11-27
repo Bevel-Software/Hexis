@@ -42,7 +42,10 @@ interface PlatformOptions {
 
 async function startPlatform(opts: PlatformOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), 'hosted-mcp-hints-'));
-  stops.push(() => rm(root, { recursive: true, force: true }));
+  // Retried: the graph's last git child can still be writing into the bare
+  // repository for a moment after the stop, and a removal that meets it
+  // fails with ENOTEMPTY (seen on CI, on several branches).
+  stops.push(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
   const repository = join(root, 'repository');
   await cp(defaultKbTemplateDir(), repository, { recursive: true });
   await writeFile(join(repository, 'roles.yaml'), 'roles:\n  Admin:\n    - admin@example.com\n');
