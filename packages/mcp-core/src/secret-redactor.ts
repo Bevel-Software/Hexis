@@ -100,8 +100,8 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * either, since any eight characters of it are a piece.
  *
  * Nothing here gives up on a long text: each secret is matched in time linear
- * in the text and the secret, and each run taken out is filled once, so no
- * bound on the work can trip on one and not on another.
+ * in the text and the secret, and in space linear in the secret, so no bound
+ * on the work can trip on one and not on another.
  */
 export class SecretRedactor {
   /** Taken out wherever they appear. */
@@ -208,29 +208,21 @@ export class SecretRedactor {
       } else if (secret.length < MIN_ECHOED_PIECE_CHARS) {
         for (let at = text.indexOf(secret); at >= 0; at = text.indexOf(secret, at + 1)) hideClear(at, at + secret.length);
       } else {
-        // Every run of eight characters or more that is a piece of it: the
-        // pieces that overlap merged into one run, filled once, without the
-        // spaces at its edges (a piece of `Bearer <token>` can start with one).
-        const ending = longestPiecesEnding(secret, text, blocked);
-        let runStart = -1;
-        let runEnd = -1;
-        const fill = () => {
-          let start = runStart;
-          let end = runEnd;
-          while (start < end && /\s/.test(text[start]!)) start++;
-          while (end > start && /\s/.test(text[end - 1]!)) end--;
-          hide(start, end);
-        };
-        for (let i = 0; i < text.length; i++) {
-          if (ending[i]! < MIN_ECHOED_PIECE_CHARS) continue;
-          const start = i + 1 - ending[i]!;
-          if (runStart >= 0 && start <= runEnd) runEnd = i + 1;
-          else {
-            if (runStart >= 0) fill();
-            [runStart, runEnd] = [start, i + 1];
-          }
+        // Every run of eight characters or more made of its pieces, filled
+        // once, without the spaces at its edges (a piece of `Bearer <token>`
+        // can start with one).
+        const covered = windowsOf(secret, text, blocked);
+        for (let start = 0; start < text.length; start++) {
+          if (!covered[start]) continue;
+          let end = start;
+          while (end < text.length && covered[end]) end++;
+          let from = start;
+          let to = end;
+          while (from < to && /\s/.test(text[from]!)) from++;
+          while (to > from && /\s/.test(text[to - 1]!)) to--;
+          hide(from, to);
+          start = end;
         }
-        if (runStart >= 0) fill();
       }
     }
     let out = '';
@@ -302,66 +294,57 @@ function urlEncoded(value: string): string | null {
 }
 
 /**
- * For each position of `text`, the length of the longest piece of `pattern`
- * that ends there, with no position marked in `blocked` inside it: a suffix
- * automaton of the pattern run over the text, in time linear in both.
+ * Which positions of `text` lie in a window of eight characters that also
+ * occurs in `pattern`, with nothing `blocked` in the window. The pattern's
+ * windows go into an open-addressing table of two typed arrays (two rolling
+ * hashes, so a collision can only take out more), and the text's are looked
+ * up: time linear in both, space linear in the pattern. A run of covered
+ * positions is a piece of the pattern, or made of its pieces.
  */
-function longestPiecesEnding(pattern: string, text: string, blocked: Uint8Array): Int32Array {
-  const next: Map<number, number>[] = [new Map()];
-  const link: number[] = [-1];
-  const length: number[] = [0];
-  let last = 0;
-  for (let i = 0; i < pattern.length; i++) {
-    const unit = pattern.charCodeAt(i);
-    const current = next.push(new Map()) - 1;
-    length[current] = length[last]! + 1;
-    let state = last;
-    while (state !== -1 && !next[state]!.has(unit)) {
-      next[state]!.set(unit, current);
-      state = link[state]!;
-    }
-    if (state === -1) link[current] = 0;
-    else {
-      const target = next[state]!.get(unit)!;
-      if (length[state]! + 1 === length[target]) link[current] = target;
-      else {
-        const clone = next.push(new Map(next[target])) - 1;
-        length[clone] = length[state]! + 1;
-        link[clone] = link[target]!;
-        while (state !== -1 && next[state]!.get(unit) === target) {
-          next[state]!.set(unit, clone);
-          state = link[state]!;
-        }
-        link[target] = clone;
-        link[current] = clone;
+function windowsOf(pattern: string, text: string, blocked: Uint8Array): Uint8Array {
+  const size = MIN_ECHOED_PIECE_CHARS;
+  const covered = new Uint8Array(text.length);
+  if (pattern.length < size || text.length < size) return covered;
+  const [baseA, baseB] = [0x01000193, 0x5bd1e995];
+  let [dropA, dropB] = [1, 1];
+  for (let i = 1; i < size; i++) [dropA, dropB] = [Math.imul(dropA, baseA), Math.imul(dropB, baseB)];
+  /** Each window's two hashes, rolled one unit at a time over `of`. */
+  const roll = function* (of: string): Generator<readonly [number, number, number]> {
+    let [a, b] = [0, 0];
+    for (let i = 0; i < of.length; i++) {
+      if (i >= size) {
+        const out = of.charCodeAt(i - size);
+        [a, b] = [(a - Math.imul(out, dropA)) | 0, (b - Math.imul(out, dropB)) | 0];
       }
+      const unit = of.charCodeAt(i);
+      [a, b] = [(Math.imul(a, baseA) + unit) | 0, (Math.imul(b, baseB) + unit) | 0];
+      if (i >= size - 1) yield [i + 1 - size, a, b];
     }
-    last = current;
+  };
+  let slots = 1;
+  while (slots < 2 * pattern.length) slots *= 2;
+  const mask = slots - 1;
+  const keyA = new Int32Array(slots);
+  const keyB = new Int32Array(slots);
+  const used = new Uint8Array(slots);
+  /** The slot of hashes `a`, `b`: theirs, or the empty one where they would go. */
+  const slotOf = (a: number, b: number): number => {
+    let slot = (a ^ (a >>> 15)) & mask;
+    while (used[slot] && !(keyA[slot] === a && keyB[slot] === b)) slot = (slot + 1) & mask;
+    return slot;
+  };
+  for (const [, a, b] of roll(pattern)) {
+    const slot = slotOf(a, b);
+    [keyA[slot], keyB[slot], used[slot]] = [a, b, 1];
   }
-  const ending = new Int32Array(text.length);
-  let state = 0;
-  let matched = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (blocked[i]) {
-      state = 0;
-      matched = 0;
-      continue;
-    }
-    const unit = text.charCodeAt(i);
-    while (state !== 0 && !next[state]!.has(unit)) {
-      state = link[state]!;
-      matched = length[state]!;
-    }
-    if (next[state]!.has(unit)) {
-      state = next[state]!.get(unit)!;
-      matched++;
-    } else {
-      state = 0;
-      matched = 0;
-    }
-    ending[i] = matched;
+  let blockedIn = 0;
+  for (let i = 0; i < size - 1; i++) blockedIn += blocked[i]!;
+  for (const [start, a, b] of roll(text)) {
+    blockedIn += blocked[start + size - 1]!;
+    if (blockedIn === 0 && used[slotOf(a, b)]) covered.fill(1, start, start + size);
+    blockedIn -= blocked[start]!;
   }
-  return ending;
+  return covered;
 }
 
 
