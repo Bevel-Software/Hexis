@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import type { CoreConfig } from '../../../core-config.js';
 import jwt from 'jsonwebtoken';
 import { AuthService, PasswordChangedMeanwhileError, PasswordRefusedError } from '../auth.service.js';
@@ -24,6 +24,7 @@ interface FakeChain extends PromiseLike<unknown> {
   orderBy: (...args: unknown[]) => FakeChain;
   returning: (...args: unknown[]) => FakeChain;
   onConflictDoUpdate: (...args: unknown[]) => FakeChain;
+  onConflictDoNothing: (...args: unknown[]) => FakeChain;
 }
 
 function makeFakeDb(queue: unknown[]) {
@@ -48,6 +49,7 @@ function makeFakeDb(queue: unknown[]) {
       orderBy: passthrough(),
       returning: passthrough(),
       onConflictDoUpdate: passthrough((a) => captured.conflict.push(a[0])),
+      onConflictDoNothing: passthrough(),
       then: (onFulfilled, onRejected) => Promise.resolve(result).then(onFulfilled, onRejected),
     };
     return chain;
@@ -324,6 +326,54 @@ describe('AuthService.createAccount / changePassword', () => {
       expect(db.update).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('AuthService.createInvitedAccount — accounts that never hold a password', () => {
+  // What the insert hands back for a new address: the row as written.
+  function invitedDb(email: string) {
+    return makeFakeDb([[], [{ ...ROW, email, passwordHash: null }]]);
+  }
+
+  it('generates, hashes and returns a starting password for an ordinary address (the control)', async () => {
+    const { db, captured } = invitedDb('new@example.com');
+    const made = await new AuthService(db, makeConfig()).createInvitedAccount('new@example.com', { startingPassword: true });
+    if (!made.created) throw new Error('expected a new account');
+    expect(made.startingPassword).toHaveLength(16);
+    const written = captured.values[0] as { passwordHash?: string };
+    expect(written.passwordHash?.startsWith('scrypt:')).toBe(true);
+  });
+
+  // A platform account holding a hash could be signed in as; the invite
+  // asked for a password, and none is made, returned or stored.
+  it.each([RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL])(
+    'makes the platform account %s with no password, though one was asked for',
+    async (email) => {
+      const { db, captured } = invitedDb(email);
+      const made = await new AuthService(db, makeConfig()).createInvitedAccount(email.toUpperCase(), {
+        startingPassword: true,
+      });
+      expect(made).toEqual({ created: true, user: expect.objectContaining({ email }) });
+      expect(made).not.toHaveProperty('startingPassword');
+      expect(captured.values).toHaveLength(1);
+      expect(captured.values[0]).not.toHaveProperty('passwordHash');
+    },
+  );
+
+  it.each([
+    ['with ADMIN_PASSWORD set', 'sup3r-secret'],
+    ['with ADMIN_PASSWORD unset', ''],
+  ])("makes an owner's account with no password, %s", async (_label, adminPassword) => {
+    const { db, captured } = invitedDb('root@example.com');
+    const made = await new AuthService(db, makeConfig({ adminEmail: 'root@example.com', adminPassword })).createInvitedAccount(
+      'Root@Example.com',
+      { startingPassword: true },
+    );
+    // The account IS made (one insert); only the password is left out.
+    expect(made).toEqual({ created: true, user: expect.objectContaining({ email: 'root@example.com' }) });
+    expect(made).not.toHaveProperty('startingPassword');
+    expect(captured.values).toHaveLength(1);
+    expect(captured.values[0]).not.toHaveProperty('passwordHash');
+  });
 });
 
 describe('AuthService.createAccountWithStartingPassword — an invite never replaces a password', () => {

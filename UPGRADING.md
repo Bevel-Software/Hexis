@@ -33,6 +33,48 @@ earlier release added for it — the Skills & Tools sidebar shows that root as
 a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
+### Anyone signed in can invite people (0.41+)
+
+From 0.41 the toolbar's Invite button and the Invite people command open the
+Invite dialog for everyone signed in, not only admins; so does Manage
+access's Invite action on a row with no account, on a deployment with
+password sign-in and no single sign-on (the only one where it is offered).
+A member invites as Member; only an admin can invite as Admin.
+There is no setting to turn this off: a deployment that wants nobody to
+create password accounts turns password sign-in off (`LOGIN_PASSWORD=false`).
+On a cloud deployment each newly created account still takes a seat and is
+refused when the plan is full; an address that already has an account takes
+no seat and answers `existing`.
+
+Nobody types a starting password any more. Where one is needed (password
+sign-in and no single sign-on, or "Also give them a password" ticked), the
+platform generates it and passes it to the deployment's listeners. When one
+of them delivers it to the invited person (their email, the companion), the
+inviter is not shown it and the row says how it was sent; otherwise it is
+shown once on the person's row, to copy and pass on. An address that grants
+or groups already name gets a password like any other. The owner's address
+(`ADMIN_EMAIL`, with or without `ADMIN_PASSWORD`) and the system accounts'
+addresses never get one. From a non-admin, the password of an address that
+already holds Admin in `roles.yaml` is never shown to the inviter: delivered
+if a listener can, discarded otherwise, leaving the account with no way in
+(its row says so, and an admin sets a password in User accounts; should the
+discard fail, the server logs it, and the password it stored is one nobody
+was given). A listener whose channel name carries the password as written is counted as
+not having reached the person, and the name is neither shown nor logged. When
+`roles.yaml` cannot be read, a non-admin's invite treats the address as
+holding Admin: the account is made and its password withheld the same way.
+An invite never changes an account that already exists: it no longer gives a
+first password to an existing account without one. Admins set or reset a
+password from User accounts, as before.
+
+Hosts that listen for invitations (`onAccountInvited`) receive the generated
+password as `startingPassword` on the event. A listener that puts it in what
+it sends the person answers `{ channel: 'email', deliveredStartingPassword: true }`
+(or its own channel name) instead of `'email'`; a plain channel name still
+means "told them of the invite" and leaves the password with the inviter, so
+a mail that does not carry the password yet keeps working as before. The
+admission port is asked with the new reason `invite`.
+
 ### A change request's body is its description (0.32+)
 
 From 0.32 a change request's stored body is exactly its description. Until

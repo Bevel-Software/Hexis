@@ -5,16 +5,12 @@ import { act } from 'react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { SearchPalette } from '../SearchPalette';
-import { GitContext, type GitContextValue } from '../../../git/state/git.context';
-import { WorkspaceContext } from '../../../workspace/state/workspace.context';
-import { makeWorkspaceFixture } from '../../../workspace/__tests__/testFixtures';
-import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
-import { AuthContext } from '../../../auth/state/auth.context';
-import { authValue } from '../../../library/__tests__/auth-harness';
-import { InviteDialogContext } from '../../../onboarding/state/invite-dialog.context';
-import { resetOnboardingForTests } from '../../../onboarding/state/onboarding';
-import { WELCOME_PATH } from '../../../onboarding/paths';
-import { publishEditablePage } from '../../../workspace/state/editable-page';
+import { GitContext, type GitContextValue } from '../../../git';
+import { WorkspaceContext } from '../../../workspace';
+import { AdminContext, type AdminContextValue } from '../../../admin';
+import { AuthContext } from '../../../auth';
+import { WELCOME_PATH } from '../../../onboarding';
+import { authValue, makeWorkspaceFixture } from '../../../../__tests__/context-fixtures';
 import {
   ActiveAppIdContext,
   AppRegistryContext,
@@ -24,35 +20,61 @@ import {
 } from '../../../../core/registry';
 import type { CommandAction } from '../../commands/actions';
 
+// The other modules the palette reaches, replaced at their entries: that is
+// where the palette and its commands import them from.
 const api = vi.hoisted(() => ({
   listSkills: vi.fn(),
   listToolSecrets: vi.fn(),
   listPlugins: vi.fn(),
 }));
-vi.mock('../../../library/services/library.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../library/services/library.api')>()),
+vi.mock('../../../library', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../library')>()),
   listSkills: api.listSkills,
-}));
-vi.mock('../../../secrets-vault/services/tool-secrets.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../secrets-vault/services/tool-secrets.api')>()),
-  listToolSecrets: api.listToolSecrets,
-}));
-vi.mock('../../../library/services/plugins.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../library/services/plugins.api')>()),
   listPlugins: api.listPlugins,
+}));
+vi.mock('../../../secrets-vault', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../secrets-vault')>()),
+  listToolSecrets: api.listToolSecrets,
 }));
 // Create new page's own naming and retrying is `useCreatePage`'s, pinned by the Get
 // set up column's suite; here it is the command that calls it.
 const createPage = vi.hoisted(() => vi.fn<() => Promise<string | null>>());
 // Where Create new page would write; null for someone who may write no Knowledge folder.
 const pageTarget = vi.hoisted(() => ({ folder: 'knowledge-base/KnowledgeBase' as string | null }));
-vi.mock('../../../workspace/hooks/useCreatePage', () => ({
-  useCreatePage: () => ({
-    knowledgeRoot: 'knowledge-base/KnowledgeBase',
-    createPage,
-    pageFolder: pageTarget.folder,
-    pageFolderSettled: true,
-  }),
+// The page open for editing, as the file viewer announces it (`useEditablePage`).
+const editable = vi.hoisted(() => {
+  let page: string | null = null;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => page,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    publish: (next: string | null) => {
+      page = next;
+      for (const listener of listeners) listener();
+    },
+  };
+});
+vi.mock('../../../workspace', async (importOriginal) => {
+  const { useSyncExternalStore } = await import('react');
+  return {
+    ...(await importOriginal<typeof import('../../../workspace')>()),
+    useCreatePage: () => ({
+      knowledgeRoot: 'knowledge-base/KnowledgeBase',
+      createPage,
+      pageFolder: pageTarget.folder,
+      pageFolderSettled: true,
+    }),
+    useEditablePage: () => useSyncExternalStore(editable.subscribe, editable.get),
+  };
+});
+// The Invite dialog the command opens.
+const inviteOpen = vi.hoisted(() => vi.fn());
+vi.mock('../../../onboarding', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../onboarding')>()),
+  useInviteDialog: () => ({ open: inviteOpen, invitedRevision: 0 }),
 }));
 // The onboarding write is not what these tests are about.
 vi.mock('../../../../lib/api', () => ({ authFetch: vi.fn(async () => ({ ok: true, status: 200 })) }));
@@ -115,7 +137,6 @@ const APPS: AppDef[] = [
   { id: 'skills-tools', label: 'Skills & Tools', path: '/skills-and-tools', order: 20, element: <></> },
 ];
 
-const inviteOpen = vi.fn();
 
 interface PaletteOptions {
   compact?: boolean;
@@ -148,15 +169,13 @@ function renderPalette({
         <ActiveAppIdContext.Provider value="knowledge">
           <AuthContext.Provider value={auth}>
             <AdminContext.Provider value={adminValue(admin)}>
-              <InviteDialogContext.Provider value={{ open: inviteOpen, invitedRevision: 0 }}>
-                <WorkspaceContext.Provider value={makeWorkspaceFixture({ fileTree: TREE, openFilePath })}>
-                  <GitContext.Provider value={git}>
-                    <button type="button">Elsewhere</button>
-                    <SearchPalette compact={compact} />
-                    <LocationProbe />
-                  </GitContext.Provider>
-                </WorkspaceContext.Provider>
-              </InviteDialogContext.Provider>
+              <WorkspaceContext.Provider value={makeWorkspaceFixture({ fileTree: TREE, openFilePath })}>
+                <GitContext.Provider value={git}>
+                  <button type="button">Elsewhere</button>
+                  <SearchPalette compact={compact} />
+                  <LocationProbe />
+                </GitContext.Provider>
+              </WorkspaceContext.Provider>
             </AdminContext.Provider>
           </AuthContext.Provider>
         </ActiveAppIdContext.Provider>
@@ -173,8 +192,7 @@ const groupRows = (name: string) =>
   within(screen.getByRole('group', { name })).getAllByRole('option').map((o) => o.textContent);
 
 beforeEach(() => {
-  resetOnboardingForTests();
-  publishEditablePage(null);
+  editable.publish(null);
   inviteOpen.mockReset();
   createPage.mockReset().mockResolvedValue('knowledge-base/KnowledgeBase/Untitled.md');
   pageTarget.folder = 'knowledge-base/KnowledgeBase';
@@ -462,16 +480,17 @@ describe('SearchPalette: commands', () => {
     expect(groupRows('Pages')).toContain('OnboardingKnowledge');
   });
 
-  it('keeps admin-only commands from members', async () => {
+  it('keeps admin-only commands from members, and offers them Invite people', async () => {
     const user = userEvent.setup();
     renderPalette({ admin: false });
     await user.click(trigger());
     expect(groupRows('Actions')).toEqual([
       'Create new pageC (shortcut C)',
+      'Invite peopleShift I (shortcut Shift I)',
       'Go to Skills & ToolsShift S (shortcut Shift S)',
     ]);
     await user.type(input(), 'invite');
-    expect(group('Actions')).toBeNull();
+    expect(groupRows('Actions')).toEqual(['Invite peopleShift I (shortcut Shift I)']);
     await user.clear(input());
     await user.type(input(), 'app roles');
     expect(group('Actions')).toBeNull();
@@ -610,7 +629,7 @@ describe('SearchPalette: commands', () => {
     expect(group('Actions')).toBeNull();
     await user.keyboard('{Escape}');
 
-    act(() => publishEditablePage(page));
+    act(() => editable.publish(page));
     await user.click(trigger());
     await user.type(input(), 'edit');
     await user.keyboard('{Enter}');
@@ -752,7 +771,7 @@ describe('SearchPalette: shortcuts', () => {
   });
 
   it('does nothing for G then K, G then S, ⇧E or ⇧A', () => {
-    publishEditablePage('knowledge-base/KnowledgeBase/Onboarding.md');
+    editable.publish('knowledge-base/KnowledgeBase/Onboarding.md');
     renderPalette({ openFilePath: 'knowledge-base/KnowledgeBase/Onboarding.md', onboardingPending: true });
     press('g');
     press('k');
@@ -813,7 +832,7 @@ describe('SearchPalette: shortcuts', () => {
   });
 
   it('gives Edit this page, Connect your agent and the settings rows no key', async () => {
-    publishEditablePage('knowledge-base/KnowledgeBase/Onboarding.md');
+    editable.publish('knowledge-base/KnowledgeBase/Onboarding.md');
     const user = userEvent.setup();
     renderPalette({
       openFilePath: 'knowledge-base/KnowledgeBase/Onboarding.md',
@@ -901,10 +920,10 @@ describe('SearchPalette: shortcuts', () => {
     expect(location()).toBe('/workspace/main');
   });
 
-  it('lets the key through where its command is not on offer: ⇧I for someone who is not an admin', () => {
+  it('⇧I opens the Invite dialog for someone who is not an admin too', () => {
     renderPalette({ admin: false });
-    expect(shift('i')).toBe(true);
-    expect(inviteOpen).not.toHaveBeenCalled();
+    expect(shift('i')).toBe(false);
+    expect(inviteOpen).toHaveBeenCalledTimes(1);
   });
 
   // A distribution's command gets a working key for the `shortcut` it set,

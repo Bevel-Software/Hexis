@@ -3,12 +3,9 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { AccessResponse } from '../api';
-import type { LoginProviders } from '../../auth/services/sso';
-import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
-import {
-  InviteDialogContext,
-  type InviteDialogController,
-} from '../../onboarding/state/invite-dialog.context';
+import type { LoginProviders } from '../../auth';
+import { AdminContext, type AdminContextValue } from '../../admin';
+import type { InviteDialogController } from '../../onboarding';
 
 const api = vi.hoisted(() => ({
   fetchFileAccess: vi.fn(),
@@ -20,26 +17,32 @@ vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
   return { ...actual, ...api };
 });
-const { providersMock } = vi.hoisted(() => ({ providersMock: vi.fn<() => Promise<LoginProviders>>() }));
-vi.mock('../../auth/services/sso', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../auth/services/sso')>()),
-  fetchLoginProvidersStrict: providersMock,
+// The sign-in probe is a plain `fetch` of `/api/auth/providers`; the other
+// modules are stood in for at their entries.
+const { providersMock, invite } = vi.hoisted(() => ({
+  providersMock: vi.fn<() => Promise<LoginProviders>>(),
+  invite: { current: null as InviteDialogController | null },
 }));
-vi.mock('../../workspace/state/workspace.context', () => ({
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   useWorkspace: () => ({ workspaceId: 'ws-1', kbDirName: 'knowledge-base' }),
 }));
-vi.mock('../../auth/state/auth.context', () => ({
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   useAuth: () => ({ user: { email: 'me@x.com', name: 'Me' } }),
+}));
+vi.mock('../../onboarding', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../onboarding')>()),
+  useInviteDialog: () => invite.current,
 }));
 
 import { ManageAccessDialog } from '../components/ManageAccessDialog';
 
 /**
  * Manage access on a deployment with no single sign-on: an address with no
- * account cannot sign in until someone invites it, so the row says so — to
- * an admin, with an Invite action that opens the Invite dialog with that
- * address; to anyone else, that an admin has to. The grant saves exactly as
- * before. With single sign-on, or when the sign-in methods could not be
+ * account cannot sign in until someone invites it, so the row says so, and
+ * offers anyone viewing (admin or not) an Invite action that opens the
+ * Invite dialog with that address. The grant saves exactly as before. With single sign-on, or when the sign-in methods could not be
  * read, the note is today's.
  */
 
@@ -56,7 +59,6 @@ const TODAY_NOTE = /hasn't signed in yet/i;
 const TODAY_HELP =
   'No account for this email yet. The grant is saved and takes effect the moment they first sign in — if you did not expect this, check the spelling.';
 const ADMIN_HELP = "No account yet. They can't sign in until you invite them.";
-const MEMBER_HELP = "No account yet. They can't sign in until an admin invites them.";
 
 const viewWith = (users: { name: string; email: string; hasAccount?: boolean }[]): AccessResponse =>
   ({
@@ -88,15 +90,14 @@ function adminValue(isAdmin: boolean): AdminContextValue {
 }
 
 function mount(isAdmin: boolean) {
-  const invite: InviteDialogController = { open: vi.fn(), invitedRevision: 0 };
+  const controller: InviteDialogController = { open: vi.fn(), invitedRevision: 0 };
+  invite.current = controller;
   render(
     <AdminContext.Provider value={adminValue(isAdmin)}>
-      <InviteDialogContext.Provider value={invite}>
-        <ManageAccessDialog entry={ENTRY} onClose={() => {}} />
-      </InviteDialogContext.Provider>
+      <ManageAccessDialog entry={ENTRY} onClose={() => {}} />
     </AdminContext.Provider>,
   );
-  return invite;
+  return controller;
 }
 
 async function rowFor(name: string): Promise<HTMLElement> {
@@ -148,6 +149,13 @@ beforeEach(() => {
     accountsKnown: true,
   });
   providersMock.mockResolvedValue({ password: true, sso: [] });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => {
+      if (url !== '/api/auth/providers') throw new Error(`unexpected fetch ${url}`);
+      return new Response(JSON.stringify(await providersMock()), { status: 200 });
+    }),
+  );
 });
 
 describe('ManageAccessDialog, no single sign-on', () => {
@@ -164,12 +172,13 @@ describe('ManageAccessDialog, no single sign-on', () => {
     expect(within(known).queryByText(ADMIN_HELP)).toBeNull();
   });
 
-  it('anyone else reads that an admin has to invite them, and gets no action', async () => {
+  it('anyone else reads the same, and Invite opens the dialog with the address for them too', async () => {
     const invite = mount(false);
     const row = await rowFor(UNKNOWN.name);
-    expect(await within(row).findByText(MEMBER_HELP)).toBeInTheDocument();
-    expect(within(row).queryByRole('button', { name: /^Invite/ })).toBeNull();
-    expect(invite.open).not.toHaveBeenCalled();
+    expect(await within(row).findByText(ADMIN_HELP)).toBeInTheDocument();
+    expect(within(row).queryByText(/until an admin invites them/)).toBeNull();
+    await userEvent.click(within(row).getByRole('button', { name: `Invite ${UNKNOWN.email}` }));
+    expect(invite.open).toHaveBeenCalledWith({ emails: [UNKNOWN.email] });
   });
 
   it('the grant saves as today, and the new chip carries the same help — for an admin', async () => {
@@ -180,8 +189,8 @@ describe('ManageAccessDialog, no single sign-on', () => {
 
   it('the grant saves as today, and the new chip carries the same help — for anyone else', async () => {
     mount(false);
-    await screen.findByText(MEMBER_HELP);
-    await grantToUnknown(MEMBER_HELP);
+    await screen.findByText(ADMIN_HELP);
+    await grantToUnknown(ADMIN_HELP);
   });
 });
 

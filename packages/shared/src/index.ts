@@ -1,6 +1,7 @@
 // Auth
 export * from './auth/types.js';
 export * from './auth/password-policy.js';
+export * from './auth/invitation.types.js';
 
 // Chat
 export * from './chat/types.js';

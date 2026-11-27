@@ -22,6 +22,7 @@ import {
 } from './password-hash.js';
 import { RECOVERY_BOT_EMAIL } from '../version-control/index.js';
 import { DIRECTORY_SYNC_BOT_EMAIL } from '../access/index.js';
+import { generateStartingPassword } from './starting-password.js';
 import { takeAccountSwitchLock } from './account-switch-lock.js';
 import type { IAccountSwitchGuard } from './account-switch-guard.js';
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
@@ -504,6 +505,81 @@ export class AuthService implements IAccountSwitchGuard {
     const [existing] = await this.db.select().from(users).where(eq(users.emailBidx, normalizedEmail)).limit(1);
     if (!existing) throw new Error('Could not set the password');
     return { user: this.toClientUser(existing), created: false, passwordSet: false, deactivated: existing.deactivatedAt != null };
+  }
+
+  /**
+   * An invitation: a NEW account for the address, or nothing at all. The
+   * insert does nothing on conflict, so an address that already has an
+   * account is never written, not its password, its name or its switched-off
+   * state, whoever invites (`created: false`, and nothing else).
+   *
+   * With `startingPassword` the account gets one generated here
+   * ({@link generateStartingPassword}), stored only as its hash and returned
+   * once for the caller to hand on. An owner ({@link isOwnerEmail}, with or
+   * without `ADMIN_PASSWORD` set) and the accounts the platform runs its own
+   * work as never get one: the owner is invited by nobody, as
+   * `POST /api/admin/accounts` refuses too, or the inviter would know the
+   * password of an owner who has not signed in yet. Theirs is made without one.
+   *
+   * The admission port is asked with the reason `invite` before the insert,
+   * and only for an address with no account.
+   *
+   * An address that already has an account is answered before anything is
+   * asked or generated: no admission, no password, no hash, so inviting
+   * existing addresses costs one indexed read each. The insert still does
+   * nothing on conflict, for an account made between that read and it.
+   */
+  async createInvitedAccount(
+    email: string,
+    options: { startingPassword: boolean },
+  ): Promise<{ created: true; user: AuthUser; startingPassword?: string } | { created: false }> {
+    const normalizedEmail = canonicalEmail(email ?? '');
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new AccountChangeRefusedError('Invalid email');
+    }
+    const [already] = await this.db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.emailBidx, normalizedEmail))
+      .limit(1);
+    if (already) return { created: false };
+    await this.assertAdmitted(normalizedEmail, 'invite');
+    const mayHoldHash = !SYSTEM_ACCOUNT_EMAILS.includes(normalizedEmail) && !this.isOwnerEmail(normalizedEmail);
+    const startingPassword = options.startingPassword && mayHoldHash ? generateStartingPassword() : undefined;
+    const passwordHash = startingPassword ? await hashPassword(startingPassword) : undefined;
+    const [row] = await this.db
+      .insert(users)
+      .values({
+        email: normalizedEmail,
+        emailBidx: normalizedEmail,
+        name: normalizedEmail.split('@')[0] || normalizedEmail,
+        ...(passwordHash ? { passwordHash } : {}),
+      })
+      .onConflictDoNothing({ target: users.emailBidx })
+      .returning();
+    // No row back: the address already had an account, and it is untouched.
+    if (!row) return { created: false };
+    return { created: true, user: this.toClientUser(row), ...(startingPassword ? { startingPassword } : {}) };
+  }
+
+  /**
+   * Take back an invited account's generated starting password that nobody
+   * was given (see `POST /api/invitations`), leaving the account with none.
+   * Only while the row still holds exactly that password: the hash read is
+   * the hash the update matches, so a password somebody set in the meantime
+   * (an admin in User accounts) is never cleared. Answers whether it cleared
+   * it; a database failure throws.
+   */
+  async discardStartingPassword(userId: string, startingPassword: string): Promise<boolean> {
+    const [row] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!row?.passwordHash || !(await verifyPassword(startingPassword, row.passwordHash))) return false;
+    const [cleared] = await this.db
+      .update(users)
+      .set({ passwordHash: null, sessionVersion: sql`${users.sessionVersion} + 1`, updatedAt: new Date() })
+      .where(and(eq(users.id, userId), eq(users.passwordHash, row.passwordHash)))
+      .returning({ id: users.id });
+    if (cleared) this.activeCache.delete(userId);
+    return Boolean(cleared);
   }
 
   /**
