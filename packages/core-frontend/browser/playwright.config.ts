@@ -10,10 +10,13 @@ import { defineConfig } from '@playwright/test';
  * Run with `pnpm test:browser`, after `playwright install chromium` once;
  * CI installs the browser and runs it beside the unit suites. No server:
  * every page here is set from a string.
+ *
+ * The runner collects suites from two places: this folder, and any module's
+ * own `__tests__/browser/` (see `testMatch`).
  */
 export default defineConfig({
-  testDir: '.',
-  testMatch: '**/*.browser.ts',
+  testDir: '..',
+  testMatch: ['browser/**/*.browser.ts', 'src/**/__tests__/browser/**/*.browser.ts'],
   outputDir: '../node_modules/.playwright/test-results',
   reporter: 'list',
   timeout: 30_000,

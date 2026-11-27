@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
-import { buildSandboxedHtml } from '../src/modules/workspace/components/renderers/htmlSandbox';
-import { attachFrameResizeHandle } from '../src/modules/workspace/components/renderers/frameResizeHandle';
+import { buildSandboxedHtmlIn } from './fixtures/sandboxed-document';
+import { attachFrameResizeHandle } from '../../components/renderers/frameResizeHandle';
 
 /**
  * The handle under an HTML page's frame, driven by a real pointer in a real
@@ -51,7 +51,7 @@ const HOST = `<!doctype html>
 
 async function host(page: Page) {
   await page.setContent(HOST);
-  const srcdoc = buildSandboxedHtml({
+  const srcdoc = await buildSandboxedHtmlIn(page, {
     title: 'page',
     libModuleSources: [],
     bodyHtml: '<div style="height:2000px;background:linear-gradient(#eee,#999)">a long page</div>',
