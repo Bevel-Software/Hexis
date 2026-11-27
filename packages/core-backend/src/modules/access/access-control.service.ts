@@ -2705,6 +2705,19 @@ export class AccessControlService implements IAccessControl {
     return result;
   }
 
+  async personalSpaceCreationsAtRef(
+    workspaceId: string,
+    ref: string,
+    relativePaths: string[],
+  ): Promise<string[] | null> {
+    const pluginsDir = this.kb.layout.pluginsDir;
+    const candidates = relativePaths.filter((p) => personalSpaceOf(p, pluginsDir) !== null);
+    if (candidates.length === 0) return [];
+    const loaded = await this.loadModelAtRef(workspaceId, ref);
+    if (!loaded) return null;
+    return candidates.filter((p) => writesUnprovisionedPersonalSpace(loaded.model, 'write', p));
+  }
+
   async canReadBatchAtRef(
     workspaceId: string,
     ref: string,

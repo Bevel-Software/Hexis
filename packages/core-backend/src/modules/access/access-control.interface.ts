@@ -718,6 +718,23 @@ export interface IAccessControl {
   ): Promise<Map<string, boolean> | null>;
 
   /**
+   * Of `relativePaths`, the ones that would bring a personal plugin folder
+   * into being as of `ref`: paths in a `<plugins root>/personal-*` folder that
+   * holds no `access.md` at `ref`. Nobody may write those (only the owner's
+   * `my_plugin` creates the folder), whatever else would admit the write, so
+   * a merge that lands any of them is refused. The same predicate every write
+   * verdict applies, asked on its own for the change-request merge, whose
+   * other files are decided by approvals rather than by the merger's write.
+   * `[]` when no path lies in a personal folder, without reading the tree;
+   * null with `canWriteAtRef`'s null-semantics otherwise.
+   */
+  personalSpaceCreationsAtRef(
+    workspaceId: string,
+    ref: string,
+    relativePaths: string[],
+  ): Promise<string[] | null>;
+
+  /**
    * The set of principals with `write` on this path as of `ref`. Used by PR
    * reviewer routing and the per-file approval UI rendered against the PR
    * head. Returns null with the same null-semantics as `canWriteAtRef`.

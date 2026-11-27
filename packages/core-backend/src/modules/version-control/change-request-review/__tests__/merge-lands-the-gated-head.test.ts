@@ -144,7 +144,8 @@ describe('mergePr: the head the gate judged is the head that lands', () => {
     logWrites = [];
     service = new ChangeRequestReviewService(
       makeDb(logWrites),
-      {} as unknown as IAccessControl,
+      // No file here lies in a personal plugin folder: the merge's one access question answers none.
+      { personalSpaceCreationsAtRef: async () => [] } as unknown as IAccessControl,
       workspaces,
       new GitService(workspaces, stubVersionControlHooks(), testKbContext()),
     );
