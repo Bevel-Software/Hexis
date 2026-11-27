@@ -605,6 +605,24 @@ describe('ConnectionProbeService: what the probe concludes', () => {
       }
     });
 
+    it('redacts a value the process environment supplies when the vault read fails', async () => {
+      process.env.acme_API_KEY = SECRET;
+      try {
+        createClientMock.mockResolvedValue({});
+        registerManualMock.mockResolvedValue({ ok: false, error: `401 Unauthorized: bad token ${SECRET}` });
+        const vaultDown = async (): Promise<string | null> => {
+          throw new Error('the vault is unreachable');
+        };
+
+        const r = await build({ type: 'mcp', callTemplate: MCP_TEMPLATE_WITH_KEY }, vaultDown).probe('u1', 'a@b.c', 'acme');
+
+        expect(r?.status).toBe('failed');
+        expect(r?.detail).not.toContain(SECRET);
+      } finally {
+        delete process.env.acme_API_KEY;
+      }
+    });
+
     it('redacts a literal token the manual put in the query string', async () => {
       const literal = 'sk-live-in-the-query-string';
       const svc = build({

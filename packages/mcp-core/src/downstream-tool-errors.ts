@@ -135,8 +135,9 @@ type ResultProcessor = {
  * message and stack redacted in place, so the token classifier still reads
  * it; one whose message cannot be replaced (a frozen error) becomes an
  * `Error` with its name, code and cause. Text the caller sent in the
- * call's arguments, keys and numbers included, is left as it is where it is
- * quoted back (`SecretRedactor.redact`). Streaming goes through `callTool` in
+ * call's arguments, keys and numbers included, is taken out wherever it is
+ * quoted back, so the answer does not depend on whether it matched a secret
+ * (`SecretRedactor.redact`). Streaming goes through `callTool` in
  * this protocol, so the same wrap covers it.
  */
 export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
@@ -188,7 +189,11 @@ function redactedInPlace(err: Error, redact: (text: string) => string): Error {
   }
 }
 
-/** Every string, object key, number and boolean in a call's arguments, however deeply nested (walked without recursion). */
+/**
+ * Every string, object key and number in a call's arguments, however deeply
+ * nested (walked without recursion). Not a boolean: `true` can guess nothing,
+ * and blanking it would only cost the message.
+ */
 function stringsIn(args: unknown): string[] {
   const found: string[] = [];
   const pending: unknown[] = [args];
@@ -196,7 +201,7 @@ function stringsIn(args: unknown): string[] {
   while (pending.length > 0) {
     const value = pending.pop();
     if (typeof value === 'string') found.push(value);
-    else if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') found.push(String(value));
+    else if (typeof value === 'number' || typeof value === 'bigint') found.push(String(value));
     else if (value && typeof value === 'object' && !seen.has(value)) {
       seen.add(value);
       if (Array.isArray(value)) for (const item of value) pending.push(item);

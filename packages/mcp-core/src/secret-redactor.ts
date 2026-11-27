@@ -16,6 +16,8 @@ import type { CallTemplate } from '@utcp/sdk';
 const MIN_SECRET_CHARS = 6;
 /** The shortest leading run of a secret we will treat as an echo of it. */
 const MIN_ECHOED_PREFIX_CHARS = 8;
+/** The shortest string the caller sent that is taken out where it is quoted back — see {@link SecretRedactor}. */
+const MIN_CALLER_CHARS = 4;
 const REDACTED = '[redacted]';
 
 /**
@@ -48,13 +50,15 @@ const REDACTED = '[redacted]';
  * makes the verdict useful, so a SHORT one of those may only match a run of
  * its own. Six characters or more, it is taken out wherever it appears too.
  *
- * Text the CALLER sent is not a disclosure: where the quote repeats one of
- * the caller's own strings ({@link redact}'s `callerText`), as sent or in one
- * of the spellings above, what lies within that repeat is left as it is.
- * Otherwise a tool that echoes its input would answer the caller's guesses: a
- * guess at the next character of a key would come back `[redacted]` exactly
- * when it was right. A server that quotes the input rewritten some other way
- * (shortened, re-cased) still leaves its quote to the rules above.
+ * Text the CALLER sent ({@link redact}'s `callerText`) is taken out too,
+ * wherever the quote repeats it, as sent or in one of the spellings above,
+ * whether or not a secret is in it. Otherwise the quote would answer the
+ * caller's guesses: a guess at a key echoed back, or a list of candidates
+ * sent alongside a server that quotes the key itself, would come back
+ * `[redacted]` or as sent depending on whether it was right. Taken out every
+ * time, it comes back the same either way. A string shorter than four
+ * characters is left to the rules above, since blanking every `a` or `1`
+ * would destroy the message; a credential that short could still be guessed.
  */
 export class SecretRedactor {
   /** Taken out wherever they appear. */
@@ -83,17 +87,18 @@ export class SecretRedactor {
    * `text` with every secret taken out, each run of taken-out characters as
    * one `[redacted]`. Every match is found in the text as it came, so no value
    * can match inside a marker another one left, and echoes that overlap are
-   * both taken out. `callerText`: the strings the caller sent with the request
-   * (see the class comment).
+   * both taken out. `callerText`: the strings the caller sent with the request,
+   * taken out wherever they are repeated (see the class comment).
    */
   redact(text: string, callerText: readonly string[] = []): string {
-    const repeats = callerText
-      .flatMap((sent) => spellings(sent))
-      .flatMap((sent) => occurrences(text, sent).map((at) => [at, at + sent.length] as const));
     const hidden = new Uint8Array(text.length);
-    const hide = (start: number, end: number) => {
-      if (!repeats.some(([from, to]) => from <= start && end <= to)) hidden.fill(1, start, end);
-    };
+    const hide = (start: number, end: number) => hidden.fill(1, start, end);
+    for (const sent of callerText) {
+      for (const spelling of spellings(sent)) {
+        if (spelling.length < MIN_CALLER_CHARS) continue;
+        for (const at of occurrences(text, spelling)) hide(at, at + spelling.length);
+      }
+    }
     for (const secret of new Set([...this.credentials, ...this.substituted])) {
       if (secret.length < MIN_SECRET_CHARS && !this.credentials.has(secret)) {
         for (const match of text.matchAll(standingAlone(secret))) hide(match.index, match.index + secret.length);

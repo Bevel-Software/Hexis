@@ -70,15 +70,18 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('got abcdefgh1234wxyz5678.')).toBe('got [redacted].');
   });
 
-  it("leaves what lies within a repeat of the caller's own text, and nothing beyond it", () => {
+  it("takes out every repeat of the caller's own text, so a guess or a candidate comes back the same right or wrong", () => {
     const redactor = new SecretRedactor();
     redactor.remember('sk-live-Q7xZ2abcdefgh');
     redactor.remember('a9B2');
-    // A head of the key, and a short key among many guesses: both the caller's own.
-    expect(redactor.redact("Project 'sk-live-Q7xZ' not found", ['sk-live-Q7xZ'])).toBe("Project 'sk-live-Q7xZ' not found");
-    expect(redactor.redact('no match for zzza9B2zzz', ['zzza9B2zzz'])).toBe('no match for zzza9B2zzz');
-    // The server's own echo is not shielded by a caller string inside it, nor are characters the caller sent apart.
-    expect(redactor.redact('sent sk-live-Q7xZ2abcdefgh', ['Q7xZ', 's', 'k'])).toBe('sent [redacted]');
+    // A guess at a head of the key, echoed back: right and wrong read the same.
+    expect(redactor.redact("Project 'sk-live-Q7xZ' not found", ['sk-live-Q7xZ'])).toBe("Project '[redacted]' not found");
+    expect(redactor.redact("Project 'sk-live-Q7xA' not found", ['sk-live-Q7xA'])).toBe("Project '[redacted]' not found");
+    // The server quoting the key itself: the same with or without the right candidate among the caller's strings.
+    expect(redactor.redact('key a9B2 refused', ['a9B2', 'zzzz'])).toBe('key [redacted] refused');
+    expect(redactor.redact('key a9B2 refused', ['a9B3', 'zzzz'])).toBe('key [redacted] refused');
+    // Shorter than four characters, the caller's text is left to the other rules.
+    expect(redactor.redact('field id is wrong', ['id'])).toBe('field id is wrong');
   });
 
   it('never matches a value inside a marker it has already put in', () => {
