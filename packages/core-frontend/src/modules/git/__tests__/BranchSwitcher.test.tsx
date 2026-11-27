@@ -180,6 +180,20 @@ describe('BranchSwitcher: naming a new draft', () => {
     // With no usable local-part, the person's own `suggestions/` prefix, which they can delete.
     await waitFor(() => expect(createBranch).toHaveBeenCalledWith(expected ?? `${suggestionsBranchPrefixFor(user)}fix-the-typo`));
   });
+
+  it('never sends a name without a prefix: with nobody signed in it creates nothing', async () => {
+    const createBranch = vi.fn(async () => {});
+    renderSwitcher(makeGit({ createBranch }), { ...auth, user: null } as unknown as AuthContextValue);
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+    fireEvent.click(screen.getByText('Start a shared draft…'));
+    const input = screen.getByPlaceholderText('e.g. Add owner to Checkout process');
+    fireEvent.change(input, { target: { value: 'Fix the typo' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    // The input is still there with what was typed: nothing was created or navigated to.
+    await waitFor(() => expect(screen.getByPlaceholderText('e.g. Add owner to Checkout process')).toHaveValue('Fix the typo'));
+    expect(createBranch).not.toHaveBeenCalled();
+  });
 });
 
 describe('BranchSwitcher: author-can-delete affordance', () => {

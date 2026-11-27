@@ -248,15 +248,17 @@ export function createVersionControlRoutes(
   router.post('/workspace/:id/workflow/branches', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
-    const { name, fromBase } = req.body as { name?: string; fromBase?: string };
-    if (!name) {
+    const { name, fromBase } = req.body as { name?: unknown; fromBase?: string };
+    if (typeof name !== 'string' || !name) {
       res.status(400).json({ error: 'name is required' });
       return;
     }
     try {
       // The same naming as the `create_branch` tool: a bare name its maker
       // could not delete is created under their own prefix, and the answer
-      // names the branch as created.
+      // names the branch as created. A client that sends a bare name reads
+      // the name from the answer; the app's own clients send names that
+      // already carry a prefix, which come back as sent.
       const draft = await versionControl.draftNameFor(req.params.id, name, user);
       res.json(await versionControl.createBranch(req.params.id, draft, fromBase));
     } catch (err) {

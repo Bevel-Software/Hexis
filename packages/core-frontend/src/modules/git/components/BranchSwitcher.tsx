@@ -279,8 +279,12 @@ export function BranchSwitcher() {
    */
   async function doCreate() {
     const text = newBranchName.trim();
-    if (!text) return;
-    const name = user?.email ? slugifyDraftName(user, text) : text;
+    // A draft is always named for its maker here, so the name sent is one the
+    // server creates as sent (it only renames a name with no prefix) and the
+    // navigation below lands on the branch that was made. With nobody signed
+    // in there is nobody to name it for, and the server would refuse the call.
+    if (!text || !user) return;
+    const name = slugifyDraftName(user, text);
     try {
       // Create the branch server-side on the current workspace's clone, then
       // navigate to the new branch's URL. The URL change triggers the

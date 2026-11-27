@@ -91,10 +91,18 @@ describe('POST /workspace/:id/workflow/branches', () => {
     expect(res.json.name).toBe(NAMED_BY_THE_SERVICE);
   });
 
-  it('still asks for a name', async () => {
+  it.each([
+    ['no name', {}],
+    ['an empty name', { name: '' }],
+    ['a name that is no string', { name: { toString: 'x' } }],
+    ['a name that is a list', { name: ['a/b'] }],
+  ])('answers %s with a 400, and asks the service nothing', async (_what, body) => {
     const { baseUrl, asked, created } = await serve();
 
-    expect((await createBranch(baseUrl, {})).status).toBe(400);
+    const res = await createBranch(baseUrl, body);
+
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'name is required' });
     expect(asked).toEqual([]);
     expect(created).toEqual([]);
   });
