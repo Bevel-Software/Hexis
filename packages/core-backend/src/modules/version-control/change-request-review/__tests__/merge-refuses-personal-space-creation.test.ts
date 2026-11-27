@@ -4,10 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AuthUser, FileApprovalState } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
-import { AccessControlService } from '../../../access/access-control.service.js';
+import { realAccessControl } from '../../../../__tests__/real-access.js';
 import { AccessUnreadableError } from '../../../access-model/index.js';
-import { NodeFs } from '../../../kb-fs/node-fs.js';
-import { personalAccessMd } from '../../../plugins/plugin-provision.service.js';
+import { realDisk } from '../../../../__tests__/real-disk.js';
+import { personalAccessMd } from '../../../plugins/index.js';
 import { changeRequests, prMergeLog } from '../../../database/index.js';
 import type { Database } from '../../../database/index.js';
 import type { WorkspaceService } from '../../../workspace/index.js';
@@ -83,7 +83,7 @@ describe('mergePr: a change request cannot create a personal plugin folder', () 
   let seedDir: string;
   let featureDir: string;
   let service: ChangeRequestReviewService;
-  let access: AccessControlService;
+  let access: ReturnType<typeof realAccessControl>;
   let logWrites: LogWrite[];
 
   const tipOf = (branch: string) => gitOut(upstream, ['rev-parse', `refs/heads/${branch}`]);
@@ -127,7 +127,7 @@ describe('mergePr: a change request cannot create a personal plugin folder', () 
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
     logWrites = [];
-    access = new AccessControlService(workspaces, 'knowledge-base', new NodeFs());
+    access = realAccessControl(workspaces, 'knowledge-base', realDisk());
     service = new ChangeRequestReviewService(
       makeDb(logWrites),
       access,

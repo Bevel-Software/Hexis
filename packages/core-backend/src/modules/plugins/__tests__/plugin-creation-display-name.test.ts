@@ -5,13 +5,13 @@ import path from 'node:path';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pluginDisplayNameOf, pluginIdentityOf, type AuthUser } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/index.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { PluginProvisionService } from '../plugin-provision.service.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
 import { CREATE_PLUGIN } from '../plugins.tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
 
 /**
  * Both doors into plugin creation, through the code each one really runs.
@@ -71,11 +71,15 @@ async function makeHarness(
         throw err;
       }
     },
+    ensureRemotesFetched: async () => undefined,
   } as unknown as WorkspaceService;
+  // The real resolver: an ensure that finds the folder asks it whether the folder is the owner's alone.
+  await fs.mkdir(path.join(dir, KB), { recursive: true });
+  await fs.writeFile(path.join(dir, KB, 'roles.yaml'), 'roles:\n  Admin:\n    - admin@example.com\n');
   const svc = new PluginProvisionService(
     workspaceService,
     { runPendingCommit: vi.fn(async () => undefined) },
-    { invalidate: vi.fn() } as unknown as IAccessControl,
+    realAccessControl(workspaceService, KB, realDisk()),
     testKbContext({ kbDirName: KB }),
     undefined,
     realPluginSource(realDisk(), testKbContext({ kbDirName: KB })),

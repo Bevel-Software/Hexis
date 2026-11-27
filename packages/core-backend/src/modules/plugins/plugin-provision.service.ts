@@ -54,14 +54,7 @@ import {
 import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from '../access/index.js';
-import {
-  accessMdSelfEntries,
-  canonicalEmail,
-  creatorPrincipal,
-  parseAccessFile,
-  spliceGrant,
-  type ParsedEntry,
-} from '../access-model/index.js';
+import { canonicalEmail, creatorPrincipal, spliceGrant } from '../access-model/index.js';
 import { WorkspaceMutex } from '../kb-fs/index.js';
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
@@ -123,9 +116,10 @@ export interface ProvisionedPlugin {
   /** False when an ensure found the folder already there. */
   created: boolean;
   /**
-   * True when the personal-folder ensure found the folder's `access.md`
-   * granting someone besides its owner anything, or missing, or unreadable as
-   * rules, and rewrote it to owner-only. Always false for a named plugin.
+   * True when the personal-folder ensure found the folder open to someone
+   * besides its owner, as the access resolver answers it (rules inherited
+   * from above included, so a missing or unreadable `access.md` counts), and
+   * rewrote its `access.md` to owner-only. Always false for a named plugin.
    */
   repaired: boolean;
 }
@@ -326,10 +320,11 @@ export class PluginProvisionService {
    * reads it, so a repeated call with no edit in between answers as the call
    * that made the folder did.
    *
-   * A folder already there is the owner's alone or is made so: when its
-   * `access.md` grants anyone else anything, or is missing or unreadable as
-   * rules, it is rewritten to the template a new folder gets, committed, and
-   * the answer says `repaired: true` (see {@link repairPersonalRules}).
+   * A folder already there is the owner's alone or is made so: when the
+   * access resolver gives anyone else access to it (its own rules or rules
+   * inherited from above), its `access.md` is rewritten to the template a new
+   * folder gets, committed, and the answer says `repaired: true` (see
+   * {@link repairPersonalRules}).
    * A folder holding no file at all is not already there: it is cleared and
    * made as new (see {@link removedIfHollow}).
    */
@@ -553,8 +548,10 @@ export class PluginProvisionService {
 
   /**
    * Make the personal folder `folder` (its on-disk spelling) its owner's
-   * alone again when its `access.md` says otherwise; true when it did. Runs
-   * under the ensure's creation lock. The new rules are the template a new
+   * alone again when it is not; true when it did. Whether it is, is the
+   * access resolver's answer (see {@link isOwnersAlone}), so rules inherited
+   * from above count as every gate counts them. Runs under the ensure's
+   * creation lock. The new rules are the template a new
    * folder gets, written and committed as a provision's are — inline and
    * `systemAuthorized`, because the rules being replaced may not let the
    * owner write them, and the caller is the owner by the folder's very name.
@@ -565,6 +562,7 @@ export class PluginProvisionService {
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
     const repoRel = `${this.pluginsRoot}/${folder}/access.md`;
     const abs = path.join(wsDir, this.kbDirName, this.pluginsRoot, folder, 'access.md');
+    if (await this.isOwnersAlone(wsId, `${this.pluginsRoot}/${folder}`, user.email)) return false;
     let current: string | null;
     try {
       current = await this.disk.readTextFile(abs);
@@ -572,7 +570,6 @@ export class PluginProvisionService {
       if (!isAbsence(err)) throw err;
       current = null;
     }
-    if (current !== null && isOwnerOnly(current, repoRel, user.email)) return false;
     const wsRel = `${this.kbDirName}/${repoRel}`;
     await this.workspaceService.writeFile(wsId, wsRel, personalAccessMd(user));
     try {
@@ -592,6 +589,33 @@ export class PluginProvisionService {
     this.accessControl.invalidate(wsId);
     this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
     return true;
+  }
+
+  /**
+   * Whether the folder `folderRel` (repo-relative) is `ownerEmail`'s alone,
+   * as the access resolver answers it, rules inherited from above included:
+   * nobody else holds read, write, download or owner on the folder, the owner
+   * holds owner, and nobody else may read its `access.md`. Writing that file
+   * is not asked: the resolver's `access.md` rescue lets Admin write it,
+   * whatever it says.
+   */
+  private async isOwnersAlone(wsId: string, folderRel: string, ownerEmail: string): Promise<boolean> {
+    const owner = canonicalEmail(ownerEmail);
+    const onlyOwner = (h: { roles: string[]; principals?: unknown[]; users: { email: string }[] }) =>
+      h.roles.length === 0 && (h.principals ?? []).length === 0 && h.users.every((u) => canonicalEmail(u.email) === owner);
+    const [readers, writers, owners, downloaders, fileReaders] = await Promise.all([
+      this.accessControl.eligibleReaders(wsId, folderRel),
+      this.accessControl.eligibleWriters(wsId, folderRel),
+      this.accessControl.eligibleOwners(wsId, folderRel),
+      this.accessControl.eligibleDownloaders(wsId, folderRel),
+      this.accessControl.eligibleReaders(wsId, `${folderRel}/access.md`),
+    ]);
+    return (
+      readers.restricted &&
+      fileReaders.restricted &&
+      [readers, writers, owners, downloaders, fileReaders].every(onlyOwner) &&
+      owners.users.length > 0
+    );
   }
 
   /**
@@ -794,25 +818,6 @@ export function personalAccessMd(creator: { name: string; email: string }): stri
     creator,
   );
   return spliceGrant(seeded, 'read', creatorPrincipal(creator), { allowScalar: false, target: 'node' }).text;
-}
-
-/**
- * Whether the personal `access.md` `text` keeps its folder `ownerEmail`'s
- * alone: it parses, its folder rules make the owner `owner`, and neither
- * block grants anyone else anything, `everyone` included. Denials admit
- * nobody, so they are left as they are.
- */
-function isOwnerOnly(text: string, repoRel: string, ownerEmail: string): boolean {
-  const parsed = parseAccessFile(text, repoRel);
-  if (!parsed.ok) return false;
-  const owner = canonicalEmail(ownerEmail);
-  const isOwner = (e: ParsedEntry) => e.kind === 'user' && e.email === owner;
-  const self = accessMdSelfEntries(text);
-  const blocks = self ? [parsed.file.entries, self] : [parsed.file.entries];
-  const othersGranted = blocks.some((entries) =>
-    Object.values(entries).some((list) => list.some((e) => !e.deny && !isOwner(e))),
-  );
-  return !othersGranted && parsed.file.entries.owner.some((e) => !e.deny && isOwner(e));
 }
 
 /**

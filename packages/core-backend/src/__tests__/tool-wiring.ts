@@ -4,8 +4,10 @@
  * handler factory and context resolver, the tool-auth middleware, the two
  * registrars that take their dependencies by hand, the session sink, the
  * routine write policy, the access resolver, the version-control hooks, the
- * manual auth middleware and the auth cookie reader, the MCP routes and service, and
- * the git-folder guard every `/api/workspace/:id` route sits behind.
+ * manual auth middleware and the auth cookie reader, the session auth
+ * middleware and the key-or-session gate the `/api/plugins` routes sit
+ * behind, the MCP routes and service, and the git-folder guard every
+ * `/api/workspace/:id` route sits behind.
  *
  * A module's entry holds its contracts, and a suite asserts through entries.
  * These are not contracts: they are what the root composes, so a suite that
@@ -26,7 +28,8 @@ export { RoutineWritePolicyService } from '../modules/workspace/routine-write-po
 export { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 export { VersionControlHooks, type AgentOperationContext } from '../modules/version-control/version-control-hooks.js';
 export { createManualAuthMiddleware } from '../modules/tool-auth/tool-auth.middleware.js';
-export { readAuthCookie } from '../modules/auth/auth.middleware.js';
+export { createAuthMiddleware, readAuthCookie } from '../modules/auth/auth.middleware.js';
+export { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
 export type { ToolBranchPort } from '../modules/tool-helpers/tool-handler.js';
 export { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 export { McpService } from '../modules/mcp/mcp.service.js';

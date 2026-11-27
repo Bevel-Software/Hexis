@@ -1,14 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_BRANCH, personalPluginFolderName } from '@bevel-software/platform-shared';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { isPrivateAccessMd } from '../../access-model/access-grammar.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import { isPrivateAccessMd } from '../../access-model/index.js';
 import {
   PluginProvisionError,
   PluginProvisionService,
@@ -16,6 +14,8 @@ import {
   personalAccessMd,
 } from '../plugin-provision.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
 
 const KB = 'knowledge-base';
 const USER: AuthUser = { id: 'u1-abcd', email: 'ali@example.com', name: 'Ali Vega' } as AuthUser;
@@ -46,13 +46,20 @@ async function makeHarness() {
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-main' })),
     getWorkspacePath: vi.fn(async () => dir),
+    ensureRemotesFetched: vi.fn(async () => undefined),
     writeFile,
   } as unknown as WorkspaceService;
   const commits = { runPendingCommit: vi.fn(async () => undefined) };
-  const accessControl = { invalidate: vi.fn() } as unknown as IAccessControl;
+  // The real resolver over the temp tree: whether a personal folder is its
+  // owner's alone is what the rules resolve to, inherited ones included.
+  await fs.mkdir(path.join(dir, KB), { recursive: true });
+  await fs.writeFile(path.join(dir, KB, 'roles.yaml'), 'roles:\n  Admin:\n    - admin@example.com\n');
+  const disk = realDisk();
+  const accessControl = realAccessControl(workspaceService, KB, disk);
+  vi.spyOn(accessControl, 'invalidate');
   const events = { emit: vi.fn() };
   const kb = testKbContext({ kbDirName: KB });
-  const svc = new PluginProvisionService(workspaceService, commits, accessControl, kb, events, new KbPluginSource(new NodeFs(), kb), new NodeFs());
+  const svc = new PluginProvisionService(workspaceService, commits, accessControl, kb, events, new KbPluginSource(disk, kb), disk);
   return { svc, dir, commits, accessControl, events, writeFile };
 }
 
@@ -290,7 +297,7 @@ describe('PluginProvisionService.deletePlugin', () => {
     await fs.mkdir(path.join(h.dir, KB, 'Plugins/GTM/outreach'), { recursive: true });
     await fs.writeFile(path.join(h.dir, KB, 'Plugins/GTM/outreach/SKILL.md'), '# outreach\n');
     h.commits.runPendingCommit.mockClear();
-    (h.accessControl.invalidate as ReturnType<typeof vi.fn>).mockClear();
+    vi.mocked(h.accessControl.invalidate).mockClear();
 
     await h.svc.deletePlugin(USER, 'GTM');
 
@@ -674,6 +681,21 @@ describe('PluginProvisionService.ensurePersonalPlugin on a folder somebody else 
       expect(result.repaired, String(rules)).toBe(true);
       expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
     }
+  });
+
+  it('repairs rules that name only the owner but deny nobody, when the root opens the repository to everyone — inherited access counts', async () => {
+    const h = await makeHarness();
+    await fs.mkdir(path.join(h.dir, KB), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'access.md'), '---\nowner:\n  - Admin\n---\nread:\n  - everyone\n');
+    const ownerNamedOnly =
+      '---\nread:\n  - Ali Vega <ali@example.com>\n---\nread:\n  - Ali Vega <ali@example.com>\nwrite:\n  - Ali Vega <ali@example.com>\nowner:\n  - Ali Vega <ali@example.com>\n';
+    await seed(h.dir, { 'access.md': ownerNamedOnly });
+    const result = await h.svc.ensurePersonalPlugin(USER);
+    expect(result.repaired).toBe(true);
+    expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+    // The template's `deny everyone` closes it under that same root: nothing more to repair.
+    expect((await h.svc.ensurePersonalPlugin(USER)).repaired).toBe(false);
+    expect(await h.accessControl.canRead('ws-main', 'bob@example.com', `Plugins/${folder}`)).toBe(false);
   });
 
   it('leaves rules that name only the owner as they are, wording and all', async () => {

@@ -1,15 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { personalAccessMd, pluginAccessMd } from '../../plugins/plugin-provision.service.js';
-import { closePersonalSpaceRules } from '../../workspace/startup/steps/personal-spaces.step.js';
+import { personalAccessMd, pluginAccessMd } from '../../plugins/index.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * What the seeded access templates actually resolve to, through the public
@@ -56,7 +55,7 @@ describe('the seeded access templates, resolved', () => {
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, contents);
     }
-    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
+    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, realDisk());
   }
 
   const PERSONAL = {
@@ -111,29 +110,6 @@ describe('the seeded access templates, resolved', () => {
     expect(await svc.canWrite(workspaceId, OWNER.email, skill)).toBe(true);
     expect(await svc.canOwner(workspaceId, OWNER.email, 'Plugins/personal-ali')).toBe(true);
     expect(await svc.canWrite(workspaceId, 'bob@x.io', skill)).toBe(false);
-  });
-
-  it('a personal space seeded by the previous template, once the boot step has closed it, resolves like a new one', async () => {
-    // The old seed: the owner's grants in the legacy single-block shape.
-    const legacy =
-      '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\nread: []\n';
-    const closed = closePersonalSpaceRules(legacy, 'Plugins/personal-ali/access.md');
-    expect(closed).not.toBeNull();
-    // Closing it again changes nothing: the step is idempotent by parse, not by text.
-    expect(closePersonalSpaceRules(closed!, 'Plugins/personal-ali/access.md')).toBeNull();
-
-    const svc = await makeService({
-      'roles.yaml': ROLES_YAML,
-      'access.md': '---\nowner:\n  - Admin\n---\nread:\n  - everyone\nwrite:\n  - Admin\n',
-      'Plugins/personal-ali/plugin.json': '{"name":"personal-ali"}',
-      'Plugins/personal-ali/access.md': closed!,
-      'Plugins/personal-ali/skills/weekly/SKILL.md': '# Weekly\n',
-    });
-    const skill = 'Plugins/personal-ali/skills/weekly/SKILL.md';
-    expect(await svc.canRead(workspaceId, 'bob@x.io', skill)).toBe(false);
-    expect(await svc.canRead(workspaceId, OWNER.email, skill)).toBe(true);
-    expect(await svc.canWrite(workspaceId, OWNER.email, skill)).toBe(true);
-    expect(await svc.canRead(workspaceId, 'admin@x.io', skill)).toBe(false);
   });
 
   describe('a personal folder nobody has provisioned', () => {

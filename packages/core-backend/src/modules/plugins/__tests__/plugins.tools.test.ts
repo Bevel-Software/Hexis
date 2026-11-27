@@ -1,20 +1,21 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
-import { keyOrSessionAuth } from '../../tool-auth/key-or-session.middleware.js';
-import { createAuthMiddleware } from '../../auth/auth.middleware.js';
+import { GUIDE_FIRST_SENTENCE, TOOL_DESCRIPTION_CAP, ToolRegistry } from '../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  createAuthMiddleware,
+  createToolAuthMiddleware,
+  keyOrSessionAuth,
+} from '../../../__tests__/tool-wiring.js';
+import { CLIENT_SHORT_CUT, clientVisibleLength } from '../../../__tests__/hexis-catalog.js';
 import { DEFAULT_KB_LAYOUT, validateKbLayout } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
 import { registerPluginsTools, CREATE_PLUGIN, myPluginDef, myPluginDescription } from '../plugins.tools.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
 import { PluginProvisionError } from '../plugin-provision.service.js';
 import type { IAgentScopeResolver } from '../../agent-scope/index.js';
-import { agentFile, agentScopeOver, inMemoryKb } from '../../agent-scope/__tests__/in-memory-kb.js';
+import { agentFile, agentScopeOver, inMemoryKb } from '../../../__tests__/in-memory-kb.js';
 
 /**
  * The plugin tools are DESCRIPTIONS of the app's own creation endpoints.
