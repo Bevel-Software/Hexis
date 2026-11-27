@@ -673,6 +673,22 @@ describe('PluginPage', () => {
     expect(banner).not.toHaveTextContent('Skills/QALink/beta/access.md');
   });
 
+  it('trusts the refetched catalog over the repair report, also when it names a revoked folder again', async () => {
+    dataMock.useLibraryData.mockReturnValue(withLeftover('GTM', ['Skills/QALink/beta', 'Skills/QALink']));
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true })]);
+    pluginsMock.repairPluginLinks.mockResolvedValue({ repaired: [], skipped: [], revoked: ['Skills/QALink/beta'] });
+    // The refetch after the revoke answers a catalog in which someone has put
+    // the grant back on beta: new entries, fetched after the repair.
+    vi.mocked(CATALOG.reload).mockImplementationOnce(() => {
+      dataMock.useLibraryData.mockReturnValue(withLeftover('GTM', ['Skills/QALink/beta']));
+    });
+    renderPlugin('GTM');
+    await waitFor(() =>
+      expect(screen.getByTestId('leftover-grants')).toHaveTextContent('Skills/QALink/beta/access.md'),
+    );
+    expect(screen.getByTestId('leftover-grants')).not.toHaveTextContent('Skills/QALink/access.md');
+  });
+
   it("says nothing of leftovers while the opened plugin's repair runs, though another plugin's has answered", async () => {
     dataMock.useLibraryData.mockReturnValue(withLeftover('Product', ['Skills/QALink/beta']));
     pluginsMock.listPlugins.mockResolvedValue([

@@ -130,9 +130,14 @@ export function PluginPage() {
    * How the page-open repair ended, keyed by the plugin it ran for: the page
    * is not remounted when `:plugin` changes, so an outcome for another plugin
    * reads as no outcome at all (see `repairReport` and `repairFailed` below).
+   * `revokedEntries` are the catalog's own leftover-grant entries the page
+   * held when the report landed, on folders the report revoked (see
+   * `leftoverGrants` below).
    */
   const [repairOutcome, setRepairOutcome] = useState<
-    { plugin: string; report: LinkRepairReport } | { plugin: string; failed: true } | null
+    | { plugin: string; report: LinkRepairReport; revokedEntries: ReadonlySet<LeftoverGrantEntry> }
+    | { plugin: string; failed: true }
+    | null
   >(null);
   const outcomeHere = repairOutcome?.plugin === plugin ? repairOutcome : null;
   /**
@@ -142,6 +147,7 @@ export function PluginPage() {
    * counted before the repair wrote anything.
    */
   const repairReport = outcomeHere && 'report' in outcomeHere ? outcomeHere.report : null;
+  const revokedEntries = outcomeHere && 'report' in outcomeHere ? outcomeHere.revokedEntries : null;
   /**
    * The repair could not even be asked for. Then — and only then — the page
    * falls back to the banner it showed before this existed: the served count
@@ -179,6 +185,11 @@ export function PluginPage() {
    */
   const { reload, reloadPlugins } = data;
   const repairedFor = useRef<string | null>(null);
+  /** The catalog as last rendered, for the repair's answer to be read against. */
+  const latestItems = useRef(data.items);
+  useEffect(() => {
+    latestItems.current = data.items;
+  });
   const canRepairLinks = summary?.canWrite === true && summary.linksAreManaged !== false;
   useEffect(() => {
     if (!canRepairLinks || repairedFor.current === plugin) return;
@@ -187,7 +198,13 @@ export function PluginPage() {
     void repairPluginLinks(plugin)
       .then((report) => {
         if (!live) return;
-        setRepairOutcome({ plugin, report });
+        const revoked = new Set(report.revoked ?? []);
+        const revokedEntries = new Set(
+          latestItems.current.flatMap((i) =>
+            (i.leftoverGrants ?? []).filter((g) => g.plugin === plugin && revoked.has(g.folder)),
+          ),
+        );
+        setRepairOutcome({ plugin, report, revokedEntries });
         // Only a write is worth a refetch: the catalog and the summaries carry
         // the link health this just changed.
         if (report.repaired.length > 0 || (report.revoked?.length ?? 0) > 0) {
@@ -226,18 +243,20 @@ export function PluginPage() {
    * Grants this plugin still holds on skills its manifest no longer links: a
    * link edited out of plugin.json left them. From the catalog, so every
    * viewer who may read the skill sees them (a skill the viewer may not read
-   * is not named to them, as everywhere in the catalog), less the folders the
-   * repair has just revoked: the catalog may still be the one fetched before.
+   * is not named to them, as everywhere in the catalog). Less what the repair
+   * revoked, but only the very entries the page held when it answered: those
+   * were fetched before the revoke. A refetch brings new entries, so a fresh
+   * catalog is the truth again, also when it names a revoked folder anew. A
+   * refetch that fails changes no entry, so the revoked ones stay hidden.
    */
-  const revokedHere = repairReport?.revoked;
   const leftoverGrants = useMemo(
     () =>
       data.items.flatMap((i) =>
         (i.leftoverGrants ?? [])
-          .filter((g) => g.plugin === plugin && !(revokedHere ?? []).includes(g.folder))
+          .filter((g) => g.plugin === plugin && !revokedEntries?.has(g))
           .map((grant) => ({ skill: i.name, grant })),
       ),
-    [data.items, plugin, revokedHere],
+    [data.items, plugin, revokedEntries],
   );
   /**
    * Whether this page may not yet say what is left: the plugin's summary has
@@ -751,6 +770,9 @@ export function PluginPage() {
  * admins through the rescue on `access.md`, so the sentence stays true and
  * stays actionable when the list comes back empty.
  */
+/** One leftover grant as the catalog serves it on a skill. */
+type LeftoverGrantEntry = NonNullable<LibraryItem['leftoverGrants']>[number];
+
 function editorsText(link: UnrepairedLink): string {
   return joinNames([...link.editors.roles, ...link.editors.users.map((u) => u.name)]) || 'Its editors';
 }
