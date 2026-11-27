@@ -100,8 +100,8 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('ßxx', ['SSxx'])).toBe('[redacted]');
     // Text the caller sent that no secret is in is taken out all the same.
     expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named '[redacted]'");
-    // Shorter than four characters, the caller's text is taken out where it stands alone, not inside other words.
-    expect(redactor.redact('Invalid id: 42', ['id', '42'])).toBe('Invalid [redacted]: [redacted]');
+    // A short string of the caller's is taken out where it stands alone, not inside other words.
+    expect(redactor.redact('Invalid value: 42 (max 420)', ['42'])).toBe('Invalid value: [redacted] (max 420)');
   });
 
   it('takes out a long echoed run of one character without going over its bound', () => {
@@ -115,13 +115,32 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('bad value', ['z'.repeat(4_000_001)])).toBe('[redacted]');
   });
 
-  it('answers a short guess the same right or wrong, alone or glued to other text', () => {
+  it('quotes nothing with the caller\'s text about while a credential shorter than four characters is held', () => {
+    for (const short of ['ab1', 'a!']) {
+      const redactor = new SecretRedactor();
+      redactor.remember(short);
+      for (const guess of [short, 'zz9', 'b!']) {
+        expect(redactor.redact(`PIN ${guess} is wrong`, [guess])).toBe('[redacted]');
+        expect(redactor.redact(`no x${guess}y here`, [guess])).toBe('[redacted]');
+      }
+    }
+  });
+
+  it('answers a short guess at a value the same right or wrong, alone, glued or with punctuation', () => {
     const redactor = new SecretRedactor();
-    redactor.remember('ab1');
-    for (const guess of ['ab1', 'ab2']) {
-      expect(redactor.redact(`PIN ${guess} is wrong`, [guess])).toBe('PIN [redacted] is wrong');
+    redactor.rememberSubstituted('REGION', 'us');
+    redactor.rememberSubstituted('SEP', '.!');
+    for (const guess of ['us', 'eu']) {
+      expect(redactor.redact(`region ${guess} is closed`, [guess])).toBe('region [redacted] is closed');
       expect(redactor.redact(`no x${guess}y here`, [guess])).toBe(`no x${guess}y here`);
     }
+    for (const guess of ['.!', '?!']) expect(redactor.redact(`sep ${guess} refused`, [guess])).toBe('sep [redacted] refused');
+  });
+
+  it('takes out a credential shorter than four characters inside other words too', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('ab1');
+    expect(redactor.redact('key xab1y refused')).toBe('key x[redacted]y refused');
   });
 
   it('matches a long repetitive secret in a long text without giving up on the text', () => {

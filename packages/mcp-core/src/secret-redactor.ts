@@ -45,13 +45,14 @@ const REDACTED = '[redacted]';
  * nothing there and prints the head of the key regardless. So do the other
  * spellings a value travels in: trimmed, url-encoded and JSON-escaped.
  *
- * A KNOWN credential ({@link remember}) is taken out wherever it appears: a
- * four-character key is still the key, and one echoed glued to other text
- * (`xa9B2y`) is still echoed. The price is paid in the message: a short
- * credential blanks its characters wherever they fall. Under four characters,
- * it is taken out only where it stands alone, as the caller's own short text
- * is (below): matched inside other text, it would answer a short guess glued
- * to it.
+ * A KNOWN credential ({@link remember}) is taken out wherever it appears,
+ * whatever its length: a four-character key is still the key, and one echoed
+ * glued to other text (`xa9B2y`) is still echoed. The price is paid in the
+ * message: a short credential blanks its characters wherever they fall. One
+ * shorter than four characters cannot also be kept from answering a guess the
+ * caller glues to other text, so while one is held, a quote made with the
+ * caller's text about ({@link redact}'s `callerText`) is not quoted at all:
+ * the same `[redacted]` whatever was sent.
  *
  * A value that is only known to have been SUBSTITUTED ({@link rememberSubstituted})
  * is one too when its variable's name says so. Otherwise it may be anything:
@@ -65,19 +66,21 @@ const REDACTED = '[redacted]';
  * Text the CALLER sent ({@link redact}'s `callerText`) is taken out too,
  * whether or not a secret is in it: every four characters of the quote that
  * also occur, case aside, in a string the caller sent (as sent or in one of
- * the spellings above), and every word of one to three letters or digits that
- * stands alone in the quote and is, case aside, one of the caller's own short
- * words (a short string they sent, or a short word in one). Otherwise the
+ * the spellings above); and, where it stands alone in the quote, every string
+ * of theirs shorter than that, punctuation included, and every word of one to
+ * three letters or digits inside a longer string of theirs (the way a short
+ * value that is not a credential is matched, below). Otherwise the
  * quote would answer the caller's guesses: a guess at a key echoed back,
  * whole, shortened at either end or re-cased, or a list of candidates sent
  * alongside a server that quotes the key itself, would come back `[redacted]`
  * or not depending on whether it was right. Nothing taken out there depends
  * on a secret, so it comes back the same either way. The price is paid in the
  * message, which loses every piece it shares with what the caller sent; a
- * short word is taken out only where it stands alone and only as the caller
- * wrote it, since blanking every `a` or `1` would destroy the message. A
- * piece shorter than four characters cut from a longer word of the caller's
- * is not recognised.
+ * short piece only where it stands alone, since blanking every `a` or `1`
+ * inside other words would destroy it. A short guess glued to other text is
+ * left as it came, right or wrong: nothing that short is matched inside other
+ * text while the caller's text is about. A piece shorter than four characters
+ * cut from a longer string of the caller's is not recognised.
  *
  * Nothing here gives up on a long text: each secret is matched in time linear
  * in the text and the secret, so no bound on the work can trip on one and not
@@ -114,6 +117,10 @@ export class SecretRedactor {
    * taken out wherever they are repeated (see the class comment).
    */
   redact(text: string, callerText: readonly string[] = []): string {
+    // A credential this short cannot be both taken out wherever it is and
+    // kept from answering a guess glued to other text; with the caller's text
+    // about, the quote goes whole (see the class comment).
+    if (callerText.length > 0 && [...this.credentials].some((secret) => secret.length < MIN_CALLER_CHARS)) return REDACTED;
     const hidden = new Uint8Array(text.length);
     const hide = (start: number, end: number) => hidden.fill(1, start, end);
     // What the caller sent, case aside: each four characters of the folded
@@ -150,6 +157,13 @@ export class SecretRedactor {
             for (const start of startsOf.get(piece) ?? []) hide(from[start]!, to[start + MIN_CALLER_CHARS - 1]!);
             startsOf.delete(piece);
           }
+          // A short string of theirs, punctuation included, and a short word
+          // inside a longer one: each where it stands alone.
+          if (sentFolded.trim().length > 0 && sentFolded.length < MIN_CALLER_CHARS) {
+            for (const match of folded.matchAll(standingAlone(sentFolded))) {
+              hide(from[match.index]!, to[match.index + sentFolded.length - 1]!);
+            }
+          }
           for (const word of sentFolded.matchAll(/[\p{L}\p{N}]+/gu)) {
             if (word[0].length >= MIN_CALLER_CHARS) continue;
             for (const [start, end] of shortRuns.get(word[0]) ?? []) hide(start, end);
@@ -159,8 +173,7 @@ export class SecretRedactor {
       }
     }
     for (const secret of new Set([...this.credentials, ...this.substituted])) {
-      const short = secret.length < MIN_CALLER_CHARS || (secret.length < MIN_SECRET_CHARS && !this.credentials.has(secret));
-      if (short) {
+      if (secret.length < MIN_SECRET_CHARS && !this.credentials.has(secret)) {
         for (const match of text.matchAll(standingAlone(secret))) hide(match.index, match.index + secret.length);
         continue;
       }
