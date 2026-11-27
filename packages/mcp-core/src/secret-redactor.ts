@@ -114,8 +114,8 @@ export class SecretRedactor {
     // What the caller sent, in any piece of four characters, case aside: each
     // four characters of the folded text found in a folded string of theirs,
     // taken out over the characters of the text it came from.
-    const { folded, from, to } = foldWithSpans(text);
-    if (callerText.length > 0 && folded.length >= MIN_CALLER_CHARS) {
+    const { folded, from, to } = callerText.length > 0 ? foldWithSpans(text) : { folded: '', from: [], to: [] };
+    if (folded.length >= MIN_CALLER_CHARS) {
       const startsOf = new Map<string, number[]>();
       for (let i = 0; i + MIN_CALLER_CHARS <= folded.length; i++) {
         const piece = folded.slice(i, i + MIN_CALLER_CHARS);
