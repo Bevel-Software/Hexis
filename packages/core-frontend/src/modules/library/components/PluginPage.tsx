@@ -761,6 +761,9 @@ export function PluginPage() {
   );
 }
 
+/** One leftover grant as the catalog serves it on a skill. */
+type LeftoverGrantEntry = NonNullable<LibraryItem['leftoverGrants']>[number];
+
 /**
  * Who the banner tells the reader to ask — the roles first, then the people,
  * spoken the way a person lists them.
@@ -770,9 +773,6 @@ export function PluginPage() {
  * admins through the rescue on `access.md`, so the sentence stays true and
  * stays actionable when the list comes back empty.
  */
-/** One leftover grant as the catalog serves it on a skill. */
-type LeftoverGrantEntry = NonNullable<LibraryItem['leftoverGrants']>[number];
-
 function editorsText(link: UnrepairedLink): string {
   return joinNames([...link.editors.roles, ...link.editors.users.map((u) => u.name)]) || 'Its editors';
 }
