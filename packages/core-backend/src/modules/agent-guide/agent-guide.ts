@@ -152,8 +152,8 @@ export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
  * The one line that proves a root guide file is the platform's and not the
  * customer's: the blockquote the packaged guide opened with for as long as
  * the guide was a file, under every release. Asked for WHERE the header put
- * it — a blockquote line among the first lines of the file — and not anywhere
- * in the text: a note of the organisation's own that quotes the platform's
+ * it — a blockquote line among the first lines of the body, after any leading
+ * frontmatter block — and not anywhere in the text: a note of the organisation's own that quotes the platform's
  * sentence in its body must not read as ours, because the consequence of the
  * mistake is a deletion. Still read on every start, to take the copies
  * earlier releases wrote out of the repository (see template-files.step.ts),
