@@ -55,7 +55,11 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
   'directory-structure': SECTION_TOKEN_BUDGET,
   'where-a-new-file-goes': SECTION_TOKEN_BUDGET,
   'working-with-files': SECTION_TOKEN_BUDGET,
-  'access-control': SECTION_TOKEN_BUDGET,
+  // 2,525 since it says which writes to a path you cannot read get
+  // `read_file`'s refusal instead of `write-denied` (`edit_file` and a copy's
+  // or move's source): an agent told otherwise reads the wrong answer as a
+  // proposable write. SECTION_TOKEN_BUDGET (2,500) before.
+  'access-control': 2_525,
   'drafts-and-change-requests': SECTION_TOKEN_BUDGET,
   skills: SECTION_TOKEN_BUDGET,
   tools: SECTION_TOKEN_BUDGET,
@@ -67,15 +71,22 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
   'tool-manuals': 2_750,
   // The page contract is long by nature (the frame, the bridge, the link
   // rules, pages that load live data), and an agent fetches it only to build
-  // a page. 5,600 since an Allow is remembered by the page's content (a rule
-  // a page author must know); 5,500 before.
-  'html-views': 5_600,
+  // a page. 5,650 since `uploadFile` lists the refusal of a whole zip, what
+  // it carries in place of an `error.code` and which entries cause it; 5,600
+  // since an Allow is remembered by the page's content (a rule a page
+  // author must know); 5,500 before.
+  'html-views': 5_650,
   conventions: SECTION_TOKEN_BUDGET,
   'new-knowledge-base': SECTION_TOKEN_BUDGET,
 });
 
 /**
- * Every core section at once: what `section: "all"` returns. 23,350 since
+ * Every core section at once: what `section: "all"` returns. 23,450 since
+ * `access-control` says which writes to an unreadable path get `read_file`'s
+ * refusal (about 15); 23,425 since
+ * `html-views` lists the refusal of a whole zip to a page's `uploadFile`
+ * (about 70: what it carries in place of an `error.code`, and which entries
+ * cause it); 23,350 since
  * `drafts-and-change-requests` says how an agent applies a request (about 75:
  * the rule it replaces said no agent tool does); 23,250 since
  * `tool-manuals` says how a tool sends a file as one part of a form (about
@@ -85,7 +96,7 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
  * README); 23,000 since the `onboarding` section (about 1,200) was added;
  * 21,500 before.
  */
-export const WHOLE_GUIDE_TOKEN_BUDGET = 23_350;
+export const WHOLE_GUIDE_TOKEN_BUDGET = 23_450;
 
 /** One task: the start section plus the sections it routes the task to. */
 export const TASK_TOKEN_BUDGET = 6_000;

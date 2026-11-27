@@ -82,6 +82,37 @@ async function start() {
   return { asked, both };
 }
 
+describe('GET /tools/:slug/manual', () => {
+  it('answers with the reader it is handed, as the composition root hands it the endpoint\'s', async () => {
+    const asked: unknown[] = [];
+    const app = express();
+    app.use(
+      createToolManualsAgentRoutes(
+        {} as IToolManualService,
+        (req, _res, next) => {
+          req.toolAuth = { source: 'external', scope: 'read', userId: 'ada' };
+          next();
+        },
+        async () => 'ada@example.com',
+        undefined,
+        undefined,
+        undefined,
+        async (caller, slug) => {
+          asked.push([caller, slug]);
+          return ACME;
+        },
+      ),
+    );
+    server = await new Promise<HttpServer>((res) => {
+      const s = app.listen(0, () => res(s));
+    });
+    const res = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/tools/acme/manual`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(ACME);
+    expect(asked).toEqual([[{ userId: 'ada', agentPath: undefined }, 'acme']]);
+  });
+});
+
 describe('createInlineManualReader', () => {
   it('serves the manual to the person who may read it, as its route does', async () => {
     const { both } = await start();

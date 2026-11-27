@@ -7,7 +7,7 @@ const log = logger('access');
 
 import { isAbsence, isSkippedEntry, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import { isCommitSha, isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
-import { catFileBatchBytes } from './cat-file-batch.js';
+import { catFileBatchBytes } from '../../shared/cat-file-batch.js';
 import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../version-control/index.js';
 import { readRevSha } from '../kb-fs/index.js';
@@ -17,6 +17,7 @@ import type {
   AccessDecision,
   AccessDecisionSource,
   AccessTargetKind,
+  DenialSource,
   DenialSources,
   GrantPrincipal,
   GrantSource,
@@ -48,9 +49,11 @@ import {
   EVERYONE_DISPLAY,
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
+  FIXED_NAME_SOURCES,
   GROUP_TOKEN_PREFIX,
   splitPrincipalToken,
   accessMdSelfEntries,
+  accessSourceOf,
   canonicalEmail,
   canonicalRoleName,
   hasAccessFrontmatterExtension,
@@ -76,7 +79,8 @@ import { OwnEntriesMemo, type IOwnEntriesMemo, type WorkspaceOwnEntries } from '
 import { TreeIndexer, type CommitPaths, type ITreeIndexer } from './tree-index.js';
 import { visitTreeListing, type ListedFile } from './commit-listing.js';
 import { frontmatterHead } from './frontmatter-head.js';
-import { HEAD_MAP_LIMITS, HeadMaps, type HeadMap, type HeadModelSource, type IHeadMaps } from './head-access-map.js';
+import { DISK_READS_AT_ONCE, HEAD_MAP_LIMITS, HeadMaps, type HeadMap, type HeadModelSource, type IHeadMaps } from './head-access-map.js';
+import { mapPooled } from '../../shared/map-pooled.js';
 
 /**
  * What one spec of a batched read came back as: a blob's text, nothing at
@@ -123,8 +127,15 @@ async function catFileBatch(
 }
 
 
-/** The sources of a model that are read by a fixed name at the root, whatever else the tree holds. */
-const FIXED_NAME_SOURCES = ['roles.yaml', SYNCED_GROUPS_YAML, GROUPS_YAML] as const;
+/** Whether two grant or denial sources name the same scope. */
+function sameSource(a: DenialSource, b: DenialSource): boolean {
+  return a.kind === 'direct' ? b.kind === 'direct' : b.kind === 'ancestor' && a.path === b.path;
+}
+
+/** How close a source is to its target: the target's own scope, then deeper folders before shallower ones. */
+function closeness(s: DenialSource): number {
+  return s.kind === 'direct' ? Number.MAX_SAFE_INTEGER : s.path.split('/').length;
+}
 
 /** The rules of one tree: what a head map holds as its model, opaque to everything but this file. */
 export interface AccessModel {
@@ -320,12 +331,14 @@ function accessFileListener(
   return {
     async onFile(dir, name) {
       const rel = dir ? `${dir}/${name}` : name;
-      if (name === PLUGIN_MANIFEST_FILE && dir.startsWith(`${pluginsDir}/`)) {
+      const source = accessSourceOf(rel, pluginsDir);
+      if (source === 'manifest') {
         const text = await fs.readFile(path.join(repoDir, rel), 'utf-8').catch(() => null);
         pluginDirs.set(dir, pluginIdentityOf(parseManifestText(text), path.posix.basename(dir)));
         return;
       }
-      if (name !== 'access.md') return;
+      // The fixed-name sources are read by name (`loadCheckoutModel`).
+      if (source !== 'rules') return;
       const text = await fs.readFile(path.join(repoDir, rel), 'utf-8');
       const parsed = parseAccessFile(text, rel);
       if (!parsed.ok) {
@@ -1266,6 +1279,99 @@ function eligibleHoldersResolved(
   return { principals, roles, users };
 }
 
+type Holders = ReturnType<typeof eligibleHoldersResolved>;
+
+/**
+ * One file's holders of `verb` under every copy of its own entries, against
+ * the same rules (`ownCopiesOf`); `lists[i]` is the list `copies[i]` gives.
+ * Each candidate is put to every copy's resolver, as `holderChangesFor` puts
+ * its candidates to a move's two sides: the candidates here are the rows any
+ * copy's list names, and each is kept that every copy's resolver allows. A
+ * person is put to `hasPermissionResolved` under each copy. A principal is
+ * allowed under a copy whose own list names it (so a row the list adds of
+ * its own, as Admin's on an `access.md`, stays) or whose
+ * `hasPermissionForKeys` allows its keys. Intersecting the lists instead
+ * would drop a holder the copies write differently: a role or group in one,
+ * a member of it by name in the other. One copy's list is returned as it is.
+ */
+function holdersUnderEveryCopy<H extends Holders>(
+  model: AccessModel,
+  verb: Verb,
+  relativePath: string,
+  copies: readonly (OwnEntries | null)[],
+  lists: readonly H[],
+): H {
+  if (lists.length === 1) return lists[0]!;
+  const identity = (p: ResolvedPrincipal) => `${p.kind}\0${p.name.toLowerCase()}`;
+  const candidates = new Map<string, ResolvedPrincipal>();
+  for (const p of lists.flatMap((list) => list.principals)) {
+    if (!candidates.has(identity(p))) candidates.set(identity(p), p);
+  }
+  const principals = [...candidates.values()]
+    .filter((p) =>
+      copies.every(
+        (own, i) =>
+          lists[i]!.principals.some((q) => identity(q) === identity(p)) ||
+          hasPermissionForKeys(model, verb, keysOfHolder(model, p), relativePath, own),
+      ),
+    )
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+  const users = [...new Set(lists.flatMap((list) => list.users.map((u) => u.email)))]
+    .filter((email) => copies.every((own) => hasPermissionResolved(model, verb, email, relativePath, own)))
+    .sort((a, b) => a.localeCompare(b))
+    .map((email) => ({ name: '', email }));
+  return { ...lists[0]!, principals, roles: [...new Set(principals.map((p) => p.name))], users };
+}
+
+/**
+ * Who may read `relativePath` as `eligibleReaders` reports it. `restricted` is
+ * the verdict — whether `read: everyone` applies cleanly — and the lists are
+ * the GRANTS that exist regardless: on a public node they name what makes it
+ * public (`everyone`, and a public plugin principal whose grant is the one to
+ * remove), so the share dialog can show that grant as a row. Consumers that
+ * only want to know whether the node is public read the flag; the lists may be
+ * empty for a default-denied path with no grants.
+ */
+function readersResolved(model: AccessModel, relativePath: string, own: OwnEntries | null) {
+  const { principals, roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
+  // WHY it is public, when it is: the public plugin principals granted read
+  // here — the one thing the dialog cannot tell from the lists alone (a
+  // plugin principal in them may or may not be public), so the resolver,
+  // which knows, says it. A literal `everyone` line shows up as a source
+  // of the `everyone` row instead; together the two answer "what remains
+  // public after this grant is removed".
+  const collapsed = resolveAtPath(model, 'read', relativePath, own);
+  const publicVia = [...collapsed.byRole]
+    .filter(([key, state]) => state === 'grant' && model.roles.publicKeys?.has(key))
+    .map(([key]) => key)
+    .sort();
+  return { restricted: !canEveryoneReadResolved(model, relativePath, own), principals, roles, users, publicVia };
+}
+
+/**
+ * `eligibleHolderEmailsResolved` under every copy of one file's own entries,
+ * by the rule of `holdersUnderEveryCopy`: every email any copy's map holds,
+ * kept where every copy allows it. A map holds only people the rules name,
+ * its own copy among them, so an email one copy alone names inline is in no
+ * other copy's map, even where that copy allows it. One copy's map is
+ * returned as it is.
+ */
+function holderEmailsUnderEveryCopy(
+  model: AccessModel,
+  verb: Verb,
+  relativePath: string,
+  copies: readonly (OwnEntries | null)[],
+  maps: readonly Map<string, { name: string; email: string }>[],
+): Map<string, { name: string; email: string }> {
+  if (maps.length === 1) return maps[0]!;
+  const emails = new Set(maps.flatMap((map) => [...map.keys()]));
+  return new Map(
+    [...emails]
+      .filter((email) => copies.every((own) => hasPermissionResolved(model, verb, email, relativePath, own)))
+      .map((email) => [email, { name: '', email }]),
+  );
+}
+
 /** One side of a move: the access model, the path, and the rules the file carries there. */
 type MoveSide = { model: AccessModel; path: string; own: OwnEntries | null };
 
@@ -1517,6 +1623,13 @@ export class AccessControlService implements IAccessControl {
    */
   private readonly deploymentOwners: ReadonlySet<string>;
 
+  /**
+   * Four collaborators below have defaults this constructor builds itself
+   * (`gitRunner`, `treeIndexer`, `ownEntriesMemo`, `headMaps`): an exception
+   * to constructor injection, kept because many suites construct this service
+   * without them. The composition root passes every one, so in this
+   * repository only those suites run the defaults.
+   */
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly kbDirName: string,
@@ -1569,8 +1682,12 @@ export class AccessControlService implements IAccessControl {
      * `fs.readFile` per node per tree build. Dropped by `invalidate()`, which
      * fires on every commit / pull / branch switch, so that is the PRIMARY
      * freshness mechanism; its age limit is only a backstop. Single-file
-     * gates (`canRead` / `canWrite`) stay uncached: the write gate reads
-     * disk-fresh on purpose.
+     * gates (`canRead` / `canWrite`, through `rulesOf` and `ownCopiesOf`)
+     * keep out of it: where the checkout answers them, a file's own entries
+     * are read disk-fresh, on purpose for the write gate; where a head map
+     * answers, a file the commit holds is judged under the map's copy of its
+     * own entries and under a copy read disk-fresh, and a file the commit
+     * does not hold under the disk-fresh copy alone.
      *
      * The memo keeps entries only for paths in the access-frontmatter
      * extension set; a batch reads any other path as before, without keeping
@@ -1613,14 +1730,17 @@ export class AccessControlService implements IAccessControl {
 
   /**
    * Workspaces whose checkout was just reported changed (`invalidate`), with
-   * the commit it stood on then. Until its head moves off that commit, the
-   * change may be on disk and in no commit yet, so the workspace is answered
-   * from the checkout, as before the maps. `SUSPECT_MS` ends the wait for a
-   * change that never became a commit. The wait is short because every write
-   * path commits moments after it lands on disk (the agent tools, the app's
-   * routes, `unzip` included); only a file someone saves by hand later
-   * (`save_file`, e.g. one `unzip` reports `unsaved`) stays outside the
-   * commit longer, and until then the commit's rules answer for it.
+   * the commit a map last answered them at (or, when none is known, the one
+   * the checkout stands on at the next read). Until the head moves off that
+   * commit, and for `SUSPECT_MS` at most, the workspace is answered from the
+   * checkout, as before the maps. That covers a caller that reports its write
+   * once the bytes are on disk and before their commit, as the grant, revoke
+   * and deny edits of `AccessMutationService` do. The commit, pull and reset
+   * paths report once the head has moved. A write that reports nothing when
+   * its bytes land (a save, an agent's file write) is not covered: wherever
+   * a map answers, the head commit's rules (its `access.md` files, roles,
+   * groups and plugin manifests) answer for it until its commit lands,
+   * however long that takes.
    */
   private readonly suspects = new Map<string, { at: number; commit: string | undefined }>();
   private static readonly SUSPECT_MS = 10_000;
@@ -1746,23 +1866,88 @@ export class AccessControlService implements IAccessControl {
      * `owns` is then empty.
      */
     needsPaths: (model: AccessModel) => boolean = () => true,
-  ): Promise<{ model: AccessModel; owns: (OwnEntries | null)[] }> {
+    /** Read the checkout's own entries fresh, past the memo (a single-file gate's reading: `rulesOf`). */
+    fresh = false,
+  ): Promise<{ model: AccessModel; owns: (OwnEntries | null)[]; head: HeadMap<AccessModel> | null }> {
     const repoDir = await this.repoDir(workspaceId);
     const head = await this.headMapOf(workspaceId, repoDir);
     const model = head ? head.model : await this.loadCheckoutModel(workspaceId, repoDir);
-    if (!needsPaths(model)) return { model, owns: [] };
-    const memo = this.ownEntriesMemo.open(workspaceId);
-    const owns = await Promise.all(
-      relativePaths.map((p) => {
-        const own = head?.ownEntries(p);
-        return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
-      }),
-    );
-    return { model, owns };
+    if (!needsPaths(model)) return { model, owns: [], head };
+    const memo = fresh ? null : this.ownEntriesMemo.open(workspaceId);
+    // A few files at a time: a batch may name thousands of paths, and each
+    // path no map answers for may be a read of the checkout.
+    const owns = await mapPooled(relativePaths, DISK_READS_AT_ONCE, async (p) => {
+      const own = head?.ownEntries(p);
+      return own !== undefined ? own : this.cachedOwnEntries(memo, repoDir, p);
+    });
+    return { model, owns, head };
+  }
+
+  /**
+   * The model and `relativePath`'s own entries for a single-file gate, read
+   * as a batch reads them (`batchRules`): the head commit's where its map
+   * answers (a path the commit does not hold has its entries read from the
+   * checkout, as nothing in the commit says them), the checkout's for both
+   * where no map answers. A gate that took the model from the commit and a
+   * committed file's entries from the checkout could pair a restriction's old
+   * place with its new one, and keep it nowhere. Where the checkout answers,
+   * the entries are read fresh, past the memo, as the write gate has always
+   * read them. `needsOwn` false (a folder target, whose own rules are in the
+   * model) reads no entries, and `own` is null. `fromCommit` says the entries
+   * are the commit's copy (`ownCopiesOf`).
+   */
+  private async rulesOf(
+    workspaceId: string,
+    relativePath: string,
+    needsOwn = true,
+  ): Promise<{ model: AccessModel; own: OwnEntries | null; fromCommit: boolean }> {
+    const { model, owns, head } = await this.batchRules(workspaceId, [relativePath], () => needsOwn, true);
+    return { model, own: owns[0] ?? null, fromCommit: needsOwn && head?.ownEntries(relativePath) !== undefined };
+  }
+
+  /**
+   * The rules and every copy of `relativePath`'s own entries that a
+   * single-file answer is judged under, from one reading (`rulesOf`): that
+   * reading's copy, and, where it is the commit's and the commit holds the
+   * file, the file's own entries as the checkout has them, against the same
+   * rules. So a denial written into the file and not yet committed holds at
+   * once: a gate allows only what every copy allows (`gateAllows`); a holder
+   * list (`eligibleWriters` and the others) keeps, of the rows any copy's
+   * list names, those every copy's resolver allows
+   * (`holdersUnderEveryCopy`); `explainAccess` explains the first copy that
+   * refuses, else the reading's own copy; a grant's sources are the ones
+   * every copy has (`grantSources`), and a denial's are any copy's
+   * (`denialSources`, `locallyDeniedPrincipals`). These are worked out
+   * apart, so while the copies differ they need not agree: for one person,
+   * `explainAccess` and `grantSources` can name different places, and
+   * `grantSources` none for a verb a holder list names them for (as when a
+   * role grants it in one copy and their own line in the other). The
+   * checkout's copy only ever takes away; it never grants what the commit's
+   * copy refuses, so a restriction moved on disk from the file to its folder
+   * still holds by the commit's.
+   */
+  private async ownCopiesOf(
+    workspaceId: string,
+    relativePath: string,
+  ): Promise<{ model: AccessModel; copies: [OwnEntries | null, ...(OwnEntries | null)[]] }> {
+    const { model, own, fromCommit } = await this.rulesOf(workspaceId, relativePath);
+    if (!fromCommit) return { model, copies: [own] };
+    return { model, copies: [own, await this.readOwnEntries(await this.repoDir(workspaceId), relativePath)] };
+  }
+
+  /** Whether a single-file gate allows what `allows` asks, under every copy `ownCopiesOf` reads. */
+  private async gateAllows(
+    workspaceId: string,
+    relativePath: string,
+    allows: (model: AccessModel, own: OwnEntries | null) => boolean,
+  ): Promise<boolean> {
+    const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
+    return copies.every((own) => allows(model, own));
   }
 
   private async cachedOwnEntries(
-    memo: WorkspaceOwnEntries,
+    /** Null reads fresh and keeps nothing (`batchRules`' `fresh`). */
+    memo: WorkspaceOwnEntries | null,
     repoDir: string,
     relativePath: string,
   ): Promise<OwnEntries | null> {
@@ -1771,7 +1956,7 @@ export class AccessControlService implements IAccessControl {
     // as before; only the memo leaves it out, because the file tree asks about
     // every file, screenshots and transcripts included, and the memo would
     // hold one entry for each.
-    if (!hasAccessFrontmatterExtension(relativePath)) return this.readOwnEntries(repoDir, relativePath);
+    if (memo === null || !hasAccessFrontmatterExtension(relativePath)) return this.readOwnEntries(repoDir, relativePath);
     const hit = memo.get(relativePath);
     if (hit !== undefined) return hit;
     const own = await this.readOwnEntries(repoDir, relativePath);
@@ -1799,9 +1984,9 @@ export class AccessControlService implements IAccessControl {
   ): Promise<boolean> {
     const machineOwned = this.machineOwnedWriteRule(userEmail, relativePath);
     if (machineOwned !== null) return machineOwned;
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return hasPermissionResolved(model, 'write', userEmail, relativePath, own);
+    return this.gateAllows(workspaceId, relativePath, (model, own) =>
+      hasPermissionResolved(model, 'write', userEmail, relativePath, own),
+    );
   }
 
   async canRead(
@@ -1809,9 +1994,7 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return canReadResolved(model, userEmail, relativePath, own);
+    return this.gateAllows(workspaceId, relativePath, (model, own) => canReadResolved(model, userEmail, relativePath, own));
   }
 
   async canReadBatch(
@@ -1904,9 +2087,9 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return hasPermissionResolved(model, 'download', userEmail, relativePath, own);
+    return this.gateAllows(workspaceId, relativePath, (model, own) =>
+      hasPermissionResolved(model, 'download', userEmail, relativePath, own),
+    );
   }
 
   async canDownloadBatch(
@@ -1942,9 +2125,9 @@ export class AccessControlService implements IAccessControl {
     userEmail: string,
     relativePath: string,
   ): Promise<boolean> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return hasPermissionResolved(model, 'owner', userEmail, relativePath, own);
+    return this.gateAllows(workspaceId, relativePath, (model, own) =>
+      hasPermissionResolved(model, 'owner', userEmail, relativePath, own),
+    );
   }
 
   async eligibleOwners(
@@ -1955,9 +2138,9 @@ export class AccessControlService implements IAccessControl {
     roles: string[];
     users: { name: string; email: string }[];
   }> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return eligibleHoldersResolved(model, 'owner', relativePath, own);
+    const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
+    const lists = copies.map((own) => eligibleHoldersResolved(model, 'owner', relativePath, own));
+    return holdersUnderEveryCopy(model, 'owner', relativePath, copies, lists);
   }
 
   async eligibleWriters(
@@ -1968,9 +2151,9 @@ export class AccessControlService implements IAccessControl {
     roles: string[];
     users: { name: string; email: string }[];
   }> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return eligibleHoldersResolved(model, 'write', relativePath, own);
+    const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
+    const lists = copies.map((own) => eligibleHoldersResolved(model, 'write', relativePath, own));
+    return holdersUnderEveryCopy(model, 'write', relativePath, copies, lists);
   }
 
   async eligibleReaders(
@@ -1983,28 +2166,14 @@ export class AccessControlService implements IAccessControl {
     users: { name: string; email: string }[];
     publicVia: string[];
   }> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    // `restricted` is the verdict — whether `read: everyone` applies cleanly —
-    // and the lists are the GRANTS that exist regardless: on a public node
-    // they name what makes it public (`everyone`, and a public plugin
-    // principal whose grant is the one to remove), so the share dialog can
-    // show that grant as a row. Consumers that only want to know whether the
-    // node is public read the flag; the lists may be empty for a
-    // default-denied path with no grants.
-    const { principals, roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
-    // WHY it is public, when it is: the public plugin principals granted read
-    // here — the one thing the dialog cannot tell from the lists alone (a
-    // plugin principal in them may or may not be public), so the resolver,
-    // which knows, says it. A literal `everyone` line shows up as a source
-    // of the `everyone` row instead; together the two answer "what remains
-    // public after this grant is removed".
-    const collapsed = resolveAtPath(model, 'read', relativePath, own);
-    const publicVia = [...collapsed.byRole]
-      .filter(([key, state]) => state === 'grant' && model.roles.publicKeys?.has(key))
-      .map(([key]) => key)
-      .sort();
-    return { restricted: !canEveryoneReadResolved(model, relativePath, own), principals, roles, users, publicVia };
+    const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
+    const lists = copies.map((own) => readersResolved(model, relativePath, own));
+    // Restricted where any copy is; public through what every copy says.
+    return {
+      ...holdersUnderEveryCopy(model, 'read', relativePath, copies, lists),
+      restricted: lists.some((r) => r.restricted),
+      publicVia: lists[0]!.publicVia.filter((key) => lists.every((r) => r.publicVia.includes(key))),
+    };
   }
 
   async eligibleDownloaders(
@@ -2015,9 +2184,9 @@ export class AccessControlService implements IAccessControl {
     roles: string[];
     users: { name: string; email: string }[];
   }> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return eligibleHoldersResolved(model, 'download', relativePath, own);
+    const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
+    const lists = copies.map((own) => eligibleHoldersResolved(model, 'download', relativePath, own));
+    return holdersUnderEveryCopy(model, 'download', relativePath, copies, lists);
   }
 
   /**
@@ -2046,8 +2215,11 @@ export class AccessControlService implements IAccessControl {
     fromPath: string,
     toPath: string,
   ): Promise<ProspectiveHolders> {
-    const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
+    // The thing moved is read from the checkout (`relocationSubject`), parsed
+    // under the name it lands under, which no head map holds: the model is
+    // read from the checkout too, so both come from one reading.
+    const model = await this.loadCheckoutModel(workspaceId, repoDir);
     const { isFolder, ownHere, ownThere, landing } =
       await this.relocationSubject(repoDir, fromPath, toPath);
     const after = withRelocatedAccessFiles(model, fromPath, toPath, {
@@ -2071,8 +2243,9 @@ export class AccessControlService implements IAccessControl {
     fromPath: string,
     toPath: string,
   ): Promise<HolderChanges> {
-    const model = await this.loadModel(workspaceId);
     const repoDir = await this.repoDir(workspaceId);
+    // One reading, the checkout's, for the model and the thing moved (see `prospectiveHolders`).
+    const model = await this.loadCheckoutModel(workspaceId, repoDir);
     const { isFolder, ownHere, ownThere, landing } =
       await this.relocationSubject(repoDir, fromPath, toPath);
     const here: MoveSide = { model, path: fromPath, own: ownHere };
@@ -2119,8 +2292,10 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     const { isFolder, ownThere: own, landing } =
       await this.relocationSubject(repoDir, fromPath, toPath, opts?.sourceContent);
+    // The model from the same reading as the source's entries: the checkout
+    // (see `prospectiveHolders`).
     const model = withRelocatedAccessFiles(
-      await this.loadModel(workspaceId),
+      await this.loadCheckoutModel(workspaceId, repoDir),
       fromPath,
       toPath,
       { sourceRemains: opts?.sourceRemains === true, sourceIsFolder: isFolder, landing },
@@ -2138,18 +2313,18 @@ export class AccessControlService implements IAccessControl {
     workspaceId: string,
     relativePath: string,
   ): Promise<Map<string, { name: string; email: string }>> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return eligibleHolderEmailsResolved(model, 'write', relativePath, own);
+    const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
+    const maps = copies.map((own) => eligibleHolderEmailsResolved(model, 'write', relativePath, own));
+    return holderEmailsUnderEveryCopy(model, 'write', relativePath, copies, maps);
   }
 
   async eligibleOwnerEmails(
     workspaceId: string,
     relativePath: string,
   ): Promise<Map<string, { name: string; email: string }>> {
-    const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    return eligibleHolderEmailsResolved(model, 'owner', relativePath, own);
+    const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
+    const maps = copies.map((own) => eligibleHolderEmailsResolved(model, 'owner', relativePath, own));
+    return holderEmailsUnderEveryCopy(model, 'owner', relativePath, copies, maps);
   }
 
   async grantSources(
@@ -2159,28 +2334,36 @@ export class AccessControlService implements IAccessControl {
     principal: GrantPrincipal,
     opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<GrantSources> {
-    const model = await this.loadModel(workspaceId);
     // A file target consults its own frontmatter as the most-specific scope; a
     // folder target's most-specific scope is its own access.md (in the dir
-    // chain), so it passes no fileOwn.
-    const own =
-      kind === 'file'
-        ? await this.readOwnEntries(await this.repoDir(workspaceId), relativePath)
-        : null;
+    // chain), so it passes no fileOwn. A file's grant is reported only where
+    // every copy of its own entries grants it (`ownCopiesOf`), as its gates
+    // allow only what every copy allows.
+    const { model, copies } = await this.copiesFor(workspaceId, kind, relativePath);
     const out: GrantSources = {};
     for (const verb of KNOWN_VERBS) {
-      const sources = resolveGrantSourcesForVerb(
-        model,
-        verb,
-        kind,
-        relativePath,
-        principal,
-        own,
-        opts?.tokenMatch,
+      const [first, ...rest] = copies.map((own) =>
+        resolveGrantSourcesForVerb(model, verb, kind, relativePath, principal, own, opts?.tokenMatch),
       );
+      const sources = rest.reduce((kept, next) => kept.filter((s) => next.some((n) => sameSource(s, n))), first!);
       if (sources.length > 0) out[verb] = sources;
     }
     return out;
+  }
+
+  /**
+   * The rules and the copies of a target's own entries an annotation is read
+   * under: every copy `ownCopiesOf` reads for a file, none for a folder (its
+   * own rules are its `access.md`, in the model).
+   */
+  private async copiesFor(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<{ model: AccessModel; copies: (OwnEntries | null)[] }> {
+    if (kind === 'file') return this.ownCopiesOf(workspaceId, relativePath);
+    const { model } = await this.rulesOf(workspaceId, relativePath, false);
+    return { model, copies: [null] };
   }
 
   async denialSources(
@@ -2190,24 +2373,21 @@ export class AccessControlService implements IAccessControl {
     principal: GrantPrincipal,
     opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<DenialSources> {
-    const model = await this.loadModel(workspaceId);
     // Same own-scope rule as `grantSources`: a file target consults its own
     // frontmatter, a folder target's own access.md is already in the dir chain.
-    const own =
-      kind === 'file'
-        ? await this.readOwnEntries(await this.repoDir(workspaceId), relativePath)
-        : null;
+    // A file's denial is reported where any copy of its own entries writes it,
+    // as its gates refuse what any copy refuses.
+    const { model, copies } = await this.copiesFor(workspaceId, kind, relativePath);
     const out: DenialSources = {};
     for (const verb of KNOWN_VERBS) {
-      const sources = resolveDenialSourcesForVerb(
-        model,
-        verb,
-        kind,
-        relativePath,
-        principal,
-        own,
-        opts?.tokenMatch,
-      );
+      const sources: DenialSource[] = [];
+      for (const own of copies) {
+        for (const s of resolveDenialSourcesForVerb(model, verb, kind, relativePath, principal, own, opts?.tokenMatch)) {
+          if (!sources.some((kept) => sameSource(kept, s))) sources.push(s);
+        }
+      }
+      // Closest first, as each copy lists them: the target's own denial, then its folders from the nearest up.
+      sources.sort((a, b) => closeness(b) - closeness(a));
       if (sources.length > 0) out[verb] = sources;
     }
     return out;
@@ -2218,19 +2398,19 @@ export class AccessControlService implements IAccessControl {
     kind: AccessTargetKind,
     relativePath: string,
   ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }> {
-    const model = await this.loadModel(workspaceId);
     // The target's OWN entries, and only those — the one scope whose rules a
     // restriction made here is written into. A folder's are its `access.md` in
-    // the dir model; a file node's are its own frontmatter.
-    const own: OwnEntries | null =
-      kind === 'folder'
-        ? (model.accessFilesByDir.get(relativePath)?.entries ?? null)
-        : await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    if (!own) return { principals: [], users: [] };
+    // the dir model; a file node's are its own frontmatter, in every copy
+    // `ownCopiesOf` reads, as its gates refuse what any copy denies.
+    const { model, copies } = await this.copiesFor(workspaceId, kind, relativePath);
+    const owns: OwnEntries[] = (
+      kind === 'folder' ? [model.accessFilesByDir.get(relativePath)?.entries ?? null] : copies
+    ).filter((o): o is OwnEntries => o !== null);
+    if (owns.length === 0) return { principals: [], users: [] };
 
     const byIdentity = new Map<string, ResolvedPrincipal>();
     const byEmail = new Map<string, { name: string; email: string }>();
-    for (const verb of KNOWN_VERBS) {
+    for (const own of owns) for (const verb of KNOWN_VERBS) {
       for (const entry of own[verb] ?? []) {
         // Grants are already reported by the eligible lists; only the denials
         // are invisible there, and only they are this method's business.
@@ -2273,17 +2453,22 @@ export class AccessControlService implements IAccessControl {
     kind: AccessTargetKind,
     relativePath: string,
   ): Promise<Record<Verb, AccessDecision>> {
-    const model = await this.loadModel(workspaceId);
-    // The same own-entries read `canRead`/`canWrite`/… make, whatever the
-    // kind: a directory simply has none.
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    // The same reading `canRead`/`canWrite`/… make, whatever the kind: a
+    // directory simply has no own entries. As at the gates, a file the commit
+    // holds is asked as the checkout has it too (`ownCopiesOf`), and the first
+    // copy that refuses is the one explained.
+    const { model, copies } = await this.ownCopiesOf(workspaceId, relativePath);
+    const decide = (verb: Verb): PermissionDecision => {
+      const decisions = copies.map((own) => decidePermissionResolved(model, verb, userEmail, relativePath, own));
+      return decisions.find((d) => !d.allowed) ?? decisions[0];
+    };
     const out = {} as Record<Verb, AccessDecision>;
     for (const verb of KNOWN_VERBS) {
       const machineOwned = verb === 'write' ? this.machineOwnedWriteRule(userEmail, relativePath) : null;
       out[verb] =
         machineOwned !== null
           ? { allowed: machineOwned, source: null, via: 'machine-owned', principal: null }
-          : explainDecision(model, decidePermissionResolved(model, verb, userEmail, relativePath, own), kind, relativePath);
+          : explainDecision(model, decide(verb), kind, relativePath);
     }
     return out;
   }
@@ -3023,6 +3208,9 @@ export class AccessControlService implements IAccessControl {
       // for them makes git open every object, so one lost object anywhere
       // would fail the listing; a gate at a ref must not depend on that.
       const args = opts.checkout ? ['ls-tree', '-r', '-t', '-z', '-l', ref] : ['ls-tree', '-r', '-t', '-z', ref];
+      // Outside the workspace's git turn, on purpose, in both modes: `ref` is
+      // the commit id `buildModelAtCommit` was given, and this reads its
+      // objects, which no write to the checkout changes.
       const { stdout } = await this.gitRunner.run(repoDir, args, { encoding: 'buffer' });
       const walked = (p: string) => !opts.checkout || !p.split('/').some(isSkippedEntry);
       const out: string[] = [];
@@ -3047,21 +3235,19 @@ export class AccessControlService implements IAccessControl {
       // seen by its name even when it is an empty folder object with no
       // file beneath it.
       visitTreeListing(stdout, (p, file) => {
+        const source = accessSourceOf(p, pluginsDir);
         if (file.folder) {
-          if ((FIXED_NAME_SOURCES as readonly string[]).includes(p)) sources.update(`${p}/\0folder\n`);
+          if (source === 'fixed-name') sources.update(`${p}/\0folder\n`);
           return;
         }
         opts.visit?.(p, file);
         // One past the cap is enough to know the tree is not kept.
         if (all.length <= this.treeIndexMaxPaths) all.push(p);
-        if (p === 'access.md' || p.endsWith('/access.md')) {
-          if (!walked(p)) return;
-          out.push(p);
-        } else if (p === 'roles.yaml' || p === SYNCED_GROUPS_YAML || p === GROUPS_YAML) named.add(p);
-        else if (p.startsWith(`${pluginsDir}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
-          if (!walked(p)) return;
-          pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
-        } else return;
+        if (source === null) return;
+        if (source === 'fixed-name') named.add(p);
+        else if (!walked(p)) return;
+        else if (source === 'rules') out.push(p);
+        else pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
         sources.update(`${p}\0${file.objectId()}\n`);
       });
       return { accessFiles: out, pluginDirs, named, all, sourcesKey: sources.digest('hex') };
@@ -3265,9 +3451,7 @@ export class AccessControlService implements IAccessControl {
     const shared = this.modelsBySources.get(listed.sourcesKey);
     if (shared) return { model: shared.model, resolvedRef: commit, tree: treeOf(), sourcesKey: listed.sourcesKey };
     const wanted = [
-      'roles.yaml',
-      SYNCED_GROUPS_YAML,
-      GROUPS_YAML,
+      ...FIXED_NAME_SOURCES,
       ...listed.accessFiles,
       ...listed.pluginDirs.map((dir) => `${dir}/${PLUGIN_MANIFEST_FILE}`),
     ];

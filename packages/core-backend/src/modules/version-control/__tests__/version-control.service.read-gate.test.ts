@@ -4,15 +4,15 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService } from '../version-control.service.js';
-import type { Database } from '../../database/connection.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/change-gate.js';
+import type { Database } from '../../database/index.js';
+import { AccessDeniedError } from '../../access-model/index.js';
+import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/index.js';
 
 /**
  * The read-before-write gate sits in `acquireLock` next to the write gate:
@@ -37,7 +37,7 @@ function gateThat(verdict: ChangeReadVerdict) {
     throw new AccessDeniedError({ path: wsPath, eligibleRoles: [], eligibleUsers: [], unreadable: v.unreadable });
   });
   const gate: IChangeReadGate = { judge, assertMayChange };
-  return { gate, assertMayChange };
+  return { gate, assertMayChange, judge };
 }
 
 function makeService(opts: {
@@ -93,10 +93,13 @@ describe('acquireLock asks the read-before-write gate', () => {
   const PATH = `${KB}/KnowledgeBase/Sealed/brief.pdf`;
 
   it('on a DRAFT branch, where no write gate runs: a refusal means no lock', async () => {
-    const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed' });
+    const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
     const { svc, acquire, accessControl } = makeService({ gate });
 
-    await expect(svc.acquireLock(WS, DRAFT, PATH, USER)).rejects.toBeInstanceOf(AccessDeniedError);
+    await expect(svc.acquireLock(WS, DRAFT, PATH, USER)).rejects.toMatchObject({
+      status: 403,
+      access: { path: PATH, unreadable: 'KnowledgeBase/Sealed/brief.pdf', eligibleRoles: [], eligibleUsers: [] },
+    });
     expect(assertMayChange).toHaveBeenCalledWith(WS, USER.email, PATH, 'file');
     expect(acquire).not.toHaveBeenCalled();
     // The write gate is still protected-branch only.
@@ -113,31 +116,53 @@ describe('acquireLock asks the read-before-write gate', () => {
   });
 
   it('on a PROTECTED branch, after the write gate: a write grant without read is refused', async () => {
-    const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed' });
+    const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
     const { svc, acquire, accessControl } = makeService({ gate, writable: true });
 
-    await expect(svc.acquireLock(WS, PROTECTED, PATH, USER)).rejects.toBeInstanceOf(AccessDeniedError);
+    await expect(svc.acquireLock(WS, PROTECTED, PATH, USER)).rejects.toMatchObject({
+      status: 403,
+      access: { path: PATH, unreadable: 'KnowledgeBase/Sealed/brief.pdf', eligibleRoles: [], eligibleUsers: [] },
+    });
     expect(accessControl.canWriteBatchAtRef).toHaveBeenCalledOnce();
     expect(assertMayChange).toHaveBeenCalledOnce();
     expect(acquire).not.toHaveBeenCalled();
   });
 
-  it('the write gate refuses first, so the read gate is never asked about a path the caller may not write', async () => {
-    const { gate, assertMayChange } = gateThat({ allowed: true, via: 'readable' });
-    const { svc, acquire } = makeService({ gate, writable: false });
+  it('a path the caller may read but not write is refused by the write gate, naming who may write it', async () => {
+    const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
+    const { svc, acquire, accessControl } = makeService({ gate, writable: false });
 
-    await expect(svc.acquireLock(WS, PROTECTED, PATH, USER)).rejects.toBeInstanceOf(AccessDeniedError);
-    expect(assertMayChange).not.toHaveBeenCalled();
+    const err = await svc.acquireLock(WS, PROTECTED, PATH, USER).then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({ status: 403 });
+    expect((err as { access: { unreadable?: string } }).access.unreadable).toBeUndefined();
+    expect((err as Error).message).toContain('Eligible:');
+    expect(judge).toHaveBeenCalledOnce();
+    expect(judge).toHaveBeenCalledWith(WS, USER.email, PATH, 'file');
+    expect(accessControl.eligibleWritersAtRef).toHaveBeenCalledOnce();
     expect(acquire).not.toHaveBeenCalled();
   });
 
-  it('the refusal carries the unreadable place, so the route and the tools can say why', async () => {
-    const { gate } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed' });
+  it('a path the caller may neither write nor read is refused for the read, without its writers', async () => {
+    const { gate } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
+    const { svc, acquire, accessControl } = makeService({ gate, writable: false });
+
+    const err = await svc.acquireLock(WS, PROTECTED, PATH, USER).then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({
+      status: 403,
+      access: { unreadable: 'KnowledgeBase/Sealed/brief.pdf', eligibleRoles: [], eligibleUsers: [] },
+    });
+    // The writers a file's own entries name would say it is there.
+    expect(accessControl.eligibleWritersAtRef).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('the refusal carries the unreadable path, so the route and the tools can say why', async () => {
+    const { gate } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
     const { svc } = makeService({ gate });
 
     const err = await svc.acquireLock(WS, DRAFT, PATH, USER).then(() => null, (e: unknown) => e);
-    expect((err as AccessDeniedError).access.unreadable).toBe('KnowledgeBase/Sealed');
-    expect((err as AccessDeniedError).message).toContain('You don\'t have read access to "KnowledgeBase/Sealed"');
+    expect((err as AccessDeniedError).access.unreadable).toBe('KnowledgeBase/Sealed/brief.pdf');
+    expect((err as AccessDeniedError).message).toContain('You don\'t have read access to "KnowledgeBase/Sealed/brief.pdf"');
   });
 
   it('a platform-file restore that the write gate let through is not asked — the rescue is for a denying destination', async () => {

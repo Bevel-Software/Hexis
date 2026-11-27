@@ -10,11 +10,11 @@ export interface AccessDeniedDetails {
   eligibleUsers: { name: string; email: string }[];
   /**
    * Set when the refusal is the READ-BEFORE-WRITE rule rather than a missing
-   * write grant: the repo-relative path the caller cannot read — the file
-   * itself, or the folder a new file would land in (`''` for the repository
-   * root). Nothing can be created, changed or removed at a place the caller
-   * cannot see, whatever write rules say, so the eligible lists are empty
-   * and the message names the unreadable place instead.
+   * write grant: the repo-relative path the caller cannot read, which is the
+   * path being changed whether or not something is at it (`''` for the
+   * repository root). Nothing can be created, changed or removed at a place
+   * the caller cannot see, whatever write rules say, so the eligible lists
+   * are empty and the message names the unreadable path instead.
    */
   unreadable?: string;
   /**

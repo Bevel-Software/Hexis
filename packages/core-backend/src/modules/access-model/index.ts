@@ -14,6 +14,8 @@
 export * from './access-grammar.js';
 export * from './access-errors.js';
 export type { ChangeReadVerdict, ChangeTargetKind, IChangeReadGate } from './change-gate.js';
+// The refusal of a write the write rule refused, read gate first: the lock's and the write tools' one answer.
+export { unwritableRefusal } from './write-refusal.js';
 export { canReadWorkspacePath } from './kb-read-filter.js';
 // Reached by other modules; exported here so they stop importing the files.
 export { AccessSpliceError, spliceGrant, spliceRevoke, validatePrincipal } from './access-splice.js';
@@ -24,7 +26,7 @@ export { scanFrontmatter } from './frontmatter-lines.js';
 export { GROUPS_YAML, SYNCED_GROUPS_YAML, parseGroupsFile, unsafeNameReason, validateGroupsFile } from './group-files.js';
 export type { GroupsIndex } from './group-files.js';
 export { resolveReadableMap, toKbRelative } from './kb-read-filter.js';
-export { decidesListing, fencedHead, listingUnchangedBy } from './listing-deciders.js';
+export { accessSourceOf, decidesListing, FIXED_NAME_SOURCES, fencedHead, listingUnchangedBy } from './listing-deciders.js';
 export { synthesizePluginPrincipals } from './plugin-principals.js';
 export { renderRolesYaml } from './render-roles-yaml.js';
 export { ROLES_YAML_BASENAME, assertRolesYamlParsable, isRolesYamlPath, makeAgentRolesYamlWriteValidator, makeRolesYamlWriteValidator } from './roles-yaml-guard.js';

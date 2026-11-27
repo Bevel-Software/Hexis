@@ -5,6 +5,7 @@ import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { authCookieSecure } from '../modules/auth/auth.middleware.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import { LockingFilesystem } from '../modules/kb-fs/index.js';
 import {
   createAgentUploadRoutes,
   isAgentUploadRawBodyPath,
@@ -585,6 +586,8 @@ export async function createCoreServer(
     async (userId) => (await core.authService.getUserById(userId))?.email,
     readOnlyHints,
     core.agentScopeService,
+    // The reader the MCP endpoint calls in process: one reader, two callers.
+    core.readExternalManual,
   ));
   toolsRouter.use(createToolHintsAgentRoutes(readOnlyHints, core.manualAuthMiddleware));
   // The aggregated manual list (KB + the caller's accessible `.tool`s) + inline
@@ -602,8 +605,9 @@ export async function createCoreServer(
       pluginIndex: core.pluginIndexService,
     },
     core.agentScopeService,
-    // The reader the MCP endpoint calls in process: one computation, two callers.
+    // The readers the MCP endpoint calls in process: one each, two callers.
     core.readManualList,
+    core.readInlineManual,
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
@@ -704,6 +708,20 @@ export async function createCoreServer(
     core.disk,
     allowedToolsChecker,
     core.changeGate,
+    // Where the app's unzip lands an archive: the person's own lock-aware
+    // filesystem on that workspace, so the extraction is one commit of theirs.
+    async (workspaceId, branch, user) =>
+      new LockingFilesystem(
+        { basePath: await core.workspaceService.getWorkspacePath(workspaceId), contained: true },
+        {
+          versionControl: core.versionControlService,
+          workspaceId,
+          branch,
+          user,
+          kbDirName: core.kb.kbDirName,
+          creatorAccess: core.creatorAccess,
+        },
+      ),
   ));
   // Version control is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes

@@ -86,7 +86,7 @@ import { authCookieSecure, createAuthMiddleware, readAuthCookie } from '../modul
 import { AccessControlService, loadActiveGroups, type AccessModel } from '../modules/access/access-control.service.js';
 import { OwnEntriesMemo, OWN_ENTRIES_LIMITS } from '../modules/access/own-entries-memo.js';
 import { TreeIndexer } from '../modules/access/tree-index.js';
-import { HEAD_MAP_LIMITS, HeadMaps } from '../modules/access/head-access-map.js';
+import { ACCESS_READING_VERSION, HEAD_MAP_LIMITS, HeadMaps } from '../modules/access/head-access-map.js';
 import { DbHeadSeedStore } from '../modules/access/head-seed-store.js';
 import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
@@ -174,9 +174,12 @@ import {
   createCallerResolver,
   createTokenVerifier,
   createManualAuthMiddleware,
+  createManualTokenVerifier,
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import { McpService } from '../modules/mcp/mcp.service.js';
+import { ManualInHand } from '../modules/mcp/manual-in-hand.js';
+import { registerCallable } from '@utcp/direct-call';
 import { AgentAuditService, retentionDaysFrom } from '../modules/audit/agent-audit.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
 import {
@@ -195,7 +198,7 @@ import { alwaysWritable, type IWriteAccess } from '../modules/write-access/write
 import { createInProcessToolCaller, createToolHandlerFactory } from '../modules/tool-helpers/tool-handler.js';
 import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
-import { resolveAppVersion } from '../version.js';
+import { GIT_SHA, resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
 import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.js';
 import { createCatalogRevisionReader, type CatalogRevisionReader } from './catalog-revision.js';
@@ -441,6 +444,14 @@ export interface CoreServices {
    * tool surface, so the two cannot answer differently.
    */
   readManualList: ManualListReader;
+  /**
+   * Reads one caller's platform manual and one inline `.tool`'s manual: the
+   * routes `GET /agent/utcp` and `GET /tools/:slug/manual` answer with these,
+   * and the MCP endpoint calls them directly, so the two cannot answer
+   * differently.
+   */
+  readExternalManual: ReturnType<typeof createExternalManualReader>;
+  readInlineManual: ReturnType<typeof createInlineManualReader>;
   mcpService: McpService;
   mcpAuthMiddleware: ReturnType<typeof createMcpAuthMiddleware>;
   mcpOAuthProvider: BevelOAuthProvider;
@@ -898,12 +909,12 @@ export async function createCoreServices(
     new OwnEntriesMemo(Date.now, OWN_ENTRIES_LIMITS),
     // The maps a branch's reads are answered from: their own tree indexer
     // (a map keeps its commit's whole tree), the deployment's bounds, and
-    // the row a restart begins from, read only by the release that wrote it.
+    // the row a restart begins from, read only by the build that wrote it.
     new HeadMaps<AccessModel>(
       gitRunner,
       new TreeIndexer(),
       HEAD_MAP_LIMITS,
-      new DbHeadSeedStore(db, resolveAppVersion()),
+      new DbHeadSeedStore(db, { reading: ACCESS_READING_VERSION, sha: GIT_SHA }),
       Date.now,
     ),
   );
@@ -1553,25 +1564,35 @@ export async function createCoreServices(
       readOnlyOverrides: () => readOnlyHints.overrides(),
       // A tool whose body is declared a file path sends the file's bytes.
       readFileBody: async (userId, ref) => fileBodies.read(await authService.getUserById(userId), ref),
+      // Each read below is handed the bearer of the request's loopback
+      // identity and resolves it as the route it replaces resolves it: every
+      // one of those routes runs `manualAuth`, so with the verifier that
+      // middleware runs, built from the same services, when the read is made.
+      // (`resolveManualCaller` is made further down; these run per request.)
       // Asked on every request, so answered in process and not over loopback.
-      readCatalogRevision,
-      // Read for every surface build, in process for the same reason. The
-      // bearer is resolved as the route's auth resolves it, when the list is
-      // read. (`resolveToolCaller` is made further down; this runs per request.)
+      readCatalogRevision: async (bearer) => {
+        const caller = await resolveManualCaller(bearer);
+        return readCatalogRevision({ userId: caller.userId, agentPath: caller.agentPath });
+      },
+      // Read for every surface build, in process for the same reason.
       readManualList: async (bearer, opts) => {
-        const caller = await resolveToolCaller(bearer);
+        const caller = await resolveManualCaller(bearer);
         return readManualList({ userId: caller.userId, agentPath: caller.agentPath }, opts);
       },
       // The tools of the manuals this server hosts, discovered the same way:
       // the platform's own, and each inline `.tool`'s.
       readPlatformManual: async (bearer) => {
-        const caller = await resolveToolCaller(bearer);
+        const caller = await resolveManualCaller(bearer);
         return readExternalManual({ userId: caller.userId, agentPath: caller.agentPath });
       },
       readInlineManual: async (bearer, slug) => {
-        const caller = await resolveToolCaller(bearer);
+        const caller = await resolveManualCaller(bearer);
         return readInlineManual({ userId: caller.userId, agentPath: caller.agentPath }, slug);
       },
+      // The manuals those two read reach the tool client through the
+      // `direct-call` protocol, by one function this graph registers, under a
+      // name of its own.
+      manualInHand: new ManualInHand(registerCallable),
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -1675,11 +1696,14 @@ export async function createCoreServices(
     isMissing: (branch) => workspaceService.isBranchMissing(branch),
   });
   // The same context and connection scope, for a hosted read this process
-  // calls as a function (the MCP endpoint's skill reads).
-  const inProcessTool = createInProcessToolCaller(resolveToolContext);
+  // calls as a function (the MCP endpoint's skill reads). The catalog says
+  // which tools write: those are refused, as the route's write gates do not
+  // run there.
+  const inProcessTool = createInProcessToolCaller(resolveToolContext, toolRegistry);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
   const verifyToolToken = createTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
-  // The same verifier, for a read this process makes as a function.
+  // The same verifier, for a read of a tool route (the skill reads) this
+  // process makes as a function.
   const resolveToolCaller = createCallerResolver(verifyToolToken);
   // Every credential kind this server issues — connection keys, internal
   // tokens and app sessions (bearer or cookie) — so a fetch carrying another
@@ -1692,6 +1716,13 @@ export async function createCoreServices(
   // logged-in user can browse the catalog with their session. Execution routes
   // keep `toolAuthMiddleware` (no JWT), so a session can read but not invoke.
   const manualAuthMiddleware = createManualAuthMiddleware(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider);
+  // The verifier that middleware runs, built from the same services, for a
+  // read of a manual route (the MCP endpoint's revision, manual list and
+  // hosted manuals) this process makes as a function: it accepts what those
+  // routes accept, an app session included.
+  const resolveManualCaller = createCallerResolver(
+    createManualTokenVerifier(externalApiKeyService, internalTokenService, authService, mcpOAuthProvider),
+  );
 
   // Recovery-bot identity: a synthetic `recovery-bot@bevel.local` user
   // backing (a) the recovery agent's commit authorship and (b) the
@@ -1917,6 +1948,8 @@ export async function createCoreServices(
     mcpAppService,
     readCatalogRevision,
     readManualList,
+    readExternalManual,
+    readInlineManual,
     mcpService,
     mcpAuthMiddleware,
     mcpOAuthProvider,

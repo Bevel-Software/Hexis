@@ -23,7 +23,7 @@ export class ApprovalCarryPendingError extends VersionControlDomainError {
   static readonly LISTED_PATHS_MAX_CHARS = 400;
   constructor(waitingPaths: readonly string[] = []) {
     super(
-      'The server updated this draft while applying it and could not yet carry the approvals already given over to the updated draft, so nothing was applied. ' +
+      'The server updated this draft (an update from its target, or while applying it) and could not yet carry the approvals already given over to the updated draft, so nothing was applied. ' +
         'Applying again tries once more to carry over the approvals of files the update left alone. ' +
         (waitingPaths.length > 0
           ? `Approval is still awaited on ${listedPaths(waitingPaths.map(sanitizedPath), ApprovalCarryPendingError.LISTED_PATHS_MAX_CHARS)}; any of those the update changed needs approving again.`

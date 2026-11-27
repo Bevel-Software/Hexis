@@ -15,7 +15,7 @@ export { assertValidBranchName, assertValidRelativePath, isBranchAuthoredBy, isO
 export { ORIGIN_FETCH_REFSPEC, SAFE_IMPLICIT_FETCH_ARGS, cloneCredentialArgs, cloneCredentialConfigArgs, cloneTrackingConfigArgs, credentialHelperValue } from './clone-config.js';
 export type { FileChangeNotifier } from './file-change-notifier.js';
 export { GitGuardedFilesystem } from './git-guarded-filesystem.js';
-export { LockingFilesystem, MoveLockedError, MoveRacedError } from './locking-filesystem.js';
+export { LockingFilesystem, MoveLockedError, MoveRacedError, PathHeldError } from './locking-filesystem.js';
 export { ReadOnlyFilesystem } from './read-only-filesystem.js';
 export { normalizeRepositoryAddress, sameRepository } from './remote-url.js';
 export { assertInsideRepo, assertKbDirNameFree, assertRepoRootNameFree, assertRepoRootNameFreeArgs, hasControlCharacter, isInsideRepo, normalizePathArgs } from './repo-path.js';

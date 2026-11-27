@@ -11,13 +11,12 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
 
 /**
- * The listings of PART of a workspace's tree: one folder's subtree
- * (`listFilesUnder`) and a tree cut at a depth (`listFilesToDepth`, and
- * `depth` on the folder listing).
+ * The listing of PART of a workspace's tree: one folder's subtree
+ * (`listFilesUnder`).
  *
- * Two promises are held here. What they answer is what the whole tree holds
+ * Two promises are held here. What it answers is what the whole tree holds
  * for the same folder, read filter and `.bevelignore` rules included. And
- * they walk only what they return: a caller that needs one folder of a
+ * it walks only what it returns: a caller that needs one folder of a
  * knowledge base of thousands does not pay for the rest.
  */
 
@@ -154,56 +153,6 @@ describe('WorkspaceService — listings of part of the tree', () => {
     it('refuses a path that leaves the repository, and the git folder', async () => {
       await expect(svc.listFilesUnder(workspaceId, `${KB}/../..`)).rejects.toThrow();
       await expect(svc.listFilesUnder(workspaceId, `${KB}/.git`)).rejects.toThrow();
-    });
-  });
-
-  describe('cut at a depth', () => {
-    it('depth 1 is the folder\'s own entries, with its folders not looked into', async () => {
-      const cut = (await svc.listFilesUnder(workspaceId, `${KB}/Data/Sales`, { depth: 1 }))!;
-      expect(cut.children!.map((c) => [c.name, c.type, 'children' in c])).toEqual([
-        ['Customers', 'directory', false],
-        ['Deals', 'directory', false],
-        ['Empty', 'directory', false],
-        ['pricing.md', 'file', false],
-      ]);
-    });
-
-    it('depth 1 lists the one folder and no other', async () => {
-      disk.listed = [];
-      await svc.listFilesUnder(workspaceId, `${KB}/Data/Sales`, { depth: 1 });
-      expect(disk.listed).toEqual([`${KB}/Data/Sales`]);
-    });
-
-    it('depth 2 holds two levels, the same entries the whole tree has there', async () => {
-      const cut = (await svc.listFilesUnder(workspaceId, `${KB}/Data/Sales`, { depth: 2 }))!;
-      const whole = at(await svc.listFiles(workspaceId), `${KB}/Data/Sales`)!;
-      expect(at(cut, 'Customers')).toEqual(at(whole, 'Customers'));
-      expect(at(cut, 'Empty')).toEqual(at(whole, 'Empty'));
-      // Deals is listed, Q1 beneath it is at the cut.
-      expect(at(cut, 'Deals')!.children).toEqual([{ name: 'Q1', relativePath: `${KB}/Data/Sales/Deals/Q1`, type: 'directory' }]);
-    });
-
-    it('a depth past the bottom is the whole subtree', async () => {
-      const whole = at(await svc.listFiles(workspaceId), `${KB}/Data`);
-      expect(await svc.listFilesUnder(workspaceId, `${KB}/Data`, { depth: 50 })).toEqual(whole);
-    });
-
-    it('the whole workspace cut at a depth walks no folder below the cut', async () => {
-      disk.listed = [];
-      const cut = await svc.listFilesToDepth(workspaceId, 2);
-      expect(disk.listed.sort()).toEqual(['', KB]);
-      expect(at(cut, KB)!.children!.map((c) => c.name)).toEqual(['Data', 'Plugins', '.bevelignore', 'top.md']);
-      expect('children' in at(cut, `${KB}/Data`)!).toBe(false);
-    });
-
-    it('a folder at the cut the caller may not read is left out and counted, not shown as a way further', async () => {
-      const filter: ReadTreeFilter = async (ps) => new Map(ps.map((p) => [p, !p.endsWith('/Finance')]));
-      const cut = (await svc.listFilesUnder(workspaceId, `${KB}/Data`, { depth: 1, readFilter: filter }))!;
-      expect(cut.children!.map((c) => c.name)).toEqual(['Sales', '.bevelignore']);
-      expect(cut.withheld).toBe(1);
-      // With the depth to see beneath it, the folder is the way to Payroll.
-      const deeper = (await svc.listFilesUnder(workspaceId, `${KB}/Data`, { depth: 3, readFilter: filter }))!;
-      expect(paths(deeper)).toContain(`${KB}/Data/Finance/Payroll/march.md`);
     });
   });
 });

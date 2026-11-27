@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decidesListing, fencedHead, listingUnchangedBy } from '../index.js';
+import { accessSourceOf, decidesListing, fencedHead, listingUnchangedBy } from '../index.js';
 
 describe('which files decide what a listing shows', () => {
   it.each([
@@ -16,11 +16,20 @@ describe('which files decide what a listing shows', () => {
     ['Data/roles.yaml', false],
     ['Data/groups.yaml', false],
     ['Data/plugin.json', false],
+    // A manifest at the plugins root makes no plugin, so it decides nothing either.
+    ['Plugins/plugin.json', false],
     ['Data/Sales/Customer.md', false],
     ['Data/Sales/my-access.md', false],
     ['Plugins/sales/skills/call/SKILL.md', false],
   ])('%s: %s', (p, expected) => {
     expect(decidesListing(p, 'Plugins')).toBe(expected);
+  });
+
+  it('is every source of the access model, and a .bevelignore', () => {
+    const paths = ['access.md', 'Data/access.md', 'roles.yaml', 'groups.yaml', 'synced-groups.yaml', 'Plugins/sales/plugin.json', 'Plugins/plugin.json', 'Data/roles.yaml', 'Data/x.md'];
+    for (const p of paths) expect(decidesListing(p, 'Plugins'), p).toBe(accessSourceOf(p, 'Plugins') !== null);
+    expect(accessSourceOf('.bevelignore', 'Plugins')).toBeNull();
+    expect(decidesListing('Data/.bevelignore', 'Plugins')).toBe(true);
   });
 });
 

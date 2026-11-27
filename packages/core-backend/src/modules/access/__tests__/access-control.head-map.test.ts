@@ -12,6 +12,7 @@ import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService, type AccessModel } from '../access-control.service.js';
 import { HEAD_MAP_LIMITS, HeadMaps, type HeadMapLimits, type HeadSeed, type IHeadSeedStore } from '../head-access-map.js';
 import { TreeIndexer } from '../tree-index.js';
+import { resolveAccessView } from '../access-view.js';
 
 const execFileAsync = promisify(execFile);
 const KB = 'knowledge-base';
@@ -243,6 +244,22 @@ describe('AccessControlService: reads answered from the map of the head commit',
     reset();
     expect((await svc.canReadBatch('ws', 'mem@x.io', paths)).get('Team/Doc.md')).toBe(false);
     expect(opened).toEqual([]);
+  }, 120_000);
+
+  // A plugin is a folder below the plugins root that holds a manifest. One
+  // test of what the model is read from serves the checkout and the commit,
+  // so a manifest in the plugins root itself makes no plugin in either.
+  it('makes no plugin of a manifest at the plugins root, at the commit as on the checkout', async () => {
+    await commit('a manifest at the root of the plugins', {
+      'Plugins/plugin.json': '{ "name": "everything" }\n',
+      'Plugins/access.md': '---\nread:\n  - Sales\n---\n',
+      'ForPlugin.md': '---\nread:\n  - deny everyone\n  - plugin/everything/read\n---\n# for a plugin\n',
+    });
+    await copyToPlain();
+    const paths = [...Object.keys(FILES), 'ForPlugin.md'];
+    const svc = service();
+    expect(await svc.canRead('ws', 'sal@x.io', 'ForPlugin.md')).toBe(false);
+    expect(await answers(svc, 'ws', paths)).toEqual(await answers(service(), 'plain', paths));
   }, 120_000);
 
   it('reads a file the commit does not hold from the checkout', async () => {
@@ -573,6 +590,202 @@ describe('AccessControlService: reads answered from the map of the head commit',
       },
       { timeout: 30_000, interval: 100 },
     );
+  }, 120_000);
+
+  // A page's restriction moved, on disk only, to its folder: the commit restricts the page, the checkout its folder.
+  // Rules from one and the page's own entries from the other would restrict it nowhere.
+  const MOVED_TO_FOLDER = {
+    'Team/Own.md': '# own, now plain\n',
+    'Team/access.md': '---\nread:\n  - deny everyone\n  - Sales\n---\n',
+  };
+
+  it('answers a single-file gate from the reading a batch answers from, so a restriction moved on disk still holds', async () => {
+    const svc = service();
+    await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md']);
+    await write(repo, MOVED_TO_FOLDER);
+    // Nothing reported: the map's reading, the commit's, where the page denies members, whichever gate asks.
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
+    expect(await svc.canRead('ws', 'mem@x.io', 'Team/Own.md')).toBe(false);
+    expect((await svc.explainAccess('ws', 'mem@x.io', 'file', 'Team/Own.md')).read.allowed).toBe(false);
+    // Reported: the checkout's reading, where the folder denies members.
+    svc.invalidate('ws');
+    expect(await svc.canRead('ws', 'mem@x.io', 'Team/Own.md')).toBe(false);
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md'])).get('Team/Own.md')).toBe(false);
+  }, 120_000);
+
+  it('reads a single file\'s own entries fresh where the checkout answers, past the memo a batch keeps', async () => {
+    const svc = service();
+    // Reported changed: the checkout answers. A batch remembers that the page declares nothing.
+    svc.invalidate('ws');
+    expect((await svc.canReadBatch('ws', 'mem@x.io', ['Top.md'])).get('Top.md')).toBe(true);
+    // The page restricts itself on disk, and nothing reports it: the write gate's reading sees it at once.
+    await write(repo, { 'Top.md': DENY_ALL });
+    expect(await svc.canRead('ws', 'mem@x.io', 'Top.md')).toBe(false);
+    expect(await svc.canWrite('ws', 'mem@x.io', 'Top.md')).toBe(false);
+  }, 120_000);
+
+  it('keeps a denial written into a committed file and not yet committed, at every single-file gate', async () => {
+    const svc = service();
+    await svc.canReadBatch('ws', 'mem@x.io', ['Team/Doc.md']);
+    // On disk only, and nothing reported: the page denies members what the commit's copy lets them do.
+    await write(repo, { 'Team/Doc.md': '---\nread:\n  - deny Member\nwrite:\n  - deny Member\n---\n# doc\n' });
+    expect(await svc.canRead('ws', 'mem@x.io', 'Team/Doc.md')).toBe(false);
+    expect(await svc.canWrite('ws', 'mem@x.io', 'Team/Doc.md')).toBe(false);
+    const explained = await svc.explainAccess('ws', 'mem@x.io', 'file', 'Team/Doc.md');
+    expect([explained.read.allowed, explained.write.allowed]).toEqual([false, false]);
+    // What the commit's copy allows still answers where the checkout's adds no denial.
+    expect(await svc.canRead('ws', 'mem@x.io', 'Team/Write.md')).toBe(true);
+  }, 120_000);
+
+  it('lists as holders of a file only whom its gates let hold it, with a denial written into it and not yet committed', async () => {
+    const page = 'Team/Shared.md';
+    await commit('a page members own and download', { [page]: '---\nowner:\n  - Member\n  - Pat <pat@x.io>\ndownload:\n  - Member\n---\n# shared\n' });
+    const svc = service();
+    const lists = async () => ({
+      read: await svc.eligibleReaders('ws', page),
+      write: await svc.eligibleWriters('ws', page),
+      owner: await svc.eligibleOwners('ws', page),
+      download: await svc.eligibleDownloaders('ws', page),
+    });
+    const gates = async (who: string) => ({
+      read: await svc.canRead('ws', who, page),
+      write: await svc.canWrite('ws', who, page),
+      owner: await svc.canOwner('ws', who, page),
+      download: await svc.canDownload('ws', who, page),
+    });
+    const emails = async () => ({
+      write: [...(await svc.eligibleWriterEmails('ws', page)).keys()],
+      owner: [...(await svc.eligibleOwnerEmails('ws', page)).keys()],
+    });
+    // The commit's copy: members hold every verb, and every list names them; so is Pat named, an owner by name.
+    expect(await gates('mem@x.io')).toEqual({ read: true, write: true, owner: true, download: true });
+    for (const list of Object.values(await lists())) expect(list.roles).toContain('Member');
+    expect((await gates('pat@x.io')).owner).toBe(true);
+    expect((await lists()).owner.users.map((u) => u.email)).toEqual(['pat@x.io']);
+    expect(await emails()).toEqual({ write: expect.arrayContaining(['mem@x.io']), owner: expect.arrayContaining(['mem@x.io']) });
+
+    // On disk only, and nothing reported: the page denies members every verb the commit's copy grants them.
+    await write(repo, {
+      [page]: '---\nread:\n  - deny Member\nwrite:\n  - deny Member\nowner:\n  - deny Member\n  - deny Pat <pat@x.io>\ndownload:\n  - deny Member\n---\n# shared\n',
+    });
+    expect(await gates('mem@x.io')).toEqual({ read: false, write: false, owner: false, download: false });
+    expect((await gates('pat@x.io')).owner).toBe(false);
+    const after = await lists();
+    for (const list of Object.values(after)) expect(list.roles).not.toContain('Member');
+    expect(after.owner.users).toEqual([]);
+    const afterEmails = await emails();
+    expect([afterEmails.write, afterEmails.owner]).toEqual([expect.not.arrayContaining(['mem@x.io']), expect.not.arrayContaining(['mem@x.io'])]);
+    // Whom the copy on disk does not deny, both still name.
+    expect((await gates('admin@x.io')).write).toBe(true);
+    expect(after.write.roles).toContain('Admin');
+    expect(afterEmails.write).toContain('admin@x.io');
+    // One screen: Manage access refuses members every verb, and none of its four holder lists names them.
+    const view = await resolveAccessView(svc, 'ws', page, 'mem@x.io', 'file');
+    expect([view.canRead, view.canWrite, view.canOwner, view.canDownload]).toEqual([false, false, false, false]);
+    for (const list of [view.readers, view.eligible, view.owners, view.downloaders]) expect(list.roles).not.toContain('Member');
+  }, 120_000);
+
+  it('lists a holder every copy of a file lets hold it, however each copy writes them, with its own entries changed on disk and not yet committed', async () => {
+    const page = 'Team/Spelled.md';
+    await commit('a page members own and Nobody writes', {
+      [page]: '---\nowner:\n  - Member\nwrite:\n  - Nobody <nobody@x.io>\n---\n# spelled\n',
+    });
+    const svc = service();
+    expect(await svc.canOwner('ws', 'mem@x.io', page)).toBe(true);
+
+    // On disk only, and nothing reported: the page names the one member as its owner, and lets everyone write.
+    await write(repo, { [page]: '---\nowner:\n  - Mem <mem@x.io>\nwrite:\n  - everyone\n---\n# spelled\n' });
+    // She owns the page under both copies: the commit's through the role, the disk's by name. So she is its owner on
+    // the list, and the role, which owns nothing under the disk's copy, is not.
+    expect(await svc.canOwner('ws', 'mem@x.io', page)).toBe(true);
+    const owners = await svc.eligibleOwners('ws', page);
+    expect(owners.users.map((u) => u.email)).toEqual(['mem@x.io']);
+    expect(owners.roles).toEqual([]);
+    // Nobody writes under both copies: the commit's names him, the disk's lets everyone. Only the commit's copy names
+    // him, so only its map of emails holds him, and he stays on the writer emails.
+    expect(await svc.canWrite('ws', 'nobody@x.io', page)).toBe(true);
+    expect([...(await svc.eligibleWriterEmails('ws', page)).keys()]).toContain('nobody@x.io');
+    // Who writes under the disk's copy only is kept off: the Sales member its `everyone` lets in, off the writer
+    // emails, and `everyone` itself, off the writers.
+    expect(await svc.canWrite('ws', 'sal@x.io', page)).toBe(false);
+    expect([...(await svc.eligibleWriterEmails('ws', page)).keys()]).not.toContain('sal@x.io');
+    expect((await svc.eligibleWriters('ws', page)).roles).not.toContain('everyone');
+  }, 120_000);
+
+  it('says where a file\'s access comes from and where it is denied as its gates judge it, with its own entries changed on disk and not yet committed', async () => {
+    const page = 'Team/Named.md';
+    await commit('a page Pat owns by name', { [page]: '---\nowner:\n  - Pat <pat@x.io>\n---\n# named\n' });
+    const svc = service();
+    const pat = { kind: 'user' as const, email: 'pat@x.io' };
+    const member = { kind: 'role' as const, role: 'Member' };
+    // The commit's copy: Pat owns the page here; nobody is denied anything here.
+    expect((await svc.grantSources('ws', 'file', page, pat)).owner).toEqual([{ kind: 'direct' }]);
+    expect((await svc.denialSources('ws', 'file', page, member)).read).toBeUndefined();
+    expect((await svc.locallyDeniedPrincipals('ws', 'file', page)).principals).toEqual([]);
+
+    // On disk only, and nothing reported: Pat's grant is gone and members are denied reading.
+    await write(repo, { [page]: '---\nread:\n  - deny Member\n---\n# named\n' });
+    expect(await svc.canOwner('ws', 'pat@x.io', page)).toBe(false);
+    expect((await svc.grantSources('ws', 'file', page, pat)).owner).toBeUndefined();
+    expect(await svc.canRead('ws', 'mem@x.io', page)).toBe(false);
+    expect((await svc.denialSources('ws', 'file', page, member)).read).toEqual([{ kind: 'direct' }]);
+    expect((await svc.locallyDeniedPrincipals('ws', 'file', page)).principals.map((p) => p.name)).toEqual(['Member']);
+    // A grant the copy on disk takes away is not reported: members may no longer read, so neither their read nor
+    // their write, which needs it, comes from anywhere. The folder's read grant to the Platform group holds under
+    // both copies, so it still is.
+    expect(await svc.canWrite('ws', 'mem@x.io', page)).toBe(false);
+    expect(await svc.grantSources('ws', 'file', page, member)).toEqual({});
+    expect(await svc.canRead('ws', 'zoe@x.io', page)).toBe(true);
+    expect((await svc.grantSources('ws', 'file', page, { kind: 'role', role: 'Platform' })).read).toEqual([
+      { kind: 'ancestor', path: 'Team/access.md' },
+    ]);
+  }, 120_000);
+
+  it('lists a file\'s denials from both copies of its own entries closest first, each place once', async () => {
+    const page = 'Team/Doc.md';
+    const sales = { kind: 'role' as const, role: 'Sales' };
+    const svc = service();
+    // The commit's copy: the page says nothing; its folder denies Sales reading.
+    expect((await svc.denialSources('ws', 'file', page, sales)).read).toEqual([{ kind: 'ancestor', path: 'Team/access.md' }]);
+    // On disk only, and nothing reported: the page denies Sales reading too. The commit's copy lists the folder, the
+    // disk's the page and then the folder.
+    await write(repo, { [page]: '---\nread:\n  - deny Sales\n---\n# doc\n' });
+    expect((await svc.denialSources('ws', 'file', page, sales)).read).toEqual([
+      { kind: 'direct' },
+      { kind: 'ancestor', path: 'Team/access.md' },
+    ]);
+  }, 120_000);
+
+  it('says whether a file is public, and through what, as its gates do, with a denial written into it and not yet committed', async () => {
+    const page = 'Team/Pub.md';
+    await commit('a page public through a plugin', {
+      'Plugins/Open/plugin.json': '{ "name": "open" }\n',
+      'Plugins/Open/access.md': '---\nread:\n  - everyone\n---\nread:\n  - everyone\n',
+      [page]: '---\nread:\n  - plugin/Open/read\n---\n# pub\n',
+    });
+    const svc = service();
+    expect(await svc.canRead('ws', 'nobody@x.io', page)).toBe(true);
+    expect(await svc.eligibleReaders('ws', page)).toMatchObject({ restricted: false, publicVia: ['plugin/open/read'] });
+    // On disk only, and nothing reported: the page takes back what the plugin made public.
+    await write(repo, { [page]: '---\nread:\n  - deny plugin/Open/read\n---\n# pub\n' });
+    expect(await svc.canRead('ws', 'nobody@x.io', page)).toBe(false);
+    expect(await svc.eligibleReaders('ws', page)).toMatchObject({ restricted: true, publicVia: [] });
+  }, 120_000);
+
+  it('previews a move as the checkout alone would: both the rules and the moved file read there', async () => {
+    const svc = service();
+    await svc.canReadBatch('ws', 'mem@x.io', ['Team/Own.md']);
+    await write(repo, MOVED_TO_FOLDER);
+    await copyToPlain();
+    // Out of its folder, so what changes depends on the folder's rules: the checkout's restrict, the commit's do not.
+    const [from, to] = ['Team/Own.md', 'Moved.md'];
+    const reference = service();
+    expect(await svc.previewAccessAfterRelocation('ws', 'mem@x.io', from, to)).toEqual(
+      await reference.previewAccessAfterRelocation('plain', 'mem@x.io', from, to),
+    );
+    expect(await svc.prospectiveHolders('ws', from, to)).toEqual(await reference.prospectiveHolders('plain', from, to));
+    expect(await svc.prospectiveHolderChanges('ws', from, to)).toEqual(await reference.prospectiveHolderChanges('plain', from, to));
+    expect((await svc.prospectiveHolders('ws', from, to)).before.read.roles).not.toContain('Member');
   }, 120_000);
 
   it('takes no member from a roles or groups file changed on disk and not committed, where the checkout alone would', async () => {

@@ -55,15 +55,15 @@ describe('friendlyGitError: translates raw backend git messages', () => {
     expect(friendlyGitError(err)).toBe('something completely new went wrong');
   });
 
-  it('rewrites the read-before-write refusal to name the folder the person cannot read', () => {
-    // The backend's `AccessDeniedError` with `unreadable` set: the folder a
-    // new file would land in, or the file itself when it exists.
-    const folder = new GitApiError(
+  it('rewrites the read-before-write refusal to name the path the person cannot read', () => {
+    // The backend's `AccessDeniedError` with `unreadable` set: the path being
+    // changed, whether or not something is there.
+    const file = new GitApiError(
       403,
-      'You don\'t have permission to write to "knowledge-base/KnowledgeBase/Sales/brief.pdf". You don\'t have read access to "KnowledgeBase/Sales"; only what you can read can be created, changed or removed.',
+      'You don\'t have permission to write to "knowledge-base/KnowledgeBase/Sales/brief.pdf". You don\'t have read access to "KnowledgeBase/Sales/brief.pdf"; only what you can read can be created, changed or removed.',
     );
-    expect(friendlyGitError(folder)).toBe(
-      'You can\'t add or change anything in "KnowledgeBase/Sales" because you don\'t have read access to it. Ask an admin or the folder\'s owners to share it with you first.',
+    expect(friendlyGitError(file)).toBe(
+      'You can\'t add or change "KnowledgeBase/Sales/brief.pdf" because you don\'t have read access to it. Ask an admin or its owners to share it with you first.',
     );
     const root = new GitApiError(
       403,

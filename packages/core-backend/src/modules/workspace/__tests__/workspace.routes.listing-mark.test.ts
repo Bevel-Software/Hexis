@@ -7,6 +7,7 @@ import express from 'express';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
+import { archiveLandingFor } from '../../../__tests__/archive-landing.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/index.js';
 import type { ICreatorAccess } from '../../access-model/index.js';
@@ -36,6 +37,7 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
   let baseUrl: string;
   let emitted: { kind: string; listingUnchanged?: true; path?: string }[];
   let heldBy: string | null;
+  let versionControlService: IVersionControlService;
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-listing-mark-'));
@@ -61,7 +63,7 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
         return { extracted: [`${KB}/Data/page.md`, `${KB}/Data/unpacked.md`], skipped: [] };
       },
     } as unknown as WorkspaceService;
-    const versionControlService = {
+    versionControlService = {
       getLock: vi.fn(async () => (heldBy ? { holderUserId: heldBy } : null)),
       acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderUserId: USER.id, holderName: 'Alice' } })),
       releaseLock: vi.fn(async () => null),
@@ -86,6 +88,9 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
         { planForCreate: async () => null, noteAccessFileWritten: () => {} } as unknown as ICreatorAccess,
         { isAdmin: async () => true } as unknown as IAdminAccessService,
         realDisk(),
+        undefined,
+        undefined,
+        archiveLandingFor({ workspaceService, versionControl: versionControlService, kbDirName: KB }),
       ),
     );
     server = await new Promise<Server>((resolve) => {
@@ -113,9 +118,8 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
     expect(treeEvents()[0]).not.toHaveProperty('listingUnchanged');
   };
 
-  it('an unzip, whose files are on disk before their locks, says nothing: the tree is asked for', async () => {
-    // The archive's entries replace nothing here, yet by the time each file
-    // meets its lock it is on disk, so "the same before and after" would hold.
+  it('an unzip says nothing about the listing: the tree is asked for', async () => {
+    // An archive adds files, so no event of its extraction may say the listing is unchanged.
     const res = await fetch(`${baseUrl}/api/workspace/${WS}/unzip`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -178,6 +182,38 @@ describe('PUT /workspace/:id/file — what its events say about the tree', () =>
   it('a save of an access.md says nothing', async () => {
     await save('Data/access.md', 'read: [Finance]\n');
     expectOneUnmarked();
+  });
+
+  // What the page was before is read once the path's lock is this request's.
+  // Here another holder's save lands while this request waits for the lock:
+  // it opens the page, and this save closes it again, which changes who may
+  // read it. Compared with the page as it was before that save, the two
+  // would look the same.
+  const OPENED = '# Name\nA page\n';
+  const anotherHoldersSave = () => fs.writeFile(path.join(root, KB, 'Data', 'page.md'), OPENED);
+
+  it('a save that waited for the lock is compared with what the previous holder saved', async () => {
+    vi.mocked(versionControlService.acquireLock).mockImplementationOnce(async () => {
+      // The previous holder saves and releases; then the lock is granted.
+      await anotherHoldersSave();
+      return { acquired: true, lock: { holderUserId: USER.id, holderName: 'Alice' } } as Awaited<ReturnType<IVersionControlService['acquireLock']>>;
+    });
+    await save('Data/page.md', PAGE);
+    expectOneUnmarked();
+  });
+
+  it('an editor that took the lock after another holder\'s save is compared with that save', async () => {
+    heldBy = USER.id;
+    vi.mocked(versionControlService.getLock).mockImplementationOnce(async () => {
+      // The previous holder saved and released, and the editor took the lock.
+      await anotherHoldersSave();
+      return { holderUserId: USER.id } as Awaited<ReturnType<IVersionControlService['getLock']>>;
+    });
+    await save('Data/page.md', PAGE);
+    expect(emitted.map((e) => [e.kind, e.listingUnchanged])).toEqual([
+      ['file-changed', undefined],
+      ['fs-tree-changed', undefined],
+    ]);
   });
 
   it('an editor that holds the lock saves to disk: both events carry the same answer', async () => {

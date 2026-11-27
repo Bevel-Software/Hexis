@@ -108,7 +108,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { ApprovalCarryPendingError } from './approval-carry-pending-error.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, listingUnchangedBy, pushAccessRefusalSentence, type IChangeReadGate } from '../access-model/index.js';
+import { EVERYONE_CANONICAL, PushAccessRefusedError, listingUnchangedBy, pushAccessRefusalSentence, toKbRelative, unwritableRefusal, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -1534,16 +1534,14 @@ export class VersionControlService implements IVersionControlService {
     ) {
       return 'restore';
     }
-    const eligible = await this.accessControl.eligibleWritersAtRef(
+    // A caller who may not read the path is told that, and not who may write
+    // it. A lock is always taken on a file, so the path is asked about as one.
+    throw await unwritableRefusal(
+      { accessControl: this.accessControl, changeGate: this.changeGate },
       workspaceId,
-      `HEAD`,
-      repoRelative,
+      userEmail,
+      { wsPath: targetPath, repoRelative, kind: 'file' },
     );
-    throw new AccessDeniedError({
-      path: targetPath,
-      eligibleRoles: eligible?.roles ?? [],
-      eligibleUsers: eligible?.users ?? [],
-    });
   }
 
   // ── File locks ────────────────────────────────────────────────────────────
@@ -1955,7 +1953,7 @@ export class VersionControlService implements IVersionControlService {
    * open file explorer keeps its tree instead of asking for all of it again.
    */
   private listingMark(change: Change, targetPath: string): { listingUnchanged?: true } {
-    const repoRelative = targetPath.startsWith(`${this.kbDirName}/`) ? targetPath.slice(this.kbDirName.length + 1) : targetPath;
+    const repoRelative = toKbRelative(targetPath, this.kbDirName) ?? targetPath;
     return listingUnchangedBy(change.contentEdit, repoRelative, this.kb.layout.pluginsDir) ? { listingUnchanged: true } : {};
   }
 
@@ -5254,12 +5252,14 @@ export class VersionControlService implements IVersionControlService {
         { kind: 'protected-update-target', branch },
       );
     }
-    // The one merge a person makes: a change request's. An update that would
-    // land an OPEN request from `from` into this draft is that merge by
-    // another name, and `mergeBranch`'s gate refuses it here too — asked once
-    // before waiting, and again under the locks below, where the answer
-    // counts. (The other direction, the request's target into its source, is
-    // how a draft under review stays current, and is never blocked.)
+    // An open change request lands by being applied, and `mergeBranch`
+    // refuses a merge of its source into its target while it is open. An
+    // update that would land an OPEN request from `from` into this draft is
+    // that merge by another name, and the same gate refuses it here too —
+    // asked once before waiting, and again under the locks below, where the
+    // answer counts. (The other direction, the request's target into its
+    // source, is how a draft under review stays current, and is never
+    // blocked.)
     if (from !== branch) {
       const openBefore = await this.openRequestBlockingMerge(from, branch);
       if (openBefore !== null) throw new OpenChangeRequestBlocksMergeError(from, branch, openBefore);

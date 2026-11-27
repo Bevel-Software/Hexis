@@ -1,8 +1,8 @@
 import express, { type Request, type RequestHandler } from 'express';
 import { UtcpManualSerializer } from '@utcp/sdk';
 import { declaresWrite, type IToolRegistry, type ToolManualContext, type UtcpTool } from './tool.contract.js';
-import { requireInternalSource } from '../tool-auth/index.js';
-import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
+import { createCallerScope, requireInternalSource, type ReadCaller } from '../tool-auth/index.js';
+import type { IAgentScopeResolver } from '../agent-scope/index.js';
 import type { IToolReadOnlyHints } from './read-only-hints.contract.js';
 
 /** Resolve a connection-key/internal-token user id to its email (for per-caller provider defs). */
@@ -51,45 +51,33 @@ function toManual(tools: UtcpTool[]) {
  * on top of it. (External callers are always write-scoped, so the external
  * manual needs no variant.)
  */
-/** Who a manual is built for: what a request's credential resolved to. */
-export interface ManualCaller {
-  userId?: string | null;
-  /** The agent configuration the credential connects as; absent or null for Everything. */
-  agentPath?: string | null;
-}
-
 /** Builds the per-caller context a `ToolProvider` words its def from. */
 function contextBuilder(resolveUserEmail?: ResolveUserEmail, agentScope?: Pick<IAgentScopeResolver, 'resolve'>) {
   // Resolve the caller's email so a `ToolProvider` (e.g. the skill tools) can
-  // tailor its def to who's asking. Best-effort — a failure just yields an
-  // empty (global) context.
-  return async function context(caller: ManualCaller): Promise<ToolManualContext> {
+  // tailor its def to who's asking. Best-effort — a failure just yields a
+  // context without one.
+  const callerScope = createCallerScope({ resolveUserEmail: resolveUserEmail ?? (async () => undefined), agentScope });
+  return async function context(caller: ReadCaller): Promise<ToolManualContext> {
     const userId = caller.userId;
     if (!userId) return {};
-    let userEmail: string | undefined;
-    try {
-      userEmail = resolveUserEmail ? await resolveUserEmail(userId) : undefined;
-    } catch {
-      userEmail = undefined;
-    }
+    const { email: userEmail, scope } = await callerScope(caller);
     // Everything adds nothing to the context, so its providers are asked
     // exactly what they were asked before connections could be narrowed.
-    const agentPath = caller.agentPath;
-    const connectionScope = agentPath ? await resolveConnectionScope(agentScope, userEmail, agentPath) : undefined;
     return {
       userId,
       ...(userEmail !== undefined ? { userEmail } : {}),
-      ...(connectionScope ? { connectionScope } : {}),
+      ...(caller.agentPath ? { connectionScope: scope } : {}),
     };
   };
 }
 
 /**
  * Reads one caller's external manual: the platform's own tools as
- * `GET /agent/utcp` serves them. The ONE place it is built: the route below
- * answers with it, and the hosted MCP endpoint calls it directly
+ * `GET /agent/utcp` serves them. The composition root builds one and hands it
+ * to the route below and to the hosted MCP endpoint, which calls it directly
  * (`McpProxyOptions.readPlatformManual`) when it discovers the platform's
- * tools for a caller's surface.
+ * tools for a caller's surface: one reader, so the two cannot answer
+ * differently.
  *
  * Called directly, and not over HTTP, for the reason the catalog revision is
  * (`core/catalog-revision.ts`): the endpoint and this code are one process, and
@@ -101,7 +89,7 @@ export function createExternalManualReader(
   resolveUserEmail?: ResolveUserEmail,
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
-): (caller: ManualCaller) => Promise<ReturnType<typeof toManual>> {
+): (caller: ReadCaller) => Promise<ReturnType<typeof toManual>> {
   const context = contextBuilder(resolveUserEmail, agentScope);
   return async (caller) => {
     const ctx = await context(caller);
@@ -122,16 +110,29 @@ export function createManualRoutes(
    * The read-only hints (`read-only-hints.ts`), put on the AGENT manual's tools
    * as the `read-only` tag the hosted MCP endpoint turns into
    * `annotations.readOnlyHint` — the built-in value; the endpoint joins an
-   * admin's override on at listing time.
-   * Absent, the manual carries the tools' own tags only.
+   * admin's override on at listing time. Read only by the reader the route
+   * makes when it is handed none (`readExternalManual`): absent then, the
+   * manual carries the tools' own tags only. A reader handed in applies its own.
    */
   readOnlyHints?: Pick<IToolReadOnlyHints, 'apply'>,
   /**
-   * Resolves the scope of a connection made as an agent configuration: the external
-   * manual then lists only the platform tools it loads, and the providers word
-   * their descriptions for it (`modules/agent-scope`).
+   * Resolves the scope of a connection made as an agent configuration: the
+   * providers word their descriptions for it, and the reader the route makes
+   * when it is handed none lists only the platform tools it loads
+   * (`modules/agent-scope`). A reader handed in narrows by its own.
    */
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
+  /**
+   * The reader `GET /agent/utcp` answers with. The composition root passes the
+   * one it also hands the MCP endpoint, so the route and the endpoint cannot
+   * answer differently. Absent, the route reads through the services above.
+   */
+  readExternalManual: ReturnType<typeof createExternalManualReader> = createExternalManualReader(
+    registry,
+    resolveUserEmail,
+    readOnlyHints,
+    agentScope,
+  ),
 ): express.Router {
   const router = express.Router();
 
@@ -139,7 +140,6 @@ export function createManualRoutes(
   const contextOf = contextBuilder(resolveUserEmail, agentScope);
   const context = (req: Request): Promise<ToolManualContext> =>
     contextOf({ userId: req.toolAuth?.userId, agentPath: req.toolAuth?.agentPath });
-  const readExternalManual = createExternalManualReader(registry, resolveUserEmail, readOnlyHints, agentScope);
 
   router.get('/agent/utcp', manualAuth, async (req, res) => {
     res.json(await readExternalManual({ userId: req.toolAuth?.userId, agentPath: req.toolAuth?.agentPath }));

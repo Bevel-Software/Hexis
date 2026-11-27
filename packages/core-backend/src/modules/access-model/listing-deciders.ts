@@ -7,10 +7,9 @@
  * or reveal paths without adding or removing any, so whoever announces a
  * change must not mark it "listing unchanged":
  *
- *   - an `access.md` at any depth, and the roles and groups files at the root:
- *     the rules themselves;
- *   - a plugin's manifest: it decides which folders are a plugin, and a
- *     plugin's folder has its own readers;
+ *   - every source of the access model (`accessSourceOf`): the rules
+ *     themselves, and a plugin's manifest, which decides which folders are a
+ *     plugin, whose folder has its own readers;
  *   - a `.bevelignore` at any depth: it removes paths from every listing.
  *
  * `repoRelativePath` is relative to the knowledge base's repository root, with
@@ -21,13 +20,27 @@ import { isAccessMdPath } from './access-grammar.js';
 import { scanFrontmatter } from './frontmatter-lines.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML } from './group-files.js';
 
-const AT_THE_ROOT = new Set(['roles.yaml', GROUPS_YAML, SYNCED_GROUPS_YAML]);
+/** The sources of a model that are read by a fixed name at the root, whatever else the tree holds. */
+export const FIXED_NAME_SOURCES = ['roles.yaml', SYNCED_GROUPS_YAML, GROUPS_YAML] as const;
+
+/**
+ * Which source of an access model the file at `p` (repository-relative) is:
+ * a folder's rules (an `access.md` at any depth), one read by its fixed name
+ * at the root (`FIXED_NAME_SOURCES`), a plugin's manifest (a `plugin.json`
+ * in any folder below the plugins root), or none. The one answer
+ * for every reader of the set: both builds of a model, the key a commit's
+ * model is shared by, and `decidesListing`.
+ */
+export function accessSourceOf(p: string, pluginsDir: string): 'rules' | 'fixed-name' | 'manifest' | null {
+  if (isAccessMdPath(p)) return 'rules';
+  if ((FIXED_NAME_SOURCES as readonly string[]).includes(p)) return 'fixed-name';
+  const cut = p.lastIndexOf('/');
+  return cut > 0 && p.slice(cut + 1) === PLUGIN_MANIFEST_FILE && p.slice(0, cut).startsWith(`${pluginsDir}/`) ? 'manifest' : null;
+}
 
 export function decidesListing(repoRelativePath: string, pluginsDir: string): boolean {
-  if (isAccessMdPath(repoRelativePath) || AT_THE_ROOT.has(repoRelativePath)) return true;
-  const name = repoRelativePath.slice(repoRelativePath.lastIndexOf('/') + 1);
-  if (name === '.bevelignore') return true;
-  return name === PLUGIN_MANIFEST_FILE && repoRelativePath.startsWith(`${pluginsDir}/`);
+  if (accessSourceOf(repoRelativePath, pluginsDir) !== null) return true;
+  return repoRelativePath.slice(repoRelativePath.lastIndexOf('/') + 1) === '.bevelignore';
 }
 
 /**

@@ -4,7 +4,8 @@ import { logger } from '../shared/logging.js';
 import type { ISkillService, SkillSummary } from '../modules/skills/index.js';
 import type { IToolManualService } from '../modules/tool-manuals/index.js';
 import '../modules/tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
-import { resolveConnectionScope, type ConnectionScopeWire, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { type ConnectionScopeWire, type IAgentScopeResolver } from '../modules/agent-scope/index.js';
+import { createCallerScope, type ReadCaller } from '../modules/tool-auth/index.js';
 
 const log = logger('catalog-revision');
 
@@ -98,13 +99,6 @@ export interface CatalogRevisionSources {
   mcpApps?: { manifest(): Promise<{ resources: readonly { uri: string; text: string }[] }> };
 }
 
-/** Who a revision is read for: what a request's credential resolved to. */
-export interface CatalogRevisionCaller {
-  userId?: string | null;
-  /** The agent configuration the credential connects as; absent or null for Everything. */
-  agentPath?: string | null;
-}
-
 /** A caller's revision, the two counts behind it, and the agent their connection is narrowed to. */
 export interface CatalogRevisionAnswer {
   revision: string;
@@ -113,7 +107,8 @@ export interface CatalogRevisionAnswer {
   connection?: ConnectionScopeWire;
 }
 
-export type CatalogRevisionReader = (caller: CatalogRevisionCaller) => Promise<CatalogRevisionAnswer>;
+/** Reads the revision for a caller: what a request's credential resolved to. */
+export type CatalogRevisionReader = (caller: ReadCaller) => Promise<CatalogRevisionAnswer>;
 
 /**
  * Reads one caller's catalog revision. The ONE place it is computed: the
@@ -129,15 +124,15 @@ export type CatalogRevisionReader = (caller: CatalogRevisionCaller) => Promise<C
  * the route's `manualAuth` resolves the same bearer to.
  */
 export function createCatalogRevisionReader(deps: CatalogRevisionSources): CatalogRevisionReader {
+  // The caller's email and connection scope, derived as the manual readers derive them.
+  const callerScope = createCallerScope(deps);
   return async (caller) => {
-    const userId = caller.userId;
-    const email = userId ? await deps.resolveUserEmail(userId).catch(() => undefined) : undefined;
     // No resolvable caller is an EMPTY catalog, not a failure: that is what
     // both list surfaces answer such a caller, so the fingerprint agrees
     // with them rather than inventing a third verdict.
     // A connection made as an agent configuration is fingerprinted over what IT
     // loads, plus the file itself; Everything asks exactly what it always did.
-    const scope = await resolveConnectionScope(deps.agentScope, email, caller.agentPath);
+    const { email, scope } = await callerScope(caller);
     const connectors = scope.connectorFilter();
     const within = scope.skillFilter();
     const [manuals, skills] = email

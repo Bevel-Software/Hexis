@@ -8,18 +8,33 @@ const KEY = 'latest';
 
 /**
  * The head maps' seed in the database (`access_head_seeds`): one row, read
- * only when the release that wrote it is the one running. Which file
- * versions declare something is a release's reading of them, so another
- * release's list is not trusted and that start reads the files again.
+ * only by the build that wrote it. A seed lists the file versions that
+ * declare something, and every version it leaves out is taken to declare
+ * nothing; another build may read some of those versions otherwise (a fix to
+ * a parser in between), so its list is not trusted and that start reads the
+ * files again. The row carries the reading (`ACCESS_READING_VERSION`) and
+ * the git sha of the build that saved it, and is read only when both are
+ * this build's. A build whose sha is unknown reads and saves no seed: two
+ * such builds could not be told apart.
  */
 export class DbHeadSeedStore implements IHeadSeedStore {
+  /** What this build's row is keyed by, or null when it keeps none. */
+  private readonly version: string | null;
+
   constructor(
     private readonly db: Database,
-    /** The running release (`resolveAppVersion`). */
-    private readonly version: string,
-  ) {}
+    /**
+     * The reading the head maps make (`ACCESS_READING_VERSION`) and the
+     * running build's git sha (`GIT_SHA`, which is `'unknown'` when the
+     * build was given none).
+     */
+    build: { reading: number; sha: string },
+  ) {
+    this.version = build.sha === '' || build.sha === 'unknown' ? null : `${build.reading}:${build.sha}`;
+  }
 
   async load(): Promise<HeadSeed | null> {
+    if (this.version === null) return null;
     const [row] = await this.db.select().from(accessHeadSeeds).where(eq(accessHeadSeeds.key, KEY)).limit(1);
     if (!row || row.version !== this.version) return null;
     const declaring = row.declaring;
@@ -30,6 +45,7 @@ export class DbHeadSeedStore implements IHeadSeedStore {
   }
 
   async save(seed: HeadSeed): Promise<void> {
+    if (this.version === null) return;
     const values = { version: this.version, commit: seed.commit, declaring: seed.declaring.map(([p, id]) => [p, id] as [string, string]) };
     await this.db
       .insert(accessHeadSeeds)

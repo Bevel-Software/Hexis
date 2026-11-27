@@ -111,6 +111,11 @@ function stubVersionControl() {
       locks.set(p, user);
       return { acquired: true, lock: lockRow(user) };
     },
+    // A batch's ownership check: the lock the acquire granted, while the user holds it.
+    heartbeatLock: async (_w: string, _b: string, p: string, user: AuthUser) => {
+      if (locks.get(p) !== user) throw new Error(`not held: ${p}`);
+      return lockRow(user);
+    },
     // LockingFilesystem's success path: the LocalFilesystem write already hit
     // disk, so releasing just drops the lock (the "commit" is a no-op in-memory).
     releaseLock: async (_w: string, _b: string, p: string) => {

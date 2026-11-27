@@ -17,7 +17,7 @@ import { McpServerEditError, type McpServerEditService, type McpServerWrite } fr
 import { ToolDeleteError, type ToolDeleteService } from './tool-delete.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/index.js'; // Express Request augmentation (req.userId / req.userEmail)
-import '../tool-auth/index.js'; // Express Request augmentation (req.toolAuth)
+import { createCallerScope, type ReadCaller } from '../tool-auth/index.js'; // and the Express Request augmentation (req.toolAuth)
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import {
   NOT_AVAILABLE_TO_CONNECTION,
@@ -28,13 +28,6 @@ import {
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
-
-/** Who a manual list is read for: what a request's credential resolved to. */
-export interface ManualListCaller {
-  userId?: string | null;
-  /** The agent configuration the credential connects as; absent or null for Everything. */
-  agentPath?: string | null;
-}
 
 /** A caller's manuals, and the agent their connection is narrowed to. */
 export interface ManualListAnswer {
@@ -47,7 +40,7 @@ export interface ManualListAnswer {
  * Reads one caller's manual list. `remoteOnly` leaves out the manuals that only
  * a locally installed MCP server can run.
  */
-export type ManualListReader = (caller: ManualListCaller, opts: { remoteOnly: boolean }) => Promise<ManualListAnswer>;
+export type ManualListReader = (caller: ReadCaller, opts: { remoteOnly: boolean }) => Promise<ManualListAnswer>;
 
 /** What a manual list is read from. */
 export interface ManualListSources {
@@ -88,14 +81,13 @@ function kbManualTemplate(): CallTemplate {
  * same bearer to.
  */
 export function createManualListReader(deps: ManualListSources): ManualListReader {
+  const callerScope = createCallerScope(deps);
   return async (caller, { remoteOnly }) => {
-    const userId = caller.userId;
-    const email = userId ? await deps.resolveUserEmail(userId).catch(() => undefined) : undefined;
     // A connection made as an agent configuration lists only the connectors that
     // file loads, and says which agent it is — the MCP proxy words its
     // refusals and its handshake from that. Everything lists as it always
     // did, with no `connection` at all.
-    const scope = await resolveConnectionScope(deps.agentScope, email, caller.agentPath);
+    const { email, scope } = await callerScope(caller);
     const within = scope.connectorFilter();
     const userManuals = email
       ? await deps.toolManuals.toManualCallTemplates(email, within ? { remoteOnly, within } : { remoteOnly })
@@ -118,14 +110,15 @@ export class InlineManualRefusedError extends Error {
 }
 
 /** Reads one inline `.tool`'s embedded manual for a caller, or throws an {@link InlineManualRefusedError}. */
-export type InlineManualReader = (caller: ManualListCaller, slug: string) => Promise<Record<string, unknown>>;
+export type InlineManualReader = (caller: ReadCaller, slug: string) => Promise<Record<string, unknown>>;
 
 /**
  * Reads the tools an inline `.tool` embeds, as `GET /tools/:slug/manual`
- * serves them. The ONE place it is decided: the route below answers with it,
- * and the hosted MCP endpoint calls it directly
+ * serves them. The composition root builds one and hands it to the route
+ * below and to the hosted MCP endpoint, which calls it directly
  * (`McpProxyOptions.readInlineManual`) when it discovers such a manual's tools,
- * for the reason the manual list is read that way ({@link createManualListReader}).
+ * for the reason the manual list is read that way ({@link createManualListReader}):
+ * one reader, so the two cannot answer differently.
  *
  * A caller with no account is refused (403). A manual that does not exist,
  * that the caller cannot read or that their connection does not load is not
@@ -136,13 +129,12 @@ export function createInlineManualReader(deps: {
   resolveUserEmail: ResolveUserEmail;
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>;
 }): InlineManualReader {
+  const callerScope = createCallerScope(deps);
   return async (caller, slug) => {
-    const userId = caller.userId;
-    const email = userId ? await deps.resolveUserEmail(userId).catch(() => undefined) : undefined;
-    if (!email) throw new InlineManualRefusedError('Forbidden', 403);
     // A connection made as an agent configuration reads only the manuals of the
     // connectors it loads; another is as absent as one the person cannot read.
-    const scope = await resolveConnectionScope(deps.agentScope, email, caller.agentPath);
+    const { email, scope } = await callerScope(caller);
+    if (!email) throw new InlineManualRefusedError('Forbidden', 403);
     const within = scope.connectorFilter();
     const manual = await deps.toolManuals.resolveInlineManual(email, slug, within ? { within } : undefined);
     if (!manual) throw new InlineManualRefusedError('Not found', 404);
@@ -158,6 +150,11 @@ export function createInlineManualReader(deps: {
  *                                registers each on its per-session UTCP client.
  *   GET /tools/:slug/manual    — an inline `.tool`'s embedded tools as a UTCP
  *                                manual (so inline needs no extra client plugin).
+ *
+ * `toolManualService` feeds only the readers the routes make when they are
+ * handed none; a reader handed in is used as it is. `agentScope` feeds those
+ * readers too, and `GET /agent/plugins/:folder/archive` reads the
+ * connection's scope through it, whatever readers were handed in.
  */
 export function createToolManualsAgentRoutes(
   toolManualService: IToolManualService,
@@ -188,6 +185,15 @@ export function createToolManualsAgentRoutes(
    * differently. Absent, the route reads through the services above.
    */
   readManualList: ManualListReader = createManualListReader({ toolManuals: toolManualService, resolveUserEmail, agentScope }),
+  /**
+   * The reader `GET /tools/:slug/manual` answers with, passed by the
+   * composition root as `readManualList` is, for the same reason.
+   */
+  readInlineManual: ReturnType<typeof createInlineManualReader> = createInlineManualReader({
+    toolManuals: toolManualService,
+    resolveUserEmail,
+    agentScope,
+  }),
 ): express.Router {
   const router = express.Router();
 
@@ -405,7 +411,6 @@ export function createToolManualsAgentRoutes(
     }
   });
 
-  const readInlineManual = createInlineManualReader({ toolManuals: toolManualService, resolveUserEmail, agentScope });
   router.get('/tools/:slug/manual', manualAuth, async (req, res) => {
     try {
       const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;

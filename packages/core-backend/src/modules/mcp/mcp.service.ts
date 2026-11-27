@@ -20,8 +20,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import '@utcp/http'; // side effect: registers the 'http' UTCP communication protocol
 import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (native MCP-server `.tool` sources)
-import { registerCallable } from '@utcp/direct-call'; // and registers the 'direct-call' protocol
-import { AsyncLocalStorage } from 'node:async_hooks';
+import '@utcp/direct-call'; // side effect: registers the 'direct-call' protocol (a manual read in process; see ManualInHand)
 import {
   UtcpClientConfigSerializer,
   CallTemplateSerializer,
@@ -69,6 +68,7 @@ import { ToolSchemaGuard, type ScreenedHiddenTool } from './tool-schema-guard.js
 import { DownstreamRefreshGuard, isDownstreamTokenRejection } from './downstream-token-refresh.js';
 import { SurfaceCache, type SurfaceCacheOptions } from './surface-cache.js';
 import { SharedDefinitions } from './shared-definitions.js';
+import type { ManualInHand } from './manual-in-hand.js';
 import { currentRequest, runInRequest, type McpRequestContext } from './request-context.js';
 import { printable } from '../../shared/printable.js';
 import { withinLoopTime } from '../../shared/loop-time-limit.js';
@@ -167,16 +167,18 @@ export interface McpProxyOptions {
    * the caller's cached surface, so over loopback it was a request the server
    * sent itself on every request: it waited on the event loop it was already
    * running on, behind `LOOPBACK_TIMEOUT_MS`, and a busy server failed its own
-   * callers. The caller is the one the request's credential resolved to, which
-   * is what the route's auth resolves the loopback bearer to.
+   * callers.
+   *
+   * It is handed the bearer the loopback request carried, and resolves it as
+   * the route's auth did, when it reads: a bearer refused by then (a key
+   * revoked, an account switched off) is refused here too, by throwing, and
+   * the request then builds a surface of its own and keeps it to itself, as
+   * when the route answered it 401.
    *
    * Absent (a test, or a composition that serves the route elsewhere), the
    * revision is read over loopback as before.
    */
-  readCatalogRevision?: (caller: {
-    userId: string;
-    agentPath: string | null;
-  }) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
+  readCatalogRevision?: (bearer: string) => Promise<{ revision: string; connection?: ConnectionScopeWire }>;
   /**
    * Reads a caller's manual list in process: the same computation
    * `GET /api/agent/all-tools` answers with (`createManualListReader` in
@@ -218,6 +220,14 @@ export interface McpProxyOptions {
    * Absent, an inline manual is discovered over loopback as before.
    */
   readInlineManual?: (bearer: string, slug: string) => Promise<unknown>;
+  /**
+   * How a manual read in process (by {@link McpProxyOptions.readPlatformManual}
+   * or {@link McpProxyOptions.readInlineManual}) reaches the tool client: the
+   * `direct-call` protocol's function, registered by the composition root for
+   * its graph. Absent, those two readers are not called, and the hosted
+   * manuals are discovered over loopback as before.
+   */
+  manualInHand?: ManualInHand;
   /**
    * How long a read this service makes in process may take: a limit a held
    * event loop cannot use up (`shared/loop-time-limit.ts`); default
@@ -317,28 +327,6 @@ export const MCP_LOOPBACK_TOKEN_TTL_MS = 5 * 60 * 60 * 1000;
 
 const callTemplateSerializer = new CallTemplateSerializer();
 
-/**
- * A manual this process has already read, on its way into a tool client.
- *
- * A client learns a manual's tools by asking the manual's communication
- * protocol to discover them. For a platform-hosted manual that was an HTTP
- * request to this server. Read in process, the manual is in hand before the
- * client is asked to register it, and the `direct-call` protocol discovers it
- * by calling ONE function, registered once for the process, which answers the
- * manual the current registration carries here.
- *
- * Carried in the async context of that one registration, so concurrent
- * registrations (every manual of a surface registers at once, and so do the
- * surfaces of different people) each discover their own.
- */
-const manualInHand = new AsyncLocalStorage<{ manual: unknown }>();
-const MANUAL_IN_HAND_CALLABLE = 'hexis.manual-in-hand';
-registerCallable(MANUAL_IN_HAND_CALLABLE, () => {
-  const carried = manualInHand.getStore();
-  if (!carried) throw new Error('no manual was read for this registration');
-  return carried.manual;
-});
-
 /** `${API_URL}/api/agent/utcp`: where the platform manual is discovered over HTTP. */
 const PLATFORM_MANUAL_URL = '${API_URL}/api/agent/utcp';
 /** `${API_URL}/api/tools/<slug>/manual`: where an inline `.tool`'s manual is discovered over HTTP. */
@@ -414,6 +402,16 @@ interface RequestSurface {
 function connectionOf(body: unknown): { connection?: ConnectionScopeWire } {
   const connection = connectionWireOf(body);
   return connection ? { connection } : {};
+}
+
+/**
+ * A `catalog-revision` answer, read at the boundary as the loopback and the
+ * in-process read both hand it over: its revision, null when it carries
+ * none, and its connection.
+ */
+function revisionOf(body: unknown): { revision: string | null; connection?: ConnectionScopeWire } {
+  const revision = (body as { revision?: unknown } | null)?.revision;
+  return { revision: typeof revision === 'string' && revision ? revision : null, ...connectionOf(body) };
 }
 
 /**
@@ -720,7 +718,7 @@ export class McpService {
     // revision (cheap), not the surface (a full discovery). Everything is
     // told nothing new, so its handshake is exactly what it was.
     const connectionLine = async (): Promise<string | null> =>
-      agentPath ? describeConnection((await this.catalogRevisionOf(caller, loopbackBearer)).connection) : null;
+      agentPath ? describeConnection((await this.catalogRevisionOf(loopbackBearer)).connection) : null;
     // The Audit log's view of this request — only when the request can be
     // attributed to a key, an agent connection or a page. The catalog names
     // it classifies pooled tools by are the surface's, which is looked up
@@ -1138,7 +1136,7 @@ export class McpService {
    */
   private async surfaceFor(caller: McpCaller, loopbackBearer: string): Promise<RequestSurface> {
     const { userId, tokenId } = caller;
-    const { revision } = await this.catalogRevisionOf(caller, loopbackBearer);
+    const { revision } = await this.catalogRevisionOf(loopbackBearer);
     if (revision === null) return this.buildSurface(caller, loopbackBearer, 'uncached');
     // The agent the connection was made as is part of the key: two
     // connections of one person made as different agents are two surfaces.
@@ -1171,25 +1169,46 @@ export class McpService {
    * its own and keeps it to itself.
    */
   private async catalogRevisionOf(
-    caller: Pick<McpCaller, 'userId' | 'agentPath'>,
     loopbackBearer: string,
   ): Promise<{ revision: string | null; connection?: ConnectionScopeWire }> {
     const read = this.opts.readCatalogRevision;
     if (!read) return this.fetchCatalogRevision(loopbackBearer);
-    try {
-      const { revision, connection } = await this.inProcess(
-        read({ userId: caller.userId, agentPath: caller.agentPath || null }),
-      );
-      return { revision: revision || null, ...(connection ? { connection } : {}) };
-    } catch (err) {
-      log.warn("the catalog revision could not be read; building this request's surface uncached:", { err });
-      return { revision: null };
-    }
+    const answer = await this.readInProcess('catalog-revision', () => read(loopbackBearer));
+    return answer.ok ? revisionOf(answer.value) : { revision: null };
   }
 
-  /** A read made in process, held to {@link IN_PROCESS_READ_LIMIT_MS} (a limit a held event loop cannot use up). */
-  private inProcess<T>(read: Promise<T>): Promise<T> {
-    return withinLoopTime(read, this.opts.inProcessReadLimitMs ?? IN_PROCESS_READ_LIMIT_MS);
+  /**
+   * A read made in process, made as the loopback request it replaces was:
+   * held to its limit (`inProcessReadLimitMs`, by default
+   * {@link IN_PROCESS_READ_LIMIT_MS}: a limit a held event loop cannot use
+   * up), and its answer passed through JSON, as the route's answer was on its
+   * way here, so the code that reads it is handed what it was always handed,
+   * and a copy of its own: nothing it changes is the reader's.
+   *
+   * The ONE policy for the four reads that replaced a loopback request (the
+   * catalog revision, the manual list, a skill read, a hosted manual). A read
+   * that fails, is refused or passes the limit is answered as a failure, not
+   * thrown, and is logged under `label`: one line when it was refused with
+   * the status its route answers (a key revoked since the request was
+   * admitted, a connection that loads nothing), as the loopback's refusal
+   * was; the error with its stack otherwise.
+   */
+  private async readInProcess(
+    label: string,
+    read: () => Promise<unknown>,
+  ): Promise<{ ok: true; value: unknown } | { ok: false; status?: number; message: string }> {
+    try {
+      const value = await withinLoopTime(read(), this.opts.inProcessReadLimitMs ?? IN_PROCESS_READ_LIMIT_MS);
+      return { ok: true, value: JSON.parse(JSON.stringify(value ?? null)) as unknown };
+    } catch (err) {
+      const status = (err as { status?: unknown } | null)?.status;
+      if (typeof status === 'number' && err instanceof Error) {
+        log.error(`${label} refused: HTTP ${status} ${err.message}`);
+        return { ok: false, status, message: err.message };
+      }
+      log.error(`${label} could not be read:`, { err });
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /**
@@ -1211,11 +1230,7 @@ export class McpService {
         if (res.status !== 404) log.warn(`catalog-revision loopback failed: HTTP ${res.status}; building this request's surface uncached`);
         return { revision: null };
       }
-      const body = (await res.json()) as { revision?: unknown; connection?: unknown };
-      return {
-        revision: typeof body.revision === 'string' && body.revision ? body.revision : null,
-        ...connectionOf(body),
-      };
+      return revisionOf(await res.json());
     } catch (err) {
       log.warn("catalog-revision loopback threw; building this request's surface uncached:", { err });
       return { revision: null };
@@ -1311,11 +1326,8 @@ export class McpService {
    * when the composition handed over the reads (`readSkillsWith`), over
    * loopback otherwise. A failure is logged under the tool's name and degrades
    * to null either way — a skill read must not throw into the MCP request. A
-   * read in process is held to {@link IN_PROCESS_READ_LIMIT_MS}, as the
-   * loopback request was to its limit.
-   *
-   * The in-process answer is passed through JSON, as the route's answer was on
-   * its way here, so what the handlers below read is what they always read.
+   * read in process is made as each read that replaced a loopback request is
+   * ({@link readInProcess}).
    */
   private async skillRead(
     bearer: string,
@@ -1325,20 +1337,8 @@ export class McpService {
   ): Promise<unknown> {
     const reads = this.skillReads;
     if (!reads) return this.loopbackTool(bearer, tool, body);
-    try {
-      return JSON.parse(JSON.stringify((await this.inProcess(read(reads))) ?? null)) as unknown;
-    } catch (err) {
-      // A refusal the route answers with a status (a connection that loads
-      // nothing is refused the skills on every `prompts/list`) is one line,
-      // as it was over loopback, and carries no stack.
-      const status = (err as { status?: unknown } | null)?.status;
-      if (typeof status === 'number' && err instanceof Error) {
-        log.error(`skill ${tool} refused: HTTP ${status} ${err.message}`);
-      } else {
-        log.error(`skill ${tool} could not be read:`, { err });
-      }
-      return null;
-    }
+    const answer = await this.readInProcess(`skill ${tool}`, () => read(reads));
+    return answer.ok ? answer.value : null;
   }
 
   /**
@@ -1382,11 +1382,11 @@ export class McpService {
    * the read ends at a limit, and a list not read by then is one that could
    * not be read.
    *
-   * The in-process answer is passed through JSON, as the route's answer was on
-   * its way here, so the validation that follows is handed exactly what it
-   * was always handed. It also makes the list this build's own: discovery
-   * renames each template in place, and nothing the reader handed out may
-   * change under the catalog every caller is served from.
+   * The in-process answer comes through JSON ({@link readInProcess}), so the
+   * validation that follows is handed exactly what it was always handed, and
+   * the list is this build's own: discovery renames each template in place,
+   * and nothing the reader handed out may change under the catalog every
+   * caller is served from.
    */
   private async manualListOf(bearer: string): Promise<{ manuals?: unknown; connection?: unknown } | null> {
     // This is the REMOTE proxy, so ask for remote-capable manuals only — local-only
@@ -1397,20 +1397,8 @@ export class McpService {
         | { manuals?: unknown; connection?: unknown }
         | null;
     }
-    try {
-      const answer = await this.inProcess(read(bearer, { remoteOnly: true }));
-      return JSON.parse(JSON.stringify(answer)) as { manuals?: unknown; connection?: unknown };
-    } catch (err) {
-      // A bearer refused since the request was admitted is one line, as the
-      // loopback's 401 was; anything else is a failed read, with its stack.
-      const status = (err as { status?: unknown } | null)?.status;
-      if (typeof status === 'number' && err instanceof Error) {
-        log.error(`all-tools refused: HTTP ${status} ${err.message}`);
-      } else {
-        log.error('the manual list could not be read:', { err });
-      }
-      return null;
-    }
+    const answer = await this.readInProcess('all-tools', () => read(bearer, { remoteOnly: true }));
+    return answer.ok ? (answer.value as { manuals?: unknown; connection?: unknown } | null) : null;
   }
 
   /**
@@ -1639,8 +1627,9 @@ export class McpService {
 
   /**
    * Register one `http` manual: read in process when it is one this server
-   * hosts and the composition offers its reader, discovered over HTTP
-   * otherwise (a third-party `.tool`, or a composition with no reader).
+   * hosts and the composition offers its reader and the way to hand it over
+   * (`manualInHand`), discovered over HTTP otherwise (a third-party `.tool`,
+   * or a composition without them).
    */
   private registerHostedOrRemote(
     client: CodeModeUtcpClient,
@@ -1649,15 +1638,16 @@ export class McpService {
     const url = (m as { url?: unknown }).url;
     const hosted = m.call_template_type === 'http' && typeof url === 'string';
     const bearer = currentRequest()?.loopbackBearer;
-    if (hosted && bearer !== undefined) {
+    const inHand = this.opts.manualInHand;
+    if (hosted && bearer !== undefined && inHand) {
       const readPlatform = this.opts.readPlatformManual;
       if (readPlatform && m.name === EXTERNAL_KB_MANUAL_NAME && url === PLATFORM_MANUAL_URL) {
-        return this.registerInHand(client, m, () => readPlatform(bearer));
+        return this.registerInHand(client, m, inHand, () => readPlatform(bearer));
       }
       const readInline = this.opts.readInlineManual;
       const slug = INLINE_MANUAL_URL.exec(url)?.[1];
       if (readInline && slug !== undefined) {
-        return this.registerInHand(client, m, () => readInline(bearer, decodeURIComponent(slug)));
+        return this.registerInHand(client, m, inHand, () => readInline(bearer, decodeURIComponent(slug)));
       }
     }
     return registerManual(client, m);
@@ -1666,7 +1656,7 @@ export class McpService {
   /**
    * Register a manual this server hosts from what `read` answers, with no
    * request to the server: read it first, then hand it to the client through
-   * the `direct-call` protocol ({@link manualInHand}).
+   * the `direct-call` protocol (`inHand`, see {@link ManualInHand}).
    *
    * The client keeps the tools the manual's own protocol allows, exactly as it
    * did when it discovered the manual over that protocol. `m` itself is not
@@ -1674,34 +1664,30 @@ export class McpService {
    * `m` once the surface is built (`SharedDefinitions.share`), so calls are
    * judged against the manual as the catalog declares it.
    *
-   * A read that fails or is refused is a registration that failed, worded as
-   * the HTTP discovery worded it. The read is held to the limit every read in
-   * process is, and its answer is passed through JSON as the route's was.
+   * The read is made as each read that replaced a loopback request is
+   * ({@link readInProcess}). One
+   * that fails or is refused is a registration that failed, worded as the HTTP
+   * discovery worded it.
    */
   private async registerInHand(
     client: CodeModeUtcpClient,
     m: CallTemplate,
+    inHand: ManualInHand,
     read: () => Promise<unknown>,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const name = String(m.name);
-    let manual: unknown;
-    try {
-      manual = JSON.parse(JSON.stringify((await this.inProcess(read())) ?? null)) as unknown;
-    } catch (err) {
-      const status = (err as { status?: unknown } | null)?.status;
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false,
-        error: `${typeof status === 'number' ? `HTTP ${status} ` : ''}discovering tools from '${name}': ${message}`,
-      };
+    const answer = await this.readInProcess(`manual '${name}'`, read);
+    if (!answer.ok) {
+      const status = answer.status !== undefined ? `HTTP ${answer.status} ` : '';
+      return { ok: false, error: `${status}discovering tools from '${name}': ${answer.message}` };
     }
-    const inHand = callTemplateSerializer.validateDict({
+    const template = callTemplateSerializer.validateDict({
       name,
       call_template_type: 'direct-call',
-      callable_name: MANUAL_IN_HAND_CALLABLE,
+      callable_name: inHand.callableName,
       allowed_communication_protocols: [m.call_template_type],
     });
-    return manualInHand.run({ manual }, () => registerManual(client, inHand));
+    return inHand.carry(answer.value, () => registerManual(client, template));
   }
 
   /**

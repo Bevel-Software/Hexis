@@ -35,6 +35,15 @@ import { sharedFileRulesSection } from './shared-file-rules.js';
 
 export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
 
+/**
+ * The one tool that returns the platform's guide (see `modules/agent-guide`).
+ * Named here, where the text that sends an agent to it is composed, and read
+ * from here by tool-registry's guide-first sentence: tool-registry already
+ * imports this module (`PREFIXED_TOOLS`), and this module imports no value
+ * from any other module, so neither import closes a cycle.
+ */
+export const GET_AGENT_GUIDE_TOOL = 'get_agent_guide';
+
 /** The tools whose descriptions carry the prefix. Every other tool is untouched. */
 export const PREFIXED_TOOLS: ReadonlySet<string> = new Set(['start_session', 'grep', 'list_files', 'read_file']);
 
@@ -91,7 +100,7 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * agent configuration's rule, not this text's, and is left as it is.
  */
 export const GUIDE_FIRST_LINE =
-  'Before anything else, call `get_agent_guide` and read the guide: it says what this deployment is and what this connection loads.';
+  `Before anything else, call \`${GET_AGENT_GUIDE_TOOL}\` and read the guide: it says what this deployment is and what this connection loads.`;
 
 /**
  * The whole platform-owned part of the handshake text: the guide-first line,

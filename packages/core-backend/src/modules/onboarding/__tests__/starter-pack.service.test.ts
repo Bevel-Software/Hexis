@@ -36,6 +36,9 @@ async function put(base: string, rel: string, content: string): Promise<void> {
  * `store` stands for the deployment-settings table: pass one to two
  * harnesses and they are two replicas sharing a database.
  */
+/** The lock every acquire here is granted, as the lock service words one. */
+const GRANTED = { holderName: 'x', acquiredAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-01T00:01:00.000Z' };
+
 function harness({
   layout = DEFAULT_KB_LAYOUT as KbLayout,
   admins = [ADMIN.email],
@@ -71,7 +74,10 @@ function harness({
     },
   };
   const versionControl = {
-    acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderName: 'x' } })),
+    acquireLock: vi.fn(async () => ({ acquired: true, lock: GRANTED })),
+    // A batch's ownership check answers the lock the acquire granted: the
+    // same holder and the same `acquiredAt`, which is what makes it that lock.
+    heartbeatLock: vi.fn(async () => GRANTED),
     releaseLock: vi.fn(async () => null),
     releaseLockNoCommit: vi.fn(async () => undefined),
     releaseLockUntouched: vi.fn(async () => undefined),
@@ -259,7 +265,7 @@ describe('choosing a pack', () => {
     // Between the question and the locks, someone writes About us.
     versionControl.acquireLock.mockImplementationOnce(async () => {
       await put(wsDir, `${KB}/KnowledgeBase/About us.md`, '# Ours\n');
-      return { acquired: true, lock: { holderName: 'x' } };
+      return { acquired: true, lock: GRANTED };
     });
 
     const applied = await svc.choose(ADMIN, 'sales');
@@ -432,7 +438,7 @@ describe('choosing a pack', () => {
     versionControl.acquireLock.mockImplementationOnce(async () => {
       store.starterPackClaim = 'u-other 1';
       store.starterPack = 'none';
-      return { acquired: true, lock: { holderName: 'x' } };
+      return { acquired: true, lock: GRANTED };
     });
     await expect(svc.choose(ADMIN, 'sales')).rejects.toMatchObject({ status: 409 });
     expect(versionControl.commitChanges).not.toHaveBeenCalled();
@@ -460,7 +466,7 @@ describe('choosing a pack', () => {
     // The work before the commit takes a moment, so a renewal is dated later than the claim.
     versionControl.acquireLock.mockImplementationOnce(async () => {
       await new Promise((r) => setTimeout(r, 5));
-      return { acquired: true, lock: { holderName: 'x' } };
+      return { acquired: true, lock: GRANTED };
     });
     let claimAtCommit = '';
     versionControl.commitChanges.mockImplementationOnce(async () => {
