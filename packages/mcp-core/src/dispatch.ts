@@ -54,7 +54,7 @@ export async function registerManual(
   const resolved = new Map<string, Set<string>>();
   // A failure is the server's or the transport's words, which can quote what
   // the registration sent: redacted before anyone logs or shows it.
-  const failed = (error: string) => ({ ok: false as const, error: callRedactor(resolved, manual).redact(error) });
+  const failed = (error: string) => ({ ok: false as const, error: callRedactor(resolved, manual, false).redact(error) });
   try {
     const result = await recordingSubstitutions(resolved, () => client.registerManual(manual));
     if (result && result.success === false) {

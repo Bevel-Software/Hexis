@@ -42,6 +42,18 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('xa9B2y')).toBe('x[redacted]y');
   });
 
+  it.each(['BYPASS_CACHE', 'PRIVATE_REPO', 'CREDIT_LIMIT'])('does not count a `${%s}` as a credential', (name) => {
+    const redactor = new SecretRedactor();
+    redactor.rememberSubstituted(name, 'true');
+    expect(redactor.redact('untrue: true')).toBe('untrue: [redacted]');
+  });
+
+  it('remembers a value that cannot be url-encoded, without throwing', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('\ud800lone-surrogate');
+    expect(redactor.redact('sent \ud800lone-surrogate')).toBe('sent [redacted]');
+  });
+
   it('takes out the spellings a value travels in: trimmed, url-encoded and JSON-escaped', () => {
     const redactor = new SecretRedactor();
     redactor.remember('a b/c"d1234567');

@@ -79,10 +79,21 @@ export function manualSecrets(client: unknown, manualName: string): Substitution
   return byManual?.get(manualName) ?? new Map<string, ReadonlySet<string>>();
 }
 
-/** A redactor holding every secret a call through `template` carries: the values substituted into it and the credentials it spells out. */
-export function callRedactor(resolved: Substitutions, template: CallTemplate): SecretRedactor {
+/**
+ * A redactor holding every secret a call through `template` carries: the
+ * values substituted into it and the credentials it spells out. A filled-in
+ * template shows which values went into credential-named fields; an unfilled
+ * one (`filledIn: false`, as registration has) cannot, so there every
+ * substituted value counts as a credential.
+ */
+export function callRedactor(resolved: Substitutions, template: CallTemplate, filledIn = true): SecretRedactor {
   const redactor = new SecretRedactor();
-  for (const [name, values] of resolved) for (const value of values) redactor.rememberSubstituted(name, value);
+  for (const [name, values] of resolved) {
+    for (const value of values) {
+      if (filledIn) redactor.rememberSubstituted(name, value);
+      else redactor.remember(value);
+    }
+  }
   rememberCallCredentials(redactor, template);
   return redactor;
 }

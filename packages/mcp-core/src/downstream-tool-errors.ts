@@ -133,9 +133,11 @@ type ResultProcessor = {
  * any other failure (a JSON-RPC error a handler threw, an HTTP error with the
  * response body in its message) keeps its class, code and cause, with its
  * message and stack redacted in place, so the token classifier still reads
- * it. Text the caller sent in the call's arguments is left as it is
- * (`SecretRedactor.redact`). Streaming goes through `callTool` in this
- * protocol, so the same wrap covers it.
+ * it; one whose message cannot be replaced (a `DOMException`'s is a getter)
+ * becomes an `Error` with its name and code. Text the caller sent in the
+ * call's arguments, keys and numbers included, is left as it is where it is
+ * quoted back (`SecretRedactor.redact`). Streaming goes through `callTool` in
+ * this protocol, so the same wrap covers it.
  */
 export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
   const target = protocol as unknown as ResultProcessor;
@@ -159,11 +161,7 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
         const sent = stringsIn(args);
         const redact = (text: string) => redactor.redact(text, sent);
         if (err instanceof DownstreamToolError) throw err.redactedWith(redact);
-        if (err instanceof Error) {
-          err.message = redact(err.message);
-          if (typeof err.stack === 'string') err.stack = redact(err.stack);
-          throw err;
-        }
+        if (err instanceof Error) throw redactedInPlace(err, redact);
         throw typeof err === 'string' ? redact(err) : err;
       }
     };
@@ -171,11 +169,27 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
   return protocol;
 }
 
-/** Every string in a call's arguments, however deeply nested. */
-function stringsIn(value: unknown, depth = 0): string[] {
+/** `err` with `redact` applied to its message and stack, or an `Error` in its place, with its name and code, when they cannot be replaced. */
+function redactedInPlace(err: Error, redact: (text: string) => string): Error {
+  const message = redact(err.message);
+  try {
+    Object.defineProperty(err, 'message', { value: message, writable: true, configurable: true });
+    if (typeof err.stack === 'string') Object.defineProperty(err, 'stack', { value: redact(err.stack), writable: true, configurable: true });
+    return err;
+  } catch {
+    const replacement = Object.assign(new Error(message), { code: (err as { code?: unknown }).code });
+    replacement.name = err.name;
+    return replacement;
+  }
+}
+
+/** Every string, key, number and boolean in a call's arguments, however deeply nested. */
+function stringsIn(value: unknown, seen = new Set<object>()): string[] {
   if (typeof value === 'string') return [value];
-  if (!value || typeof value !== 'object' || depth > 32) return [];
-  return Object.values(value).flatMap((item) => stringsIn(item, depth + 1));
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return [String(value)];
+  if (!value || typeof value !== 'object' || seen.has(value)) return [];
+  seen.add(value);
+  return Object.entries(value).flatMap(([key, item]) => [key, ...stringsIn(item, seen)]);
 }
 
 /**

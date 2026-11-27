@@ -49,10 +49,12 @@ const REDACTED = '[redacted]';
  * its own. Six characters or more, it is taken out wherever it appears too.
  *
  * Text the CALLER sent is not a disclosure: where the quote repeats one of
- * the caller's own strings ({@link redact}'s `callerText`), what lies within
- * that repeat is left as it is. Otherwise a tool that echoes its input would
- * answer the caller's guesses: a guess at the next character of a key would
- * come back `[redacted]` exactly when it was right.
+ * the caller's own strings ({@link redact}'s `callerText`), as sent or in one
+ * of the spellings above, what lies within that repeat is left as it is.
+ * Otherwise a tool that echoes its input would answer the caller's guesses: a
+ * guess at the next character of a key would come back `[redacted]` exactly
+ * when it was right. A server that quotes the input rewritten some other way
+ * (shortened, re-cased) still leaves its quote to the rules above.
  */
 export class SecretRedactor {
   /** Taken out wherever they appear. */
@@ -85,7 +87,9 @@ export class SecretRedactor {
    * (see the class comment).
    */
   redact(text: string, callerText: readonly string[] = []): string {
-    const repeats = callerText.flatMap((sent) => occurrences(text, sent).map((at) => [at, at + sent.length] as const));
+    const repeats = callerText
+      .flatMap((sent) => spellings(sent))
+      .flatMap((sent) => occurrences(text, sent).map((at) => [at, at + sent.length] as const));
     const hidden = new Uint8Array(text.length);
     const hide = (start: number, end: number) => {
       if (!repeats.some(([from, to]) => from <= start && end <= to)) hidden.fill(1, start, end);
@@ -119,7 +123,18 @@ function spellings(value: string): string[] {
   // Blank is not a secret, and a blank needle matches everywhere.
   if (!trimmed) return [];
   const escaped = JSON.stringify(value).slice(1, -1);
-  return [value, trimmed, encodeURIComponent(value), escaped, escaped.replaceAll('/', '\\/')].filter((spelling) => spelling.trim());
+  return [value, trimmed, urlEncoded(value), escaped, escaped.replaceAll('/', '\\/')].filter(
+    (spelling): spelling is string => !!spelling?.trim(),
+  );
+}
+
+/** `value` url-encoded, or null for one that cannot be (a lone surrogate): no request could carry it that way. */
+function urlEncoded(value: string): string | null {
+  try {
+    return encodeURIComponent(value);
+  } catch {
+    return null;
+  }
 }
 
 /** Where `needle` starts in `text`, every time, overlapping ones included. */
@@ -172,14 +187,16 @@ const CREDENTIAL_MARKERS = [
   'key',
   'token',
   'secret',
-  'pass',
+  'password',
+  'passwd',
+  'passcode',
+  'passphrase',
   'pwd',
   'cookie',
-  'cred',
+  'credential',
   'session',
   'bearer',
   'jwt',
-  'private',
   'signature',
   'hmac',
 ];
@@ -187,10 +204,10 @@ const CREDENTIAL_MARKERS = [
 /**
  * The same, for names too short to match as substrings: `sig` inside a word
  * would swallow `design`, `assign` and `signal`, `pin` would swallow
- * `mapping`, and blanking those would eat the message rather than protect
- * anything in it.
+ * `mapping`, `pass` would swallow `bypass`, and blanking those would eat the
+ * message rather than protect anything in it.
  */
-const CREDENTIAL_WORDS = /(?:^|[-_])(sig|hash|pin|pat|otp|sid|pw)(?:$|[-_])/;
+const CREDENTIAL_WORDS = /(?:^|[-_])(sig|hash|pin|pat|otp|sid|pw|pass|creds)(?:$|[-_])/;
 
 export function carriesCredential(fieldName: string): boolean {
   const name = fieldName.toLowerCase();

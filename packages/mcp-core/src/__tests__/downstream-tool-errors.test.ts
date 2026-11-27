@@ -3,8 +3,13 @@ import '@utcp/mcp'; // side effect: registers the stock 'mcp' protocol, which th
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { DownstreamToolError, downstreamErrorText, installDownstreamToolErrors } from '../downstream-tool-errors.js';
+import { McpError, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import {
+  DownstreamToolError,
+  downstreamErrorText,
+  installDownstreamToolErrors,
+  keepDownstreamToolErrors,
+} from '../downstream-tool-errors.js';
 import { SecretRedactor } from '../secret-redactor.js';
 import { registerManual, dispatchToolCall } from '../dispatch.js';
 import type { ProxiedTool } from '../proxied-tool.js';
@@ -98,6 +103,54 @@ describe('DownstreamToolError.redactedWith', () => {
     ]);
     // Nowhere: not in a field, a MIME type, a payload, or a key the server chose.
     expect(JSON.stringify(redacted.content)).not.toContain(KEY);
+  });
+});
+
+describe('every failure a wrapped protocol lets through', () => {
+  const KEY = 'sk-live-1234567890abcdef';
+  const template = {
+    name: 'stub',
+    call_template_type: 'mcp',
+    config: { mcpServers: { srv: { url: 'https://x.example/mcp', headers: { Authorization: `Bearer ${KEY}`, 'X-Pin': '4821' } } } },
+  } as unknown as CallTemplate;
+  /** A protocol whose call fails with `failure`, wrapped; its `callTool` answers what the wrap throws. */
+  const failingWith = (failure: unknown) => {
+    const protocol = keepDownstreamToolErrors({
+      _processMcpToolResult: (result: unknown) => result,
+      callTool: async () => {
+        throw failure;
+      },
+    }) as unknown as { callTool: (caller: unknown, tool: string, args: unknown, template: CallTemplate) => Promise<unknown> };
+    return (args: unknown = {}) => protocol.callTool({}, 'stub.srv.echo', args, template).catch((err: unknown) => err);
+  };
+
+  it('keeps an AbortError the DOMException it was, its message and stack redacted', async () => {
+    const thrown = await failingWith(new DOMException(`aborted while sending ${KEY}`, 'AbortError'))();
+    expect(thrown).toBeInstanceOf(DOMException);
+    expect(thrown).toMatchObject({ name: 'AbortError', message: 'aborted while sending [redacted]' });
+    expect(String((thrown as Error).stack)).not.toContain(KEY);
+  });
+
+  it("puts an Error with a frozen failure's name and code in its place", async () => {
+    const frozen = Object.freeze(Object.assign(new Error(`refused ${KEY}`), { code: 401, name: 'HttpError' }));
+    expect(await failingWith(frozen)()).toMatchObject({ name: 'HttpError', code: 401, message: 'refused [redacted]' });
+  });
+
+  it('redacts a thrown string', async () => {
+    expect(await failingWith(`refused ${KEY}`)()).toBe('refused [redacted]');
+  });
+
+  it("leaves the caller's keys, numbers and escaped strings as they came, where the server quotes them", async () => {
+    const quoting = (text: string) => new DownstreamToolError(text, [{ type: 'text', text }]);
+    const answer = async (failure: DownstreamToolError, args: unknown) => ((await failingWith(failure)(args)) as DownstreamToolError).message;
+    expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe("Unrecognized key 'sk-live-1234'");
+    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('PIN 4821 is wrong');
+    // Sent as `sk-live-1234"x`, quoted JSON-escaped.
+    expect(await answer(quoting('{"error":"No project sk-live-1234\\"x"}'), { text: 'sk-live-1234"x' })).toBe(
+      '{"error":"No project sk-live-1234\\"x"}',
+    );
+    // Not quoting the caller: the server's own words lose the PIN.
+    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('PIN [redacted] is wrong');
   });
 });
 
@@ -305,6 +358,11 @@ describe('a downstream isError over a real MCP connection', () => {
     const text = (result.content[0] as { text: string }).text;
     expect(text).toContain('rejected [redacted]');
     expect(text).not.toContain('sk-live-1234567890abcdef');
+    // The same failure, as the token classifier receives it: still the McpError it was, code and all.
+    const thrown = await client.callTool('thrown.srv.echo', { text: 'hi' }).catch((err: unknown) => err);
+    expect(thrown).toBeInstanceOf(McpError);
+    expect(thrown).toMatchObject({ code: -32603 });
+    expect(`${(thrown as Error).message} ${(thrown as Error).stack}`).not.toContain('sk-live-1234567890abcdef');
   });
 
   it('leaves what the caller sent as it is, so a guess at the key comes back the same right or wrong', async () => {
