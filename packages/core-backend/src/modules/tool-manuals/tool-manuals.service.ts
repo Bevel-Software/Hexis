@@ -18,7 +18,11 @@ import {
 } from '@utcp/sdk';
 // Also a side effect: loading the package registers the 'google_service_account'
 // auth type, so a `.tool` naming it validates here.
-import { findUnservedGoogleServiceAccountAuth, holdsLiteralGoogleServiceAccountKey } from '@bevel-software/platform-mcp-core';
+import {
+  EXCLUDE_TOOLS_KEY,
+  findUnservedGoogleServiceAccountAuth,
+  holdsLiteralGoogleServiceAccountKey,
+} from '@bevel-software/platform-mcp-core';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { PluginSource } from '../plugins/index.js';
 import type { WorkspaceService } from '../workspace/index.js';
@@ -627,6 +631,7 @@ export class ToolManualService implements IToolManualService {
               args: m.stdio.args,
               ...(m.stdio.env ? { env: m.stdio.env } : {}),
               ...(m.stdio.cwd ? { cwd: m.stdio.cwd } : {}),
+              ...excludedToolsField(m),
             },
           },
         },
@@ -645,6 +650,7 @@ export class ToolManualService implements IToolManualService {
               transport: 'http',
               url: m.url,
               ...(m.headers ? { headers: m.headers } : {}),
+              ...excludedToolsField(m),
             },
           },
         },
@@ -1745,4 +1751,15 @@ function normalizeType(raw: unknown): ToolManualType {
   // set says more than the rejected value does, and a `type:` line is one
   // mis-paste away from holding a credential like any other.
   throw new Error('unknown `.tool` `type` (expected `http`, `mcp`, `inline`, or absent)');
+}
+
+/**
+ * The server entry's `exclude_tools`, when the manual leaves tools out. Carried
+ * IN the server entry because UTCP keeps a server entry as given
+ * (`mcpServers` is a record of anything) and drops keys it does not know when
+ * it connects, so the list reaches every surface that builds a tool list from
+ * this template (see `EXCLUDE_TOOLS_KEY` in platform-mcp-core) and the MCP client never sees it.
+ */
+function excludedToolsField(m: ToolManualDescriptor): Record<string, string[]> {
+  return m.excludeTools && m.excludeTools.length > 0 ? { [EXCLUDE_TOOLS_KEY]: m.excludeTools } : {};
 }

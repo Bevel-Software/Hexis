@@ -5,6 +5,8 @@ import type { ProxiedTool } from './proxied-tool.js';
 import { toCallToolResult, toolError, describeToolFailure, renderProgress } from './results.js';
 import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
+import { DownstreamToolError } from './downstream-tool-errors.js';
+import { EXCLUDE_TOOLS_KEY, excludedToolNames, removeExcludedTools } from './excluded-tools.js';
 
 /**
  * Register one manual on a client, reduced to a verdict.
@@ -17,7 +19,9 @@ import { installGetHasNoBody } from './get-has-no-body.js';
  *
  * Never throws: a registration failure is a runtime problem (network, dead
  * credential), not a schema one — the templates were validated before they got
- * here — so it comes back as `{ ok: false }` for the caller to police.
+ * here — so it comes back as `{ ok: false }` for the caller to police. The one
+ * thing read from the template here is its `exclude_tools`, because here is
+ * where it is applied; a list of the wrong shape comes back the same way.
  */
 export async function registerManual(
   client: CodeModeUtcpClient,
@@ -36,12 +40,25 @@ export async function registerManual(
   // (`call-guards.ts`).
   installGetHasNoBody();
   installCallGuards(client);
+  // The same one point is where the tools a manual leaves out (`excludeTools`)
+  // come off the client: a session recovery or a catalog refresh registers
+  // through here too, so none of them can bring one back. The list is read
+  // before anything registers: one that is not a list of tool names registers
+  // nothing, rather than every tool it was written to leave out.
+  const excluded = excludedToolNames(manual);
+  if (excluded === null) {
+    return {
+      ok: false,
+      error: `The \`${EXCLUDE_TOOLS_KEY}\` of a server of "${String(manual.name ?? '')}" must be a list of tool names, so the server is not registered.`,
+    };
+  }
   try {
     const result = await client.registerManual(manual);
     if (result && result.success === false) {
       const errors = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
       return { ok: false, error: errors };
     }
+    await removeExcludedTools(client, excluded);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -91,6 +108,9 @@ export async function dispatchToolCall(
       hasPrev = true;
     }
   } catch (err) {
+    // The downstream server answered and said the call failed: pass its own
+    // answer on as the success path below would, marked as the failure it is.
+    if (err instanceof DownstreamToolError) return err.toCallToolResult(options);
     return toolError(`The "${tool.mcpName}" tool failed: ${describeToolFailure(err)}`);
   }
 
