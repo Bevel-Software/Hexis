@@ -330,6 +330,8 @@ export class PluginProvisionService {
    * `access.md` grants anyone else anything, or is missing or unreadable as
    * rules, it is rewritten to the template a new folder gets, committed, and
    * the answer says `repaired: true` (see {@link repairPersonalRules}).
+   * A folder holding no file at all is not already there: it is cleared and
+   * made as new (see {@link removedIfHollow}).
    */
   async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
@@ -340,7 +342,7 @@ export class PluginProvisionService {
     };
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       const existing = await this.existingFolder(folder);
-      if (existing !== null) return alreadyThere(existing);
+      if (existing !== null && !(await this.removedIfHollow(existing))) return alreadyThere(existing);
       try {
         await this.provision(user, folder, folder, personalAccessMd(user));
       } catch (err) {
@@ -495,6 +497,36 @@ export class PluginProvisionService {
     if (!children) return null;
     const lower = name.toLowerCase();
     return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
+  }
+
+  /**
+   * Remove the folder `folder` (its on-disk spelling, below the plugins root)
+   * when it holds no file at any depth — only empty directories, which git
+   * cannot carry, so no commit ever made it — and say whether it did. Such a
+   * folder is no plugin and nobody's rules: what a refused write would have
+   * left behind, never something to adopt as already there. Bottom-up and
+   * never recursive, so a file that appeared meanwhile fails the removal
+   * instead of going with it. A listing that cannot be read refuses, as every
+   * other hole does.
+   */
+  private async removedIfHollow(folder: string): Promise<boolean> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const dirs: string[] = [];
+    const walk = async (abs: string, rel: string): Promise<boolean> => {
+      const entries = (await listDirOrIncomplete(this.disk, abs, rel)) ?? [];
+      for (const e of entries) {
+        if (!e.isDirectory()) return false;
+        if (!(await walk(path.join(abs, e.name), `${rel}/${e.name}`))) return false;
+      }
+      dirs.push(abs);
+      return true;
+    };
+    const root = path.join(wsDir, this.kbDirName, this.pluginsRoot, ...folder.split('/'));
+    if (!(await this.disk.isDirectory(root))) return false;
+    if (!(await walk(root, `${this.pluginsRoot}/${folder}`))) return false;
+    for (const dir of dirs) await fs.rmdir(dir);
+    return true;
   }
 
   /**

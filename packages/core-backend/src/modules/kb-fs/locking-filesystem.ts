@@ -1203,15 +1203,55 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // non-empty, so the .gitkeep below is skipped when the seed targets this
     // very dir (a deeper mkdir under a seeded ancestor still gets one).
     const plan = await this.planCreate(inputPath, 'dir');
+    const absolutePath = this.resolveAbsolutePath(inputPath);
     // mkdir itself is not a lockable op (it touches no file content), so we
     // do the bare super-call without acquiring. The lock + commit happens on
     // the `.gitkeep` write below — that's the file the version-control change
-    // attaches to. If the dir already has content (rare; e.g. recursive
-    // create where a sibling already exists), we skip the .gitkeep — empty-
-    // folder placeholders are only useful for actually-empty folders.
+    // attaches to, and so the write the access gate judges. A refusal there
+    // (or of the seed) takes back the directories this call made: a refused
+    // mkdir leaves nothing on disk for a listing — or the personal-plugin
+    // ensure — to find.
+    const made = absolutePath ? await this.missingDirs(absolutePath) : [];
     await super.mkdir(inputPath, options);
+    try {
+      await this.fillNewDir(inputPath, absolutePath, plan);
+    } catch (err) {
+      // Deepest first, and never recursive: a directory something else put
+      // bytes into meanwhile stays, with those bytes.
+      for (const dir of made) await fs.rmdir(dir).catch(() => {});
+      throw err;
+    }
+  }
+
+  /**
+   * The directories `absolutePath` and its ancestors that do not exist yet,
+   * deepest first — what a recursive mkdir of it would create.
+   */
+  private async missingDirs(absolutePath: string): Promise<string[]> {
+    const missing: string[] = [];
+    let dir = absolutePath;
+    while ((await lstatOrNull(dir)) === null) {
+      missing.push(dir);
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return missing;
+  }
+
+  /**
+   * The writes that make a directory `mkdir` just created real: the creator's
+   * access.md seed when one is planned, else the `.gitkeep` placeholder. If
+   * the dir already has content (rare; e.g. recursive create where a sibling
+   * already exists), the .gitkeep is skipped — empty-folder placeholders are
+   * only useful for actually-empty folders.
+   */
+  private async fillNewDir(
+    inputPath: string,
+    absolutePath: string | undefined,
+    plan: CreationGrantPlan | null,
+  ): Promise<void> {
     if (plan?.kind === 'seed-access-md') await this.seedAccessMd(plan);
-    const absolutePath = this.resolveAbsolutePath(inputPath);
     if (!absolutePath) return;
     let entries: string[];
     try {
