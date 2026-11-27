@@ -21,6 +21,7 @@ import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fa
 import { registerBevelSecretsVariableLoader } from '../../secrets-vault/index.js';
 import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/index.js';
 import type { IToolManualService } from '../../tool-manuals/index.js';
+import type { AgentEventInput, IAgentEventRecorder } from '../../audit/index.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
 import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
@@ -130,6 +131,8 @@ interface PlatformOptions {
    * adds `start_session` so it can call the tool the ticket is about.
    */
   extraTools?: string[];
+  /** The Audit log's recorder; absent, nothing is recorded, as in a deployment without one. */
+  auditRecorder?: IAgentEventRecorder;
 }
 
 const platforms: Platform[] = [];
@@ -188,7 +191,7 @@ async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
     readAgentPreamble: opts.readAgentPreamble,
     defaultBranch: opts.defaultBranch,
     downstreamPool: opts.poolNow ? { now: opts.poolNow } : undefined,
-  }, opts.secretsVault, opts.toolManuals);
+  }, opts.secretsVault, opts.toolManuals, undefined, undefined, opts.auditRecorder);
   const stub = {} as never;
   app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
   // The loopback catalog is served per caller, from the bearer it carries.
@@ -802,6 +805,39 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(toolText(chain)).toContain('this page is not shared with the integration');
     expect(downstream.executions()).toBe(2);
     expect(state.refreshes).toBe(0);
+  });
+
+  it("records a connected server's own failure as an error in the audit log, for a direct call and for the call a chain makes", async () => {
+    quiet();
+    downstream = await startFakeDownstreamMcpServer({
+      acceptsToken: (t) => t === 'token-1',
+      failsWith: 'This tool requires a Business plan or higher.',
+    });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null;
+      return 'rejected';
+    });
+    const events: AgentEventInput[] = [];
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      auditRecorder: { record: (event) => void events.push(event) },
+    });
+    const { client } = await connectSdkClient(baseUrl);
+
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    await client.callTool({ name: 'call_tool_chain', arguments: { code: "return notion.srv_echo({ text: 'two' });" } });
+    // Recording is fire-and-forget behind the call; give the microtasks a turn.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(events.map((e) => `${e.kind}|${e.manual}|${e.name}|${e.outcome}`)).toEqual([
+      // The direct call.
+      'tool|notion|srv.echo|error',
+      // The call the chain made, then the chain it failed.
+      'tool|notion|srv.echo|error',
+      'capability|null|call_tool_chain|error',
+    ]);
   });
 
   it('401 → refresh → retry: a token revoked mid-life is refreshed and the call succeeds; the caller sees only that', async () => {

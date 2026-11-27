@@ -345,7 +345,7 @@ describe('stdio end-to-end', () => {
     }
   });
 
-  it("answers a local stdio server's own failure, and the deployment's, as a failed call in the server's words", { timeout: 60_000 }, async () => {
+  it("answers a local stdio server's own failure, and the deployment's, as a failed call in the server's words, to a direct call and to a chain", { timeout: 60_000 }, async () => {
     const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: false });
     const probe = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
     try {
@@ -366,6 +366,27 @@ describe('stdio end-to-end', () => {
       const platform = await probe.callTool({ name: 'refuse', arguments: {} });
       expect(platform.isError).toBe(true);
       expect(platform.content).toEqual([{ type: 'text', text: 'You may not write here.' }]);
+
+      // A chain sees each of the two as a rejected call, not as a value: the
+      // chain fails with the server's words, and a chain that catches the
+      // rejection reads them from the error.
+      const chainText = (res: Awaited<ReturnType<typeof probe.callTool>>) => JSON.stringify(res.content);
+      for (const [call, words] of [
+        ['gtmprobe.probe_refuse({})', 'This tool requires a Business plan or higher.'],
+        ['hexis.hexis_refuse({})', 'You may not write here.'],
+      ] as const) {
+        const failed = await probe.callTool({ name: 'call_tool_chain', arguments: { code: `return ${call};` } });
+        expect(failed.isError).toBe(true);
+        expect(chainText(failed)).toContain(words);
+
+        const caught = await probe.callTool({
+          name: 'call_tool_chain',
+          arguments: { code: `try { ${call}; return 'answered'; } catch (err) { return 'rejected: ' + String(err && err.message); }` },
+        });
+        expect(caught.isError).toBeFalsy();
+        expect(chainText(caught)).toContain('rejected: ');
+        expect(chainText(caught)).toContain(words);
+      }
     } finally {
       await probe.close().catch(() => {});
       await handle.shutdown();
