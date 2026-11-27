@@ -39,7 +39,8 @@ export interface PluginLinks {
    * Grants of this plugin's tokens that open released skills the manifest does
    * NOT link: what a link leaves behind when its entry is edited out of
    * plugin.json by hand. The page-open repair revokes them where the viewer
-   * may; whatever remains is named on the skill page and the plugin page.
+   * may and the same grant opens no skill the manifest still links; whatever
+   * remains is named on the skill page and the plugin page.
    * Empty for an unmanaged (dialect) plugin.
    */
   leftoverGrants: LeftoverGrant[];

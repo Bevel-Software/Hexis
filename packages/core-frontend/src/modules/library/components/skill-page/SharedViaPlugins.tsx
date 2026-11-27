@@ -86,7 +86,7 @@ export function SharedViaPlugins({
     <section className="mt-6" data-testid="shared-via-plugins">
       <h2 className="mb-2.5 text-label font-semibold uppercase text-ink-faint">In plugins</h2>
       <div className="grid gap-2">
-        {memberships.length === 0 && (
+        {memberships.length === 0 && leftovers.length === 0 && (
           <p className="text-detail text-ink-faint">This skill is in no plugin yet.</p>
         )}
         {memberships.map((m) => {

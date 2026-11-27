@@ -127,18 +127,27 @@ export function PluginPage() {
   }, [refreshState]);
 
   /**
+   * How the page-open repair ended, keyed by the plugin it ran for: the page
+   * is not remounted when `:plugin` changes, so an outcome for another plugin
+   * reads as no outcome at all (see `repairReport` and `repairFailed` below).
+   */
+  const [repairOutcome, setRepairOutcome] = useState<
+    { plugin: string; report: LinkRepairReport } | { plugin: string; failed: true } | null
+  >(null);
+  const outcomeHere = repairOutcome?.plugin === plugin ? repairOutcome : null;
+  /**
    * What the page-open repair did — null until it has answered, and left null
    * for a viewer who never runs one (see the effect below). Once it is in, it
    * is the truth about this plugin's links: the served `brokenLinks` was
    * counted before the repair wrote anything.
    */
-  const [repairReport, setRepairReport] = useState<LinkRepairReport | null>(null);
+  const repairReport = outcomeHere && 'report' in outcomeHere ? outcomeHere.report : null;
   /**
    * The repair could not even be asked for. Then — and only then — the page
    * falls back to the banner it showed before this existed: the served count
    * is all anyone knows.
    */
-  const [repairFailed, setRepairFailed] = useState(false);
+  const repairFailed = outcomeHere !== null && 'failed' in outcomeHere;
   /** The card being removed, while its confirm dialog is up. */
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
   /** Whether the plugin's own delete confirmation is up. */
@@ -178,7 +187,7 @@ export function PluginPage() {
     void repairPluginLinks(plugin)
       .then((report) => {
         if (!live) return;
-        setRepairReport(report);
+        setRepairOutcome({ plugin, report });
         // Only a write is worth a refetch: the catalog and the summaries carry
         // the link health this just changed.
         if (report.repaired.length > 0 || (report.revoked?.length ?? 0) > 0) {
@@ -187,7 +196,7 @@ export function PluginPage() {
         }
       })
       .catch(() => {
-        if (live) setRepairFailed(true);
+        if (live) setRepairOutcome({ plugin, failed: true });
       });
     return () => {
       live = false;
@@ -216,18 +225,26 @@ export function PluginPage() {
   /**
    * Grants this plugin still holds on skills its manifest no longer links: a
    * link edited out of plugin.json left them. From the catalog, so every
-   * viewer sees them, and a writer sees what the page-open repair could not
-   * revoke once it reloads.
+   * viewer who may read the skill sees them (a skill the viewer may not read
+   * is not named to them, as everywhere in the catalog), less the folders the
+   * repair has just revoked: the catalog may still be the one fetched before.
    */
+  const revokedHere = repairReport?.revoked;
   const leftoverGrants = useMemo(
     () =>
       data.items.flatMap((i) =>
-        (i.leftoverGrants ?? []).filter((g) => g.plugin === plugin).map((grant) => ({ skill: i.name, grant })),
+        (i.leftoverGrants ?? [])
+          .filter((g) => g.plugin === plugin && !(revokedHere ?? []).includes(g.folder))
+          .map((grant) => ({ skill: i.name, grant })),
       ),
-    [data.items, plugin],
+    [data.items, plugin, revokedHere],
   );
-  /** The page-open repair is running: what it may revoke is not said until it has answered. */
-  const repairInFlight = canRepairLinks && repairReport === null && !repairFailed;
+  /**
+   * Whether this page may not yet say what is left: the plugin's summary has
+   * not arrived (so whether a repair will run is unknown), or the repair for
+   * this plugin has not answered.
+   */
+  const repairInFlight = summary === null || (canRepairLinks && repairReport === null && !repairFailed);
   /** Links the page-open repair could not put back — the banner's own list. */
   const unrepairedLinks = repairReport?.skipped ?? [];
   /**

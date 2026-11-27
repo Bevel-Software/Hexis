@@ -576,6 +576,21 @@ describe('PluginLinksService', () => {
       expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
     });
 
+    it('a leftover grant that opens a skill linked BELOW it before the revoke runs is kept', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+      await linkThenRemoveByHand('Skills/Eng');
+      expect(await leftoversOf()).toMatchObject([{ folder: 'Skills/Eng' }]); // the work list is read now…
+      await write(
+        'Plugins/GTM/plugin.json',
+        `${JSON.stringify(withLinkedSkillRoots({ name: 'gtm' }, ['Skills/Eng/deploy']), null, 2)}\n`,
+      ); // …and deploy, opened only by the grant on Skills/Eng, is linked again before the revoke
+
+      expect((await svc.repairAll(manager, 'gtm')).revoked).toEqual([]);
+      expect(await read('Skills/Eng/access.md')).toContain('plugin/gtm/read');
+      access.invalidate(wsId);
+      expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
+    });
+
     it('a link whose entry is still in the manifest is never a leftover', async () => {
       await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
       await svc.link(manager, 'gtm', 'Skills/Eng/deploy');

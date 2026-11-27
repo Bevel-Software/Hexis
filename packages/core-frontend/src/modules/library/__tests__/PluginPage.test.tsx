@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
   WorkspaceContext,
@@ -647,6 +647,54 @@ describe('PluginPage', () => {
     vi.mocked(CATALOG.reload).mockClear();
     renderPlugin('GTM');
     await waitFor(() => expect(CATALOG.reload).toHaveBeenCalled());
+  });
+
+  /** A catalog whose skill `beta` still carries grants of `plugin` on `folders`. */
+  const withLeftover = (plugin: string, folders: string[]): LibraryData => ({
+    ...CATALOG,
+    tools: [connectedTool()],
+    skills: [
+      ...CATALOG.skills,
+      {
+        name: 'beta',
+        description: 'B.',
+        path: 'Skills/QALink/beta',
+        plugins: [],
+        leftoverGrants: folders.map((folder) => ({ plugin, folder, editors: { roles: ['Admin'], users: [] } })),
+      },
+    ],
+  });
+
+  it('drops the folders the repair revoked from the banner, even before the catalog is refetched', async () => {
+    // The catalog stays the one fetched before the repair: reload is a mock.
+    dataMock.useLibraryData.mockReturnValue(withLeftover('GTM', ['Skills/QALink/beta', 'Skills/QALink']));
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true })]);
+    pluginsMock.repairPluginLinks.mockResolvedValue({ repaired: [], skipped: [], revoked: ['Skills/QALink/beta'] });
+    renderPlugin('GTM');
+    const banner = await screen.findByTestId('leftover-grants');
+    expect(banner).toHaveTextContent('Skills/QALink/access.md');
+    expect(banner).not.toHaveTextContent('Skills/QALink/beta/access.md');
+  });
+
+  it("says nothing of leftovers while the opened plugin's repair runs, though another plugin's has answered", async () => {
+    dataMock.useLibraryData.mockReturnValue(withLeftover('Product', ['Skills/QALink/beta']));
+    pluginsMock.listPlugins.mockResolvedValue([
+      gtm({ canWrite: true }),
+      gtm({ name: 'Product', folders: ['Plugins/Product'], canWrite: true }),
+    ]);
+    pluginsMock.repairPluginLinks.mockImplementation((name: string) =>
+      name === 'GTM' ? Promise.resolve({ repaired: [], skipped: [], revoked: [] }) : new Promise(() => {}),
+    );
+    function GoToProduct() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate('/skills-and-tools/plugins/Product')}>to-product</button>;
+    }
+    renderPlugin('GTM', <GoToProduct />);
+    await waitFor(() => expect(pluginsMock.repairPluginLinks).toHaveBeenCalledWith('GTM'));
+    await act(async () => {});
+    fireEvent.click(screen.getByText('to-product'));
+    await waitFor(() => expect(pluginsMock.repairPluginLinks).toHaveBeenCalledWith('Product'));
+    expect(screen.queryByTestId('leftover-grants')).not.toBeInTheDocument();
   });
 
   it('names the skill and its editors for a link the manager cannot repair', async () => {

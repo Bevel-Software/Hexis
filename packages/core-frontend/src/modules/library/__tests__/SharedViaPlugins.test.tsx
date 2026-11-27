@@ -139,5 +139,7 @@ describe('SharedViaPlugins', () => {
     expect(screen.getByTestId('leftover-grant')).toHaveTextContent(
       "the root access.md still grants Lead Ops's members access to it. Its editors can remove the grant.",
     );
+    // A plugin's members still read it, so the section does not say it is in none.
+    expect(screen.queryByText('This skill is in no plugin yet.')).not.toBeInTheDocument();
   });
 });

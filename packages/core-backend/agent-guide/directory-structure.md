@@ -59,8 +59,8 @@ links resolve to, and one skill can be linked by many plugins. Do not edit that
 list by hand: link from the plugin's page in the app, which also grants the
 plugin's members read on the skill (see `access-control`). When someone who
 may write the plugin opens its page, a link missing that grant is repaired and
-the grant of an entry removed by hand is revoked; what is left shows on the
-skill's page. Who may read
+the grant of an entry removed by hand is revoked where they can; any left
+shows on the skill and plugin pages. Who may read
 a skill is decided by the skill's own folders, never by the plugin: a plugin
 linking a skill someone cannot read simply does not show it to them.
 

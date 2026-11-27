@@ -352,16 +352,20 @@ export class PluginLinksService {
    * Revoke the plugin's two tokens from `grantFolder` when the manifest no
    * longer links it: what Unlink would have revoked, had the entry been
    * removed with Unlink rather than by editing plugin.json. Under the same
-   * pair of locks, with the manifest re-read inside them, so a link added
-   * meanwhile at or above the folder keeps its grant. Only where the viewer
-   * may write the folder's access file, as Unlink; otherwise false, and the
-   * grant stays visible for an editor to remove.
+   * pair of locks, with the manifest re-read inside them. Never when a linked
+   * root sits at, above or below the folder: that grant still opens a linked
+   * skill, so it stays and is named. Only where the viewer may write the
+   * folder's access file, as Unlink; otherwise false, and the grant stays
+   * visible for an editor to remove.
    */
   private async revokeLeftover(user: AuthUser, folder: string, grantFolder: string): Promise<boolean> {
     const wsId = this.kb.defaultWorkspaceId();
     return this.locks.runAll(this.lockKeys(folder, grantFolder), async () => {
       const { manifest } = await this.readManifest(wsId, folder);
-      if (linkedSkillRoots(manifest).some((root) => skillUnderRoot(grantFolder, root))) return false;
+      // A linked root at, above or below the folder: its grant opens a skill
+      // the plugin still links, so revoking it would break that link.
+      const overlaps = (root: string) => skillUnderRoot(grantFolder, root) || skillUnderRoot(root, grantFolder);
+      if (linkedSkillRoots(manifest).some(overlaps)) return false;
       if (!(await this.accessControl.canWrite(wsId, user.email, accessMdPathForFolder(grantFolder)))) return false;
       const changed = await this.revokeTokens(wsId, user, folder, grantFolder, leftoverSummary(folder, grantFolder));
       this.changed(wsId);
