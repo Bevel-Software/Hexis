@@ -292,6 +292,19 @@ describe('excludeTools in the plugin.json extension', () => {
     }
   });
 
+  it('reads a manifest that does not parse, or a server entry in it that is no object, as no list: the server is offered whole, and the warning says the lists are ignored', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const [unparsable] = fromMcpJson('Support', MCP, '{ not json');
+    expect(unparsable).toMatchObject({ slug: 'notion' });
+    expect(unparsable?.excludeTools).toBeUndefined();
+    expect(warn.mock.calls.flat().join(' ')).toMatch(/plugin\.json is not valid JSON.*excludeTools/);
+
+    const notAnObject = JSON.stringify({ name: 'support', extensions: { 'software.bevel.hexis': { mcpServers: { notion: 'spawn' } } } });
+    const [whole] = fromMcpJson('Support', MCP, notAnObject);
+    expect(whole).toMatchObject({ slug: 'notion' });
+    expect(whole?.excludeTools).toBeUndefined();
+  });
+
   it('keeps a server with a malformed list offline instead of offering every tool', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const refused: string[] = [];
