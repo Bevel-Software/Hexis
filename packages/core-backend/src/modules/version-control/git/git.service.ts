@@ -48,6 +48,7 @@ import {
   ProtectedBranchError,
   PullRebaseConflictError,
   RemoteBranchGoneError,
+  SourceHeadMovedError,
   VersionNotOnBranchError,
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
@@ -2171,6 +2172,19 @@ export class GitService implements IGitService {
       appliedChangeNumber?: number;
       /** The request's stored title, so a merge commit in the old message format is recognised too. */
       appliedChangeTitle?: string;
+      /**
+       * The source commit the caller's approval gate judged. When given, the
+       * merge lands that commit or nothing: if the published source is at any
+       * other commit once the fetch below has run, it refuses with
+       * {@link SourceHeadMovedError} before anything is checked out, merged or
+       * pushed.
+       *
+       * Compared HERE, inside the reservation, and not by the caller: the
+       * caller read the head before it asked the gate, and a push landing
+       * between that reading and this fetch would otherwise be merged on the
+       * strength of approvals given to the commit before it.
+       */
+      expectedSourceHead?: string;
     } = {},
   ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
@@ -2226,6 +2240,17 @@ export class GitService implements IGitService {
           `+refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`,
           `+refs/heads/${sourceBranch}:refs/remotes/origin/${sourceBranch}`,
         ]);
+        // The source commit this attempt merges, read once from the ref the
+        // fetch above just wrote and named by its id from here on. The ref
+        // itself can move again under this reservation: `resolvePrShas`
+        // fetches into a clone before it takes the clone's turn. So the paths
+        // `authorize` judges and the commit merged are one commit, and it is
+        // the commit a caller's `expectedSourceHead` was compared with.
+        const { stdout: sourceTipOut } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}`]);
+        const sourceTip = sourceTipOut.trim();
+        if (opts.expectedSourceHead !== undefined && sourceTip !== opts.expectedSourceHead) {
+          throw new SourceHeadMovedError(sourceBranch);
+        }
         // Match the published base tip exactly. Protected base branches never
         // carry local commits (save=share + no direct commits), so this only
         // discards a prior attempt's state, never real work.
@@ -2240,7 +2265,7 @@ export class GitService implements IGitService {
           const changedPaths = await this.prChangedPathsAt(
             cwd,
             `origin/${targetBranch}`,
-            `origin/${sourceBranch}`,
+            sourceTip,
             { forAccessCheck: true },
           );
           await opts.authorize({ sha: targetSha.trim(), changedPaths });
@@ -2249,7 +2274,7 @@ export class GitService implements IGitService {
         // `--no-commit --no-ff` so we author the merge commit as the human and
         // never fast-forward past the merge record.
         try {
-          await this.git(cwd, ['merge', '--no-commit', '--no-ff', `origin/${sourceBranch}`]);
+          await this.git(cwd, ['merge', '--no-commit', '--no-ff', sourceTip]);
         } catch (err) {
           const paths = await this.conflictedPaths(cwd);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);

@@ -20,6 +20,7 @@ import { mergeCommitSubject } from '../git/merge-commit.js';
 import { redactSecret } from '../../../shared/redact-secret.js';
 import {
   ChangeRequestConflictsError,
+  SourceHeadMovedError,
   VersionControlDomainError,
   VersionControlValidationError,
 } from '../../../shared/domain-errors.js';
@@ -51,6 +52,14 @@ const MERGE_METHOD = 'merge' as const;
  * "nothing to apply".
  */
 const NOTHING_TO_APPROVE = 'This pull request has no file changes to approve.';
+/**
+ * The hard block a request earns when its branch was pushed to after the gate
+ * read it. It names no file: what changed is for the caller to read again,
+ * under their own access.
+ */
+const REQUEST_CHANGED_SINCE_GATE =
+  'This request changed after its approvals were checked, so it was not applied. ' +
+  'Open it again to see what changed, then apply it once more.';
 const EVERYONE_CANONICAL = 'everyone';
 
 /**
@@ -628,9 +637,19 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         // Named so a merge that finds nothing to merge can tell an empty request
         // apart from one a previous attempt already merged and failed to record
         // (see `ownMergeCommitOn`).
-        { appliedChangeNumber: prNumber, appliedChangeTitle: cr.title },
+        // and pinned to the head the gate above judged: the approvals are for
+        // that commit, so a push that lands after the caller read the request
+        // is refused here, never merged on their strength.
+        { appliedChangeNumber: prNumber, appliedChangeTitle: cr.title, expectedSourceHead: headSha },
       );
     } catch (err) {
+      if (err instanceof SourceHeadMovedError) {
+        await this.db
+          .update(prMergeLog)
+          .set({ succeeded: false, completedAt: new Date(), error: 'the source branch moved after the gate read it' })
+          .where(eq(prMergeLog.id, logRow.id));
+        throw new MergeBlockedError([REQUEST_CHANGED_SINCE_GATE]);
+      }
       const redacted = redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token());
       await this.db
         .update(prMergeLog)

@@ -640,6 +640,24 @@ export class NotImplementedVersionControlError extends VersionControlDomainError
 }
 
 /**
+ * A merge was asked to land one commit of its source branch and the published
+ * branch is at another: someone pushed to it after the caller read its head.
+ * Nothing was merged. A 409 whose payload is `{ kind: 'source-head-moved' }`;
+ * a caller that answers in its own words tells it apart by its type.
+ */
+export class SourceHeadMovedError extends VersionControlDomainError {
+  readonly kind = 'source-head-moved' as const;
+  constructor(readonly sourceBranch: string) {
+    super(
+      `"${sourceBranch}" changed after it was last read, so it was not merged. Read it again and merge once more.`,
+      409,
+      { kind: 'source-head-moved' },
+    );
+    this.name = 'SourceHeadMovedError';
+  }
+}
+
+/**
  * Attempting to reconcile two branches (opening a change request, refreshing
  * one from target, or executing a merge) hit conflicts that the version-control service
  * cannot auto-resolve. The structured payload carries the list of
