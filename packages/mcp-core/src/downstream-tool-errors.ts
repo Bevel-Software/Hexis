@@ -134,11 +134,12 @@ type ResultProcessor = {
  * response body in its message) keeps its class, code and cause, with its
  * message and stack redacted in place, so the token classifier still reads
  * it; one whose message cannot be replaced (a frozen error) becomes an
- * `Error` with its name, code and cause. Text the caller sent in the
- * call's arguments, keys and numbers included, is taken out wherever it is
- * quoted back, so the answer does not depend on whether it matched a secret
- * (`SecretRedactor.redact`). Streaming goes through `callTool` in
- * this protocol, so the same wrap covers it.
+ * `Error` with its name, code and cause. With the call's arguments about
+ * (strings, keys, numbers, booleans and nulls), a failure's text goes whole or
+ * not at all: one that repeats any of them or holds any secret is withheld, so
+ * the answer does not depend on whether they matched a secret
+ * (`SecretRedactor.redact`). Streaming goes through `callTool` in this
+ * protocol, so the same wrap covers it.
  */
 export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
   const target = protocol as unknown as ResultProcessor;

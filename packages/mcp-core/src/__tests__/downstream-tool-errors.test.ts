@@ -140,21 +140,21 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(await failingWith(`refused ${KEY}`)()).toBe('refused [redacted]');
   });
 
-  it("takes out the caller's keys, numbers and escaped strings where the server quotes them, matched or not", async () => {
+  it("withholds a failure that quotes the caller's keys, numbers or escaped strings, matched or not", async () => {
     const quoting = (text: string) => new DownstreamToolError(text, [{ type: 'text', text }]);
     const answer = async (failure: DownstreamToolError, args: unknown) => ((await failingWith(failure)(args)) as DownstreamToolError).message;
-    expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe("Unrecognized key '[redacted]'");
-    expect(await answer(quoting("Unrecognized key 'zz-none-9999'"), { 'zz-none-9999': 1 })).toBe("Unrecognized key '[redacted]'");
+    expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe('[redacted]');
+    expect(await answer(quoting("Unrecognized key 'zz-none-9999'"), { 'zz-none-9999': 1 })).toBe('[redacted]');
     // Sent as `sk-live-1234"x`, quoted JSON-escaped.
-    expect(await answer(quoting('{"error":"No project sk-live-1234\\"x"}'), { text: 'sk-live-1234"x' })).toBe(
-      '{"error":"No project [redacted]"}',
-    );
-    // The server quoting the PIN itself reads the same whichever PIN the caller sent (`PIN` is their key, too).
-    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted] is wrong');
-    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('[redacted] is wrong');
+    expect(await answer(quoting('{"error":"No project sk-live-1234\\"x"}'), { text: 'sk-live-1234"x' })).toBe('[redacted]');
+    // The server quoting the PIN itself reads the same whichever PIN the caller sent.
+    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted]');
+    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('[redacted]');
+    // A failure that quotes none of it and no credential goes as it came.
+    expect(await answer(quoting('This tool requires a Business plan.'), { q: 'hi' })).toBe('This tool requires a Business plan.');
   });
 
-  it('takes out a boolean or null the caller sent, so a guess at a key spelled the same reads the same right or wrong', async () => {
+  it('counts a boolean or null the caller sent as theirs, so a guess at a key spelled the same reads the same right or wrong', async () => {
     const keyed = {
       name: 'stub',
       call_template_type: 'mcp',
@@ -162,9 +162,10 @@ describe('every failure a wrapped protocol lets through', () => {
     } as unknown as CallTemplate;
     const answer = async (text: string, args: unknown) =>
       ((await failingWith(new DownstreamToolError(text, [{ type: 'text', text }]), keyed)(args)) as DownstreamToolError).message;
-    expect(await answer('flag true is invalid', { flag: true })).toBe('[redacted] [redacted] is invalid');
-    expect(await answer('flag false is invalid', { flag: false })).toBe('[redacted] [redacted] is invalid');
-    expect(await answer('flag null is invalid', { flag: null })).toBe('[redacted] [redacted] is invalid');
+    expect(await answer('got true', { f: true })).toBe('[redacted]');
+    expect(await answer('got false', { f: false })).toBe('[redacted]');
+    expect(await answer('got null', { f: null })).toBe('[redacted]');
+    expect(await answer('got nothing', { f: false })).toBe('got nothing');
   });
 });
 
@@ -246,12 +247,15 @@ describe('a downstream isError over a real MCP connection', () => {
       'Rejected: token sk-live-1234567890abcdef (or its head sk-live-1234…), key literal-key-abcdef123456, trace middle|secret-9876.',
     );
 
-    const result = await dispatchToolCall(client, { ...echo, utcpName: 'my_notion.srv.echo', mcpName: 'my_notion_srv_echo', manualName: 'my_notion' }, { text: 'hi' });
+    const tool = { ...echo, utcpName: 'my_notion.srv.echo', mcpName: 'my_notion_srv_echo', manualName: 'my_notion' };
+    const result = await dispatchToolCall(client, tool, {});
 
     expect(result.isError).toBe(true);
     expect(result.content).toEqual([
       { type: 'text', text: 'Rejected: token [redacted] (or its head [redacted]…), key [redacted], trace [redacted].' },
     ]);
+    // With the caller's arguments about, a failure that holds a credential is not quoted at all.
+    expect((await dispatchToolCall(client, tool, { text: 'hi' })).content).toEqual([{ type: 'text', text: '[redacted]' }]);
   });
 
   it('takes a short credential out even glued to other text, and a short value that is not one only where it stands alone', async () => {
@@ -282,7 +286,7 @@ describe('a downstream isError over a real MCP connection', () => {
     expect(await registerManual(client, template)).toEqual({ ok: true });
     server.reportToolErrors('Session xa9B2y refused for users in region us.');
 
-    const result = await dispatchToolCall(client, { ...echo, utcpName: 'short.srv.echo', mcpName: 'short_srv_echo', manualName: 'short' }, { text: 'hi' });
+    const result = await dispatchToolCall(client, { ...echo, utcpName: 'short.srv.echo', mcpName: 'short_srv_echo', manualName: 'short' }, {});
 
     expect(result.content).toEqual([{ type: 'text', text: 'Session x[redacted]y refused for users in region [redacted].' }]);
   });
@@ -370,7 +374,7 @@ describe('a downstream isError over a real MCP connection', () => {
     const { client } = await registerWithToken('thrown', server.url, 'sk-live-1234567890abcdef');
     server.failToolCalls('rejected sk-live-1234567890abcdef');
 
-    const result = await dispatchToolCall(client, { ...echo, utcpName: 'thrown.srv.echo', mcpName: 'thrown_srv_echo', manualName: 'thrown' }, { text: 'hi' });
+    const result = await dispatchToolCall(client, { ...echo, utcpName: 'thrown.srv.echo', mcpName: 'thrown_srv_echo', manualName: 'thrown' }, {});
 
     expect(result.isError).toBe(true);
     const text = (result.content[0] as { text: string }).text;
@@ -383,7 +387,7 @@ describe('a downstream isError over a real MCP connection', () => {
     expect(`${(thrown as Error).message} ${(thrown as Error).stack}`).not.toContain('sk-live-1234567890abcdef');
   });
 
-  it('takes out what the caller sent where the server quotes it, so a guess at the key comes back the same right or wrong', async () => {
+  it('withholds a failure that quotes what the caller sent, so a guess at the key comes back the same right or wrong', async () => {
     installDownstreamToolErrors();
     const server = await startFakeMcpServer('notion');
     cleanups.push(() => server.stop());
@@ -393,11 +397,11 @@ describe('a downstream isError over a real MCP connection', () => {
       dispatchToolCall(client, { ...echo, utcpName: 'quoted.srv.echo', mcpName: 'quoted_srv_echo', manualName: 'quoted' }, { text });
 
     // `sk-live-Q7xZ` is a head of the key, `sk-live-Q7xA` is not: both come back the same.
-    expect((await call('sk-live-Q7xZ')).content).toEqual([{ type: 'text', text: "Project '[redacted]' not found" }]);
-    expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: "Project '[redacted]' not found" }]);
+    expect((await call('sk-live-Q7xZ')).content).toEqual([{ type: 'text', text: '[redacted]' }]);
+    expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: '[redacted]' }]);
   });
 
-  it("takes out the caller's keys with their values, a field the tool's schema declares included", async () => {
+  it("withholds a failure that quotes the caller's keys, a field the tool's schema declares included", async () => {
     installDownstreamToolErrors();
     const server = await startFakeMcpServer('notion');
     cleanups.push(() => server.stop());
@@ -411,7 +415,7 @@ describe('a downstream isError over a real MCP connection', () => {
     );
 
     // `text` is the caller's key as much as the tool's field: a guess sent as a key reads the same either way.
-    expect(result.content).toEqual([{ type: 'text', text: '[redacted]: [redacted] is not a page' }]);
+    expect(result.content).toEqual([{ type: 'text', text: '[redacted]' }]);
   });
 
   it('refuses a value every call would read as another variable, naming the variable and not the value', async () => {
