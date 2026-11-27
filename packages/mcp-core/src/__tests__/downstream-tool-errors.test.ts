@@ -218,7 +218,8 @@ describe('every failure a wrapped protocol lets through', () => {
     const nested = Object.assign(new McpError(-32603, 'rejected', { status: 401, detail: { statusCode: 404 } }), { status: 401 });
     const echoed = (await failingWith(nested)({ want: 401, also: 404 })) as McpError & { status: unknown };
     expect(echoed.status).toBe(401);
-    expect(echoed.data).toEqual({ status: '[redacted]', detail: { statusCode: '[redacted]' } });
+    // With the caller's arguments about, the payload is withheld whole, its keys too.
+    expect(echoed.data).toEqual({ '[redacted]': { '[redacted]': '[redacted]' } });
     // A boolean whose text is a credential goes too.
     const keyed = {
       name: 'stub',
@@ -233,7 +234,7 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(await failingWith(`refused ${KEY}`)()).toBe('refused [redacted]');
   });
 
-  it("withholds a failure that quotes the caller's keys, numbers or escaped strings, matched or not", async () => {
+  it("withholds a failure of a call with arguments, whatever it quotes of them, while the call carries a secret", async () => {
     const quoting = (text: string) => new DownstreamToolError(text, [{ type: 'text', text }]);
     const answer = async (failure: DownstreamToolError, args: unknown) => ((await failingWith(failure)(args)) as DownstreamToolError).message;
     expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe('[redacted]');
@@ -243,11 +244,13 @@ describe('every failure a wrapped protocol lets through', () => {
     // The server quoting the PIN itself reads the same whichever PIN the caller sent.
     expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted]');
     expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('[redacted]');
-    // A failure that quotes none of it and no credential goes as it came.
-    expect(await answer(quoting('This tool requires a Business plan.'), { query: 'Quarterly review' })).toBe('This tool requires a Business plan.');
+    // With no secret held there is nothing to keep, and a failure goes as it came.
+    const open = { name: 'stub', call_template_type: 'mcp', config: { mcpServers: { srv: { url: 'https://x.example/mcp' } } } } as unknown as CallTemplate;
+    const plain = new DownstreamToolError('This tool requires a Business plan.', [{ type: 'text', text: 'This tool requires a Business plan.' }]);
+    expect(((await failingWith(plain, open)({ query: 'Quarterly review' })) as DownstreamToolError).message).toBe('This tool requires a Business plan.');
   });
 
-  it('counts a boolean or null the caller sent as theirs, so a guess at a key spelled the same reads the same right or wrong', async () => {
+  it('withholds a failure of a call whose arguments are a boolean or null, so a guess at a key spelled the same reads the same', async () => {
     const keyed = {
       name: 'stub',
       call_template_type: 'mcp',
@@ -258,7 +261,7 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(await answer('got true', { f: true })).toBe('[redacted]');
     expect(await answer('got false', { f: false })).toBe('[redacted]');
     expect(await answer('got null', { f: null })).toBe('[redacted]');
-    expect(await answer('got nothing', { f: false })).toBe('got nothing');
+    expect(await answer('got nothing', { f: false })).toBe('[redacted]');
   });
 });
 

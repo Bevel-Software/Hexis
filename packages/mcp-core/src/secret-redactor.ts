@@ -16,18 +16,6 @@ import type { CallTemplate } from '@utcp/sdk';
 const MIN_SECRET_CHARS = 6;
 /** The shortest piece of a secret we will treat as an echo of it. */
 const MIN_ECHOED_PIECE_CHARS = 8;
-/**
- * The length of a piece of the caller's text that counts as repeated
- * wherever it appears; a shorter string of theirs counts whole, wherever it
- * appears. A secret shorter than this withholds every quote made with the
- * caller's text about. See {@link SecretRedactor}.
- */
-const MIN_CALLER_CHARS = 4;
-/**
- * How much of what the caller sent `redact` reads at most; past it, none of
- * the text is quoted. It depends on nothing secret, so it tells nothing.
- */
-const MAX_CALLER_CHARS_READ = 4_000_000;
 const REDACTED = '[redacted]';
 /**
  * Every secret a request carried, so that none of them can come back out in
@@ -49,12 +37,7 @@ const REDACTED = '[redacted]';
  * A KNOWN credential ({@link remember}) is taken out wherever it appears,
  * whatever its length: a four-character key is still the key, and one echoed
  * glued to other text (`xa9B2y`) is still echoed. The price is paid in the
- * message: a short credential blanks its characters wherever they fall. A
- * secret shorter than four characters, a credential or a substituted value
- * (below), cannot also be kept from answering a guess the server shortened or
- * glued to other text, so while one is held, a quote made with the caller's
- * text about ({@link redact}'s `callerText`) is not quoted at all: the same
- * `[redacted]` whatever was sent.
+ * message: a short credential blanks its characters wherever they fall.
  *
  * A value that is only known to have been SUBSTITUTED ({@link rememberSubstituted})
  * is one too when its variable's name says so. Otherwise it may be anything:
@@ -65,23 +48,18 @@ const REDACTED = '[redacted]';
  * makes the verdict useful, so a SHORT one of those may only match a run of
  * its own. Six characters or more, it is taken out wherever it appears too.
  *
- * With text the CALLER sent ({@link redact}'s `callerText`), a quote goes
- * whole or not at all: it is withheld, one `[redacted]` for all of it, when it
- * repeats any of that text, case aside, or holds any secret. It repeats it
- * when it has any four characters of a string the caller sent (as sent or in
- * one of the spellings above), or any of their shorter strings anywhere, glued
- * to other text or not. Anything finer answers guesses. Taking out only what repeats the
- * caller's text leaves the rest of a key whose head a right guess covered,
- * where a wrong guess leaves the key taken out whole; taking out the rest of a
- * key from the secrets answers whether a stretch next to the caller's text
- * (one they placed there with a short argument, say) is in a key. Whether a
- * quote is withheld reads the caller's text against the server's words, or
- * the secrets against words the caller's text is not in, so it says nothing
- * about whether a guess was right. The price is paid in the message: a failure
- * that repeats any piece of a call's arguments, a key's name included, is not
- * quoted, nor one that has any of their short strings anywhere (a `1` the
- * call sent withholds every failure with a `1` in it). With no secret held
- * there is nothing to keep, and the quote goes as it came.
+ * With text the CALLER sent ({@link redact}'s `callerText`) and any secret
+ * held, nothing is quoted: the whole text is one `[redacted]`, whatever was
+ * sent and whatever the server said. A server can hand the caller's input
+ * back rewritten (shortened, glued to its own words, re-encoded), and a
+ * secret matched in what it rewrote answers whether the guess was right; no
+ * reading of the text can tell every rewriting from the server's own words,
+ * so only a rule that reads neither the text nor the secrets answers the same
+ * either way. The price is paid in the message: a failure of a call with
+ * arguments to a server that holds a secret says only that it failed. A
+ * failure quoted without the caller's text about (a registration's, the
+ * connection probe's) is redacted as above, and with no secret held there is
+ * nothing to keep, so the quote goes as it came.
  *
  * Nothing here gives up on a long text: each secret is matched in time linear
  * in the text and the secret, and in space linear in the secret, so no bound
@@ -115,18 +93,13 @@ export class SecretRedactor {
    * one `[redacted]`. Every match is found in the text as it came, so no value
    * can match inside a marker another one left, and echoes that overlap are
    * both taken out. `callerText`: the strings the caller sent with the request;
-   * with any, the text goes whole or not at all (see the class comment).
+   * with any, and a secret held, nothing is quoted (see the class comment).
    */
   redact(text: string, callerText: readonly string[] = []): string {
     const secrets = new Set([...this.credentials, ...this.substituted]);
+    // With the caller's text about, nothing is quoted (see the class comment).
+    if (callerText.length > 0) return secrets.size === 0 ? text : REDACTED;
     const hidden = hiddenIn(text, secrets, this.credentials);
-    if (callerText.length > 0) {
-      if (secrets.size === 0) return text;
-      // A secret this short cannot be kept from answering a guess the server
-      // shortened or glued to other text (see the class comment).
-      if ([...secrets].some((secret) => secret.length < MIN_CALLER_CHARS)) return REDACTED;
-      return hidden.includes(1) || repeatsCallerText(text, callerText) ? REDACTED : text;
-    }
     let out = '';
     for (let i = 0; i < text.length; i++) {
       if (!hidden[i]) out += text[i];
@@ -168,41 +141,6 @@ function hiddenIn(text: string, secrets: ReadonlySet<string>, credentials: Reado
   return hidden;
 }
 
-/**
- * Whether `text` repeats any of `callerText`, case aside (see the class
- * comment); and, past four million characters of it read, whether it might,
- * which depends on nothing secret. Their four-character pieces are looked up
- * in a table of the text's, and their short strings in one walk over it.
- */
-function repeatsCallerText(text: string, callerText: readonly string[]): boolean {
-  const folded = foldCase(text);
-  const pieces = new HashTable(folded.length);
-  for (const [, a, b] of rolled(folded, MIN_CALLER_CHARS)) pieces.add(a, b);
-  const shortStrings = new Set<string>();
-  let read = 0;
-  for (const sent of callerText) {
-    for (const spelling of new Set(spellings(sent))) {
-      read += spelling.length;
-      if (read > MAX_CALLER_CHARS_READ) return true;
-      const sentFolded = foldCase(spelling);
-      if (sentFolded.length < MIN_CALLER_CHARS) {
-        shortStrings.add(sentFolded);
-        continue;
-      }
-      for (const [, a, b] of rolled(sentFolded, MIN_CALLER_CHARS)) if (pieces.has(a, b)) return true;
-    }
-  }
-  if (shortStrings.size === 0) return false;
-  // Their short strings anywhere, glued to other text or not: one walk, every
-  // start tried against the set.
-  for (let at = 0; at < folded.length; at++) {
-    for (let length = 1; length < MIN_CALLER_CHARS && at + length <= folded.length; length++) {
-      if (shortStrings.has(folded.slice(at, at + length))) return true;
-    }
-  }
-  return false;
-}
-
 /** The spellings a value can travel in: as it is, trimmed, url-encoded, JSON-escaped (with `/` escaped or not). */
 function spellings(value: string): string[] {
   const trimmed = value.trim();
@@ -212,22 +150,6 @@ function spellings(value: string): string[] {
   return [value, trimmed, urlEncoded(value), escaped, escaped.replaceAll('/', '\\/')].filter(
     (spelling): spelling is string => !!spelling?.trim(),
   );
-}
-
-/**
- * One character case-folded: upper- then lower-cased, so the pairs a case
- * change expands or shrinks meet (`ß` and `SS`, `İ` and `i̇`).
- */
-function foldChar(ch: string): string {
-  return ch.toUpperCase().toLowerCase();
-}
-
-/** `text` case-folded one character at a time ({@link foldChar}); printable ASCII takes the short way, to the same result. */
-function foldCase(text: string): string {
-  if (/^[ -~]*$/.test(text)) return text.toLowerCase();
-  let folded = '';
-  for (const ch of text) folded += foldChar(ch);
-  return folded;
 }
 
 /** `value` url-encoded, or null for one that cannot be (a lone surrogate): no request could carry it that way. */

@@ -136,14 +136,15 @@ describe('SecretRedactor', () => {
     for (const guess of ['sk', 'zz']) expect(redactor.redact(`no ${guess}-live-Q7xZ here`, [guess])).toBe('[redacted]');
   });
 
-  it("passes a quote on as it came when it repeats none of the caller's text and holds no secret", () => {
+  it("withholds every quote with the caller's text about while a secret is held, whatever it says", () => {
     const redactor = new SecretRedactor();
     redactor.remember('sk-live-Q7xZ2abcdefgh');
-    const text = 'This tool requires a Business plan or higher.';
-    expect(redactor.redact(text, ['Quarterly review', 'limit', 50].map(String))).toBe(text);
-    // A short string of the caller's counts wherever it appears, glued to other text or not.
-    expect(redactor.redact('Invalid value: 42 (max 420)', ['2'])).toBe('[redacted]');
-    expect(redactor.redact(text, ['hi'])).toBe('[redacted]');
+    redactor.remember('a9B2');
+    // One that repeats nothing of the caller's and holds no secret.
+    expect(redactor.redact('This tool requires a Business plan or higher.', ['Quarterly review'])).toBe('[redacted]');
+    // A guess the server shortens below four characters and glues its own text to, right or wrong.
+    expect(redactor.redact('no a9B2 here', ['a9Bpadding'])).toBe('[redacted]');
+    expect(redactor.redact('no a9C2 here', ['a9Cpadding'])).toBe('[redacted]');
   });
 
   it("withholds a quote that holds a secret while the caller's text is about, and takes it out of one quoted without", () => {
@@ -155,19 +156,6 @@ describe('SecretRedactor', () => {
 
   it("quotes the caller's text as it came when no secret is held: there is nothing to keep", () => {
     expect(new SecretRedactor().redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named 'Quarterly plan'");
-  });
-
-  it('withholds a long echoed run of one character without going over its bound', () => {
-    const redactor = new SecretRedactor();
-    redactor.remember('sk-live-Q7xZ2abcdefgh');
-    const run = 'a'.repeat(20_000);
-    expect(redactor.redact(`bad value ${run}`, [run])).toBe('[redacted]');
-  });
-
-  it('quotes nothing when what the caller sent is too long to read', () => {
-    const redactor = new SecretRedactor();
-    redactor.remember('sk-live-Q7xZ2abcdefgh');
-    expect(redactor.redact('bad value', ['z'.repeat(4_000_001)])).toBe('[redacted]');
   });
 
   it("quotes nothing with the caller's text about while a secret shorter than four characters is held, a substituted value too", () => {
@@ -193,14 +181,6 @@ describe('SecretRedactor', () => {
     const redactor = new SecretRedactor();
     redactor.remember('ab1');
     expect(redactor.redact('key xab1y refused')).toBe('key x[redacted]y refused');
-  });
-
-  it('looks for many short strings of the caller in one walk over a long text', () => {
-    const redactor = new SecretRedactor();
-    redactor.remember('sk-live-Q7xZ2abcdefgh');
-    const words = 'word '.repeat(4_000);
-    expect(redactor.redact(`${words}! end`, Array.from({ length: 200_000 }, () => '?'))).toBe(`${words}! end`);
-    expect(redactor.redact(`${words}? end`, Array.from({ length: 200_000 }, () => '?'))).toBe('[redacted]');
   });
 
   it('fills overlapping pieces once, so a megabyte of echoes stays fast', () => {
