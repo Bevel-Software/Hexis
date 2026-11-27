@@ -4,7 +4,8 @@ import { Badge, Button } from '../../../../shared/components';
 import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
 import { NeedsSkillWriteError, linkSkill, repairSkillLink, unlinkSkill } from '../../services/plugins.api';
-import { requestSkillAccess, type PluginMembership } from '../../services/library.api';
+import { requestSkillAccess, type LeftoverPluginGrant, type PluginMembership } from '../../services/library.api';
+import { leftoverGrantText } from '../../utils/names';
 import { pathForPlugin } from '../../routes/library-paths';
 import { StatusDot } from '../StatusDot';
 import { cn } from '../../../../lib/utils';
@@ -21,6 +22,10 @@ import { cn } from '../../../../lib/utils';
  * cannot read the skill. Unlink is the plugin MANAGER's verb (it edits the
  * plugin's manifest), so it appears only on plugins the caller manages.
  *
+ * A LEFTOVER row is a plugin that no longer links the skill but whose grant
+ * is still in an access file: the link was edited out of plugin.json, so its
+ * members still read the skill. The row names the grant and who can remove it.
+ *
  * "Add to plugin" links this skill into a plugin the caller manages. It
  * needs write on the skill too; a refusal of that shape offers the request.
  */
@@ -28,12 +33,15 @@ export function SharedViaPlugins({
   skillName,
   skillPath,
   memberships,
+  leftovers = [],
   canWrite,
   onChanged,
 }: {
   skillName: string;
   skillPath: string;
   memberships: PluginMembership[];
+  /** Grants of plugins whose manifests no longer link this skill. */
+  leftovers?: LeftoverPluginGrant[];
   /** The caller may edit the skill (its SKILL.md) — the repair verb. */
   canWrite: boolean;
   onChanged(): void;
@@ -72,13 +80,13 @@ export function SharedViaPlugins({
     }
   }
 
-  if (memberships.length === 0 && addable.length === 0) return null;
+  if (memberships.length === 0 && leftovers.length === 0 && addable.length === 0) return null;
 
   return (
     <section className="mt-6" data-testid="shared-via-plugins">
       <h2 className="mb-2.5 text-label font-semibold uppercase text-ink-faint">In plugins</h2>
       <div className="grid gap-2">
-        {memberships.length === 0 && (
+        {memberships.length === 0 && leftovers.length === 0 && (
           <p className="text-detail text-ink-faint">This skill is in no plugin yet.</p>
         )}
         {memberships.map((m) => {
@@ -137,6 +145,28 @@ export function SharedViaPlugins({
             </div>
           );
         })}
+        {leftovers.map((g) => (
+          <div
+            key={`leftover:${g.plugin}:${g.folder}`}
+            data-testid="leftover-grant"
+            className="flex items-center gap-3 rounded-md border border-line bg-sunken px-3 py-2"
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <Link to={pathForPlugin(g.plugin)} className="truncate text-detail font-semibold text-ink underline-offset-2 hover:underline">
+                  {g.plugin}
+                </Link>
+                <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+                  Leftover grant
+                </Badge>
+              </div>
+              <small className="block text-meta text-urgent">{leftoverGrantText(g, skillName)}</small>
+            </div>
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <StatusDot state="urgent" />
+            </div>
+          </div>
+        ))}
       </div>
 
       {addable.length > 0 && (

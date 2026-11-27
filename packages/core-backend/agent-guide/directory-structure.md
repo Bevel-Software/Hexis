@@ -57,9 +57,10 @@ lists skill folders, or folders of skills, under `{{skillsDir}}/`:
 A plugin's skills are the ones in its own `skills/` folder plus everything its
 links resolve to, and one skill can be linked by many plugins. Do not edit that
 list by hand: link from the plugin's page in the app, which also grants the
-plugin's members read on the skill (see `access-control`). A link without that
-grant is repaired automatically when someone who may write the plugin opens its
-page; one that cannot be repaired that way shows as needing setup. Who may read
+plugin's members read on the skill (see `access-control`). When someone who
+may write the plugin opens its page, a link missing that grant is repaired and
+the grant of an entry removed by hand is revoked where they can; any left
+shows on the skill and plugin pages. Who may read
 a skill is decided by the skill's own folders, never by the plugin: a plugin
 linking a skill someone cannot read simply does not show it to them.
 

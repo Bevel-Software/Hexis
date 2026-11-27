@@ -277,6 +277,8 @@ export interface UnrepairedLink {
 export interface LinkRepairReport {
   repaired: string[];
   skipped: UnrepairedLink[];
+  /** Folders whose grant a link edited out of plugin.json left behind, now revoked. Absent from an older server. */
+  revoked?: string[];
 }
 
 /**
