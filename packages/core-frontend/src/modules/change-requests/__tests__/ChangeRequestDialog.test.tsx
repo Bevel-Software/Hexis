@@ -429,7 +429,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     expect(onResolved).not.toHaveBeenCalled();
   });
 
-  it('moving to another file disarms Decline', async () => {
+  it('moving to another file disarms Decline, and coming back asks again', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([
         approval({ path: 'Docs/a.md', viewerCanApprove: true }),
@@ -444,6 +444,11 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     fireEvent.click(screen.getByTitle('Docs/b.md'));
     expect(await screen.findByRole('button', { name: 'Decline this file' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Really decline this file?' })).not.toBeInTheDocument();
+
+    // Back on the first file: still disarmed, so one click only arms again.
+    fireEvent.click(screen.getByTitle('Docs/a.md'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this file' }));
+    expect(screen.getByRole('button', { name: 'Really decline this file?' })).toBeInTheDocument();
     expect(approvalsApi.revertPrFile).not.toHaveBeenCalled();
   });
 

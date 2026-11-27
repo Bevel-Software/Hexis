@@ -699,12 +699,13 @@ export function ChangeRequestDialog({
   const [verbError, setVerbError] = useState<string | null>(null);
   /**
    * The file whose header Decline was pressed once and now asks to be sure,
-   * the same armed second click the tree's menu takes. Keyed by path, so
-   * moving to another file disarms it without an effect.
+   * the same armed second click the tree's menu takes. Moving to another file
+   * disarms it, so coming back to this one asks again.
    */
   const [declineArmedFor, setDeclineArmedFor] = useState<string | null>(null);
   useEffect(() => {
     setVerbError(null);
+    setDeclineArmedFor(null);
   }, [selected]);
 
   /**

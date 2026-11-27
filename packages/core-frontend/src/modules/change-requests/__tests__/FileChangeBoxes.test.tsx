@@ -168,7 +168,7 @@ describe('FileChangeBoxes: who may decide', () => {
 });
 
 describe('FileChangeBoxes: Decline and Withdraw', () => {
-  it('Decline takes only THIS file out of the request, leaving its other files proposed', async () => {
+  it('Decline reverts only THIS file and does not cancel the request', async () => {
     renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
 
     fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
