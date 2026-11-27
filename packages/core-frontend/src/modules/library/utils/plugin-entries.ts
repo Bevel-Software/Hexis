@@ -1,5 +1,6 @@
 import { attentionOf, type LibraryItem } from '../state/library-data';
 import type { PluginSummary } from '../services/plugins.api';
+import { PERSONAL_PLUGIN_NAME } from './personal-plugin';
 import { pluginLabel } from './plugin-summary';
 import { filterLibraryItems, isInPlugin, pluginsOfItem, type LibraryFilter, type TeamAccess } from './status';
 
@@ -57,6 +58,8 @@ export function ownedLensOf(
  *  - A plugin's own page and the personal page list items, not plugins.
  *
  * `query` matches the label, so a search narrows plugins with the cards.
+ * The own space also answers to its default name, which the breadcrumb and
+ * the search palette keep showing after its owner names it.
  */
 export function pluginEntriesFor(
   items: readonly LibraryItem[],
@@ -114,7 +117,7 @@ export function pluginEntriesFor(
       member,
     });
   }
-  return entries.filter((e) => matches(e.label));
+  return entries.filter((e) => matches(e.label) || (e.name === null && matches(PERSONAL_PLUGIN_NAME)));
 }
 
 /**
