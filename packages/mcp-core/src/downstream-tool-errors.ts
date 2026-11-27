@@ -199,7 +199,7 @@ function stringsIn(args: unknown): string[] {
     else if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') found.push(String(value));
     else if (value && typeof value === 'object' && !seen.has(value)) {
       seen.add(value);
-      if (Array.isArray(value)) pending.push(...value);
+      if (Array.isArray(value)) for (const item of value) pending.push(item);
       else {
         for (const [key, item] of Object.entries(value)) {
           found.push(key);

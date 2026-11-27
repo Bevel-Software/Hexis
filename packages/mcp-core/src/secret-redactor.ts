@@ -204,7 +204,7 @@ const CREDENTIAL_MARKERS = [
 /**
  * The same, for names too short to match as substrings, matched as whole
  * words of the name (split at punctuation and at camelCase humps: `X-Pin`,
- * `client_cred`, `dbPass`): `sig` inside a word would swallow `design`,
+ * `client_cred`, `dbPass`, `APIPin`): `sig` inside a word would swallow `design`,
  * `assign` and `signal`, `pin` would swallow `mapping`, `pass` would swallow
  * `bypass`, `cred` would swallow `credit`, and blanking those would eat the
  * message rather than protect anything in it.
@@ -214,7 +214,9 @@ const CREDENTIAL_WORDS = new Set(['sig', 'hash', 'pin', 'pat', 'otp', 'sid', 'pw
 export function carriesCredential(fieldName: string): boolean {
   const name = fieldName.toLowerCase();
   if (CREDENTIAL_MARKERS.some((marker) => name.includes(marker))) return true;
-  return fieldName.split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).some((word) => CREDENTIAL_WORDS.has(word.toLowerCase()));
+  return fieldName
+    .split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/)
+    .some((word) => CREDENTIAL_WORDS.has(word.toLowerCase()));
 }
 
 /** Whatever takes the credentials found below: a {@link SecretRedactor}, or a collector of the fields' text. */

@@ -36,7 +36,7 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('region us, status 401 for users')).toBe('region [redacted], status 401 for users');
   });
 
-  it.each(['PIN', 'DB_PASSCODE', 'JWT', 'SESSION_ID', 'BEARER', 'OTP', 'dbPass', 'serviceCreds', 'client_cred'])('counts a `${%s}` as a credential', (name) => {
+  it.each(['PIN', 'DB_PASSCODE', 'JWT', 'SESSION_ID', 'BEARER', 'OTP', 'dbPass', 'serviceCreds', 'client_cred', 'APIPin', 'GHPat'])('counts a `${%s}` as a credential', (name) => {
     const redactor = new SecretRedactor();
     redactor.rememberSubstituted(name, 'a9B2');
     expect(redactor.redact('xa9B2y')).toBe('x[redacted]y');
