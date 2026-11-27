@@ -1,6 +1,8 @@
 import type { ITreeWalker } from '../shared/fs.contract.js';
 import type { WorkspaceService } from '../modules/workspace/index.js';
+import type { IAccessControl } from '../modules/access/index.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
+import { AccessMutationService } from '../modules/access/access-mutation.service.js';
 
 /**
  * The access resolver over a real tree, wired the way the composition root
@@ -13,4 +15,17 @@ import { AccessControlService } from '../modules/access/access-control.service.j
  */
 export function realAccessControl(workspace: WorkspaceService, kbDirName: string, disk: ITreeWalker): AccessControlService {
   return new AccessControlService(workspace, kbDirName, disk);
+}
+
+/**
+ * The access-file writer over that resolver, as the root wires it: what a
+ * suite uses when its service grants or revokes and the real rules must then
+ * answer for the change.
+ */
+export function realAccessMutation(
+  workspace: WorkspaceService,
+  access: IAccessControl,
+  kbDirName: string,
+): AccessMutationService {
+  return new AccessMutationService(workspace, access, kbDirName);
 }

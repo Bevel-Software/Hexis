@@ -363,8 +363,10 @@ export class PluginLinksService {
     return this.locks.runAll(this.lockKeys(folder, grantFolder), async () => {
       const { manifest } = await this.readManifest(wsId, folder);
       // A linked root at, above or below the folder: its grant opens a skill
-      // the plugin still links, so revoking it would break that link.
-      const overlaps = (root: string) => skillUnderRoot(grantFolder, root) || skillUnderRoot(root, grantFolder);
+      // the plugin still links, so revoking it would break that link. `''` is
+      // the knowledge base's own access.md, above every root.
+      const overlaps = (root: string) =>
+        grantFolder === '' || skillUnderRoot(grantFolder, root) || skillUnderRoot(root, grantFolder);
       if (linkedSkillRoots(manifest).some(overlaps)) return false;
       if (!(await this.accessControl.canWrite(wsId, user.email, accessMdPathForFolder(grantFolder)))) return false;
       const changed = await this.revokeTokens(wsId, user, folder, grantFolder, leftoverSummary(folder, grantFolder));

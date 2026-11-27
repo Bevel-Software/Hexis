@@ -1,7 +1,7 @@
 import type { Server } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
-import '../../auth/auth.middleware.js'; // Express Request.userEmail augmentation
+import '../../auth/index.js'; // Express Request.userEmail augmentation, through auth's entry
 import { createSkillsRoutes, type SkillMembershipSource } from '../skills.routes.js';
 import type { ISkillService } from '../skills.contract.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';

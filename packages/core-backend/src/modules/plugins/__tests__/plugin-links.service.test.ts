@@ -1,16 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { DEFAULT_BRANCH, withLinkedSkillRoots, type AuthUser } from '@bevel-software/platform-shared';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { AccessControlService } from '../../access/access-control.service.js';
-import { AccessMutationService } from '../../access/access-mutation.service.js';
-import { SkillService } from '../../skills/skills.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { SkillService } from '../../skills/index.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
+import { realAccessControl, realAccessMutation } from '../../../__tests__/real-access.js';
+import { realSkills } from '../../../__tests__/real-skills.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { PluginLinksService, PluginLinkError } from '../plugin-links.service.js';
 import type { ProvisionCommitDriver } from '../plugin-provision.service.js';
@@ -42,7 +42,7 @@ describe('PluginLinksService', () => {
   let subjects: (string | undefined)[];
   /** Set to make the commit driver refuse every path containing it. */
   let failCommitsUnder: string | null;
-  let access: AccessControlService;
+  let access: IAccessControl;
   let skills: SkillService;
   let index: PluginLinkIndex;
   let svc: PluginLinksService;
@@ -94,12 +94,12 @@ describe('PluginLinksService', () => {
     await write('Skills/Eng/deploy/SKILL.md', '---\ndescription: Ship it.\n---\n');
     await write('Skills/Eng/rollback/SKILL.md', '---\ndescription: Undo it.\n---\n');
 
-    const disk = new NodeFs();
-    access = new AccessControlService(workspaceService, KB_DIR, disk);
+    const disk = realDisk();
+    access = realAccessControl(workspaceService, KB_DIR, disk);
     const kb = testKbContext({ kbDirName: KB_DIR });
-    skills = new SkillService(workspaceService, access, kb, disk);
-    index = new PluginLinkIndex(workspaceService, skills, access, kb, new KbPluginSource(disk, kb));
-    svc = new PluginLinksService(workspaceService, driver, access, new AccessMutationService(workspaceService, access, kb.kbDirName), skills, index, kb);
+    skills = realSkills(workspaceService, access, kb, disk);
+    index = new PluginLinkIndex(workspaceService, skills, access, kb, realPluginSource(disk, kb));
+    svc = new PluginLinksService(workspaceService, driver, access, realAccessMutation(workspaceService, access, kb.kbDirName), skills, index, kb);
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));
 
@@ -587,6 +587,22 @@ describe('PluginLinksService', () => {
 
       expect((await svc.repairAll(manager, 'gtm')).revoked).toEqual([]);
       expect(await read('Skills/Eng/access.md')).toContain('plugin/gtm/read');
+      access.invalidate(wsId);
+      expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
+    });
+
+    it("a leftover grant on the knowledge base's own access.md is kept while it opens a linked skill", async () => {
+      const admin: AuthUser = { id: 'u-admin', email: 'admin@x.io', name: 'Admin' } as AuthUser;
+      await write('access.md', '---\nwrite:\n  - Admin\n---\nread:\n  - plugin/gtm/read\n');
+      access.invalidate(wsId);
+      expect(await leftoversOf()).toMatchObject([{ folder: '' }]); // the work list is read now…
+      await write(
+        'Plugins/GTM/plugin.json',
+        `${JSON.stringify(withLinkedSkillRoots({ name: 'gtm' }, ['Skills/Eng/deploy']), null, 2)}\n`,
+      ); // …and deploy, opened only by the root's grant, is linked before the revoke
+
+      expect((await svc.repairAll(admin, 'gtm')).revoked).toEqual([]);
+      expect(await read('access.md')).toContain('plugin/gtm/read');
       access.invalidate(wsId);
       expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
     });

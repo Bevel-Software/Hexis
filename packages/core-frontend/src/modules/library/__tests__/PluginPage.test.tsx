@@ -3,13 +3,10 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { AdminContext, type AdminContextValue } from '../../admin';
 import type { LibraryData } from '../hooks/useLibraryData';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import type { ToolSecrets } from '../../secrets-vault';
 import type { PluginSummary } from '../services/plugins.api';
 import { withAuth } from './auth-harness';
 import { expectMenuAtTheEndOfTheTitleRow } from './title-row-actions';
