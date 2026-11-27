@@ -691,9 +691,18 @@ export function ChangeRequestDialog({
     detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved || a.viewerCanApprove) &&
     detail.approvals.some((a) => a.isApproved || a.viewerCanApprove);
 
-  /** Approve / revert verbs — approve from the file header and the footer, revert from the tree. */
+  /**
+   * Approve / decline verbs — approve from the file header and the footer,
+   * decline from the file header and the tree's right-click "Revert file…".
+   */
   const [verbBusy, setVerbBusy] = useState(false);
   const [verbError, setVerbError] = useState<string | null>(null);
+  /**
+   * The file whose header Decline was pressed once and now asks to be sure,
+   * the same armed second click the tree's menu takes. Keyed by path, so
+   * moving to another file disarms it without an effect.
+   */
+  const [declineArmedFor, setDeclineArmedFor] = useState<string | null>(null);
   useEffect(() => {
     setVerbError(null);
   }, [selected]);
@@ -1403,9 +1412,35 @@ export function ChangeRequestDialog({
                   size="tiny"
                   className="ml-auto shrink-0"
                   disabled={verbBusy || applyBusy || bringingUpToDate}
-                  onClick={() => void toggleApprove(selected, headerVerb === 'undo')}
+                  onClick={() => {
+                    setDeclineArmedFor(null);
+                    void toggleApprove(selected, headerVerb === 'undo');
+                  }}
                 >
                   {headerVerb === 'approve' ? 'Approve this file' : 'Approved – Undo'}
+                </Button>
+              )}
+              {/* Approve's counterpart, beside it: the tree's right-click
+                  "Revert file…" was the only way to say no to one file, and
+                  nobody found it. Same verb, same gate (a changed file the
+                  viewer may approve), same armed second click. */}
+              {headerVerb && (
+                <Button
+                  variant="danger"
+                  size="tiny"
+                  className="shrink-0"
+                  title="Take this file's changes out of the request. The other files stay in it."
+                  disabled={verbBusy || applyBusy || bringingUpToDate}
+                  onClick={() => {
+                    if (declineArmedFor === selected) {
+                      setDeclineArmedFor(null);
+                      void revertFile(selected);
+                    } else {
+                      setDeclineArmedFor(selected);
+                    }
+                  }}
+                >
+                  {declineArmedFor === selected ? 'Really decline this file?' : 'Decline this file'}
                 </Button>
               )}
             </div>

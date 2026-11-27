@@ -385,6 +385,75 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     await waitFor(() => expect(onResolved).toHaveBeenCalled());
   });
 
+  it('the header offers Decline beside Approve, with its own confirm; the last file resolves the dialog', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([approval({ viewerCanApprove: true })]),
+    );
+    approvalsApi.revertPrFile.mockReset();
+    approvalsApi.revertPrFile.mockResolvedValue({ closed: true, remainingPaths: [] });
+    const onResolved = vi.fn();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
+
+    const approve = await screen.findByRole('button', { name: 'Approve this file' });
+    const decline = screen.getByRole('button', { name: 'Decline this file' });
+    // Beside Approve, so the reviewer finds both answers where they read.
+    expect(approve.nextElementSibling).toBe(decline);
+
+    fireEvent.click(decline);
+    // Nothing sent yet — the armed second click is the verdict.
+    expect(approvalsApi.revertPrFile).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Really decline this file?' }));
+
+    await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+  });
+
+  it('declining one of two files keeps the dialog open on the rest', async () => {
+    const both = detailWith([
+      approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+      approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+    ]);
+    const onlyB = detailWith([approval({ path: 'Docs/b.md', viewerCanApprove: true })]);
+    detailMock.fetchPrDetail.mockResolvedValueOnce(both).mockResolvedValue(onlyB);
+    approvalsApi.revertPrFile.mockReset();
+    approvalsApi.revertPrFile.mockResolvedValue({ closed: false, remainingPaths: ['Docs/b.md'] });
+    const onResolved = vi.fn();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this file' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Really decline this file?' }));
+
+    await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+    await waitFor(() => expect(screen.queryByTitle('Docs/a.md')).not.toBeInTheDocument());
+    expect(screen.getByTitle('Docs/b.md')).toBeInTheDocument();
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+
+  it('moving to another file disarms Decline', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+        approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+      ]),
+    );
+    approvalsApi.revertPrFile.mockReset();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this file' }));
+    expect(screen.getByRole('button', { name: 'Really decline this file?' })).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('Docs/b.md'));
+    expect(await screen.findByRole('button', { name: 'Decline this file' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Really decline this file?' })).not.toBeInTheDocument();
+    expect(approvalsApi.revertPrFile).not.toHaveBeenCalled();
+  });
+
+  it('offers no Decline to a viewer who cannot approve the file', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(detailWith([approval({})]));
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    await screen.findByText('Waiting on Admin');
+    expect(screen.queryByRole('button', { name: 'Decline this file' })).not.toBeInTheDocument();
+  });
+
   /**
    * Delete is the author's verb as much as the admin's. The dialog asks the
    * server one question — `viewerCanDelete` — so these tests never encode
