@@ -150,7 +150,7 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
   });
 
   /** Only the description changed: the call an agent makes is the call it made. */
-  it('keeps its endpoint, inputs, outputs and tags exactly as they were', () => {
+  it('keeps its endpoint, inputs and tags exactly as they were, and answers whether it repaired the folder', () => {
     const def = myPluginDef(DEFAULT_KB_LAYOUT);
     expect((def.tool_call_template as { url: string; http_method: string }).url).toBe('${API_URL}/api/plugins/personal');
     expect((def.tool_call_template as { http_method: string }).http_method).toBe('POST');
@@ -169,6 +169,7 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
       'name',
       'displayName',
       'created',
+      'repaired',
     ]);
     expect(def.tags).toEqual(['plugins', 'skills', 'write']);
     // Byte-identical on every layout but the description.

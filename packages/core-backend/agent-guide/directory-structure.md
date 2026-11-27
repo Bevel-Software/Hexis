@@ -83,7 +83,7 @@ name under `{{pluginsDir}}/` makes neither: on a protected branch it is
 refused, and on a draft it makes a folder that is not a plugin. Use:
 
 - `my_plugin`: the user's personal plugin, `{{pluginsDir}}/personal-<id>/`,
-  created on first use. Only its owner can read it, admins included, and it is
+  created on first use; no other write can create it. Only its owner can read it, admins included, and it is
   never listed as a plugin. Their own skills go in its `skills/` folder, each in
   a folder with a `SKILL.md`. A note or any other document goes under
   `{{knowledgeBaseDir}}/` instead (see `where-a-new-file-goes`).
