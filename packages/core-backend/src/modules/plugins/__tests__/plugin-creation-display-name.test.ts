@@ -232,6 +232,53 @@ describe('creation derives and stores the display name the same way through ever
     expect(JSON.parse(await fs.readFile(manifestPath, 'utf-8')).displayName).toBe("Alice's space");
   });
 
+  /** Alice's personal folder made, then its manifest relabelled by hand to `qa-toolkit` / `QA Toolkit`. */
+  async function relabelledPersonal(): Promise<Harness> {
+    const h = await makeHarness();
+    await h.svc.ensurePersonalPlugin(ALICE);
+    await fs.writeFile(
+      path.join(h.dir, KB, 'Plugins/personal-u-alice/plugin.json'),
+      JSON.stringify({ name: 'qa-toolkit', displayName: 'QA Toolkit' }, null, 2),
+    );
+    return h;
+  }
+
+  it('my_plugin answers with the manifest `name` too, as persisted, not one derived from the folder', async () => {
+    const h = await relabelledPersonal();
+    // Through the endpoint the `my_plugin` tool calls.
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      created: false,
+      folder: 'personal-u-alice',
+      name: 'qa-toolkit',
+      displayName: 'QA Toolkit',
+    });
+    // The folder, and so the private access it carries, is still keyed to the owner.
+    expect(await h.manifestOf('personal-u-alice')).toMatchObject({ name: 'qa-toolkit', displayName: 'QA Toolkit' });
+  });
+
+  it('an ensure that loses the creation race answers with the persisted manifest names too', async () => {
+    const h = await relabelledPersonal();
+    // The existence check misses the folder (another process made it between
+    // check and write), so the exclusive write is what finds it: the 409 path.
+    const svc = h.svc as unknown as { existingFolder: () => Promise<string | null> };
+    const missed = vi.spyOn(svc, 'existingFolder').mockResolvedValueOnce(null);
+    const again = await h.svc.ensurePersonalPlugin(ALICE);
+    expect(missed).toHaveBeenCalledTimes(1);
+    expect(again).toMatchObject({ created: false, name: 'qa-toolkit', displayName: 'QA Toolkit' });
+  });
+
+  it('a manifest `name` that is not an identifier is not echoed; the folder identity stands in, as discovery does', async () => {
+    const h = await makeHarness();
+    await h.svc.ensurePersonalPlugin(ALICE);
+    const manifest = { name: 'Not An Identifier', displayName: 'Mine' };
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/personal-u-alice/plugin.json'), JSON.stringify(manifest));
+    const again = await h.svc.ensurePersonalPlugin(ALICE);
+    expect(again).toMatchObject({ name: pluginIdentityOf(manifest, 'personal-u-alice'), displayName: 'Mine' });
+    expect(again.name).toBe('personal-u-alice');
+  });
+
   it("the tool's declared output promises the display name it now returns", async () => {
     const h = await makeHarness();
     const outputs = CREATE_PLUGIN.outputs as { properties: Record<string, unknown> };
