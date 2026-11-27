@@ -198,6 +198,8 @@ describe('SecretRedactor', () => {
     redactor.remember('alpha be gamma');
     expect(redactor.redact('key alpha be gamma refused', ['alpha', 'gamma'])).toBe('key [redacted] refused');
     expect(redactor.redact('key alpha be gamma refused', ['zzzzz', 'yyyyy'])).toBe('key [redacted] refused');
+    // The middle of the key printed between two wrong guesses goes too, as it would between two right ones.
+    expect(redactor.redact('key zzzzz be yyyyy refused', ['zzzzz', 'yyyyy'])).toBe('key [redacted] refused');
   });
 
   it('takes out the rest of a key with a character outside the BMP in it, right guess or wrong', () => {
