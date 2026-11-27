@@ -157,6 +157,34 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(await failingWith(frozen)()).toMatchObject({ code: 401, message: 'refused [redacted]', data: { echoed: '[redacted]' } });
   });
 
+  it("redacts an error's hidden fields, keeps a payload's kinds and a `__proto__` key as a key, and leaves binary out", async () => {
+    class Detail {
+      constructor(readonly note: string) {}
+    }
+    const failure = new McpError(-32603, 'rejected');
+    Object.defineProperty(failure, 'response', { value: { data: { error: `refused ${KEY}` } }, enumerable: false, configurable: true });
+    const payload = JSON.parse(`{"__proto__": "${KEY}"}`) as Record<string, unknown>;
+    Object.assign(payload, {
+      when: new Date(0),
+      map: new Map([[KEY, KEY]]),
+      set: new Set([KEY]),
+      bytes: new TextEncoder().encode(KEY),
+      detail: new Detail(KEY),
+    });
+    Object.defineProperty(failure, 'data', { value: payload, enumerable: true, configurable: true, writable: true });
+    const thrown = (await failingWith(failure)()) as McpError & { response: unknown };
+    expect(thrown.response).toEqual({ data: { error: 'refused [redacted]' } });
+    expect(Object.getOwnPropertyDescriptor(thrown, 'response')?.enumerable).toBe(false);
+    const data = thrown.data as Record<string, unknown>;
+    expect(Object.getOwnPropertyDescriptor(data, '__proto__')?.value).toBe('[redacted]');
+    expect(data.when).toEqual(new Date(0));
+    expect(data.map).toEqual(new Map([['[redacted]', '[redacted]']]));
+    expect(data.set).toEqual(new Set(['[redacted]']));
+    expect(data.bytes).toBeUndefined();
+    expect(data.detail).toBeInstanceOf(Detail);
+    expect((data.detail as Detail).note).toBe('[redacted]');
+  });
+
   it('redacts a thrown string', async () => {
     expect(await failingWith(`refused ${KEY}`)()).toBe('refused [redacted]');
   });

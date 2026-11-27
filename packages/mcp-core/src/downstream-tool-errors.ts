@@ -187,53 +187,88 @@ function redactedInPlace(err: Error, redact: (text: string) => string): Error {
 
 /**
  * `value` with `redact` applied to every string in it, keys included, however
- * deeply nested: objects and arrays are copied, an error is redacted in place
- * (its class, name and code kept), anything else is kept. Walked without
- * recursion, each object once, so a payload of any depth or with cycles
- * comes back whole.
+ * deeply nested. An error is redacted in place, every own field (enumerable
+ * or not) and its cause, its class, name and code kept; an array, a `Map`, a
+ * `Set` or any other object is copied with its own fields redacted and its
+ * prototype kept, each key defined as an own property (so a `__proto__` key
+ * stays a key); a `Date` is kept; a binary payload (an `ArrayBuffer` or a view
+ * of one) is left out, as a content block's is: encoded, a secret in it
+ * passes any text search. Walked without recursion, each object once, so a
+ * payload of any depth or with cycles comes back whole.
  */
 function redactedCopy(value: unknown, redact: (text: string) => string): unknown {
   const copies = new Map<object, unknown>();
   const pending: Array<() => void> = [];
+  /** Define `key` on `target` as an own data property holding `child` redacted, once the walk reaches it. */
+  const put = (target: object, key: string, child: unknown, enumerable = true) =>
+    Object.defineProperty(target, key, { value: copy(child), writable: true, configurable: true, enumerable });
   const copy = (item: unknown): unknown => {
     if (typeof item === 'string') return redact(item);
     if (!item || typeof item !== 'object') return item;
     if (copies.has(item)) return copies.get(item);
+    if (item instanceof ArrayBuffer || ArrayBuffer.isView(item)) return undefined;
+    if (item instanceof Date) return item;
     if (item instanceof Error) {
-      const fields = Object.keys(item).filter((key) => key !== 'code');
+      const fields = Object.getOwnPropertyNames(item)
+        .filter((key) => !['code', 'message', 'stack', 'cause'].includes(key))
+        .map((key) => [key, Object.getOwnPropertyDescriptor(item, key)?.enumerable ?? true, readField(item, key)] as const);
       const hasCause = Object.prototype.hasOwnProperty.call(item, 'cause');
+      const cause = hasCause ? readField(item, 'cause') : undefined;
       const message = redact(item.message);
+      let target = item;
       try {
         Object.defineProperty(item, 'message', { value: message, writable: true, configurable: true });
         if (typeof item.stack === 'string') Object.defineProperty(item, 'stack', { value: redact(item.stack), writable: true, configurable: true });
-        copies.set(item, item);
-        pending.push(() => {
-          for (const key of fields) Object.defineProperty(item, key, { value: copy((item as unknown as Record<string, unknown>)[key]), writable: true, configurable: true, enumerable: true });
-          if (hasCause) Object.defineProperty(item, 'cause', { value: copy(item.cause), writable: true, configurable: true });
-        });
-        return item;
+        // Emptied now, filled redacted as the walk reaches them: a field that
+        // cannot be replaced sends the whole error to the replacement below.
+        for (const [key] of fields) Object.defineProperty(item, key, { value: undefined, writable: true, configurable: true });
+        if (hasCause) Object.defineProperty(item, 'cause', { value: undefined, writable: true, configurable: true });
       } catch {
-        const replacement = new Error(message);
-        replacement.name = item.name;
-        copies.set(item, replacement);
-        pending.push(() => {
-          Object.assign(replacement, { code: (item as { code?: unknown }).code });
-          for (const key of fields) (replacement as unknown as Record<string, unknown>)[key] = copy((item as unknown as Record<string, unknown>)[key]);
-          if (hasCause) Object.defineProperty(replacement, 'cause', { value: copy(item.cause), writable: true, configurable: true });
-        });
-        return replacement;
+        target = Object.assign(new Error(message), { code: (item as { code?: unknown }).code });
+        target.name = item.name;
       }
+      copies.set(item, target);
+      pending.push(() => {
+        for (const [key, enumerable, child] of fields) put(target, key, child, enumerable);
+        if (hasCause) put(target, 'cause', cause, false);
+      });
+      return target;
     }
-    const out: Record<string, unknown> | unknown[] = Array.isArray(item) ? [] : {};
+    if (item instanceof Map) {
+      const out = new Map<unknown, unknown>();
+      copies.set(item, out);
+      pending.push(() => {
+        for (const [key, child] of item) out.set(copy(key), copy(child));
+      });
+      return out;
+    }
+    if (item instanceof Set) {
+      const out = new Set<unknown>();
+      copies.set(item, out);
+      pending.push(() => {
+        for (const child of item) out.add(copy(child));
+      });
+      return out;
+    }
+    const out: object = Array.isArray(item) ? [] : Object.create(Object.getPrototypeOf(item) as object | null);
     copies.set(item, out);
     pending.push(() => {
-      for (const [key, child] of Object.entries(item)) (out as Record<string, unknown>)[Array.isArray(item) ? key : redact(key)] = copy(child);
+      for (const [key, child] of Object.entries(item)) put(out, Array.isArray(item) ? key : redact(key), child);
     });
     return out;
   };
   const result = copy(value);
   while (pending.length > 0) pending.pop()!();
   return result;
+}
+
+/** `item[key]`, or undefined when reading it throws (a getter that fails says nothing). */
+function readField(item: object, key: string): unknown {
+  try {
+    return (item as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
 }
 
 /**
