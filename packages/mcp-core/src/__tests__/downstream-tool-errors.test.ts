@@ -325,22 +325,26 @@ describe('a downstream isError over a real MCP connection', () => {
    * environment, the last tier the substitutor reads: a value in the client's
    * own `variables` is substituted itself when the client is built.
    */
-  async function registerWithToken(name: string, url: string, token: string) {
-    const key = `${name}_TOKEN`;
-    process.env[key] = token;
+  async function registerWithToken(
+    name: string,
+    url: string,
+    token: string,
+    /** More variables (`${NAME}` to value), each sent in an `X-<NAME>` header; and a client to use. */
+    more: { variables?: Record<string, string>; client?: CodeModeUtcpClient } = {},
+  ) {
+    const variables = { TOKEN: token, ...more.variables };
+    for (const [variable, value] of Object.entries(variables)) process.env[`${name}_${variable}`] = value;
     cleanups.push(async () => {
-      delete process.env[key];
+      for (const variable of Object.keys(variables)) delete process.env[`${name}_${variable}`];
     });
-    const client = await CodeModeUtcpClient.create(process.cwd(), null);
-    cleanups.push(() => client.close());
+    const client = more.client ?? (await CodeModeUtcpClient.create(process.cwd(), null));
+    if (!more.client) cleanups.push(() => client.close());
+    const headers: Record<string, string> = { Authorization: 'Bearer ${TOKEN}' };
+    for (const variable of Object.keys(more.variables ?? {})) headers[`X-${variable}`] = `\${${variable}}`;
     const template = serializer.validateDict({
       name,
       call_template_type: 'mcp',
-      config: {
-        mcpServers: {
-          srv: { transport: 'http', url, timeout: 10, terminate_on_close: true, headers: { Authorization: 'Bearer ${TOKEN}' } },
-        },
-      },
+      config: { mcpServers: { srv: { transport: 'http', url, timeout: 10, terminate_on_close: true, headers } } },
     });
     return { client, registration: await registerManual(client, template) };
   }
@@ -392,15 +396,34 @@ describe('a downstream isError over a real MCP connection', () => {
     expect(await client.getTools()).toEqual([]);
   });
 
+  it("takes a refused manual's tools off even when closing its connection fails", async () => {
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    cleanups.push(() => client.close());
+    client.deregisterManual = async () => {
+      throw new Error('the connection would not close');
+    };
+
+    const { registration } = await registerWithToken('stuck', server.url, 'Pa$$w0rdSecretTail9', { client });
+
+    expect(registration.ok).toBe(false);
+    expect(await client.getTools()).toEqual([]);
+  });
+
   it('takes the credentials out of what a server quoted back when registration failed', async () => {
     const server = await startFakeMcpServer('notion');
     cleanups.push(() => server.stop());
-    server.failWithAuthError(true, 'Unauthorized: {authorization}');
+    server.failWithAuthError(true, 'Unauthorized for users in us: {authorization}');
 
-    const { registration } = await registerWithToken('refused', server.url, 'sk-live-1234567890abcdef');
+    const { registration } = await registerWithToken('refused', server.url, 'a9B2', { variables: { REGION: 'us' } });
 
     expect(registration.ok).toBe(false);
-    expect((registration as { error: string }).error).not.toContain('sk-live-1234567890abcdef');
+    const error = (registration as { error: string }).error;
+    // The server's words arrive; the token is out of them even glued, since it went in a credential-named
+    // header; the region, which did not, is out only where it stands alone.
+    expect(error).toContain('Unauthorized for users in [redacted]: Bearer [redacted]');
+    expect(error).not.toContain('a9B2');
   });
 
   it('leaves a successful call untouched once installed', async () => {

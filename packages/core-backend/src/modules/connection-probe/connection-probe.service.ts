@@ -493,15 +493,12 @@ export class ConnectionProbeService implements IConnectionProbeService {
       [...JSON.stringify(template).matchAll(varRefPattern())].map((m) => m[1] ?? m[2]),
     );
     for (const name of names) {
-      try {
-        // The vault, then the process environment: the tiers a real call
-        // resolves through, as in `substitute`.
-        const key = utcpNamespacedKey(manualName, name);
-        const value = (await this.secretsVault.resolve(userId, key)) ?? process.env[key];
-        if (value) redactor.rememberSubstituted(name, value);
-      } catch {
-        // A variable we cannot read is one the provider cannot echo either.
-      }
+      // The vault, then the process environment: the tiers a real call
+      // resolves through, as in `substitute`. A vault that cannot answer still
+      // leaves the environment's value to remember.
+      const key = utcpNamespacedKey(manualName, name);
+      const value = (await this.secretsVault.resolve(userId, key).catch(() => null)) ?? process.env[key];
+      if (value) redactor.rememberSubstituted(name, value);
     }
   }
 

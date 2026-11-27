@@ -133,8 +133,8 @@ type ResultProcessor = {
  * any other failure (a JSON-RPC error a handler threw, an HTTP error with the
  * response body in its message) keeps its class, code and cause, with its
  * message and stack redacted in place, so the token classifier still reads
- * it; one whose message cannot be replaced (a `DOMException`'s is a getter)
- * becomes an `Error` with its name and code. Text the caller sent in the
+ * it; one whose message cannot be replaced (a frozen error) becomes an
+ * `Error` with its name, code and cause. Text the caller sent in the
  * call's arguments, keys and numbers included, is left as it is where it is
  * quoted back (`SecretRedactor.redact`). Streaming goes through `callTool` in
  * this protocol, so the same wrap covers it.
@@ -169,7 +169,12 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
   return protocol;
 }
 
-/** `err` with `redact` applied to its message and stack, or an `Error` in its place, with its name and code, when they cannot be replaced. */
+/**
+ * `err` with `redact` applied to its message and stack, or an `Error` in its
+ * place, with its name, code and cause, when they cannot be replaced. An own
+ * value shadows a prototype getter (a `DOMException`'s message), so only a
+ * frozen or non-extensible error needs the replacement.
+ */
 function redactedInPlace(err: Error, redact: (text: string) => string): Error {
   const message = redact(err.message);
   try {
@@ -177,19 +182,33 @@ function redactedInPlace(err: Error, redact: (text: string) => string): Error {
     if (typeof err.stack === 'string') Object.defineProperty(err, 'stack', { value: redact(err.stack), writable: true, configurable: true });
     return err;
   } catch {
-    const replacement = Object.assign(new Error(message), { code: (err as { code?: unknown }).code });
+    const replacement = Object.assign(new Error(message, { cause: err.cause }), { code: (err as { code?: unknown }).code });
     replacement.name = err.name;
     return replacement;
   }
 }
 
-/** Every string, key, number and boolean in a call's arguments, however deeply nested. */
-function stringsIn(value: unknown, seen = new Set<object>()): string[] {
-  if (typeof value === 'string') return [value];
-  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return [String(value)];
-  if (!value || typeof value !== 'object' || seen.has(value)) return [];
-  seen.add(value);
-  return Object.entries(value).flatMap(([key, item]) => [key, ...stringsIn(item, seen)]);
+/** Every string, object key, number and boolean in a call's arguments, however deeply nested (walked without recursion). */
+function stringsIn(args: unknown): string[] {
+  const found: string[] = [];
+  const pending: unknown[] = [args];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (typeof value === 'string') found.push(value);
+    else if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') found.push(String(value));
+    else if (value && typeof value === 'object' && !seen.has(value)) {
+      seen.add(value);
+      if (Array.isArray(value)) pending.push(...value);
+      else {
+        for (const [key, item] of Object.entries(value)) {
+          found.push(key);
+          pending.push(item);
+        }
+      }
+    }
+  }
+  return found;
 }
 
 /**

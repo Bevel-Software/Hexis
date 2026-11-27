@@ -7,6 +7,7 @@ import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
 import {
   callRedactor,
+  credentialVariables,
   installSubstitutionCapture,
   recordingSubstitutions,
   rememberManualSecrets,
@@ -54,21 +55,31 @@ export async function registerManual(
   const resolved = new Map<string, Set<string>>();
   // A failure is the server's or the transport's words, which can quote what
   // the registration sent: redacted before anyone logs or shows it.
-  const failed = (error: string) => ({ ok: false as const, error: callRedactor(resolved, manual, false).redact(error) });
+  const failed = (err: unknown) => ({
+    ok: false as const,
+    error: callRedactor(resolved, manual, credentialVariables(client, manual)).redact(
+      err instanceof Error ? err.message : String(err),
+    ),
+  });
   try {
     const result = await recordingSubstitutions(resolved, () => client.registerManual(manual));
     if (result && result.success === false) {
       return failed(Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error');
     }
+  } catch (err) {
+    return failed(err);
+  }
+  // Registered. Whatever fails from here takes the manual back off the client,
+  // so nothing half-checked stays callable.
+  try {
     rememberManualSecrets(client, manualName, resolved);
     // The same one point is where the tools a manual leaves out
     // (`excludeTools`) come off the client: a session recovery or a catalog
     // refresh registers through here too, so none of them can bring one back.
     await removeExcludedTools(client, manual);
-    const toolNames = (result?.manual?.tools ?? []).map((tool) => tool.name);
-    const readAgain = await valuesReadOnEveryCall(client, manualName, toolNames, resolved);
+    const readAgain = await valuesReadOnEveryCall(client, manualName, resolved);
     if (readAgain.length > 0) {
-      await client.deregisterManual(manualName);
+      await withdraw(client, manualName);
       // Our own words, naming variables only: nothing in them to redact.
       return {
         ok: false,
@@ -77,8 +88,15 @@ export async function registerManual(
     }
     return { ok: true };
   } catch (err) {
-    return failed(err instanceof Error ? err.message : String(err));
+    await withdraw(client, manualName).catch(() => {});
+    return failed(err);
   }
+}
+
+/** Take a registered manual back off `client`: its connection closed where that works, its tools gone regardless. */
+async function withdraw(client: CodeModeUtcpClient, manualName: string): Promise<void> {
+  await client.deregisterManual(manualName).catch(() => false);
+  await client.config.tool_repository.removeManual(manualName);
 }
 
 /**

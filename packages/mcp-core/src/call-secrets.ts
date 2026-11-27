@@ -81,17 +81,21 @@ export function manualSecrets(client: unknown, manualName: string): Substitution
 
 /**
  * A redactor holding every secret a call through `template` carries: the
- * values substituted into it and the credentials it spells out. A filled-in
- * template shows which values went into credential-named fields; an unfilled
- * one (`filledIn: false`, as registration has) cannot, so there every
- * substituted value counts as a credential.
+ * values substituted into it and the credentials it spells out. In a
+ * filled-in template the credentials include whatever was substituted into a
+ * credential-named field; for an unfilled one (registration's), name those
+ * fields' variables in `credentialNames` ({@link credentialVariables}).
  */
-export function callRedactor(resolved: Substitutions, template: CallTemplate, filledIn = true): SecretRedactor {
+export function callRedactor(
+  resolved: Substitutions,
+  template: CallTemplate,
+  credentialNames: ReadonlySet<string> = new Set(),
+): SecretRedactor {
   const redactor = new SecretRedactor();
   for (const [name, values] of resolved) {
     for (const value of values) {
-      if (filledIn) redactor.rememberSubstituted(name, value);
-      else redactor.remember(value);
+      if (credentialNames.has(name)) redactor.remember(value);
+      else redactor.rememberSubstituted(name, value);
     }
   }
   rememberCallCredentials(redactor, template);
@@ -99,28 +103,39 @@ export function callRedactor(resolved: Substitutions, template: CallTemplate, fi
 }
 
 /**
+ * The variables an unfilled `template` sends in a credential-named field (a
+ * header, query parameter, environment variable or auth field), read with the
+ * client's own substitutor: their values are credentials wherever they appear.
+ */
+export function credentialVariables(client: CodeModeUtcpClient, template: CallTemplate): Set<string> {
+  const fields: string[] = [];
+  rememberCallCredentials({ remember: (text) => fields.push(text) }, template);
+  return new Set(fields.flatMap((text) => client.variableSubstitutor.findRequiredVariables(text)));
+}
+
+/**
  * The variables of `resolved` whose value the client will read as another
- * reference (`$NAME`, `${NAME}`) every time one of `toolNames` is called,
- * because the value went into a template the client stores filled in. Such a
- * call reads a different variable than the one meant, or fails naming part of
- * the value. Asked of the client's own substitutor, the parser those calls run.
+ * reference (`$NAME`, `${NAME}`) every time a tool of manual `manualName` is
+ * called, because the value went into a template the client stores filled in.
+ * Such a call reads a different variable than the one meant, or fails naming
+ * part of the value. Asked of the client's own substitutor over the tools'
+ * stored templates, as those calls run it.
  */
 export async function valuesReadOnEveryCall(
   client: CodeModeUtcpClient,
-  namespace: string,
-  toolNames: readonly string[],
+  manualName: string,
   resolved: Substitutions,
 ): Promise<string[]> {
+  // Only a value that reads as a reference can be read again: most
+  // registrations have none, and need not look at the stored tools at all.
+  const suspects = [...resolved].flatMap(([name, values]) => {
+    const refs = [...values].flatMap((value) => client.variableSubstitutor.findRequiredVariables(value, manualName));
+    return refs.length > 0 ? [{ name, refs }] : [];
+  });
+  if (suspects.length === 0) return [];
+  const tools = (await client.config.tool_repository.getToolsByManual(manualName)) ?? [];
   const stillReferenced = new Set(
-    // A tool no longer on the client (left out by `excludeTools`) is never called.
-    (await Promise.all(toolNames.map((name) => client.getRequiredVariablesForRegisteredTool(name).catch(() => [])))).flat(),
+    tools.flatMap((tool) => client.variableSubstitutor.findRequiredVariables(tool.tool_call_template, manualName)),
   );
-  if (stillReferenced.size === 0) return [];
-  return [...resolved]
-    .filter(([, values]) =>
-      [...values].some((value) =>
-        client.variableSubstitutor.findRequiredVariables(value, namespace).some((ref) => stillReferenced.has(ref)),
-      ),
-    )
-    .map(([name]) => name);
+  return suspects.filter(({ refs }) => refs.some((ref) => stillReferenced.has(ref))).map(({ name }) => name);
 }

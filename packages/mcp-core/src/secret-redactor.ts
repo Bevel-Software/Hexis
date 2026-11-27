@@ -202,17 +202,23 @@ const CREDENTIAL_MARKERS = [
 ];
 
 /**
- * The same, for names too short to match as substrings: `sig` inside a word
- * would swallow `design`, `assign` and `signal`, `pin` would swallow
- * `mapping`, `pass` would swallow `bypass`, and blanking those would eat the
+ * The same, for names too short to match as substrings, matched as whole
+ * words of the name (split at punctuation and at camelCase humps: `X-Pin`,
+ * `client_cred`, `dbPass`): `sig` inside a word would swallow `design`,
+ * `assign` and `signal`, `pin` would swallow `mapping`, `pass` would swallow
+ * `bypass`, `cred` would swallow `credit`, and blanking those would eat the
  * message rather than protect anything in it.
  */
-const CREDENTIAL_WORDS = /(?:^|[-_])(sig|hash|pin|pat|otp|sid|pw|pass|creds)(?:$|[-_])/;
+const CREDENTIAL_WORDS = new Set(['sig', 'hash', 'pin', 'pat', 'otp', 'sid', 'pw', 'pass', 'cred', 'creds']);
 
 export function carriesCredential(fieldName: string): boolean {
   const name = fieldName.toLowerCase();
-  return CREDENTIAL_MARKERS.some((marker) => name.includes(marker)) || CREDENTIAL_WORDS.test(name);
+  if (CREDENTIAL_MARKERS.some((marker) => name.includes(marker))) return true;
+  return fieldName.split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).some((word) => CREDENTIAL_WORDS.has(word.toLowerCase()));
 }
+
+/** Whatever takes the credentials found below: a {@link SecretRedactor}, or a collector of the fields' text. */
+type Remembers = Pick<SecretRedactor, 'remember'>;
 
 /**
  * Remember a credential the manual spelled out in full.
@@ -228,7 +234,7 @@ export function carriesCredential(fieldName: string): boolean {
  * because `Bearer sk-…` is echoed as the bare token far more often than in
  * full, and `Bearer` by itself is not worth blanking out of a message.
  */
-export function rememberCredentialHeaders(headers: Record<string, unknown>, redactor: SecretRedactor): void {
+export function rememberCredentialHeaders(headers: Record<string, unknown>, redactor: Remembers): void {
   for (const [name, value] of Object.entries(headers)) {
     if (typeof value !== 'string' || !carriesCredential(name)) continue;
     redactor.remember(value);
@@ -243,7 +249,7 @@ export function rememberCredentialHeaders(headers: Record<string, unknown>, reda
  * usually names the endpoint it rejected, and blanking the url wholesale would
  * cost more of the message than it protects.
  */
-export function rememberCredentialQuery(url: string, redactor: SecretRedactor): void {
+export function rememberCredentialQuery(url: string, redactor: Remembers): void {
   let query: string;
   try {
     query = new URL(url).search.slice(1);
@@ -272,7 +278,7 @@ export function rememberCredentialQuery(url: string, redactor: SecretRedactor): 
  * at registration (`call-secrets.ts`), so nothing here reads them back out of
  * the text.
  */
-export function rememberCallCredentials(redactor: SecretRedactor, processed: CallTemplate): void {
+export function rememberCallCredentials(redactor: Remembers, processed: CallTemplate): void {
   const servers = (processed as { config?: { mcpServers?: unknown } }).config?.mcpServers;
   if (servers && typeof servers === 'object') {
     for (const entry of Object.values(servers as Record<string, unknown>)) {
@@ -290,7 +296,7 @@ export function rememberCallCredentials(redactor: SecretRedactor, processed: Cal
 }
 
 /** The string values of credential-named fields. */
-function rememberCredentialFields(fields: object, redactor: SecretRedactor): void {
+function rememberCredentialFields(fields: object, redactor: Remembers): void {
   for (const [name, value] of Object.entries(fields)) {
     if (typeof value === 'string' && carriesCredential(name)) redactor.remember(value);
   }

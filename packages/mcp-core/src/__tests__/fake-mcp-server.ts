@@ -90,7 +90,7 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
       // recovery could ever mistake for session loss.
       if (toolFailure) throw new Error(toolFailure);
       const text = String((request.params.arguments as { text?: unknown } | undefined)?.text ?? '');
-      if (reportedFailure) return { isError: true, content: [{ type: 'text', text: reportedFailure.replaceAll('{text}', text) }] };
+      if (reportedFailure) return { isError: true, content: [{ type: 'text', text: reportedFailure.replaceAll('{text}', () => text) }] };
       if (tool === 'bump') {
         counter += 1;
         return { content: [{ type: 'text', text: JSON.stringify({ counter }) }] };
@@ -119,7 +119,7 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
   const http: HttpServer = createServer((req, res) => {
     void (async () => {
       if (authFailure !== null) {
-        jsonRpcError(res, 401, -32000, authFailure.replaceAll('{authorization}', String(req.headers.authorization ?? '')));
+        jsonRpcError(res, 401, -32000, authFailure.replaceAll('{authorization}', () => String(req.headers.authorization ?? '')));
         return;
       }
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
