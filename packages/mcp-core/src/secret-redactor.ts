@@ -16,14 +16,16 @@ import type { CallTemplate } from '@utcp/sdk';
 const MIN_SECRET_CHARS = 6;
 /** The shortest leading run of a secret we will treat as an echo of it. */
 const MIN_ECHOED_PREFIX_CHARS = 8;
-/** The shortest string the caller sent that is taken out where it is quoted back — see {@link SecretRedactor}. */
+/**
+ * The length from which the caller's text is taken out in any piece, and a
+ * credential wherever it appears; below it, each only where it stands alone
+ * — see {@link SecretRedactor}.
+ */
 const MIN_CALLER_CHARS = 4;
 /**
- * How many characters `redact` compares at most following a secret's echoed
- * heads, and reads at most of what the caller sent. Past either, none of the
- * text is quoted: a bound on the work that depends on nothing secret.
+ * How much of what the caller sent `redact` reads at most; past it, none of
+ * the text is quoted. It depends on nothing secret, so it tells nothing.
  */
-const MAX_COMPARED_CHARS = 1_000_000;
 const MAX_CALLER_CHARS_READ = 4_000_000;
 const REDACTED = '[redacted]';
 
@@ -43,10 +45,13 @@ const REDACTED = '[redacted]';
  * nothing there and prints the head of the key regardless. So do the other
  * spellings a value travels in: trimmed, url-encoded and JSON-escaped.
  *
- * A KNOWN credential ({@link remember}) is taken out wherever it appears,
- * whatever its length: a four-character key is still the key, and one echoed
- * glued to other text (`xa9B2y`) is still echoed. The price is paid in the
- * message: a short credential blanks its characters wherever they fall.
+ * A KNOWN credential ({@link remember}) is taken out wherever it appears: a
+ * four-character key is still the key, and one echoed glued to other text
+ * (`xa9B2y`) is still echoed. The price is paid in the message: a short
+ * credential blanks its characters wherever they fall. Under four characters,
+ * it is taken out only where it stands alone, as the caller's own short text
+ * is (below): matched inside other text, it would answer a short guess glued
+ * to it.
  *
  * A value that is only known to have been SUBSTITUTED ({@link rememberSubstituted})
  * is one too when its variable's name says so. Otherwise it may be anything:
@@ -57,18 +62,26 @@ const REDACTED = '[redacted]';
  * makes the verdict useful, so a SHORT one of those may only match a run of
  * its own. Six characters or more, it is taken out wherever it appears too.
  *
- * Text the CALLER sent ({@link redact}'s `callerText`) is taken out too:
- * every four characters of the quote that also occur, case aside, in a string
- * the caller sent (as sent or in one of the spellings above), whether or not
- * a secret is in them. Otherwise the quote would answer the caller's guesses:
- * a guess at a key echoed back, whole, shortened at either end or re-cased,
- * or a list of candidates sent alongside a server that quotes the key itself,
- * would come back `[redacted]` or not depending on whether it was right.
- * Nothing taken out there depends on a secret, so it comes back the same
- * either way. The price is paid in the message, which loses every piece it
- * shares with what the caller sent. A string shorter than four characters is
- * left to the rules above, since blanking every `a` or `1` would destroy the
- * message; a credential that short could still be guessed.
+ * Text the CALLER sent ({@link redact}'s `callerText`) is taken out too,
+ * whether or not a secret is in it: every four characters of the quote that
+ * also occur, case aside, in a string the caller sent (as sent or in one of
+ * the spellings above), and every word of one to three letters or digits that
+ * stands alone in the quote and is, case aside, one of the caller's own short
+ * words (a short string they sent, or a short word in one). Otherwise the
+ * quote would answer the caller's guesses: a guess at a key echoed back,
+ * whole, shortened at either end or re-cased, or a list of candidates sent
+ * alongside a server that quotes the key itself, would come back `[redacted]`
+ * or not depending on whether it was right. Nothing taken out there depends
+ * on a secret, so it comes back the same either way. The price is paid in the
+ * message, which loses every piece it shares with what the caller sent; a
+ * short word is taken out only where it stands alone and only as the caller
+ * wrote it, since blanking every `a` or `1` would destroy the message. A
+ * piece shorter than four characters cut from a longer word of the caller's
+ * is not recognised.
+ *
+ * Nothing here gives up on a long text: each secret is matched in time linear
+ * in the text and the secret, so no bound on the work can trip on one and not
+ * on another.
  */
 export class SecretRedactor {
   /** Taken out wherever they appear. */
@@ -103,19 +116,12 @@ export class SecretRedactor {
   redact(text: string, callerText: readonly string[] = []): string {
     const hidden = new Uint8Array(text.length);
     const hide = (start: number, end: number) => hidden.fill(1, start, end);
-    let budget = MAX_COMPARED_CHARS;
-    /** Where the run of `needle` that starts at `at`, `matched` characters known, stops matching `text`. */
-    const runEnd = (at: number, needle: string, matched: number): number => {
-      let end = at + matched;
-      while (end - at < needle.length && text[end] === needle[end - at]) end++;
-      budget -= end - at - matched + 1;
-      return end;
-    };
-    // What the caller sent, in any piece of four characters, case aside: each
-    // four characters of the folded text found in a folded string of theirs,
-    // taken out over the characters of the text it came from.
-    const { folded, from, to } = callerText.length > 0 ? foldWithSpans(text) : { folded: '', from: [], to: [] };
-    if (folded.length >= MIN_CALLER_CHARS) {
+    // What the caller sent, case aside: each four characters of the folded
+    // text found in a folded string of theirs, taken out over the characters
+    // of the text it came from, and each short word that stands alone and is
+    // one of their short words.
+    if (callerText.length > 0) {
+      const { folded, from, to } = foldWithSpans(text);
       const startsOf = new Map<string, number[]>();
       for (let i = 0; i + MIN_CALLER_CHARS <= folded.length; i++) {
         const piece = folded.slice(i, i + MIN_CALLER_CHARS);
@@ -123,10 +129,19 @@ export class SecretRedactor {
         if (starts) starts.push(i);
         else startsOf.set(piece, [i]);
       }
+      const shortRuns = new Map<string, Array<readonly [number, number]>>();
+      for (const run of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+        if (run[0].length >= MIN_CALLER_CHARS) continue;
+        const key = foldCase(run[0]);
+        const spans = shortRuns.get(key);
+        const span = [run.index, run.index + run[0].length] as const;
+        if (spans) spans.push(span);
+        else shortRuns.set(key, [span]);
+      }
       let read = 0;
       reading: for (const sent of callerText) {
         for (const spelling of new Set(spellings(sent))) {
-          if (startsOf.size === 0) break reading;
+          if (startsOf.size === 0 && shortRuns.size === 0) break reading;
           read += spelling.length;
           if (read > MAX_CALLER_CHARS_READ) return REDACTED;
           const sentFolded = foldCase(spelling);
@@ -135,21 +150,25 @@ export class SecretRedactor {
             for (const start of startsOf.get(piece) ?? []) hide(from[start]!, to[start + MIN_CALLER_CHARS - 1]!);
             startsOf.delete(piece);
           }
+          for (const word of sentFolded.matchAll(/[\p{L}\p{N}]+/gu)) {
+            if (word[0].length >= MIN_CALLER_CHARS) continue;
+            for (const [start, end] of shortRuns.get(word[0]) ?? []) hide(start, end);
+            shortRuns.delete(word[0]);
+          }
         }
       }
     }
     for (const secret of new Set([...this.credentials, ...this.substituted])) {
-      if (secret.length < MIN_SECRET_CHARS && !this.credentials.has(secret)) {
+      const short = secret.length < MIN_CALLER_CHARS || (secret.length < MIN_SECRET_CHARS && !this.credentials.has(secret));
+      if (short) {
         for (const match of text.matchAll(standingAlone(secret))) hide(match.index, match.index + secret.length);
         continue;
       }
       // The whole value, and any echoed head of it: each run that starts with
-      // its first characters, taken as far as it goes on matching.
-      const head = secret.length > MIN_ECHOED_PREFIX_CHARS ? secret.slice(0, MIN_ECHOED_PREFIX_CHARS) : secret;
-      for (const at of occurrences(text, head)) {
-        hide(at, runEnd(at, secret, head.length));
-        if (budget < 0) return REDACTED;
-      }
+      // its first characters, as far as it goes on matching.
+      const least = Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS);
+      const matched = prefixMatches(secret, text);
+      for (let at = 0; at < text.length; at++) if (matched[at]! >= least) hide(at, at + matched[at]!);
     }
     let out = '';
     for (let i = 0; i < text.length; i++) {
@@ -219,13 +238,29 @@ function urlEncoded(value: string): string | null {
   }
 }
 
-/** Where `needle` starts in `text`, every time, overlapping ones included. */
-function occurrences(text: string, needle: string): number[] {
-  const found: number[] = [];
-  if (!needle) return found;
-  for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) found.push(at);
-  return found;
+/**
+ * For each position of `text`, how many characters from there match the start
+ * of `pattern`: the Z-algorithm carried over the text, in time linear in both.
+ */
+function prefixMatches(pattern: string, text: string): Int32Array {
+  const self = new Int32Array(pattern.length);
+  self[0] = pattern.length;
+  for (let i = 1, left = 0, right = 0; i < pattern.length; i++) {
+    let k = i < right ? Math.min(self[i - left]!, right - i) : 0;
+    while (i + k < pattern.length && pattern[k] === pattern[i + k]) k++;
+    self[i] = k;
+    if (i + k > right) [left, right] = [i, i + k];
+  }
+  const matched = new Int32Array(text.length);
+  for (let i = 0, left = 0, right = 0; i < text.length; i++) {
+    let k = i < right ? Math.min(self[i - left]!, right - i) : 0;
+    while (k < pattern.length && i + k < text.length && text[i + k] === pattern[k]) k++;
+    matched[i] = k;
+    if (i + k > right) [left, right] = [i, i + k];
+  }
+  return matched;
 }
+
 
 /**
  * `value`, wherever it appears as a run of its own.

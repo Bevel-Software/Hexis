@@ -149,9 +149,9 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(await answer(quoting('{"error":"No project sk-live-1234\\"x"}'), { text: 'sk-live-1234"x' })).toBe(
       '{"error":"No project [redacted]"}',
     );
-    // The server quoting the PIN itself reads the same whichever PIN the caller sent.
-    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('PIN [redacted] is wrong');
-    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('PIN [redacted] is wrong');
+    // The server quoting the PIN itself reads the same whichever PIN the caller sent (`PIN` is their key, too).
+    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted] [redacted] is wrong');
+    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('[redacted] [redacted] is wrong');
   });
 });
 
@@ -384,7 +384,7 @@ describe('a downstream isError over a real MCP connection', () => {
     expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: "Project '[redacted]' not found" }]);
   });
 
-  it("keeps the field names the tool's own schema declares, and takes out the caller's value", async () => {
+  it("takes out the caller's keys with their values, a field the tool's schema declares included", async () => {
     installDownstreamToolErrors();
     const server = await startFakeMcpServer('notion');
     cleanups.push(() => server.stop());
@@ -397,8 +397,8 @@ describe('a downstream isError over a real MCP connection', () => {
       { text: 'Quarterly plan' },
     );
 
-    // `text` is the echo tool's declared property: an agent needs it to fix the call.
-    expect(result.content).toEqual([{ type: 'text', text: 'text: [redacted] is not a page' }]);
+    // `text` is the caller's key as much as the tool's field: a guess sent as a key reads the same either way.
+    expect(result.content).toEqual([{ type: 'text', text: '[redacted]: [redacted] is not a page' }]);
   });
 
   it('refuses a value every call would read as another variable, naming the variable and not the value', async () => {

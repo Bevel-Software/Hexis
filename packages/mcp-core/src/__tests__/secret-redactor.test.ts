@@ -100,8 +100,8 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('ßxx', ['SSxx'])).toBe('[redacted]');
     // Text the caller sent that no secret is in is taken out all the same.
     expect(redactor.redact("No page named 'Quarterly plan'", ['Quarterly plan'])).toBe("No page named '[redacted]'");
-    // Shorter than four characters, the caller's text is left to the other rules.
-    expect(redactor.redact('field id is wrong', ['id'])).toBe('field id is wrong');
+    // Shorter than four characters, the caller's text is taken out where it stands alone, not inside other words.
+    expect(redactor.redact('Invalid id: 42', ['id', '42'])).toBe('Invalid [redacted]: [redacted]');
   });
 
   it('takes out a long echoed run of one character without going over its bound', () => {
@@ -113,6 +113,21 @@ describe('SecretRedactor', () => {
   it('quotes nothing when what the caller sent is too long to read', () => {
     const redactor = new SecretRedactor();
     expect(redactor.redact('bad value', ['z'.repeat(4_000_001)])).toBe('[redacted]');
+  });
+
+  it('answers a short guess the same right or wrong, alone or glued to other text', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('ab1');
+    for (const guess of ['ab1', 'ab2']) {
+      expect(redactor.redact(`PIN ${guess} is wrong`, [guess])).toBe('PIN [redacted] is wrong');
+      expect(redactor.redact(`no x${guess}y here`, [guess])).toBe(`no x${guess}y here`);
+    }
+  });
+
+  it('matches a long repetitive secret in a long text without giving up on the text', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('ab'.repeat(500));
+    expect(redactor.redact(`${'ab'.repeat(20_000)} tail`)).toBe('[redacted] tail');
   });
 
   it('never matches a value inside a marker it has already put in', () => {
