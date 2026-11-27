@@ -11,6 +11,7 @@ import { PluginProvisionService } from '../plugin-provision.service.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
 import { CREATE_PLUGIN, myPluginDef } from '../plugins.tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
 
 /**
@@ -413,6 +414,57 @@ describe('a person names their personal plugin, and that name is what it is call
     await expect(h.svc.ensurePersonalPlugin(ALICE, 'Razvan Tools')).rejects.toThrow('push refused');
     expect(await fs.readFile(manifestPath(h), 'utf-8')).toBe(before);
     expect(await h.svc.personalPluginName(ALICE)).toBeNull();
+  });
+
+  it('a commit that landed but could not be pushed keeps the name, and the caller is told the push needs help', async () => {
+    const h = await makeHarness();
+    await myPlugin(h);
+    const pushOnly = new PushNeedsAgentResolutionError('main', `${KB}/Plugins/${PERSONAL}/plugin.json`, 'rejected', 'rebase failed', 'refused');
+    h.commit.mockRejectedValueOnce(pushOnly);
+    await expect(h.svc.ensurePersonalPlugin(ALICE, 'Razvan Tools')).rejects.toBe(pushOnly);
+    // The tree agrees with the commit that landed: nothing was undone.
+    expect((await h.manifestOf(PERSONAL)).displayName).toBe('Razvan Tools');
+    expect(await h.svc.personalPluginName(ALICE)).toBe('Razvan Tools');
+  });
+
+  it('a personal folder whose commit landed but could not be pushed is kept, not rolled back', async () => {
+    const h = await makeHarness();
+    h.commit.mockRejectedValueOnce(
+      new PushNeedsAgentResolutionError('main', `${KB}/Plugins/${PERSONAL}`, 'rejected', 'rebase failed', 'refused'),
+    );
+    await expect(h.svc.ensurePersonalPlugin(ALICE)).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins', PERSONAL, 'access.md'))).resolves.toBeTruthy();
+    expect((await h.manifestOf(PERSONAL)).name).toBe(PERSONAL);
+  });
+
+  it('a plugin delete whose commit landed but could not be pushed stays deleted, never parked back', async () => {
+    const h = await makeHarness();
+    await h.svc.createPlugin(ALICE, 'GTM');
+    h.commit.mockRejectedValueOnce(new PushNeedsAgentResolutionError('main', `${KB}/Plugins/GTM`, 'rejected', 'rebase failed', 'refused'));
+    await expect(h.svc.deletePlugin(ALICE, 'GTM')).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    // Neither the folder nor its park is left: the tree is what was committed.
+    expect((await fs.readdir(path.join(h.dir, KB, 'Plugins'))).filter((n) => n !== PERSONAL)).toEqual([]);
+  });
+
+  it('reading the name waits for a naming in flight, so it never answers a name whose commit then fails', async () => {
+    const h = await makeHarness();
+    await myPlugin(h);
+    let entered!: () => void;
+    const inCommit = new Promise<void>((r) => (entered = r));
+    let refuse!: (err: Error) => void;
+    h.commit.mockImplementationOnce(() => {
+      entered();
+      return new Promise<undefined>((_, reject) => (refuse = reject));
+    });
+    const naming = h.svc.ensurePersonalPlugin(ALICE, 'Razvan Tools');
+    await inCommit;
+    // The name is on disk but not committed: the read must not answer yet.
+    const read = h.svc.personalPluginName(ALICE);
+    const early = await Promise.race([read.then(() => 'answered'), new Promise((r) => setTimeout(() => r('waiting'), 100))]);
+    expect(early).toBe('waiting');
+    refuse(new Error('commit refused'));
+    await expect(naming).rejects.toThrow('commit refused');
+    expect(await read).toBeNull();
   });
 
   it('a plugin.json that is not a JSON object is refused, never overwritten', async () => {
