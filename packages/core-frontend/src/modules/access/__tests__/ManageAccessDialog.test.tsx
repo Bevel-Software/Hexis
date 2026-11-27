@@ -17,10 +17,12 @@ vi.mock('../api', async (importOriginal) => {
 });
 
 // --- Mock the context hooks the dialog reads --------------------------------
-vi.mock('../../workspace/state/workspace.context', () => ({
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   useWorkspace: () => ({ workspaceId: 'ws-1', kbDirName: 'knowledge-base' }),
 }));
-vi.mock('../../auth/state/auth.context', () => ({
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   useAuth: () => ({ user: { email: 'me@x.com', name: 'Me' } }),
 }));
 
@@ -90,9 +92,9 @@ describe('ManageAccessDialog: a public node', () => {
     await user.click(screen.getByRole('button', { name: /^can read$/i }));
     const readItem = screen.getAllByRole('button', { name: /^can read$/i }).at(-1)!;
     const menu = readItem.parentElement as HTMLElement;
-    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
-      'Can read',
-      'Deny',
+    expect(within(menu).getAllByRole('button')).toEqual([
+      within(menu).getByRole('button', { name: 'Can read' }),
+      within(menu).getByRole('button', { name: 'Deny' }),
     ]);
     await user.click(screen.getByRole('button', { name: 'Remove access' }));
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
@@ -361,11 +363,16 @@ describe('ManageAccessDialog: a file whose folder governs its access', () => {
     expect(screen.queryByRole('heading', { name: /On this file/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /People invited to Sales/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Remove/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /can edit/i })).not.toBeInTheDocument();
     // The read side is still there, read-only.
     expect(screen.getByRole('heading', { name: /Who can open it/i })).toBeInTheDocument();
     expect(screen.getByText('Alice')).toBeInTheDocument();
     expect(screen.getByText('Bo')).toBeInTheDocument();
+    // A row's verbs open only to be read: every item off, and no Deny.
+    await user.click(screen.getByRole('button', { name: /^can edit$/i }));
+    const menu = screen.getByRole('button', { name: /^can download$/i }).parentElement as HTMLElement;
+    for (const item of within(menu).getAllByRole('button')) expect(item).toHaveAttribute('aria-disabled', 'true');
+    expect(within(menu).queryByRole('button', { name: /^deny$/i })).toBeNull();
+    await user.keyboard('{Escape}');
 
     await user.click(screen.getByRole('button', { name: 'Manage access on Sales' }));
     expect(onManageAncestor).toHaveBeenCalledWith(
@@ -1017,13 +1024,11 @@ describe('ManageAccessDialog: the reworked layout', () => {
     // its own control beside the trigger.
     await user.click(trigger);
     const menu = screen.getByRole('button', { name: /^can download$/i }).parentElement as HTMLElement;
-    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
-      'Owner',
-      'Can edit',
-      'Can read',
-      'Can download',
-      'Deny',
-    ]);
+    expect(within(menu).getAllByRole('button')).toEqual(
+      ['Owner', 'Can edit', 'Can read', 'Can download', 'Deny'].map((name) =>
+        within(menu).getByRole('button', { name }),
+      ),
+    );
     await user.keyboard('{Escape}');
 
     await user.click(remove);

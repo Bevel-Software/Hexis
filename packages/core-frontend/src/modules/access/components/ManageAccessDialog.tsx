@@ -63,6 +63,7 @@ import { AccessRequestControl } from './AccessRequestControl';
 import { AccessRequestsBanner } from './AccessRequestsBanner';
 import { useAccessRequests } from '../hooks/useAccessRequests';
 import { listAccessRequests, reconcileAccessRequest, LEVEL_WORDS } from '../requests.api';
+import { VERB_HELP } from '../verb-help';
 
 interface Props {
   entry: FileTreeEntry;
@@ -480,6 +481,19 @@ function summarizeVerbs(v: VerbSet): string {
   else if (v.read) parts.push('Can read');
   if (v.download) parts.push('Can download');
   return parts.length ? parts.join(', ') : 'No access';
+}
+
+/**
+ * What the verbs `summarizeVerbs` names let someone do, for the accessible
+ * description of the button that shows them: the verb's line, or, when it
+ * names two, each line after its verb ("Can edit: …. Can download: …").
+ * Undefined when it names none.
+ */
+function summaryHelp(v: VerbSet): string | undefined {
+  const tier = tierOf(v);
+  const roles: Role[] = [...(tier ? [tier] : []), ...(v.download ? (['Can download'] as Role[]) : [])];
+  if (roles.length === 1) return VERB_HELP[ROLE_TO_VERB[roles[0]]];
+  return roles.length ? roles.map((r) => `${r}: ${VERB_HELP[ROLE_TO_VERB[r]]}`).join('. ') : undefined;
 }
 
 /**
@@ -1700,6 +1714,113 @@ export function ManageAccessDialog({
     );
   };
 
+  // A row's verbs, as a quiet button that opens its verb menu. `readOnly` is
+  // for a reader who cannot manage the target: the same items with their
+  // lines, none selectable, and no Deny.
+  const verbMenu = (p: PrincipalRow, readOnly: boolean) => (
+    <div>
+      {/* Not `disabled={busy}`: the menu's items freeze while a grant or
+          revoke is in flight, and this button only opens or closes the
+          menu. Disabled, it could not take focus back on Escape
+          (`.focus()` on a disabled button is a no-op), and focus fell to
+          `document`. */}
+      <Button
+        ref={openRowKey === p.key ? openRowTriggerRef : undefined}
+        variant="quiet"
+        size="sm"
+        aria-description={summaryHelp(p.verbs)}
+        aria-expanded={openRowKey === p.key}
+        onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
+        trailingIcon={<ChevronDown size={14} />}
+      >
+        {readOnly ? summarizeVerbs(p.verbs) : rowSummary(p)}
+      </Button>
+      {openRowKey === p.key && (
+        <AnchoredMenu
+          onDismiss={() => setOpenRowKey(null)}
+          triggerRef={openRowTriggerRef}
+          // Sized to the items, not the trigger: a row that reads
+          // "Can read" opens a narrow panel, and its items carry
+          // notes ("from the whole workspace") that would otherwise
+          // squeeze the label itself down to "C…".
+          width="content"
+        >
+          {/* Everyone is public READ only (the grant route refuses the
+              rest), so its row offers exactly the verb it can hold —
+              plus Deny, which takes even that away. */}
+          {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : MENU_ROLES).map((role, i) => {
+            const checked = p.verbs[ROLE_TO_KEY[role]];
+            const note = verbNote(p, ROLE_TO_VERB[role]);
+            const help = VERB_HELP[ROLE_TO_VERB[role]];
+            // Where a click on this item takes the row; null means
+            // nowhere from here, and the item says so by being off.
+            const next = nextVerbSet(p.verbs, role);
+            return (
+              // A Fragment, not a wrapper div: the items must stay
+              // DIRECT children of the panel, which is the box the
+              // menu measures and the keyboard walks.
+              <Fragment key={role}>
+                {/* Download is its own axis, not a lower tier — the
+                    rule the separator has always drawn. */}
+                {role === 'Can download' && i > 0 && <div className="my-1 border-t border-line" />}
+                <MenuItem
+                  // Read-only items stay focusable (`aria-disabled`, and no
+                  // handler), so their line and note reach assistive tech.
+                  disabled={!readOnly && (busy || next === null)}
+                  aria-disabled={readOnly || undefined}
+                  active={checked}
+                  aria-pressed={checked}
+                  // What the verb lets someone do, under its label.
+                  description={help}
+                  // The note is the row's own explanation, not part of
+                  // what the item DOES: keep it out of the name ("Can
+                  // read"), and give it to assistive tech as the
+                  // description it is, ahead of what the verb means.
+                  aria-description={note ? `${note}. ${help}` : help}
+                  onClick={readOnly ? undefined : () => next && doApplyVerbSet(p, next)}
+                  trailing={
+                    <span className="flex items-center gap-1.5">
+                      {note && (
+                        // The note is what gives way when the panel
+                        // is at its cap, never the label: bounded and
+                        // truncated, with the full text on hover.
+                        <span aria-hidden title={note} className="max-w-44 truncate text-meta text-ink-faint">
+                          {note}
+                        </span>
+                      )}
+                      {checked && <Check size={14} className="text-accent" />}
+                    </span>
+                  }
+                >
+                  {role}
+                </MenuItem>
+              </Fragment>
+            );
+          })}
+          {!readOnly && (
+            <>
+              <div className="my-1 border-t border-line" />
+              {/* Last, and the only destructive item: denies every verb here,
+                  read included. The row stays — the block is a rule about
+                  this person on this target, and this menu is where it is
+                  lifted again. */}
+              <MenuItem
+                tone="danger"
+                disabled={busy}
+                active={p.deniedHere}
+                aria-description={`Block ${p.label} on this ${targetKind}, whatever a parent folder grants`}
+                onClick={() => doApplyVerbSet(p, null)}
+                trailing={p.deniedHere ? <Check size={14} className="text-danger" /> : undefined}
+              >
+                Deny
+              </MenuItem>
+            </>
+          )}
+        </AnchoredMenu>
+      )}
+    </div>
+  );
+
   // One grantee row. Direct rows get the inline verb editor and a Remove that
   // revokes in place; inherited rows are read-only with a Remove that opens the
   // cascade flow; external rows are read-only with no action.
@@ -1777,113 +1898,20 @@ export function ManageAccessDialog({
             )}
             {/* Its own box: the menu anchors to its DOM parent, which must be
                 the trigger alone, not the trigger and Remove together. */}
-            <div>
-              {/* Not `disabled={busy}`: the menu's items freeze while a grant or
-                  revoke is in flight, and this button only opens or closes the
-                  menu. Disabled, it could not take focus back on Escape
-                  (`.focus()` on a disabled button is a no-op), and focus fell to
-                  `document`. */}
-              <Button
-                ref={openRowKey === p.key ? openRowTriggerRef : undefined}
-                variant="quiet"
-                size="sm"
-                onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
-                trailingIcon={<ChevronDown size={14} />}
-              >
-                {rowSummary(p)}
-              </Button>
-              {openRowKey === p.key && (
-                <AnchoredMenu
-                  onDismiss={() => setOpenRowKey(null)}
-                  triggerRef={openRowTriggerRef}
-                  // Sized to the items, not the trigger: a row that reads
-                  // "Can read" opens a narrow panel, and its items carry
-                  // notes ("from the whole workspace") that would otherwise
-                  // squeeze the label itself down to "C…".
-                  width="content"
-                >
-                  {/* Everyone is public READ only (the grant route refuses the
-                      rest), so its row offers exactly the verb it can hold —
-                      plus Deny, which takes even that away. */}
-                  {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : MENU_ROLES).map(
-                    (role, i) => {
-                      const checked = p.verbs[ROLE_TO_KEY[role]];
-                      const note = verbNote(p, ROLE_TO_VERB[role]);
-                      // Where a click on this item takes the row; null means
-                      // nowhere from here, and the item says so by being off.
-                      const next = nextVerbSet(p.verbs, role);
-                      return (
-                        // A Fragment, not a wrapper div: the items must stay
-                        // DIRECT children of the panel, which is the box the
-                        // menu measures and the keyboard walks.
-                        <Fragment key={role}>
-                          {/* Download is its own axis, not a lower tier — the
-                              rule the separator has always drawn. */}
-                          {role === 'Can download' && i > 0 && (
-                            <div className="my-1 border-t border-line" />
-                          )}
-                          <MenuItem
-                            disabled={busy || next === null}
-                            active={checked}
-                            aria-pressed={checked}
-                            // The note is the row's own explanation, not part of
-                            // what the item DOES: keep it out of the name ("Can
-                            // read"), and give it to assistive tech as the
-                            // description it is.
-                            aria-description={note}
-                            onClick={() => next && doApplyVerbSet(p, next)}
-                            trailing={
-                              <span className="flex items-center gap-1.5">
-                                {note && (
-                                  // The note is what gives way when the panel
-                                  // is at its cap, never the label: bounded and
-                                  // truncated, with the full text on hover.
-                                  <span
-                                    aria-hidden
-                                    title={note}
-                                    className="max-w-44 truncate text-meta text-ink-faint"
-                                  >
-                                    {note}
-                                  </span>
-                                )}
-                                {checked && <Check size={14} className="text-accent" />}
-                              </span>
-                            }
-                          >
-                            {role}
-                          </MenuItem>
-                        </Fragment>
-                      );
-                    },
-                  )}
-                  <div className="my-1 border-t border-line" />
-                  {/* Last, and the only destructive item: denies every verb here,
-                      read included. The row stays — the block is a rule about
-                      this person on this target, and this menu is where it is
-                      lifted again. */}
-                  <MenuItem
-                    tone="danger"
-                    disabled={busy}
-                    active={p.deniedHere}
-                    aria-description={`Block ${p.label} on this ${targetKind}, whatever a parent folder grants`}
-                    onClick={() => doApplyVerbSet(p, null)}
-                    trailing={p.deniedHere ? <Check size={14} className="text-danger" /> : undefined}
-                  >
-                    Deny
-                  </MenuItem>
-                </AnchoredMenu>
-              )}
-            </div>
+            {verbMenu(p, false)}
             {/* An external row has no entry here to remove — the verb menu can
                 still write one (a denial), but Remove would have nothing to act
                 on, so the slot stays empty and the row still lines up. */}
             {removeSlot(p.manage === 'external' ? null : p)}
           </div>
         ) : (
-          <span className="ml-auto flex shrink-0 items-center gap-2 text-detail text-ink-muted">
+          <div className="ml-auto flex shrink-0 items-center gap-2 text-detail text-ink-muted">
             {inviteAction(p)}
-            {summarizeVerbs(p.verbs)}
-          </span>
+            {/* The same menu, read-only: what each verb means is one press
+                away for a reader who cannot change it, keyboard and touch
+                included. */}
+            {verbMenu(p, true)}
+          </div>
         )}
       </div>
     );
@@ -2130,13 +2158,21 @@ export function ManageAccessDialog({
                   variant="outline"
                   size="sm"
                   className="max-w-44"
+                  aria-description={summaryHelp(effectiveNewVerbs)}
+                  aria-expanded={verbOpen}
                   onClick={() => setVerbOpen((o) => !o)}
                   trailingIcon={<ChevronDown size={14} className="shrink-0" />}
                 >
                   <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
                 </Button>
                 {verbOpen && (
-                  <AnchoredMenu onDismiss={() => setVerbOpen(false)} triggerRef={verbTriggerRef}>
+                  <AnchoredMenu
+                    onDismiss={() => setVerbOpen(false)}
+                    triggerRef={verbTriggerRef}
+                    // Sized to the items, as the row menus are: each verb's
+                    // line sits on one line under it.
+                    width="content"
+                  >
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];
@@ -2148,6 +2184,7 @@ export function ManageAccessDialog({
                           disabled={disabled}
                           active={checked}
                           aria-pressed={checked}
+                          description={VERB_HELP[k]}
                           onClick={() =>
                             setNewVerbs((v) => {
                               const on = !v[k];
@@ -2171,6 +2208,7 @@ export function ManageAccessDialog({
                       disabled={conferredByOthers(newVerbs, 'download')}
                       active={effectiveNewVerbs.download}
                       aria-pressed={effectiveNewVerbs.download}
+                      description={VERB_HELP.download}
                       // Same rule as the tiers: unticking download keeps the
                       // read it implied.
                       onClick={() =>
@@ -2266,7 +2304,7 @@ export function ManageAccessDialog({
                 {!canManage && (
                   <>
                     <Banner tone="neutral" role="note" className="mt-3">
-                      Only people with edit access can share this {targetKind}.
+                      Only people with edit access can manage access here.
                       {ownerNames && <> Ask an owner: {ownerNames}.</>}
                     </Banner>
                     {/* The rest of that sentence. Only on the live workspace,

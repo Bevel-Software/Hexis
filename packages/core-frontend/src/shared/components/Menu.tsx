@@ -49,37 +49,67 @@ export interface MenuItemProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   active?: boolean;
   /** Right-aligned adornment: a check, a lock, a shortcut hint. */
   trailing?: React.ReactNode;
+  /**
+   * A short muted line under the label saying what the item does, visible
+   * without hover or focus. It stays out of the item's accessible name, and a
+   * string is the item's `aria-description` unless the caller passes one. A
+   * disabled item dims its label and adornment, never this line: it is what
+   * says what the item would do.
+   */
+  description?: string;
 }
 
 export function MenuItem({
   tone = 'default',
   active = false,
   trailing,
+  description,
   className,
   children,
   type = 'button',
+  'aria-description': ariaDescription,
   ...rest
 }: MenuItemProps) {
+  const described = description !== undefined;
+  // Disabled dims the whole item, or, with a description, everything but it.
+  const dim = described ? 'group-disabled:opacity-50 group-aria-disabled:opacity-50' : undefined;
   return (
     <button
       type={type}
       className={cn(
         'flex w-full items-center gap-2 rounded-sm px-2.5 py-2 text-left text-ui',
-        'transition-colors disabled:cursor-not-allowed disabled:opacity-50',
-        'aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-transparent',
+        // Described, `disabled` stays as still as `aria-disabled` does below:
+        // no fill or brighter text on hover, since nothing fades the whole item.
+        described
+          ? 'group transition-colors disabled:cursor-not-allowed disabled:hover:bg-transparent'
+          : 'transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        described
+          ? 'aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent'
+          : 'aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-transparent',
         tone === 'danger'
           ? 'text-danger hover:bg-danger-soft'
           // The aria-disabled text override is tone-local because the hover it
           // undoes is: only the default tone brightens to `text-ink`, and a
           // disabled row that still lights up on hover reads as usable.
           : 'text-ink-muted hover:bg-hover hover:text-ink aria-disabled:hover:text-ink-muted',
+        described && tone !== 'danger' && 'disabled:hover:text-ink-muted',
         active && 'font-medium text-ink',
         className,
       )}
+      aria-description={ariaDescription ?? description}
       {...rest}
     >
-      <span className="min-w-0 flex-1 truncate">{children}</span>
-      {trailing && <span className="flex-none text-ink-faint">{trailing}</span>}
+      {described ? (
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className={cn('truncate', dim)}>{children}</span>
+          <span aria-hidden className="text-meta font-normal text-ink-muted">
+            {description}
+          </span>
+        </span>
+      ) : (
+        <span className="min-w-0 flex-1 truncate">{children}</span>
+      )}
+      {trailing && <span className={cn('flex-none text-ink-faint', dim)}>{trailing}</span>}
     </button>
   );
 }

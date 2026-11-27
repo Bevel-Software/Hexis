@@ -9,3 +9,4 @@ export { useAccessRequests } from './hooks/useAccessRequests';
 export type { AccessRequestsState } from './hooks/useAccessRequests';
 export { formatEligible, useFileAccess } from './hooks/useFileAccess';
 export { offersManageAccess } from './manage-access-affordance';
+export { PLUGIN_OWNER_HELP, VERB_HELP } from './verb-help';

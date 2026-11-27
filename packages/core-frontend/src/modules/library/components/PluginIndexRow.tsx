@@ -36,6 +36,8 @@ export interface PluginIndexRowProps {
    * grows no `…` rather than growing one that can only say "Open".
    */
   actions?: ItemAction[];
+  /** The id of text that describes the row to assistive tech (the Owner pill's line). */
+  describedBy?: string;
   onOpen(): void;
 }
 
@@ -70,12 +72,14 @@ export function PluginIndexRow({
   meta,
   trailing,
   actions,
+  describedBy,
   onOpen,
 }: PluginIndexRowProps) {
   const row = (
     <ListRow
       as="button"
       density="row"
+      aria-describedby={describedBy}
       onClick={onOpen}
       className={cn(actions && actions.length > 0 && 'pr-10')}
       // No badges here any more — they are part of the trailing group below,

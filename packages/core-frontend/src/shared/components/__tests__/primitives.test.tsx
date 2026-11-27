@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type ReactElement } from 'react';
 import { cn } from '../../../lib/utils';
@@ -321,6 +321,65 @@ describe('Menu', () => {
     const { container: b } = render(<MenuItem tone="danger">Delete</MenuItem>);
     expect(a.firstElementChild!.className).not.toContain('text-danger');
     expect(b.firstElementChild!.className).toContain('text-danger');
+  });
+
+  it('MenuItem shows its description under the label, outside its name, as its accessible description', () => {
+    render(<MenuItem description="Open and read it">Can read</MenuItem>);
+    const item = screen.getByRole('button', { name: 'Can read' });
+    expect(within(item).getByText('Open and read it')).toBeVisible();
+    expect(item).toHaveAccessibleDescription('Open and read it');
+  });
+
+  it("MenuItem keeps the caller's own accessible description over its description", () => {
+    render(
+      <MenuItem description="Open and read it" aria-description="from Sales. Open and read it">
+        Can read
+      </MenuItem>,
+    );
+    expect(screen.getByRole('button', { name: 'Can read' })).toHaveAccessibleDescription(
+      'from Sales. Open and read it',
+    );
+  });
+
+  it('a disabled MenuItem dims its label and adornment, never its description', () => {
+    render(
+      <MenuItem description="Open and read it" trailing={<span>✓</span>} disabled>
+        Can read
+      </MenuItem>,
+    );
+    const item = screen.getByRole('button');
+    // Nothing fades the whole item; the label and the adornment fade on their own,
+    // and hovering it neither fills it nor brightens it.
+    expect(item.className).not.toMatch(/(^|\s)(aria-)?disabled:opacity-50/);
+    expect(item.className).toMatch(/(^|\s)disabled:hover:bg-transparent/);
+    expect(item.className).toMatch(/(^|\s)disabled:hover:text-ink-muted/);
+    expect(within(item).getByText('Can read').className).toMatch(/group-disabled:opacity-50/);
+    expect(within(item).getByText('✓').parentElement!.className).toMatch(/group-disabled:opacity-50/);
+    expect(within(item).getByText('Open and read it').className).not.toMatch(/opacity/);
+  });
+
+  it('an aria-disabled MenuItem dims its label and adornment the same way, and stays focusable', () => {
+    render(
+      <MenuItem description="Open and read it" trailing={<span>✓</span>} aria-disabled>
+        Can read
+      </MenuItem>,
+    );
+    const item = screen.getByRole('button');
+    expect(item).not.toBeDisabled();
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+    expect(item.className).not.toMatch(/(^|\s)aria-disabled:opacity-50/);
+    expect(item.className).toMatch(/(^|\s)aria-disabled:hover:bg-transparent/);
+    expect(item.className).toMatch(/(^|\s)aria-disabled:hover:text-ink-muted/);
+    expect(within(item).getByText('Can read').className).toMatch(/group-aria-disabled:opacity-50/);
+    expect(within(item).getByText('✓').parentElement!.className).toMatch(/group-aria-disabled:opacity-50/);
+    expect(within(item).getByText('Open and read it').className).not.toMatch(/opacity/);
+  });
+
+  it('MenuItem without a description renders exactly as before', () => {
+    render(<MenuItem>Rename</MenuItem>);
+    const item = screen.getByRole('button', { name: 'Rename' });
+    expect(item.innerHTML).toBe('<span class="min-w-0 flex-1 truncate">Rename</span>');
+    expect(item).not.toHaveAttribute('aria-description');
   });
 
   it('MenuItem renders the trailing adornment slot', () => {

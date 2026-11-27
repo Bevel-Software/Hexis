@@ -34,10 +34,12 @@ vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
   return { ...actual, ...api };
 });
-vi.mock('../../workspace/state/workspace.context', () => ({
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   useWorkspace: () => ({ workspaceId: 'ws-1', kbDirName: 'knowledge-base' }),
 }));
-vi.mock('../../auth/state/auth.context', () => ({
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   useAuth: () => ({ user: { email: 'me@x.com', name: 'Me' } }),
 }));
 
@@ -187,10 +189,10 @@ describe('ManageAccessDialog: lowering an inherited set by one verb', () => {
     expect(screen.queryByRole('button', { name: /People invited to Sales/ })).toBeNull();
     expect(screen.getByText('Alice')).toBeInTheDocument();
 
-    // And the row says, verb by verb, where each one stands.
+    // And the row says, verb by verb, where each one stands (ahead of what the verb means).
     const menu = await openRowMenu(user, /^can read$/i);
-    expect(setItem(menu, /^can edit$/i)).toHaveAttribute('aria-description', 'restricted here');
-    expect(setItem(menu, /^can read$/i)).toHaveAttribute('aria-description', 'from Sales');
+    expect(setItem(menu, /^can edit$/i)).toHaveAccessibleDescription(/^restricted here\. \S/);
+    expect(setItem(menu, /^can read$/i)).toHaveAccessibleDescription(/^from Sales\. \S/);
   });
 
   it('a GROUP with download from the parent: unticking Can download denies download for the group', async () => {
@@ -380,10 +382,10 @@ describe('ManageAccessDialog: every row has the same controls', () => {
     ]);
     // And the provenance rides along as a description, on exactly the verbs she
     // holds: edit from the parent, and the read it implies.
-    expect(setItem(menu, /^can edit$/i)).toHaveAttribute('aria-description', 'from Sales');
-    expect(setItem(menu, /^can read$/i)).toHaveAttribute('aria-description', 'from Sales');
-    expect(setItem(menu, /^owner$/i)).not.toHaveAttribute('aria-description');
-    expect(setItem(menu, /^can download$/i)).not.toHaveAttribute('aria-description');
+    expect(setItem(menu, /^can edit$/i)).toHaveAccessibleDescription(/^from Sales\. \S/);
+    expect(setItem(menu, /^can read$/i)).toHaveAccessibleDescription(/^from Sales\. \S/);
+    expect(setItem(menu, /^owner$/i)).not.toHaveAccessibleDescription(/from Sales/);
+    expect(setItem(menu, /^can download$/i)).not.toHaveAccessibleDescription(/from Sales/);
     // Nothing is disabled: picking a set BELOW what is held is the point.
     for (const item of within(menu).getAllByRole('button')) expect(item).not.toBeDisabled();
   });

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ExternalLink, UserPlus, Users } from 'lucide-react';
 import { Badge, Banner } from '../../../shared/components';
@@ -15,6 +15,7 @@ import { EmptyStateAction } from './plugin-page-parts';
 import { PluginIndexRow } from './PluginIndexRow';
 import { LockGlyph } from './LockGlyph';
 import { NewPluginDialog } from './NewPluginDialog';
+import { OwnerPill } from './OwnerPill';
 
 /**
  * The Plugins band of a gallery page — the Library's one plugin renderer,
@@ -57,6 +58,8 @@ export function PluginRows({
   const navigate = useNavigate();
   const toast = useLibraryToast();
   const [newPluginOpen, setNewPluginOpen] = useState(false);
+  /** Prefix for each owned row's Owner line id (see OwnerPill). */
+  const ownerLineIds = useId();
   /** Plugins this reader has asked to join since the page loaded. */
   const [justRequested, setJustRequested] = useState<readonly string[]>([]);
 
@@ -180,11 +183,12 @@ export function PluginRows({
       {loading && <p className="mb-2 text-ui text-ink-faint">Loading plugins…</p>}
       {entries.length > 0 && (
         <div className="flex flex-col gap-1.5">
-          {entries.map((entry) => (
+          {entries.map((entry, i) => (
             <PluginIndexRow
               key={entry.name ?? ':yours'}
               label={entry.label}
-              badge={badgesOf(entry)}
+              badge={badgesOf(entry, `${ownerLineIds}-${i}`)}
+              describedBy={entry.summary?.isOwner === true ? `${ownerLineIds}-${i}` : undefined}
               {...describe(entry)}
               trailing={trailingOf(
                 entry,
@@ -219,17 +223,13 @@ export function PluginRows({
  * always the latter; it is also always the reader's, so its row carries the
  * mark on its own. Nothing when neither applies, so the row stays plain text.
  */
-function badgesOf(entry: PluginEntry): ReactNode {
+function badgesOf(entry: PluginEntry, ownerLineId: string): ReactNode {
   const owner = entry.summary?.isOwner === true;
   const isPrivate = entry.name === null || entry.summary?.isPrivate === true;
   if (!owner && !isPrivate) return undefined;
   return (
     <>
-      {owner && (
-        <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-          Owner
-        </Badge>
-      )}
+      {owner && <OwnerPill lineId={ownerLineId} plugin />}
       {isPrivate && (
         <Badge tone="outline" size="xs" title="Private" className="shrink-0 uppercase">
           <LockGlyph className="size-2.5 shrink-0" />

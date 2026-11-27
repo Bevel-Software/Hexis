@@ -10,7 +10,6 @@ import {
 } from '@bevel-software/platform-shared';
 import '../../library.css';
 import {
-  Badge,
   Banner,
   Button,
   IconButton,
@@ -46,6 +45,7 @@ import { AccessRequestsBanner } from '../../../access/components/AccessRequestsB
 import { useJoinRequests, type JoinRequestsApi } from '../../hooks/useJoinRequests';
 import { ManageAccessDialog } from '../../../access/components/ManageAccessDialog';
 import { ShareButton } from '../ShareButton';
+import { OwnerPill } from '../OwnerPill';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
 import { SkillFileTabs } from './SkillFileTabs';
@@ -703,11 +703,7 @@ export function SkillPage({
           >
             {skill?.name ?? name}
           </h1>
-          {skill && owned && (
-            <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-              Owner
-            </Badge>
-          )}
+          {skill && owned && <OwnerPill />}
           {/* Share IS the manage-access dialog, on the skill's own folder —
               standalone or inside a plugin. A rule written here sits beside
               the plugin's, and the resolver reads both at their depths. Shown
