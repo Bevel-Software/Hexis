@@ -20,10 +20,10 @@ import { mergeCommitSubject } from '../git/merge-commit.js';
 import { redactSecret } from '../../../shared/redact-secret.js';
 import {
   ChangeRequestConflictsError,
-  SourceHeadMovedError,
   VersionControlDomainError,
   VersionControlValidationError,
 } from '../../../shared/domain-errors.js';
+import { SourceHeadMovedError } from '../source-head-moved-error.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import type {

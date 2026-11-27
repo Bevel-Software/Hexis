@@ -24,6 +24,7 @@ import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
+import { SourceHeadMovedError } from '../source-head-moved-error.js';
 import { frontmatterHead, frontmatterHeadOfBytes, type IAccessControl } from '../../access/index.js';
 import { AccessDeniedError, PushAccessRefusedError, fencedHead } from '../../access-model/index.js';
 import { canonicalEmail } from '../../../shared/email-identity.js';
@@ -48,7 +49,6 @@ import {
   ProtectedBranchError,
   PullRebaseConflictError,
   RemoteBranchGoneError,
-  SourceHeadMovedError,
   VersionNotOnBranchError,
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';

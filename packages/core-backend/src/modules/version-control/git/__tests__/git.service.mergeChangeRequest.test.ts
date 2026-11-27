@@ -752,6 +752,51 @@ describe('GitService.mergeChangeRequest: the source commit the caller names', ()
     expect((await gitOut(upstream, ['rev-parse', `${BASE}^2`])).trim()).toBe(readHead);
   });
 
+  it('merges the commit it read, and hands authorize that commit\'s paths, when the source ref moves after the reading', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {
+      await fs.writeFile(path.join(dir, 'approved.md'), 'approved\n');
+    });
+    const readHead = await tipOf(upstream, FEATURE);
+    // A runner like the real one, except that right after the merge has read
+    // the source's commit, a later commit is pushed to the source and fetched
+    // into this very clone: what a request's detail read does, outside the
+    // clone's turn. From then on `origin/<source>` names the later commit.
+    const real = new NodeGitRunner();
+    let moved = false;
+    const racing: IGitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: (async (cwd: string, args: string[], opts?: unknown) => {
+        const answer = await real.run(cwd, args, opts as never);
+        if (!moved && args[0] === 'rev-parse' && args[1] === `origin/${FEATURE}`) {
+          moved = true;
+          await pushLater('later.md');
+          await runGit(baseRepo, ['fetch', 'origin', `+refs/heads/${FEATURE}:refs/remotes/origin/${FEATURE}`]);
+        }
+        return answer;
+      }) as IGitRunner['run'],
+    };
+    const git = new GitService(
+      stubWorkspaceService(baseWsId, baseRepo), new VersionControlHooks(), testKbContext(), undefined, null, racing,
+    );
+    const judged: string[][] = [];
+
+    const result = await git.mergeChangeRequest(
+      baseWsId, FEATURE, BASE, { subject: 'Add (#1)', body: 'Merged via Bevel' }, USER,
+      { expectedSourceHead: readHead, authorize: async (t) => { judged.push(t.changedPaths); } },
+    );
+
+    expect(result.kind).toBe('merged');
+    // The ref did move in this clone, to a commit that is not the one read.
+    expect(moved).toBe(true);
+    expect((await gitOut(baseRepo, ['rev-parse', `origin/${FEATURE}`])).trim()).not.toBe(readHead);
+    // What authorize judged and what landed are the commit that was read.
+    expect(judged).toEqual([['approved.md']]);
+    expect((await gitOut(upstream, ['rev-parse', `${BASE}^2`])).trim()).toBe(readHead);
+    expect((await gitOut(upstream, ['ls-tree', '-r', '--name-only', BASE])).split('\n')).not.toContain('later.md');
+  });
+
   it('refuses, with nothing merged or pushed and the clone clean on the target, when the source was pushed to after its head was read', async () => {
     const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
     await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {

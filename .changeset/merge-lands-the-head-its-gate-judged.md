@@ -12,4 +12,4 @@ Apply reads a request (its head and the approvals on that head), asks the gate, 
 
 After a merge, the request's branch is deleted only while it is still at the merged head (`expectTip`). A commit pushed to the branch after the merge read it keeps its branch; before, the branch was deleted by name and that commit with it.
 
-Upgrade note: `mergeChangeRequest` gains one optional option and `shared/domain-errors.ts` one error class. Nothing is removed or renamed, and a caller that passes no `expectedSourceHead` merges as before.
+Upgrade note: `mergeChangeRequest` gains one optional option, and the version-control module one error class, `SourceHeadMovedError` (`modules/version-control/source-head-moved-error.ts`). Nothing is removed or renamed, and a caller that passes no `expectedSourceHead` merges as before.
