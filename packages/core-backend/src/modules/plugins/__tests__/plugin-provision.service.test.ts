@@ -783,6 +783,16 @@ describe('PluginProvisionService.ensurePersonalPlugin on a folder somebody else 
     expect(await repo.status()).toBe('');
   });
 
+  it('a repair whose rollback fails too still fails with the commit error, and nothing claims a repair', async () => {
+    const h = await makeHarness();
+    await seed(h.dir, { 'access.md': PRE_SEEDED });
+    h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
+    h.commits.discardPath.mockRejectedValueOnce(new Error('index.lock held'));
+    await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
+    expect(h.commits.discardPath).toHaveBeenCalledTimes(1);
+    expect(h.accessControl.invalidate).not.toHaveBeenCalled();
+  });
+
   it('a repair committed before its push failed stays: the rules on disk are the ones at HEAD, never the old ones back', async () => {
     for (const seeded of [{ 'access.md': PRE_SEEDED }, { 'skills/.gitkeep': '' }]) {
       const h = await makeHarness();

@@ -1229,7 +1229,8 @@ export class GitService implements IGitService {
    * doesn't inherit half-finished bytes.
    *
    * Idempotent: a path that's already clean stays clean. Missing paths
-   * are silently ignored.
+   * are silently ignored. A checkout or removal that fails throws, so a
+   * caller never takes a path that is still dirty for one put back.
    */
   async discardPath(workspaceId: string, relativePath: string): Promise<void> {
     assertValidRelativePath(relativePath);
@@ -1245,15 +1246,10 @@ export class GitService implements IGitService {
         trackedAtHead = false;
       }
       if (trackedAtHead) {
-        await this.git(cwd, ['checkout', 'HEAD', '--', repoRelativePath]).catch((err) => {
-          log.warn(`discardPath checkout failed for "${repoRelativePath}":`, { err });
-        });
+        await this.git(cwd, ['checkout', 'HEAD', '--', repoRelativePath]);
       } else {
         // Untracked new file — remove from working tree.
-        const fileAbs = path.join(cwd, repoRelativePath);
-        await fs.rm(fileAbs, { force: true }).catch((err) => {
-          log.warn(`discardPath rm failed for "${repoRelativePath}":`, { err });
-        });
+        await fs.rm(path.join(cwd, repoRelativePath), { force: true });
       }
     });
   }

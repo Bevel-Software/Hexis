@@ -2791,7 +2791,7 @@ export class AccessControlService implements IAccessControl {
     if (target === null) return false;
     const email = canonicalEmail(userEmail);
     const destination =
-      target.kind === 'root' ? target.name : path.join(target.dir, 'access.md');
+      target.kind === 'root' ? target.name : path.posix.join(target.dir, 'access.md');
 
     let model: AccessModel | null;
     try {

@@ -222,4 +222,20 @@ describe('GitService.commitFile — skipValidator', () => {
     const restored = await fs.readFile(path.join(repo, relPath), 'utf-8');
     expect(restored).toBe(committed);
   });
+
+  it('discardPath throws when the path could not be put back, so no caller takes a dirty path for a clean one', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const { hooks } = makeValidator();
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), hooks, testKbContext());
+
+    const relPath = 'rules.md';
+    await fs.writeFile(path.join(repo, relPath), 'committed\n');
+    await svc.commitFile(workspaceId, USER, relPath, 'add rules');
+    await fs.writeFile(path.join(repo, relPath), 'dirty\n');
+    // Another git process holds the index: the checkout cannot run.
+    await fs.writeFile(path.join(repo, '.git', 'index.lock'), '');
+
+    await expect(svc.discardPath(workspaceId, relPath)).rejects.toThrow();
+    expect(await fs.readFile(path.join(repo, relPath), 'utf-8')).toBe('dirty\n');
+  });
 });

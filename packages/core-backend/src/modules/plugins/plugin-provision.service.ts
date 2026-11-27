@@ -52,10 +52,13 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
+import { logger } from '../../shared/logging.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from '../access/index.js';
 import { canonicalEmail, creatorPrincipal, spliceGrant } from '../access-model/index.js';
 import { WorkspaceMutex } from '../kb-fs/index.js';
+
+const log = logger('plugins');
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
 export interface ProvisionCommitDriver {
@@ -69,7 +72,7 @@ export interface ProvisionCommitDriver {
   ): Promise<void>;
 }
 
-/** How a failed inline commit is rolled back: the path put back to HEAD (`VersionControlService.discardPath`). */
+/** How a failed inline commit is rolled back: the path put back to HEAD (`VersionControlService.discardPath`), throwing when it could not be. */
 export interface ProvisionRollback {
   discardPath(workspaceId: string, targetPath: string): Promise<void>;
 }
@@ -563,7 +566,9 @@ export class PluginProvisionService {
    * A failure puts the file back to HEAD and throws: a repair committed
    * before its push failed is HEAD, so it stays, and goes out with the
    * branch's next push; a repair that never committed leaves HEAD's rules,
-   * which the next `my_plugin` repairs again.
+   * which the next `my_plugin` repairs again. When putting the file back
+   * fails as well, that is logged and the commit's error still thrown; the
+   * repaired rules then stay on disk, uncommitted.
    */
   private async repairPersonalRules(user: AuthUser, folder: string): Promise<boolean> {
     const wsId = await this.readyWorkspaceId();
@@ -576,8 +581,13 @@ export class PluginProvisionService {
         summary: `Make ${this.pluginsRoot}/${folder} private to its owner again`,
       });
     } catch (err) {
-      await this.commits.discardPath(wsId, wsRel).catch(() => {
-        /* the commit's own error is the one to report */
+      // The commit's own error is the one the caller gets; a rollback that
+      // fails too is said, because the repaired rules then stay on disk
+      // uncommitted until a later commit of the path carries them.
+      await this.commits.discardPath(wsId, wsRel).catch((rollbackErr: unknown) => {
+        log.error(`could not put ${wsRel} back to HEAD after its repair failed; the repaired rules are on disk, uncommitted:`, {
+          err: rollbackErr,
+        });
       });
       throw err;
     }
