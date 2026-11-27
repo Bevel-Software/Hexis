@@ -28,7 +28,7 @@ export interface ChangeBoxProps {
   /**
    * The file is binary (an image, a document…): there is no text to diff,
    * and the box says so instead of loading forever. The verdict buttons keep
-   * working — approving still applies the whole request.
+   * working.
    */
   binary?: boolean;
   /**
@@ -61,6 +61,13 @@ export interface ChangeBoxProps {
    * the reader, so the button stays.
    */
   refusal?: string | null;
+  /**
+   * The viewer pressed Approve on this file and the request then still waited
+   * on this many other files, so it did not apply. A note about that press,
+   * not the request's state now: the button stays, as Apply, and pressing it
+   * checks again and applies if nothing waits any more.
+   */
+  awaitingOthers?: number | null;
   /** Who the decision is waiting on, for the non-owner's footer. */
   owner?: string;
   /**
@@ -119,6 +126,7 @@ export function ChangeBox({
   blocked = false,
   conflictPrompt = null,
   refusal = null,
+  awaitingOthers = null,
   owner,
   othersPending,
   busy,
@@ -217,11 +225,15 @@ export function ChangeBox({
                 ? phase === 'approving'
                   ? 'Recording your approval…'
                   : 'Applying the change…'
-                : 'Pending approval'}
+                : awaitingOthers !== null
+                  ? 'Waiting on other files'
+                  : 'Pending approval'}
             </span>
             {!busy && (
               <span className="text-meta text-ink-faint">
-                {canDecide
+                {awaitingOthers !== null
+                  ? `When you last pressed, ${awaitingOthers} other ${awaitingOthers === 1 ? 'file' : 'files'} still needed approval.`
+                  : canDecide
                   ? othersPending === undefined
                     ? 'You can decide this.'
                     : waitingOnViewerLabel(othersPending)
@@ -253,11 +265,13 @@ export function ChangeBox({
               Withdraw
             </Button>
           )}
-          {/* Both verdicts act on the WHOLE change request, so neither is
-              offered against a file with nothing to show: approving would
-              merge, and declining would kill, a request whose other files this
-              panel is not displaying. "Read the whole change" is the honest
-              route to that decision. */}
+          {/* Neither verdict is offered against a file with nothing to show:
+              declining kills the WHOLE request, and approving consents to a
+              change this panel is not displaying. "Read the whole change" is
+              the honest route to that decision. Approve binds this file only;
+              the request applies once no other file waits. After a press that
+              found other files waiting it reads Apply: another viewer may
+              approve them meanwhile, and only a new press can tell. */}
           {canDecide && !upToDate && onDecline && (
             <Button variant="quiet" size="tiny" onClick={onDecline} disabled={busy}>
               Decline
@@ -265,7 +279,7 @@ export function ChangeBox({
           )}
           {canDecide && !upToDate && !blocked && onApprove && (
             <Button variant="primary" size="tiny" onClick={onApprove} disabled={busy}>
-              {busy ? busyLabel : 'Approve'}
+              {busy ? busyLabel : awaitingOthers !== null ? 'Apply' : 'Approve'}
             </Button>
           )}
         </span>

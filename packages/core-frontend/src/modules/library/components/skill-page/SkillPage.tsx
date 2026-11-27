@@ -1002,10 +1002,17 @@ export function SkillPage({
               blocked={blockedCrs.has(cr.number)}
               conflictPrompt={conflictResolutionPrompt(cr)}
               refusal={refusalLine(cr, applying.refusals)}
+              awaitingOthers={applying.waitingOn(cr.number, fileRepoPath)}
               owner={ownerName}
               busy={busyCr === cr.number || applying.activeCr === cr.number}
               phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
-              onApprove={() => applying.apply(cr)}
+              // Approve binds the file on screen, so it goes by that file's
+              // own write grant (what the gate resolves approvers against),
+              // not the skill's: a file restricted below the skill folder
+              // would only refuse the press.
+              onApprove={
+                fileAccess.canWrite === true ? () => applying.apply(cr, fileRepoPath) : undefined
+              }
               onDecline={() => void decline(cr)}
               onWithdraw={() => void withdraw(cr)}
               onOpenFull={canWrite ? () => setCompareCr(cr) : undefined}

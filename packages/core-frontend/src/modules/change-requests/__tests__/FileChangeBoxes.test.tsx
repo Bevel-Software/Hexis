@@ -1,11 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
-import {
-  OpenChangeRequestsContext,
-  NO_CHANGE_REQUESTS,
-} from '../../workspace/state/open-change-requests.context';
+import type { useEventBus } from '../../version-control';
+import type { useOpenChangeRequests } from '../../workspace';
 
 /**
  * The file page's proposal boxes. Approval rights come from the FILE, not from
@@ -25,10 +22,38 @@ vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: api.readFileOnBranch,
   readFileAtForkPoint: api.readFileAtForkPoint,
 }));
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: api.fetchPrDetail }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: api.approvePrFile }));
-vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: api.mergePullRequest }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({ cancelPullRequest: api.cancelPullRequest }));
+// The pull-request calls, at the pr module's entry: where the boxes and the
+// apply hook import them from.
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  fetchPrDetail: api.fetchPrDetail,
+  approvePrFile: api.approvePrFile,
+  mergePullRequest: api.mergePullRequest,
+  cancelPullRequest: api.cancelPullRequest,
+}));
+
+type Bus = NonNullable<ReturnType<typeof useEventBus>>;
+type OpenRequests = ReturnType<typeof useOpenChangeRequests>;
+
+/**
+ * What the boxes read of their surroundings, through the entries they read it
+ * from: the server's event bus (version control's `useEventBus`) and the
+ * caller's own open requests (workspace's `useOpenChangeRequests`). Each
+ * render sets both; everything else those modules offer stays their own.
+ */
+const seams = vi.hoisted(() => ({ bus: null as unknown, openRequests: null as unknown }));
+vi.mock('../../version-control', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../version-control')>()),
+  useEventBus: () => seams.bus,
+}));
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
+  useOpenChangeRequests: () => seams.openRequests,
+}));
+
+function openRequests(mineNumbers: number[] = []): OpenRequests {
+  return { paths: new Set(), forPath: () => [], minePaths: new Map(), mineNumbers: new Set(mineNumbers) };
+}
 
 import { FileChangeBoxes } from '../components/FileChangeBoxes';
 import { othersPendingBesides, waitingOnViewerLabel } from '../utils/author';
@@ -51,7 +76,7 @@ const CR: PullRequestSummary = {
 
 function makeFakeBus() {
   const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void } = {
+  const bus: Bus & { emit(e: VersionControlEvent): void } = {
     subscribe(kind, handler) {
       (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
@@ -71,21 +96,17 @@ function makeFakeBus() {
 
 function renderBoxes(opts: { mine: boolean; canDecide: boolean; othersPending?: number }) {
   const bus = makeFakeBus();
+  seams.bus = bus;
+  seams.openRequests = openRequests(opts.mine ? [CR.number] : []);
   render(
-    <EventBusContext.Provider value={bus}>
-      <OpenChangeRequestsContext.Provider
-        value={{ ...NO_CHANGE_REQUESTS, mineNumbers: new Set(opts.mine ? [CR.number] : []) }}
-      >
-        <FileChangeBoxes
-          repoRelativePath={PATH}
-          requests={[CR]}
-          canDecide={opts.canDecide}
-          ownersLabel="Docs"
-          othersPending={opts.othersPending}
-          onApplied={() => {}}
-        />
-      </OpenChangeRequestsContext.Provider>
-    </EventBusContext.Provider>,
+    <FileChangeBoxes
+      repoRelativePath={PATH}
+      requests={[CR]}
+      canDecide={opts.canDecide}
+      ownersLabel="Docs"
+      othersPending={opts.othersPending}
+      onApplied={() => {}}
+    />,
   );
   return bus;
 }
@@ -159,6 +180,145 @@ describe('FileChangeBoxes: who may decide', () => {
     expect(
       await screen.findByText('Published: the file now reads with that change.'),
     ).toBeInTheDocument();
+  });
+});
+
+describe('FileChangeBoxes: Approve binds the file on screen', () => {
+  const OTHER = 'Locked/gamma.md';
+  const approval = (path: string, isApproved: boolean) => ({
+    path,
+    eligibleApprovers: { roles: ['Admin'], users: [] },
+    approvedBy: [],
+    isApproved,
+    inMergeGate: true,
+    viewerCanApprove: true,
+  });
+
+  beforeEach(() => {
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [approval(PATH, false), approval(OTHER, false)],
+    });
+  });
+
+  it('approves only this file of a two-file request and leaves the request unapplied', async () => {
+    api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, false)]);
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    expect(await screen.findByText('Waiting on other files')).toBeInTheDocument();
+    expect(screen.getByText('When you last pressed, 1 other file still needed approval.')).toBeInTheDocument();
+    expect(api.approvePrFile).toHaveBeenCalledTimes(1);
+    expect(api.approvePrFile).toHaveBeenCalledWith(CR.number, PATH);
+    expect(api.approvePrFile).not.toHaveBeenCalledWith(CR.number, OTHER);
+    expect(api.mergePullRequest).not.toHaveBeenCalled();
+    expect(screen.queryByText('Published: the file now reads with that change.')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The note records a press; it never withholds the button. Another viewer
+   * may approve the other file meanwhile and this tab hears nothing of it, so
+   * the next press reads the server again and applies.
+   */
+  it('applies on the next press once the other file was approved elsewhere', async () => {
+    api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, false)]);
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await screen.findByText('Waiting on other files');
+
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [approval(PATH, true), approval(OTHER, true)],
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => expect(api.mergePullRequest).toHaveBeenCalledWith(CR.number));
+    expect(api.approvePrFile).toHaveBeenCalledTimes(1);
+  });
+
+  /** The note belongs to the file it was pressed on, not to the request. */
+  it('keeps the note off another file of the same request', async () => {
+    api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, false)]);
+    const both = { ...CR, touchedNodePaths: [PATH, OTHER] } as PullRequestSummary;
+    seams.bus = makeFakeBus();
+    seams.openRequests = openRequests();
+    const tree = (path: string) => (
+      <FileChangeBoxes
+        repoRelativePath={path}
+        requests={[both]}
+        canDecide
+        ownersLabel="Docs"
+        onApplied={() => {}}
+      />
+    );
+    const { rerender } = render(tree(PATH));
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await screen.findByText('Waiting on other files');
+
+    rerender(tree(OTHER));
+
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument();
+    expect(screen.getByText('Pending approval')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting on other files')).not.toBeInTheDocument();
+  });
+
+  /** A file the gate does not bind gets no approval record, as in the dialog. */
+  it('records no approval on a file outside the merge gate', async () => {
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [{ ...approval(PATH, false), inMergeGate: false }, approval(OTHER, true)],
+    });
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => expect(api.mergePullRequest).toHaveBeenCalledWith(CR.number));
+    expect(api.approvePrFile).not.toHaveBeenCalled();
+  });
+
+  it('applies when this file was the last one the request waited on', async () => {
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [approval(PATH, false), approval(OTHER, true)],
+    });
+    api.approvePrFile.mockResolvedValue([approval(PATH, true), approval(OTHER, true)]);
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => expect(api.mergePullRequest).toHaveBeenCalledWith(CR.number));
+    expect(api.approvePrFile).toHaveBeenCalledTimes(1);
+    expect(api.approvePrFile).toHaveBeenCalledWith(CR.number, PATH);
+  });
+
+  it('neither re-approves an approved file nor applies while another file waits', async () => {
+    api.fetchPrDetail.mockResolvedValue({
+      ...CR,
+      state: 'open',
+      approvals: [approval(PATH, true), approval(OTHER, false)],
+    });
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    expect(await screen.findByText('When you last pressed, 1 other file still needed approval.')).toBeInTheDocument();
+    expect(api.approvePrFile).not.toHaveBeenCalled();
+    expect(api.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it('reports a refused approval of this file instead of applying anyway', async () => {
+    api.approvePrFile.mockRejectedValue(new Error('You may not approve Docs/guide.md'));
+    renderBoxes({ mine: true, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('You may not approve');
+    expect(api.mergePullRequest).not.toHaveBeenCalled();
   });
 });
 
