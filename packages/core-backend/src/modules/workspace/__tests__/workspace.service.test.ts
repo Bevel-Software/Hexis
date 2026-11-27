@@ -1445,7 +1445,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     });
   });
 
-  it('extracts everything when no guard is supplied', async () => {
+  it('extracts every entry when the judge lets them all through', async () => {
     await writeZip('b.zip', { 'x.md': '1', 'y.md': '2' });
     const res = await svc.unzipFile(workspaceId, 'b.zip', 'out', judgeOf(), diskLanding(workspaceDir));
     expect(res.extracted.sort()).toEqual(['knowledge-base/out/x.md', 'knowledge-base/out/y.md']);
