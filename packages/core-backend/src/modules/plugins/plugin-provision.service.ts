@@ -123,9 +123,9 @@ export interface ProvisionedPlugin {
   /** False when an ensure found the folder already there. */
   created: boolean;
   /**
-   * True when the personal-folder ensure found the folder open to someone
-   * besides its owner and made it the owner's alone again. Always false for
-   * a named plugin.
+   * True when the personal-folder ensure found the folder's `access.md`
+   * granting someone besides its owner anything, or missing, or unreadable as
+   * rules, and rewrote it to owner-only. Always false for a named plugin.
    */
   repaired: boolean;
 }

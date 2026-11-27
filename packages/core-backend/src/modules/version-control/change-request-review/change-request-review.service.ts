@@ -657,7 +657,9 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         },
       );
     } catch (err) {
-      if (err instanceof MergeBlockedError) {
+      // A refusal, or target rules that could not be read (retryable, 503),
+      // keeps its own status rather than becoming a failed merge.
+      if (err instanceof MergeBlockedError || err instanceof AccessUnreadableError) {
         await this.db
           .update(prMergeLog)
           .set({ succeeded: false, completedAt: new Date(), error: err.message })
@@ -753,7 +755,10 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
    * file nobody may write has nobody to approve it, so the approval gate lets
    * it through. Asked inside the merge, against the target commit it is built
    * on and every path it writes, so it holds for an admin's bypass too, and a
-   * tree that cannot be read refuses rather than admits. Names no path.
+   * tree that cannot be read refuses rather than admits. Its own refusals name
+   * no path; when git fails reading the target's rules, the retryable
+   * `AccessUnreadableError` passes through as it does for this file's other
+   * reads at a ref.
    */
   private async refusePersonalSpaceCreation(workspaceId: string, sha: string, changedPaths: string[]): Promise<void> {
     const creations = await this.accessControl.personalSpaceCreationsAtRef(workspaceId, sha, changedPaths);

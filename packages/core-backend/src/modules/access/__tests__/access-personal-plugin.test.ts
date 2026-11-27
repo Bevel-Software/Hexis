@@ -137,7 +137,9 @@ describe('the seeded access templates, resolved', () => {
   });
 
   describe('a personal folder nobody has provisioned', () => {
-    const ROOT_RULES = '---\nowner:\n  - Admin\n---\nwrite:\n  - Admin\n';
+    // Write for everyone at the root, so the owner's refusals below come from
+    // the personal-folder rule and from nothing else.
+    const ROOT_RULES = '---\nowner:\n  - Admin\n---\nwrite:\n  - everyone\n';
     /** Every spelling of a write that would bring `personal-ali` into being before its owner. */
     const PRE_SEEDS = [
       'Plugins/personal-ali/access.md',

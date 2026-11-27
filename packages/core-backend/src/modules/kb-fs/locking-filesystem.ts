@@ -1211,9 +1211,12 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // (or of the seed) takes back the directories this call made: a refused
     // mkdir leaves nothing on disk for a listing — or the personal-plugin
     // ensure — to find.
-    const made = absolutePath ? await this.missingDirs(absolutePath) : [];
-    await super.mkdir(inputPath, options);
+    // Only a directory this call's own mkdir created is ever taken back: one
+    // another writer made meanwhile answers EEXIST here and is not ours.
+    const made: string[] = [];
     try {
+      if (absolutePath) await this.makeDirs(absolutePath, made, options?.recursive !== false);
+      await super.mkdir(inputPath, options);
       await this.fillNewDir(inputPath, absolutePath, plan);
     } catch (err) {
       // Deepest first, and never recursive: a directory something else put
@@ -1224,19 +1227,27 @@ export class LockingFilesystem extends GitGuardedFilesystem {
   }
 
   /**
-   * The directories `absolutePath` and its ancestors that do not exist yet,
-   * deepest first — what a recursive mkdir of it would create.
+   * Create `absolutePath` and its missing ancestors one level at a time,
+   * putting each directory this call's own mkdir created at the front of
+   * `made` (so it ends deepest first). A level that already exists — or that
+   * another writer creates first — is left out. Not recursive and the parent
+   * missing: nothing is made, and the base mkdir refuses as it always has.
    */
-  private async missingDirs(absolutePath: string): Promise<string[]> {
+  private async makeDirs(absolutePath: string, made: string[], recursive: boolean): Promise<void> {
     const missing: string[] = [];
-    let dir = absolutePath;
-    while ((await lstatOrNull(dir)) === null) {
-      missing.push(dir);
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
+    for (let dir = absolutePath; (await lstatOrNull(dir)) === null; dir = path.dirname(dir)) {
+      missing.unshift(dir);
+      if (path.dirname(dir) === dir) break;
     }
-    return missing;
+    if (!recursive && missing.length > 1) return;
+    for (const dir of missing) {
+      try {
+        await fs.mkdir(dir);
+        made.unshift(dir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+    }
   }
 
   /**

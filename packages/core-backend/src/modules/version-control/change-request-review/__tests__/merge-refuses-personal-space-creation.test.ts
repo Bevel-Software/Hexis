@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { AuthUser, FileApprovalState } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
 import { AccessControlService } from '../../../access/access-control.service.js';
+import { AccessUnreadableError } from '../../../access-model/index.js';
 import { NodeFs } from '../../../kb-fs/node-fs.js';
 import { personalAccessMd } from '../../../plugins/plugin-provision.service.js';
 import { changeRequests, prMergeLog } from '../../../database/index.js';
@@ -82,6 +83,7 @@ describe('mergePr: a change request cannot create a personal plugin folder', () 
   let seedDir: string;
   let featureDir: string;
   let service: ChangeRequestReviewService;
+  let access: AccessControlService;
   let logWrites: LogWrite[];
 
   const tipOf = (branch: string) => gitOut(upstream, ['rev-parse', `refs/heads/${branch}`]);
@@ -125,9 +127,10 @@ describe('mergePr: a change request cannot create a personal plugin folder', () 
       ensureRemotesFetched: async () => undefined,
     } as unknown as WorkspaceService;
     logWrites = [];
+    access = new AccessControlService(workspaces, 'knowledge-base', new NodeFs());
     service = new ChangeRequestReviewService(
       makeDb(logWrites),
-      new AccessControlService(workspaces, 'knowledge-base', new NodeFs()),
+      access,
       workspaces,
       new GitService(workspaces, stubVersionControlHooks(), testKbContext()),
     );
@@ -194,5 +197,18 @@ describe('mergePr: a change request cannot create a personal plugin folder', () 
     await propose({ 'note.md': 'note\n' });
     await apply([approvalOf('note.md', true)]);
     expect(await filesOn(BASE)).toContain('note.md');
+  });
+
+  it('when git fails reading the target rules, refuses with the retryable 503 and lands nothing', async () => {
+    await propose({ 'Plugins/personal-ali/access.md': PRE_SEED, 'note.md': 'note\n' });
+    const targetBefore = await tipOf(BASE);
+    vi.spyOn(access, 'personalSpaceCreationsAtRef').mockRejectedValue(new AccessUnreadableError(BASE, 'access.md'));
+
+    const refusal = await apply([approvalOf('note.md', true), approvalOf('Plugins/personal-ali/access.md', false)]).catch(
+      (err: unknown) => err,
+    );
+    expect(refusal).toMatchObject({ status: 503 });
+    expect(await tipOf(BASE)).toBe(targetBefore);
+    expect(logWrites.at(-1)).toMatchObject({ succeeded: false });
   });
 });
