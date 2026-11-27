@@ -153,6 +153,29 @@ describe('SecretRedactor', () => {
     expect(redactor.redact(`${words}? end`, Array.from({ length: 200_000 }, () => '?'))).toBe(`${words}[redacted] end`);
   });
 
+  it('reads the same right or wrong when the server glues its own words to the guess', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('sk-live-Q7xZ2abcdefgh');
+    for (const guess of ['sk-live-Q7xZ', 'sk-live-Q7xA']) {
+      expect(redactor.redact(`${guess}2abcdefgh!`, [guess])).toBe('[redacted]!');
+      expect(redactor.redact(`${guess}2ab!`, [guess])).toBe('[redacted]2ab!');
+    }
+  });
+
+  it('takes out the rest of a key whose start the caller sent', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('sk-live-Q7xZ2abcdefgh');
+    expect(redactor.redact('key sk-live-Q7xZ2abcdefgh refused', ['sk-l'])).toBe('key [redacted] refused');
+  });
+
+  it('fills overlapping pieces once, so a megabyte of echoes stays fast', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('a'.repeat(1_000_000));
+    const started = performance.now();
+    expect(redactor.redact(`${'a'.repeat(1_000_000)} tail`)).toBe('[redacted] tail');
+    expect(performance.now() - started).toBeLessThan(3_000);
+  });
+
   it('matches a long repetitive secret in a long text without giving up on the text', () => {
     const redactor = new SecretRedactor();
     redactor.remember('ab'.repeat(500));

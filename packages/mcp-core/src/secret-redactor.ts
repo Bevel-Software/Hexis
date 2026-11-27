@@ -14,8 +14,8 @@ import type { CallTemplate } from '@utcp/sdk';
  * what it may not do is match inside a longer run of letters and digits.
  */
 const MIN_SECRET_CHARS = 6;
-/** The shortest leading run of a secret we will treat as an echo of it. */
-const MIN_ECHOED_PREFIX_CHARS = 8;
+/** The shortest piece of a secret we will treat as an echo of it. */
+const MIN_ECHOED_PIECE_CHARS = 8;
 /**
  * The length from which the caller's text is taken out in any piece, and a
  * credential wherever it appears; below it, each only where it stands alone
@@ -50,10 +50,11 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * ADMIN key they were never allowed to see from a failure's text. A cap on the
  * quote's length bounds it; it does not redact it.
  *
- * Leading PREFIXES count as well as whole values, because that echo is usually
- * masked in the middle ("sk-live-abcd…wxyz"): a whole-value search finds
- * nothing there and prints the head of the key regardless. So do the other
- * spellings a value travels in: trimmed, url-encoded and JSON-escaped.
+ * PIECES count as well as whole values (any eight characters or more of a
+ * value, in a row), because that echo is usually masked in the middle
+ * ("sk-live-abcd…wxyz"): a whole-value search finds nothing there and prints
+ * the head and tail of the key regardless. So do the other spellings a value
+ * travels in: trimmed, url-encoded and JSON-escaped.
  *
  * A KNOWN credential ({@link remember}) is taken out wherever it appears,
  * whatever its length: a four-character key is still the key, and one echoed
@@ -92,9 +93,15 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * text while the caller's text is about. A piece shorter than four characters
  * cut from a longer string of the caller's is not recognised.
  *
+ * Secrets are matched only in what the caller did not send: their text is
+ * taken out first, and no match runs into or out of it, so whether a piece of
+ * the server's own words is taken out never depends on what the caller sent
+ * next to it. A caller who sends the start of a key does not shield the rest
+ * either, since any eight characters of it are a piece.
+ *
  * Nothing here gives up on a long text: each secret is matched in time linear
- * in the text and the secret, so no bound on the work can trip on one and not
- * on another.
+ * in the text and the secret, and each run taken out is filled once, so no
+ * bound on the work can trip on one and not on another.
  */
 export class SecretRedactor {
   /** Taken out wherever they appear. */
@@ -187,16 +194,44 @@ export class SecretRedactor {
         }
       }
     }
+    // Secrets, in the server's own words only: the caller's text is blocked
+    // out, so no match runs into or out of it.
+    const blocked = hidden.slice();
+    /** Take out `start` to `end` unless any of it is the caller's (already out). */
+    const hideClear = (start: number, end: number) => {
+      for (let i = start; i < end; i++) if (blocked[i]) return;
+      hide(start, end);
+    };
     for (const secret of new Set([...this.credentials, ...this.substituted])) {
       if (secret.length < MIN_SECRET_CHARS && !this.credentials.has(secret)) {
-        for (const match of text.matchAll(standingAlone(secret))) hide(match.index, match.index + secret.length);
-        continue;
+        for (const match of text.matchAll(standingAlone(secret))) hideClear(match.index, match.index + secret.length);
+      } else if (secret.length < MIN_ECHOED_PIECE_CHARS) {
+        for (let at = text.indexOf(secret); at >= 0; at = text.indexOf(secret, at + 1)) hideClear(at, at + secret.length);
+      } else {
+        // Every run of eight characters or more that is a piece of it: the
+        // pieces that overlap merged into one run, filled once, without the
+        // spaces at its edges (a piece of `Bearer <token>` can start with one).
+        const ending = longestPiecesEnding(secret, text, blocked);
+        let runStart = -1;
+        let runEnd = -1;
+        const fill = () => {
+          let start = runStart;
+          let end = runEnd;
+          while (start < end && /\s/.test(text[start]!)) start++;
+          while (end > start && /\s/.test(text[end - 1]!)) end--;
+          hide(start, end);
+        };
+        for (let i = 0; i < text.length; i++) {
+          if (ending[i]! < MIN_ECHOED_PIECE_CHARS) continue;
+          const start = i + 1 - ending[i]!;
+          if (runStart >= 0 && start <= runEnd) runEnd = i + 1;
+          else {
+            if (runStart >= 0) fill();
+            [runStart, runEnd] = [start, i + 1];
+          }
+        }
+        if (runStart >= 0) fill();
       }
-      // The whole value, and any echoed head of it: each run that starts with
-      // its first characters, as far as it goes on matching.
-      const least = Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS);
-      const matched = prefixMatches(secret, text);
-      for (let at = 0; at < text.length; at++) if (matched[at]! >= least) hide(at, at + matched[at]!);
     }
     let out = '';
     for (let i = 0; i < text.length; i++) {
@@ -267,26 +302,66 @@ function urlEncoded(value: string): string | null {
 }
 
 /**
- * For each position of `text`, how many characters from there match the start
- * of `pattern`: the Z-algorithm carried over the text, in time linear in both.
+ * For each position of `text`, the length of the longest piece of `pattern`
+ * that ends there, with no position marked in `blocked` inside it: a suffix
+ * automaton of the pattern run over the text, in time linear in both.
  */
-function prefixMatches(pattern: string, text: string): Int32Array {
-  const self = new Int32Array(pattern.length);
-  self[0] = pattern.length;
-  for (let i = 1, left = 0, right = 0; i < pattern.length; i++) {
-    let k = i < right ? Math.min(self[i - left]!, right - i) : 0;
-    while (i + k < pattern.length && pattern[k] === pattern[i + k]) k++;
-    self[i] = k;
-    if (i + k > right) [left, right] = [i, i + k];
+function longestPiecesEnding(pattern: string, text: string, blocked: Uint8Array): Int32Array {
+  const next: Map<number, number>[] = [new Map()];
+  const link: number[] = [-1];
+  const length: number[] = [0];
+  let last = 0;
+  for (let i = 0; i < pattern.length; i++) {
+    const unit = pattern.charCodeAt(i);
+    const current = next.push(new Map()) - 1;
+    length[current] = length[last]! + 1;
+    let state = last;
+    while (state !== -1 && !next[state]!.has(unit)) {
+      next[state]!.set(unit, current);
+      state = link[state]!;
+    }
+    if (state === -1) link[current] = 0;
+    else {
+      const target = next[state]!.get(unit)!;
+      if (length[state]! + 1 === length[target]) link[current] = target;
+      else {
+        const clone = next.push(new Map(next[target])) - 1;
+        length[clone] = length[state]! + 1;
+        link[clone] = link[target]!;
+        while (state !== -1 && next[state]!.get(unit) === target) {
+          next[state]!.set(unit, clone);
+          state = link[state]!;
+        }
+        link[target] = clone;
+        link[current] = clone;
+      }
+    }
+    last = current;
   }
-  const matched = new Int32Array(text.length);
-  for (let i = 0, left = 0, right = 0; i < text.length; i++) {
-    let k = i < right ? Math.min(self[i - left]!, right - i) : 0;
-    while (k < pattern.length && i + k < text.length && text[i + k] === pattern[k]) k++;
-    matched[i] = k;
-    if (i + k > right) [left, right] = [i, i + k];
+  const ending = new Int32Array(text.length);
+  let state = 0;
+  let matched = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (blocked[i]) {
+      state = 0;
+      matched = 0;
+      continue;
+    }
+    const unit = text.charCodeAt(i);
+    while (state !== 0 && !next[state]!.has(unit)) {
+      state = link[state]!;
+      matched = length[state]!;
+    }
+    if (next[state]!.has(unit)) {
+      state = next[state]!.get(unit)!;
+      matched++;
+    } else {
+      state = 0;
+      matched = 0;
+    }
+    ending[i] = matched;
   }
-  return matched;
+  return ending;
 }
 
 
