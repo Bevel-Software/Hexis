@@ -1833,11 +1833,18 @@ export function registerWorkspaceTools(
    * On a case-sensitive disk an existing path comes back unchanged; on a
    * case-insensitive one `knowledge-base/skills` comes back as the
    * `knowledge-base/Skills` it opens, so the platform checks see the real item.
+   * `beforeEntering`, when given, is awaited with each folder (on-disk
+   * spelling) before that folder is read, and may throw to stop the walk.
    */
-  const onDiskSpelling = async (root: string, path: string): Promise<string> => {
+  const onDiskSpelling = async (
+    root: string,
+    path: string,
+    beforeEntering?: (dir: string) => Promise<void>,
+  ): Promise<string> => {
     const segments = path.replace(/^\.?\/+/, '').replace(/\/+$/, '').split('/').filter(Boolean);
     const out: string[] = [];
     for (const segment of segments) {
+      await beforeEntering?.(out.join('/'));
       let names: string[];
       try {
         names = await nodeFs.readdir(join(root, ...out));
@@ -2694,12 +2701,16 @@ export function registerWorkspaceTools(
       const fs = await ctx.getFilesystem(a.branch as string);
       const gate = readGateFor(a.branch as string, ctx);
       // Inside a personal shelf, a folder the caller may not read is not
-      // there: the same not_found a missing path gets, decided before the
-      // folder is read, so nothing about the shelf's content shapes the
-      // answer. Judged on the on-disk spelling: on a case-insensitive disk
-      // `plugins/Personal-x` opens the shelf and must be judged as it.
-      const onDisk = dir ? await onDiskSpelling(await workspaceRoot(a.branch as string, ctx), dir) : dir;
-      if (isShelfPath(onDisk) && !(await readableFiles(gate, [onDisk])).has(onDisk)) throw notFound(dir, 'Nothing to list');
+      // there: the same not_found a missing path gets. It is decided before
+      // that folder, or any shelf folder on the way to it, is listed, so no
+      // folder in the shelf is listed for a caller who may not read it. Judged on the on-disk
+      // spelling: on a case-insensitive disk `plugins/Personal-x` opens the
+      // shelf and must be judged as it.
+      const enter = async (folder: string): Promise<void> => {
+        if (isShelfPath(folder) && !(await readableFiles(gate, [folder])).has(folder)) throw notFound(dir, 'Nothing to list');
+      };
+      const onDisk = dir ? await onDiskSpelling(await workspaceRoot(a.branch as string, ctx), dir, enter) : dir;
+      await enter(onDisk);
       // A missing folder (ENOENT) and a file named as one (ENOTDIR) are both
       // the caller's path to correct: the one not_found answer, not a 500.
       // Outside personal shelves no read gate stands in front: such folders

@@ -1,9 +1,9 @@
 import type { Server as HttpServer } from 'node:http';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import nodeFs, { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import express from 'express';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { ToolRegistry } from '../../tool-registry/index.js';
@@ -171,6 +171,23 @@ describe("list_files on another person's personal shelf", () => {
         `Plugins/${c.other}/skills/never-written`,
       ]) {
         expect(await list(c.as, path), path).toEqual(missing);
+      }
+    });
+
+    it(`${c.who} gets that answer without any folder in the other shelf being read`, async () => {
+      // The gate stands before the disk: no folder inside the shelf is read on
+      // the way to the path, so nothing in it shapes the answer or its time.
+      const shelf = join(root, KB, 'Plugins', c.other).toLowerCase();
+      const spy = vi.spyOn(nodeFs, 'readdir');
+      try {
+        for (const path of [`Plugins/${c.other}/skills/${c.otherSkill}`, `plugins/${c.other.toUpperCase()}/skills`]) {
+          expect((await list(c.as, path)).status, path).toBe(404);
+        }
+        const read = spy.mock.calls.map(([dir]) => String(dir).toLowerCase());
+        expect(read.length).toBeGreaterThan(0);
+        expect(read.filter((dir) => dir === shelf || dir.startsWith(`${shelf}/`))).toEqual([]);
+      } finally {
+        spy.mockRestore();
       }
     });
 
