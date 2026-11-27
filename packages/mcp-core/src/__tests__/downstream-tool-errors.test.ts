@@ -3,8 +3,11 @@ import '@utcp/mcp'; // side effect: registers the stock 'mcp' protocol, which th
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
-import { McpError, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, McpError, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { isSessionLoss } from '../session-recovery.js';
 import {
   DownstreamToolError,
@@ -51,6 +54,20 @@ async function clientFor(url: string): Promise<CodeModeUtcpClient> {
   cleanups.push(() => client.close());
   expect(await registerManual(client, manualTemplate('notion', url))).toEqual({ ok: true });
   return client;
+}
+
+/**
+ * `result` as an MCP client reads it: answered by an SDK server and parsed by
+ * the SDK client, which refuses a reply the spec does not allow.
+ */
+async function readBySdkClient(result: CallToolResult): Promise<CallToolResult> {
+  const server = new Server({ name: 'surface', version: '0.0.0' }, { capabilities: { tools: {} } });
+  server.setRequestHandler(CallToolRequestSchema, async () => result);
+  const reader = new Client({ name: 'reader', version: '0.0.0' });
+  const [readerSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverSide), reader.connect(readerSide)]);
+  cleanups.push(() => reader.close());
+  return (await reader.callTool({ name: 'echo' })) as CallToolResult;
 }
 
 describe('downstreamErrorText', () => {
@@ -367,6 +384,39 @@ describe('a downstream isError over a real MCP connection', () => {
     ]);
     // With the caller's arguments about, a failure that holds a credential is not quoted at all.
     expect((await dispatchToolCall(client, tool, { text: 'hi' })).content).toEqual([{ type: 'text', text: '[redacted]' }]);
+  });
+
+  it('answers a failure an MCP client can read, an annotation redaction would change left out', async () => {
+    installDownstreamToolErrors();
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    cleanups.push(() => client.close());
+    const KEY = 'literal-key-abcdef123456';
+    const template = serializer.validateDict({
+      name: 'notion',
+      call_template_type: 'mcp',
+      config: {
+        mcpServers: {
+          srv: { transport: 'http', url: server.url, timeout: 10, terminate_on_close: true, headers: { 'X-Api-Key': KEY } },
+        },
+      },
+    });
+    expect(await registerManual(client, template)).toEqual({ ok: true });
+    const annotations = { audience: ['user', 'assistant'] as ('user' | 'assistant')[], priority: 0.5, lastModified: '2026-01-02T03:04:05Z' };
+    server.reportToolErrors(`Rejected key ${KEY}.`, annotations);
+
+    // With the caller's arguments about, nothing of the failure is quoted: a
+    // redacted role or timestamp would not parse, so the annotations go too.
+    expect(await readBySdkClient(await dispatchToolCall(client, echo, { text: 'hi' }))).toEqual({
+      isError: true,
+      content: [{ type: 'text', text: '[redacted]' }],
+    });
+    // Without them, annotations that hold no secret pass as they came.
+    expect(await readBySdkClient(await dispatchToolCall(client, echo, {}))).toEqual({
+      isError: true,
+      content: [{ type: 'text', text: 'Rejected key [redacted].', annotations }],
+    });
   });
 
   it('takes a short credential out even glued to other text, and a short value that is not one only where it stands alone', async () => {

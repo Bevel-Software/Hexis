@@ -7,6 +7,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   isInitializeRequest,
+  type Annotations,
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 
@@ -53,8 +54,9 @@ export interface FakeMcpServer {
    * when the call cannot be done (a missing entitlement, a bad argument): it
    * RETURNS `isError: true` with this text, rather than throwing. `{text}`
    * in it repeats the call's `text` argument, as a server that quotes it.
+   * `annotations`, when given, go on the reported block as they are.
    */
-  reportToolErrors(text: string | null): void;
+  reportToolErrors(text: string | null, annotations?: Annotations): void;
 }
 
 const TOOLS = [
@@ -77,6 +79,7 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
   let counter = 0;
   let toolFailure: string | null = null;
   let reportedFailure: string | null = null;
+  let reportedAnnotations: Annotations | undefined;
   let authFailure: string | null = null;
 
   function buildServer(): Server {
@@ -90,7 +93,10 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
       // recovery could ever mistake for session loss.
       if (toolFailure) throw new Error(toolFailure);
       const text = String((request.params.arguments as { text?: unknown } | undefined)?.text ?? '');
-      if (reportedFailure) return { isError: true, content: [{ type: 'text', text: reportedFailure.replaceAll('{text}', () => text) }] };
+      if (reportedFailure) {
+        const reported = reportedFailure.replaceAll('{text}', () => text);
+        return { isError: true, content: [{ type: 'text', text: reported, ...(reportedAnnotations && { annotations: reportedAnnotations }) }] };
+      }
       if (tool === 'bump') {
         counter += 1;
         return { content: [{ type: 'text', text: JSON.stringify({ counter }) }] };
@@ -187,8 +193,9 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
     failWithAuthError: (on: boolean, message = 'Unauthorized') => {
       authFailure = on ? message : null;
     },
-    reportToolErrors: (text: string | null) => {
+    reportToolErrors: (text: string | null, annotations?: Annotations) => {
       reportedFailure = text;
+      reportedAnnotations = annotations;
     },
   };
 }

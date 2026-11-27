@@ -32,8 +32,10 @@ export class DownstreamToolError extends Error {
    * out. That leaves out binary payloads too (an image's or audio's `data`, a
    * resource's `blob`): encoded, a secret in one would pass any text search,
    * and a failure's words are in its text. Only a block's `type` (one of the
-   * named kinds, since it chose the fields) and numbers (a size, a priority)
-   * pass as they came. The message is redacted too.
+   * named kinds, since it chose the fields) and values of a fixed form (a
+   * size, an annotation) pass as they came, each only when `redact` would
+   * leave it so; one it would change is left out, since a redacted one would
+   * not parse. The message is redacted too.
    */
   redactedWith(redact: (text: string) => string): DownstreamToolError {
     const content = this.content.flatMap((block) => {
@@ -68,23 +70,37 @@ const NESTED_FIELDS: Readonly<Record<string, readonly string[]>> = {
   annotations: ['audience', 'priority', 'lastModified'],
 };
 /**
- * `object` reduced to `fields`: every string redacted, a number kept only
- * when `redact` leaves its digits as they are, a block's `type` (a spec kind)
- * kept.
+ * The fields besides numbers whose form the spec fixes: an annotation's
+ * roles and its timestamp. A redacted one would not parse, and a client that
+ * checks the reply would refuse the whole failure for it.
+ */
+const FIXED_FORM_FIELDS = new Set(['audience', 'lastModified']);
+/**
+ * `object` reduced to `fields`. Free text is redacted. A value of a fixed
+ * form (a number, a role, a timestamp) passes as it came when `redact` leaves
+ * it so, and is left out otherwise, as is a nested object left empty. A
+ * block's `type` (a spec kind) is kept.
  */
 function specFields(object: object, fields: readonly string[], redact: (text: string) => string): Record<string, unknown> {
+  const asItCame = (value: string | number) => redact(String(value)) === String(value);
   const out: Record<string, unknown> = {};
   for (const field of fields) {
     if (!(field in object)) continue;
     const value = (object as Record<string, unknown>)[field];
     const nested = NESTED_FIELDS[field];
     if (field === 'type') out[field] = value;
-    else if (typeof value === 'number') {
-      if (redact(String(value)) === String(value)) out[field] = value;
+    else if (nested) {
+      const inner = value && typeof value === 'object' && !Array.isArray(value) ? specFields(value, nested, redact) : {};
+      if (Object.keys(inner).length > 0) out[field] = inner;
     }
-    else if (nested && value && typeof value === 'object' && !Array.isArray(value)) out[field] = specFields(value, nested, redact);
+    else if (typeof value === 'number' || (FIXED_FORM_FIELDS.has(field) && typeof value === 'string')) {
+      if (asItCame(value)) out[field] = value;
+    }
+    else if (FIXED_FORM_FIELDS.has(field) && Array.isArray(value)) {
+      const items = value.filter((item) => typeof item === 'string' && asItCame(item));
+      if (items.length > 0) out[field] = items;
+    }
     else if (typeof value === 'string') out[field] = redact(value);
-    else if (Array.isArray(value)) out[field] = value.filter((item) => typeof item === 'string').map((item) => redact(item));
   }
   return out;
 }
