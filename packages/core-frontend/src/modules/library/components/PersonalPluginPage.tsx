@@ -68,7 +68,7 @@ export function PersonalPluginPage() {
    */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
 
-  const name = personalPluginName();
+  const name = personalPluginName(data.personalName);
   const items = useMemo(() => data.items.filter(isUngrouped), [data.items]);
   /**
    * For the add dialog's name check. Every skill, not only the ungrouped ones:

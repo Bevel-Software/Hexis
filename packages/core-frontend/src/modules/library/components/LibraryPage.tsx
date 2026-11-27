@@ -47,14 +47,14 @@ import { PendingItemReview } from './PendingItemReview';
  */
 
 /** The h1 names what the sidebar has selected, so the two never disagree. */
-function headingFor(filter: LibraryFilter): string {
+function headingFor(filter: LibraryFilter, personalLabel: string): string {
   switch (filter.kind) {
     case 'all':
       return 'Everything';
     case 'owned':
       return 'Owned by me';
     case 'ungrouped':
-      return personalPluginName();
+      return personalLabel;
     case 'team':
       return filter.group;
     case 'group':
@@ -107,7 +107,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
     () => filterLibraryItems(data.items, filter, query, data.teams),
     [data.items, filter, query, data.teams],
   );
-  const personalLabel = personalPluginName();
+  const personalLabel = personalPluginName(data.personalName);
   const plugins = useMemo(
     () => pluginEntriesFor(data.items, data.pluginSummaries, filter, data.teams, query, personalLabel),
     [data.items, data.pluginSummaries, filter, data.teams, query, personalLabel],
@@ -163,8 +163,8 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           carrying — a height no other page could match. They read below it
           now, where they always looked like they were. */}
       <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
-        <h1 className={`min-w-0 truncate text-display font-semibold ${TITLE_INK_ROOM}`} title={headingFor(filter)}>
-          {headingFor(filter)}
+        <h1 className={`min-w-0 truncate text-display font-semibold ${TITLE_INK_ROOM}`} title={headingFor(filter, personalLabel)}>
+          {headingFor(filter, personalLabel)}
         </h1>
         <TextField
           className="ml-auto w-64 flex-none"

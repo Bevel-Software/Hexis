@@ -27,6 +27,7 @@ function isSharedPath(path: string): boolean {
 import { useLibraryData, type LibraryData } from '../hooks/useLibraryData';
 import { listPlugins, type PluginSummary } from '../services/plugins.api';
 import { listTeams } from '../services/teams.api';
+import { getPersonalPluginName } from '../services/personal-plugin.api';
 import {
   isInPlugin,
   neededToolsFor,
@@ -127,6 +128,13 @@ export interface LibraryContextValue extends LibraryData {
    * could not ask" — the second is not the first.
    */
   teamsError: string | null;
+  /**
+   * What the reader named their personal plugin (its manifest `displayName`),
+   * null when they gave it none — and until loaded, and on error, when the
+   * app shows the fixed default (`personalPluginName`). Reloaded WITH the
+   * plugin summaries, since a rename is a plugin change like any other.
+   */
+  personalName: string | null;
   reloadPlugins(): void;
 }
 
@@ -141,6 +149,22 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   const [teamsLoading, setTeamsLoading] = useState(true);
   const [teamsError, setTeamsError] = useState<string | null>(null);
   const [pluginsRevision, setPluginsRevision] = useState(0);
+  const [personalName, setPersonalName] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getPersonalPluginName()
+      .then((name) => {
+        if (!cancelled) setPersonalName(name);
+      })
+      .catch(() => {
+        // Keep whatever we had, as the plugin list does: a transient failure
+        // must not swap a name the reader is looking at for the default.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pluginsRevision]);
 
   useEffect(() => {
     let cancelled = false;
@@ -367,9 +391,10 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       teams,
       teamsLoading,
       teamsError,
+      personalName,
       reloadPlugins,
     }),
-    [data, reloadAll, items, pluginSummaries, pluginsLoading, pluginsError, teams, teamsLoading, teamsError, reloadPlugins],
+    [data, reloadAll, items, pluginSummaries, pluginsLoading, pluginsError, teams, teamsLoading, teamsError, personalName, reloadPlugins],
   );
 
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;

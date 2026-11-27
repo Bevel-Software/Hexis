@@ -59,7 +59,7 @@ export function LibraryLayout() {
   const { collapsed } = useSidebar();
 
   const filter = libraryFilterForPath(location.pathname);
-  const personalLabel = personalPluginName();
+  const personalLabel = personalPluginName(lib.personalName);
 
   /**
    * One row per team: how much of the catalog the team can use, and — in

@@ -312,9 +312,17 @@ export class PluginProvisionService {
    * reads it, so a repeated call with no edit in between answers as the call
    * that made the folder did.
    */
-  async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
+  async ensurePersonalPlugin(user: AuthUser, givenName?: string): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
+    // The name its owner gave it (`my_plugin`'s `name`), trimmed; blank is
+    // refused rather than read as "no name", so a caller who meant to name
+    // the plugin never gets an answer that looks like it worked.
+    const given = givenName?.trim();
+    if (givenName !== undefined && !given) {
+      throw new PluginProvisionError('name must not be blank. Omit it to keep the current name.', 400);
+    }
     const alreadyThere = async (onDisk: string): Promise<ProvisionedPlugin> => {
+      if (given) await this.namePersonalPlugin(user, onDisk, given);
       const { name, displayName } = await this.persistedNames(onDisk, folder);
       return provisioned(this.pluginsRoot, folder, name, displayName, false);
     };
@@ -322,7 +330,7 @@ export class PluginProvisionService {
       const existing = await this.existingFolder(folder);
       if (existing !== null) return alreadyThere(existing);
       try {
-        await this.provision(user, folder, folder, personalAccessMd(user));
+        await this.provision(user, folder, folder, personalAccessMd(user), given);
       } catch (err) {
         // ENSURE semantics even under a race the lock cannot see (another
         // process, a checkout that appeared between check and write): the
@@ -330,8 +338,72 @@ export class PluginProvisionService {
         if (err instanceof PluginProvisionError && err.status === 409) return alreadyThere(folder);
         throw err;
       }
-      return provisioned(this.pluginsRoot, folder, pluginManifestName(folder), folder, true);
+      return provisioned(this.pluginsRoot, folder, pluginManifestName(folder), given ?? folder, true);
     });
+  }
+
+  /**
+   * The name the caller gave their personal plugin, or null when they gave
+   * none — the app then calls it by its fixed default. Read from the
+   * manifest's `displayName` by the shared reader, so a name an agent wrote
+   * into `plugin.json` by hand counts exactly as one `my_plugin` stored.
+   *
+   * "Gave none" is a manifest whose display name is still the folder's own
+   * label (or its identifier): what the ensure writes when no name is asked
+   * for, and what the startup backfill wrote into older manifests. Reads,
+   * never creates: a person with no personal folder yet has no name either.
+   */
+  async personalPluginName(user: AuthUser): Promise<string | null> {
+    const folder = personalPluginFolderName(user.id);
+    const existing = await this.existingFolder(folder);
+    if (existing === null) return null;
+    const shown = (await this.persistedNames(existing, folder)).displayName;
+    const unnamed = [folder, pluginManifestName(folder)].some((label) => label.toLowerCase() === shown.toLowerCase());
+    return unnamed ? null : shown;
+  }
+
+  /**
+   * Store `displayName` in the existing personal folder's manifest, keeping
+   * every other field, and commit it. Runs inside the ensure's slug lock, so
+   * the read it compares against and the write are one step. Nothing is
+   * written when the manifest already says it. A `plugin.json` that is there
+   * but is not a JSON object is refused rather than replaced: overwriting it
+   * would destroy whatever its owner wrote. A commit that does not land puts
+   * the file back as it was, so the next call does not read an uncommitted
+   * name as stored.
+   */
+  private async namePersonalPlugin(user: AuthUser, folder: string, displayName: string): Promise<void> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const rel = `${this.kbDirName}/${this.pluginsRoot}/${folder}/${PLUGIN_MANIFEST_FILE}`;
+    const abs = path.join(wsDir, ...rel.split('/'));
+    const before = await fs.readFile(abs, 'utf-8').catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null;
+      throw err;
+    });
+    const manifest = before === null ? null : await this.disk.readJsonObject(abs);
+    if (before !== null && manifest === null) {
+      throw new PluginProvisionError(
+        `${PLUGIN_MANIFEST_FILE} in your personal plugin is not a JSON object, so the name cannot be stored in it. Fix the file first.`,
+        409,
+      );
+    }
+    if (manifest?.displayName === displayName) return;
+    const next = manifest === null
+      ? renderPluginManifest(folder, displayName)
+      : `${JSON.stringify({ ...manifest, displayName }, null, 2)}\n`;
+    await this.workspaceService.writeFile(wsId, rel, next);
+    try {
+      await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, rel, user, {
+        summary: `Name personal plugin "${displayName}"`,
+      });
+    } catch (err) {
+      // Best-effort, as `provision`'s rollback is: the commit's own error is
+      // the one the caller needs, never a failure to restore.
+      await (before === null ? fs.rm(abs, { force: true }) : fs.writeFile(abs, before, 'utf-8')).catch(() => {});
+      throw err;
+    }
+    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
   }
 
   /**
@@ -547,9 +619,10 @@ export class PluginProvisionService {
 
   /**
    * Seed `Plugins/<folder>/` — `folder` being the path below the root, `leaf`
-   * its last segment, which names the manifest — and commit it.
+   * its last segment, which names the manifest — and commit it. `displayName`
+   * is the personal folder's given name; absent, the leaf is what people see.
    */
-  private async provision(user: AuthUser, folder: string, leaf: string, accessMd: string): Promise<void> {
+  private async provision(user: AuthUser, folder: string, leaf: string, accessMd: string, displayName?: string): Promise<void> {
     const wsId = await this.readyWorkspaceId();
     const folderPath = `${this.kbDirName}/${this.pluginsRoot}/${folder}`;
     const wsRelPath = `${folderPath}/access.md`;
@@ -580,7 +653,7 @@ export class PluginProvisionService {
       await this.workspaceService.writeFile(
         wsId,
         `${folderPath}/${PLUGIN_MANIFEST_FILE}`,
-        renderPluginManifest(leaf),
+        renderPluginManifest(leaf, displayName),
       );
       // Inline, not enqueued: the gate reads rules at HEAD, so the folder is
       // only real once this commit lands. `runPendingCommit` is the same

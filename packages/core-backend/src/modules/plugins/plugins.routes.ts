@@ -189,8 +189,15 @@ export function createPluginCreationRoutes(
     // anything is provisioned.
     if (await refuseOutsideConnectionScope(req, res, user, 'my_plugin', agentScope)) return;
     if (refuseMismatchedArguments(req, res)) return;
+    // `name`: what its owner calls it, stored as the manifest `displayName`.
+    // Absent keeps the name it has; the service refuses a blank one.
+    const { name } = (req.body ?? {}) as { name?: unknown };
+    if (name !== undefined && typeof name !== 'string') {
+      res.status(400).json({ error: 'name must be a string' });
+      return;
+    }
     try {
-      res.json(await provision.ensurePersonalPlugin(user));
+      res.json(await provision.ensurePersonalPlugin(user, name));
     } catch (err) {
       // The service's own refusals keep their status — a 503 for incomplete
       // discovery tells the caller to try again, which a 500 would not.
@@ -374,6 +381,31 @@ export function createPluginsRoutes(
   const openJoinCr = (mine: ChangeRequest[], email: string, plugin: string): ChangeRequest | null =>
     mine.find((cr) => cr.state === 'open' && cr.branch === joinBranchFor(email, plugin)) ?? null;
 
+  /**
+   * What the caller named their own personal plugin — `{ name }`, null when
+   * they gave it none (the app then shows its fixed default). The catalog
+   * never lists a personal folder, so this is where the app learns it.
+   * Reads only: a person with no personal folder yet has no name either.
+   *
+   *   GET /api/plugins/personal  → { name: string | null }
+   */
+  router.get('/plugins/personal', async (req, res) => {
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    try {
+      res.json({ name: await provision.personalPluginName(user) });
+    } catch (err) {
+      if (err instanceof PluginProvisionError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      log.error('personal plugin name read failed:', { err });
+      res.status(500).json({ error: "Failed to read your personal plugin's name" });
+    }
+  });
 
   router.get('/plugins', async (req, res) => {
     const email = req.userEmail;
