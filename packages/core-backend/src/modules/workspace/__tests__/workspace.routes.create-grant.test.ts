@@ -3,26 +3,30 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { archiveLandingFor } from '../../../__tests__/archive-landing.js';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ICreatorAccess } from '../../access-model/creator.js';
-import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/change-gate.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { IAccessControl } from '../../access/index.js';
+import {
+  AccessDeniedError,
+  type ChangeReadVerdict,
+  type IChangeReadGate,
+  type ICreatorAccess,
+} from '../../access-model/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
-import type { WorkspaceService } from '../workspace.service.js';
+import type { ArchiveEntryJudge, WorkspaceService } from '../workspace.service.js';
 
 /**
  * Contract test for the creator read-grant hooks on the creation routes:
  * PUT /file and POST /upload (a new root folder's seed before the file),
  * POST /directory (the seed before the .gitkeep cycle), POST /unzip (the
- * read gate on the destination before extraction). The planner itself is
- * unit-tested in creator-access.test.ts — here it's mocked to return canned
- * plans and the assertion is on what the route writes, locks, and
- * invalidates.
+ * read gate on the destination before extraction, and no seed of its own:
+ * the extraction's batch plans it). The planner itself is unit-tested in
+ * creator-access.test.ts — here it's mocked to return canned plans and the
+ * assertion is on what the route writes, locks, and invalidates.
  */
 
 const USER_ID = 'user-1';
@@ -62,6 +66,9 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
     }),
     createDirectory: vi.fn(async () => undefined),
     unzipFile: unzipFileMock,
+    // Where `POST /unzip` roots the landing it hands the extraction; the
+    // stand-in extraction above never lands anything there.
+    getWorkspacePath: vi.fn(async () => '/nonexistent/workspace'),
     // `PUT /file` runs its precondition, plan and write inside one turn for
     // the target path. Straight through here: what this file asserts is the
     // ORDER of the plan's writes and locks, which the real turn preserves.
@@ -104,9 +111,15 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
         creatorAccess as unknown as ICreatorAccess,
       // Not exercised here — only `.bevelignore`'s tree visibility consults it.
       { isAdmin: async () => false } as unknown as IAdminAccessService,
-      new NodeFs(),
+      realDisk(),
       undefined,
       opts.changeGate,
+      archiveLandingFor({
+        workspaceService,
+        versionControl: versionControlService,
+        kbDirName: KB,
+        creatorAccess: creatorAccess as unknown as ICreatorAccess,
+      }),
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -192,23 +205,24 @@ describe('creator read-grant hooks on the creation routes', () => {
     expect(h.writes).toEqual([]);
   });
 
-  it('an unzip whose destination seed fails extracts nothing', async () => {
+  it('POST /unzip writes and locks nothing of its own ahead of the extraction, a new root folder\'s seed included', async () => {
     h = await makeHarness({ extracted: [`${KB}/KnowledgeBase/Fresh/a.md`] });
     h.creatorAccess.planForCreate.mockResolvedValue({
       kind: 'seed-access-md',
       wsRelPath: `${KB}/KnowledgeBase/Fresh/access.md`,
       apply: () => 'seed',
     });
-    h.writeFileMock.mockImplementation(async () => {
-      throw new Error('boom');
-    });
     const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path: `${KB}/KnowledgeBase/drop.zip`, destination: `${KB}/KnowledgeBase/Fresh` }),
     });
-    expect(res.status).toBe(500);
-    expect(h.unzipFileMock).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    // The seed rides the extraction's own commit (the landing's batch plans
+    // it: see unzip-lands-as-one-commit.test.ts), so the route lands none first.
+    expect(h.writes).toEqual([]);
+    expect(h.lockedPaths).toEqual([]);
+    expect(h.unzipFileMock).toHaveBeenCalledOnce();
   });
 
   it('POST /directory seeds the new folder access.md before the .gitkeep cycle', async () => {
@@ -234,19 +248,6 @@ describe('creator read-grant hooks on the creation routes', () => {
     expect(h.lockedPaths[1]).toBe(`${KB}/KnowledgeBase/Projects/.gitkeep`);
   });
 
-  it('POST /unzip locks each extracted file for its commit and rewrites none of them', async () => {
-    const extracted = [`${KB}/KnowledgeBase/a.md`, `${KB}/KnowledgeBase/b.pdf`];
-    h = await makeHarness({ extracted });
-    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: `${KB}/KnowledgeBase/drop.zip` }),
-    });
-    expect(res.status).toBe(200);
-    expect(h.lockedPaths).toEqual(extracted);
-    expect(h.writes).toEqual([]);
-  });
-
   it('POST /upload lands an uploaded .md as given, with no grant folded in', async () => {
     h = await makeHarness();
     const res = await fetch(
@@ -259,12 +260,12 @@ describe('creator read-grant hooks on the creation routes', () => {
 });
 
 /**
- * Archive extraction is the one route whose bytes land on disk BEFORE the
- * lock, so the lock's read gate would meet files already there. The route
- * asks the same gate about the destination first, and extracts nothing when
- * it refuses.
+ * The route hands the extraction the archive judge, which asks the lock's read
+ * gate about the destination as a folder and about each directory entry as a
+ * folder, and leaves a file to its own lock, so an entry the gate refuses is
+ * skipped rather than refusing the whole batch.
  */
-describe('POST /unzip asks the read-before-write gate about its destination first', () => {
+describe('POST /unzip hands the extraction the archive judge, which asks the read-before-write gate', () => {
   let h: Harness | null = null;
   afterEach(async () => {
     if (h) await close(h.server);
@@ -284,62 +285,27 @@ describe('POST /unzip asks the read-before-write gate about its destination firs
     return { gate, judge };
   }
 
-  it('a destination the caller cannot read is refused whole — nothing is extracted or locked', async () => {
+  it('hands the extraction the archive judge, whose destination question asks the gate about the folder as a folder', async () => {
     const { gate, judge } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed' });
-    h = await makeHarness({ extracted: [`${KB}/KnowledgeBase/Sealed/a.md`], changeGate: gate });
+    h = await makeHarness({ extracted: [], changeGate: gate });
     const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path: `${KB}/KnowledgeBase/drop.zip`, destination: `${KB}/KnowledgeBase/Sealed` }),
     });
-    expect(res.status).toBe(403);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain('You don\'t have read access to "KnowledgeBase/Sealed"');
-    // Asked about the DESTINATION as a folder, and nothing happened after the refusal.
+    // The question is the extraction's to ask, before it looks at the folder
+    // (unzip-lands-as-one-commit.test.ts lands nothing when it refuses).
+    expect(res.status).toBe(200);
+    // The requested destination reaches the extraction, which asks the judge about it.
+    expect(h.unzipFileMock.mock.calls[0]![2]).toBe(`${KB}/KnowledgeBase/Sealed`);
+    const archiveJudge = h.unzipFileMock.mock.calls[0]![3] as ArchiveEntryJudge;
+    const err = await archiveJudge.destination(`${KB}/KnowledgeBase/Sealed`).then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({ status: 403 });
+    expect((err as Error).message).toContain('You don\'t have read access to "KnowledgeBase/Sealed"');
     expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Sealed`, 'dir');
-    expect(h.unzipFileMock).not.toHaveBeenCalled();
-    expect(h.lockedPaths).toEqual([]);
   });
 
-  it('without a destination the archive\'s own folder is what is asked about', async () => {
-    const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
-    h = await makeHarness({ extracted: [`${KB}/KnowledgeBase/Open/a.md`], changeGate: gate });
-    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: `${KB}/KnowledgeBase/Open/drop.zip` }),
-    });
-    expect(res.status).toBe(200);
-    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Open`, 'dir');
-    expect(h.unzipFileMock).toHaveBeenCalledOnce();
-    expect(h.lockedPaths).toEqual([`${KB}/KnowledgeBase/Open/a.md`]);
-  });
-
-  it('a new root folder as destination is seeded with the creator grant BEFORE the gate and the extraction', async () => {
-    const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
-    h = await makeHarness({ extracted: [`${KB}/KnowledgeBase/Fresh/a.md`], changeGate: gate });
-    const seedPath = `${KB}/KnowledgeBase/Fresh/access.md`;
-    h.creatorAccess.planForCreate.mockResolvedValue({
-      kind: 'seed-access-md',
-      wsRelPath: seedPath,
-      apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n',
-    });
-    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: `${KB}/KnowledgeBase/drop.zip`, destination: `${KB}/KnowledgeBase/Fresh` }),
-    });
-    expect(res.status).toBe(200);
-    // Planned as a FOLDER, seeded under its own lock, then the gate, then the archive.
-    expect(h.creatorAccess.planForCreate).toHaveBeenCalledWith(WS, USER, `${KB}/KnowledgeBase/Fresh`, 'dir');
-    expect(h.writes.map((w) => w.path)).toEqual([seedPath]);
-    expect(h.lockedPaths).toEqual([seedPath, `${KB}/KnowledgeBase/Fresh/a.md`]);
-    const seedOrder = h.creatorAccess.planForCreate.mock.invocationCallOrder[0]!;
-    expect(judge.mock.invocationCallOrder[0]!).toBeGreaterThan(seedOrder);
-    expect(h.unzipFileMock.mock.invocationCallOrder[0]!).toBeGreaterThan(judge.mock.invocationCallOrder[0]!);
-  });
-
-  it('hands the extraction a per-entry guard that asks the gate about each entry as a file', async () => {
+  it('hands the extraction the archive judge: a directory entry is asked about as a folder, a file is left to its lock', async () => {
     const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
     h = await makeHarness({ extracted: [], changeGate: gate });
     const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
@@ -348,10 +314,21 @@ describe('POST /unzip asks the read-before-write gate about its destination firs
       body: JSON.stringify({ path: `${KB}/KnowledgeBase/Open/drop.zip` }),
     });
     expect(res.status).toBe(200);
-    const guard = h.unzipFileMock.mock.calls[0]![3] as (p: string) => Promise<void>;
-    expect(typeof guard).toBe('function');
-    await guard(`${KB}/KnowledgeBase/Open/Nested/deep.md`);
-    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Open/Nested/deep.md`, 'file');
+    const archiveJudge = h.unzipFileMock.mock.calls[0]![3] as ArchiveEntryJudge;
+    judge.mockClear();
+    await archiveJudge.entry(`${KB}/KnowledgeBase/Open/Nested`, 'dir');
+    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Open/Nested`, 'dir');
+    // A file's read-before-write is asked by its lock, at `acquireLock`, and
+    // a refusal there is that entry's alone (see unzip-lands-as-one-commit.test.ts).
+    judge.mockClear();
+    await archiveJudge.entry(`${KB}/KnowledgeBase/Open/Nested/deep.md`, 'file');
+    expect(judge).not.toHaveBeenCalled();
+    expect(() =>
+      archiveJudge.refusedAtLock(
+        `${KB}/KnowledgeBase/Open/Nested/deep.md`,
+        new AccessDeniedError({ path: `${KB}/KnowledgeBase/Open/Nested/deep.md`, eligibleRoles: [], eligibleUsers: [] }),
+      ),
+    ).not.toThrow();
   });
 });
 

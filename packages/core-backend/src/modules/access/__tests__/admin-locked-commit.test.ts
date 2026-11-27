@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { AdminLockedCommits } from '../admin-locked-commit.js';
+import { PathHeldError } from '../../kb-fs/index.js';
 import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../../shared/domain-errors.js';
 import type { AuthUser, IWorkspaceService, IVersionControlService } from '@bevel-software/platform-shared';
 
@@ -217,5 +218,22 @@ describe('AdminLockedCommits.withFileLocks — release semantics', () => {
     expect(h.releaseNoCommitCalls).toEqual([]);
     expect(h.locks.size).toBe(0);
     expect(h.files.get(`${KB}/roles.yaml`)).toBe('roles:\n'); // restored
+  });
+});
+
+describe('AdminLockedCommits.mapLockContention', () => {
+  it('turns a held lock into the friendly 409, and passes on a failure that only reads like one', async () => {
+    const { locked } = makeHarness({});
+    await expect(
+      locked.mapLockContention(async () => {
+        throw new PathHeldError(`${KB}/roles.yaml`, 'Bo');
+      }),
+    ).rejects.toMatchObject({ status: 409, message: 'Things are being edited by another admin. Try again in a moment.' });
+    const lookalike = new Error(`Skipped editing "${KB}/roles.yaml" — locked by Bo. Nothing of this write was written; try again later.`);
+    await expect(
+      locked.mapLockContention(async () => {
+        throw lookalike;
+      }),
+    ).rejects.toBe(lookalike);
   });
 });

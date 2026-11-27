@@ -48,7 +48,7 @@
 import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 
-import { type WriteValidator, LockingFilesystem } from '../kb-fs/index.js';
+import { type WriteValidator, LockingFilesystem, PathHeldError } from '../kb-fs/index.js';
 import type { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import { isAbsence } from '../../shared/fs.contract.js';
@@ -144,8 +144,8 @@ export class AdminLockedCommits {
   }
 
   /**
-   * Map LockingFilesystem's status-less contention error ("Skipped editing …
-   * — locked by …") to the friendly 409. Callers pre-check the common case,
+   * Map LockingFilesystem's held-lock refusal (`PathHeldError`) to the
+   * friendly 409. Callers pre-check the common case,
    * but that is a TOCTOU check — this catches the race so contention always
    * surfaces as a 409, never an unhandled 500.
    */
@@ -153,7 +153,7 @@ export class AdminLockedCommits {
     try {
       return await write();
     } catch (err) {
-      if (err instanceof Error && /locked by /.test(err.message)) {
+      if (err instanceof PathHeldError) {
         throw this.deps.makeError(
           `${this.deps.contendedSubject} are being edited by another admin. Try again in a moment.`,
           409,

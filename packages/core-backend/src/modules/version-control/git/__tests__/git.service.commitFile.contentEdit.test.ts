@@ -1,0 +1,167 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { testKbContext } from '../../../../__tests__/kb-context.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import type { WorkspaceService } from '../../../workspace/index.js';
+import { VersionControlHooks } from '../../version-control-hooks.js';
+import { GitService } from '../git.service.js';
+import { NodeGitRunner } from '../node-git-runner.js';
+import { gitOut, runGit } from './git-test-helpers.js';
+import type { IGitRunner } from '../../../../shared/git.contract.js';
+
+/**
+ * `GitService.commitFile` says what kind of change it committed
+ * (`CommitAttribution.contentEdit`): an edit of a file that was already there,
+ * and whether the file's leading `---` block changed with it. The events that
+ * announce the commit are marked from it, so that an open file explorer does
+ * not ask for the whole tree after a save that cannot have changed it.
+ */
+
+const USER = { id: 'u-alice', name: 'Alice', email: 'alice@bevel.software' };
+const WS = 'ws-content-edit';
+
+const PAGE = '---\nread: [Sales]\n---\n\n# Name\nA page\n';
+
+describe('GitService.commitFile — what kind of change it was', () => {
+  let root: string;
+  let repo: string;
+  let svc: GitService;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-git-contentedit-'));
+    const workspaceDir = path.join(root, WS);
+    repo = path.join(workspaceDir, 'knowledge-base');
+    await fs.mkdir(repo, { recursive: true });
+    await runGit(repo, ['init', '-b', 'feature-test']);
+    await runGit(repo, ['config', 'user.email', 'test@bevel.local']);
+    await runGit(repo, ['config', 'user.name', 'Test Runner']);
+    await runGit(repo, ['config', 'core.autocrlf', 'false']);
+    await fs.writeFile(path.join(repo, 'page.md'), PAGE);
+    await fs.writeFile(path.join(repo, 'plain.md'), '# Name\nNo frontmatter\n');
+    await fs.writeFile(path.join(repo, 'data.csv'), 'a,b\n1,2\n');
+    await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Sales]\n---\nA note\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'seed']);
+    svc = new GitService(
+      { getWorkspacePath: async () => workspaceDir } as unknown as WorkspaceService,
+      new VersionControlHooks(),
+      testKbContext(),
+    );
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  const commit = (file: string) => svc.commitFile(WS, USER, file, undefined, true);
+
+  it('an edit of the body of an existing page is a content edit that left its frontmatter alone', async () => {
+    await fs.writeFile(path.join(repo, 'page.md'), `${PAGE}\n# Log\n- a line\n`);
+    expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: false });
+  });
+
+  it('an edit of an existing page without frontmatter is one too', async () => {
+    await fs.writeFile(path.join(repo, 'plain.md'), '# Name\nNo frontmatter\n\nMore.\n');
+    expect((await commit('plain.md'))?.contentEdit).toEqual({ frontmatterChanged: false });
+  });
+
+  it('an edit of the body of a file of another kind is a content edit that left its frontmatter alone', async () => {
+    await fs.writeFile(path.join(repo, 'data.csv'), 'a,b\n1,2\n3,4\n');
+    expect((await commit('data.csv'))?.contentEdit).toEqual({ frontmatterChanged: false });
+    await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Sales]\n---\nA note, longer\n');
+    expect((await commit('notes.txt'))?.contentEdit).toEqual({ frontmatterChanged: false });
+  });
+
+  // The access gate reads a file's own entries whatever its kind, so a .txt or .csv that opens
+  // with a `---` block is restricted by it, and a change to that block changes who may read it.
+  it('a changed access entry in the frontmatter of a file of another kind is reported', async () => {
+    await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Finance]\n---\nA note\n');
+    expect((await commit('notes.txt'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('a version the replaced file cannot be read at counts as a changed frontmatter', async () => {
+    // The real runner, except that git answers the replaced version as missing, as
+    // `cat-file --batch` does for a path HEAD does not hold: nothing to compare is no proof
+    // the file's own entries stayed the same.
+    const real = new NodeGitRunner();
+    const runner: IGitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: ((cwd: string, args: string[], opts?: { input?: string | Buffer }) => {
+        const input = String(opts?.input ?? '');
+        if (args[0] === 'cat-file' && args[1] === '--batch' && input.startsWith('HEAD:notes.txt')) {
+          return Promise.resolve({ stdout: Buffer.from('HEAD:notes.txt missing\n'), stderr: '' });
+        }
+        return real.run(cwd, args, opts as never);
+      }) as IGitRunner['run'],
+    };
+    const blind = new GitService(
+      { getWorkspacePath: async () => path.dirname(repo) } as unknown as WorkspaceService,
+      new VersionControlHooks(),
+      testKbContext(),
+      undefined,
+      null,
+      runner,
+    );
+    await fs.writeFile(path.join(repo, 'notes.txt'), '---\nread: [Sales]\n---\nA note, longer\n');
+    expect((await blind.commitFile(WS, USER, 'notes.txt', undefined, true))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('frontmatter added to a file of another kind is reported', async () => {
+    await fs.writeFile(path.join(repo, 'data.csv'), '---\nread: [Everyone]\n---\na,b\n');
+    expect((await commit('data.csv'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('a changed access entry in the frontmatter is reported', async () => {
+    await fs.writeFile(path.join(repo, 'page.md'), PAGE.replace('[Sales]', '[Sales, Finance]'));
+    expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('a changed entry behind a fence padded with spaces is reported', async () => {
+    const padded = '--- \nread: [Sales]\n--- \n\n# Name\nA page\n';
+    await fs.writeFile(path.join(repo, 'page.md'), padded);
+    await commit('page.md');
+    await fs.writeFile(path.join(repo, 'page.md'), padded.replace('[Sales]', '[Finance]'));
+    expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('frontmatter added to a page that had none is reported', async () => {
+    await fs.writeFile(path.join(repo, 'plain.md'), '---\nread: [Sales]\n---\n# Name\nNo frontmatter\n');
+    expect((await commit('plain.md'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('frontmatter removed from a page is reported', async () => {
+    await fs.writeFile(path.join(repo, 'page.md'), '# Name\nA page\n');
+    expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: true });
+  });
+
+  it('a new file is not a content edit', async () => {
+    await fs.writeFile(path.join(repo, 'new.md'), '# Name\nNew\n');
+    const change = await commit('new.md');
+    expect(change?.sha).toBeTruthy();
+    expect(change?.contentEdit).toBeUndefined();
+  });
+
+  it('a new file in a new folder is not a content edit', async () => {
+    await fs.mkdir(path.join(repo, 'Folder'));
+    await fs.writeFile(path.join(repo, 'Folder', 'new.md'), '# Name\nNew\n');
+    expect((await commit('Folder/new.md'))?.contentEdit).toBeUndefined();
+  });
+
+  // The workspace is shared: an entry something else left staged is not this save's.
+  it('commits only its own path, leaving an entry staged by something else staged and out of the commit', async () => {
+    await fs.writeFile(path.join(repo, 'data.csv'), 'a,b\n1,2\n5,6\n');
+    await runGit(repo, ['add', '--', 'data.csv']);
+    await fs.writeFile(path.join(repo, 'page.md'), `${PAGE}\n# Log\n- a line\n`);
+    expect((await commit('page.md'))?.contentEdit).toEqual({ frontmatterChanged: false });
+    expect(await gitOut(repo, ['show', '--name-only', '--pretty=format:', 'HEAD'])).toBe('page.md');
+    expect(await gitOut(repo, ['diff', '--cached', '--name-only'])).toBe('data.csv');
+  });
+
+  it('a deleted file is not a content edit', async () => {
+    await fs.rm(path.join(repo, 'plain.md'));
+    const change = await commit('plain.md');
+    expect(change?.sha).toBeTruthy();
+    expect(change?.contentEdit).toBeUndefined();
+  });
+});

@@ -41,6 +41,7 @@ import {
   PLUGIN_MANIFEST_FILE,
   PLUGIN_SKILLS_DIR,
   pluginDisplayNameOf,
+  pluginIdentityOf,
   pluginManifestName,
   renderPluginManifest,
   PERSONAL_PLUGIN_PREFIX,
@@ -306,38 +307,27 @@ export class PluginProvisionService {
   /**
    * Ensure the caller's personal folder exists — idempotent, keyed to the
    * stable user id. Returns `created: false` when it is already there, and
-   * with it the display name the existing manifest carries (see
-   * {@link persistedDisplayName}): the answer is what the file says, so the
-   * call that made the folder and every call after it agree.
+   * with it the `name` and `displayName` the existing manifest carries (see
+   * {@link persistedNames}): the answer is what the file says when the call
+   * reads it, so a repeated call with no edit in between answers as the call
+   * that made the folder did.
    */
   async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
+    const alreadyThere = async (onDisk: string): Promise<ProvisionedPlugin> => {
+      const { name, displayName } = await this.persistedNames(onDisk, folder);
+      return provisioned(this.pluginsRoot, folder, name, displayName, false);
+    };
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       const existing = await this.existingFolder(folder);
-      if (existing !== null) {
-        return provisioned(
-          this.pluginsRoot,
-          folder,
-          pluginManifestName(folder),
-          await this.persistedDisplayName(existing, folder),
-          false,
-        );
-      }
+      if (existing !== null) return alreadyThere(existing);
       try {
         await this.provision(user, folder, folder, personalAccessMd(user));
       } catch (err) {
         // ENSURE semantics even under a race the lock cannot see (another
         // process, a checkout that appeared between check and write): the
         // folder existing is this method's success case, never its error.
-        if (err instanceof PluginProvisionError && err.status === 409) {
-          return provisioned(
-            this.pluginsRoot,
-            folder,
-            pluginManifestName(folder),
-            await this.persistedDisplayName(folder, folder),
-            false,
-          );
-        }
+        if (err instanceof PluginProvisionError && err.status === 409) return alreadyThere(folder);
         throw err;
       }
       return provisioned(this.pluginsRoot, folder, pluginManifestName(folder), folder, true);
@@ -488,22 +478,25 @@ export class PluginProvisionService {
   }
 
   /**
-   * What the plugin at `folder` is ALREADY called, read from its manifest by
-   * the one shared rule — `fallback` only when there is no manifest to read
-   * (a folder mid-creation, a `plugin.json` that is not an object).
+   * What the plugin at `folder` is ALREADY called, its `name` and its
+   * `displayName`, read from its manifest by the shared rules discovery uses
+   * (`pluginIdentityOf`, `pluginDisplayNameOf`). `fallback` (the folder's
+   * leaf) stands in only where the manifest says nothing usable: no manifest
+   * yet (a folder mid-creation), a `plugin.json` that is not an object, a
+   * `name` that is not an identifier.
    *
    * An ensure that found the folder already there answers with the FILE's
-   * answer, never the folder's spelling: the folder is an input to no name,
-   * and an idempotent call whose second answer differed from its first would
+   * answer, never the folder's spelling wherever the manifest names it, and
+   * an idempotent call whose second answer differed from its first would
    * be this service telling the caller a plugin had been renamed.
    */
-  private async persistedDisplayName(folder: string, fallback: string): Promise<string> {
+  private async persistedNames(folder: string, fallback: string): Promise<{ name: string; displayName: string }> {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
     const manifest = await this.disk.readJsonObject(
       path.join(wsDir, this.kbDirName, this.pluginsRoot, ...folder.split('/'), PLUGIN_MANIFEST_FILE),
     );
-    return pluginDisplayNameOf(manifest) || fallback;
+    return { name: pluginIdentityOf(manifest, fallback), displayName: pluginDisplayNameOf(manifest) || fallback };
   }
 
   /**

@@ -8,8 +8,14 @@ import AdmZip from 'adm-zip';
 import '@utcp/mcp'; // side effect: registers the 'mcp' call-template protocol
 import { CallTemplateSerializer, UtcpClientConfigSerializer } from '@utcp/sdk';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { registerManual } from '@bevel-software/platform-mcp-core';
+import { EXCLUDE_TOOLS_KEY, registerManual } from '@bevel-software/platform-mcp-core';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { FALLBACKS_DIR, materializePlugin, prepareStdioSpec } from '../materialize.js';
+import { createHexisMcpServer } from '../server.js';
 import type { HexisMcpConfig } from '../config.js';
 
 /**
@@ -31,7 +37,7 @@ import type { HexisMcpConfig } from '../config.js';
  * from, and needing none is what keeps the fixture honest.
  */
 
-/** A minimal MCP stdio server: initialize, tools/list, tools/call(probe). */
+/** A minimal MCP stdio server: initialize, tools/list, tools/call (`refuse` reports its own failure, any other tool answers as probe). */
 const FIXTURE_SERVER = `'use strict';
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
@@ -50,7 +56,17 @@ rl.on('line', (line) => {
       name: 'probe',
       description: 'Report the runtime contract as this process sees it.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    }, {
+      name: 'extra',
+      description: 'A second tool, for a server that leaves one out.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    }, {
+      name: 'refuse',
+      description: 'A tool that reports its own failure.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     }] } });
+  } else if (req.method === 'tools/call' && req.params && req.params.name === 'refuse') {
+    send({ jsonrpc: '2.0', id: req.id, result: { isError: true, content: [{ type: 'text', text: 'This tool requires a Business plan or higher.' }] } });
   } else if (req.method === 'tools/call') {
     send({ jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: JSON.stringify({
       pluginRoot: process.env.PLUGIN_ROOT ?? null,
@@ -71,6 +87,22 @@ let priorHexisHome: string | undefined;
 let config: HexisMcpConfig;
 let client: CodeModeUtcpClient | null = null;
 
+/** The plugin's stdio server as the deployment hands it over, leaving its `extra` tool out. */
+const LOCAL_STDIO_MANUAL = {
+  name: 'gtmprobe',
+  call_template_type: 'mcp',
+  config: {
+    mcpServers: {
+      probe: {
+        transport: 'stdio',
+        command: 'node',
+        args: ['${PLUGIN_ROOT}/bin/server.cjs'],
+        [EXCLUDE_TOOLS_KEY]: ['extra'],
+      },
+    },
+  },
+};
+
 beforeAll(async () => {
   home = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-e2e-'));
   priorHexisHome = process.env.HEXIS_HOME;
@@ -89,6 +121,46 @@ beforeAll(async () => {
   const archive = zip.toBuffer();
 
   httpServer = http.createServer((req, res) => {
+    const pathname = (req.url ?? '/').split('?')[0];
+    const json = (payload: unknown): void => {
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
+    };
+    // What `createHexisMcpServer` reads at startup: the deployment's config,
+    // its manuals with the plugin's stdio server among them (local-only), and
+    // its own MCP endpoint, which serves one tool.
+    if (pathname === '/api/config') return json({ mcpUrl: `${config.baseUrl}/api/mcp` });
+    if (pathname === '/api/agent/all-tools') return json({ manuals: [LOCAL_STDIO_MANUAL] });
+    if (pathname === '/api/agent/tools/list_local_tools') {
+      return json({ tools: [{ name: 'gtmprobe', slug: 'gtmprobe', path: 'Plugins/GTM/mcp.json' }] });
+    }
+    if (pathname === '/api/mcp') {
+      let body = '';
+      req.on('data', (chunk: Buffer) => (body += chunk.toString('utf8')));
+      req.on('end', () => {
+        void (async () => {
+          const mcp = new Server({ name: 'stub-deployment', version: '0.0.0' }, { capabilities: { tools: {} } });
+          mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+            tools: [
+              { name: 'ping', description: 'the ping tool', inputSchema: { type: 'object' as const, properties: {} } },
+              { name: 'refuse', description: 'a tool that reports its own failure', inputSchema: { type: 'object' as const, properties: {} } },
+            ],
+          }));
+          mcp.setRequestHandler(CallToolRequestSchema, async (request) =>
+            request.params.name === 'refuse'
+              ? { isError: true, content: [{ type: 'text' as const, text: 'You may not write here.' }] }
+              : { content: [{ type: 'text' as const, text: 'ok' }] },
+          );
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          res.on('close', () => {
+            void transport.close();
+            void mcp.close();
+          });
+          await mcp.connect(transport);
+          await transport.handleRequest(req, res, body ? (JSON.parse(body) as unknown) : undefined);
+        })();
+      });
+      return;
+    }
     if (req.url?.startsWith('/api/agent/plugins/GTM/archive')) {
       if (req.headers.authorization !== 'Bearer bevel_e2e') {
         res.writeHead(401).end();
@@ -252,6 +324,72 @@ describe('stdio end-to-end', () => {
     } finally {
       // Per-test dirs get per-test cleanup — the shared afterAll only owns `home`.
       await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a local stdio server's excluded tool off the list a client sees", { timeout: 60_000 }, async () => {
+    const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: false });
+    const probe = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
+    try {
+      await handle.ready;
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await handle.server.connect(serverTransport);
+      await probe.connect(clientTransport);
+      const names = (await probe.listTools()).tools.map((t) => t.name);
+      expect(names).toContain('ping');
+      expect(names).toContain('gtmprobe_probe_probe');
+      expect(names).not.toContain('gtmprobe_probe_extra');
+    } finally {
+      await probe.close().catch(() => {});
+      await handle.shutdown();
+    }
+  });
+
+  it("answers a local stdio server's own failure, and the deployment's, as a failed call in the server's words, to a direct call and to a chain", { timeout: 60_000 }, async () => {
+    const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: false });
+    const probe = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
+    try {
+      await handle.ready;
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await handle.server.connect(serverTransport);
+      await probe.connect(clientTransport);
+
+      const refused = await probe.callTool({ name: 'gtmprobe_probe_refuse', arguments: {} });
+      expect(refused.isError).toBe(true);
+      expect(refused.content).toEqual([{ type: 'text', text: 'This tool requires a Business plan or higher.' }]);
+
+      const answered = await probe.callTool({ name: 'gtmprobe_probe_probe', arguments: {} });
+      expect(answered.isError).toBeFalsy();
+
+      // The deployment is an MCP server to this one too, so its own tools'
+      // failures come through the same way.
+      const platform = await probe.callTool({ name: 'refuse', arguments: {} });
+      expect(platform.isError).toBe(true);
+      expect(platform.content).toEqual([{ type: 'text', text: 'You may not write here.' }]);
+
+      // A chain sees each of the two as a rejected call, not as a value: the
+      // chain fails with the server's words, and a chain that catches the
+      // rejection reads them from the error.
+      const chainText = (res: Awaited<ReturnType<typeof probe.callTool>>) => JSON.stringify(res.content);
+      for (const [call, words] of [
+        ['gtmprobe.probe_refuse({})', 'This tool requires a Business plan or higher.'],
+        ['hexis.hexis_refuse({})', 'You may not write here.'],
+      ] as const) {
+        const failed = await probe.callTool({ name: 'call_tool_chain', arguments: { code: `return ${call};` } });
+        expect(failed.isError).toBe(true);
+        expect(chainText(failed)).toContain(words);
+
+        const caught = await probe.callTool({
+          name: 'call_tool_chain',
+          arguments: { code: `try { ${call}; return 'answered'; } catch (err) { return 'rejected: ' + String(err && err.message); }` },
+        });
+        expect(caught.isError).toBeFalsy();
+        expect(chainText(caught)).toContain('rejected: ');
+        expect(chainText(caught)).toContain(words);
+      }
+    } finally {
+      await probe.close().catch(() => {});
+      await handle.shutdown();
     }
   });
 

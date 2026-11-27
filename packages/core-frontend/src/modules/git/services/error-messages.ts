@@ -148,15 +148,19 @@ export function friendlyGitMessage(raw: string): string {
   }
 
   // The read-before-write refusal (the AccessDeniedError the backend throws
-  // when the caller cannot READ where a change would land — a folder they
-  // cannot see, or a file they cannot open). Matched before the write-grant
-  // shape below because both open with the same lead.
+  // when the caller cannot READ where a change would land). It names the path
+  // being changed, whether or not something is there, and "the top level" only
+  // for the repository root itself. Matched before the write-grant shape below
+  // because both open with the same lead.
   const unreadableMatch = raw.match(
     /^You don't have permission to write to "([^"]+)"\. You don't have read access to (the top level|"[^"]+"); only what you can read can be created, changed or removed\.$/,
   );
   if (unreadableMatch) {
     const [, , place] = unreadableMatch;
-    return `You can't add or change anything in ${place} because you don't have read access to it. Ask an admin or the folder's owners to share it with you first.`;
+    if (place === 'the top level') {
+      return `You can't add or change anything in the top level because you don't have read access to it. Ask an admin or the folder's owners to share it with you first.`;
+    }
+    return `You can't add or change ${place} because you don't have read access to it. Ask an admin or its owners to share it with you first.`;
   }
 
   // Access-control rejections (the AccessDeniedError thrown by the backend

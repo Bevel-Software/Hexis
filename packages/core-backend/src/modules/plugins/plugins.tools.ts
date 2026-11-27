@@ -23,7 +23,18 @@ import { toolDef } from '../tool-helpers/index.js';
  * agent exactly as for a person; a refusal comes back as the endpoint's own
  * 4xx with its message.
  */
-export function registerPluginsTools(registry: IToolRegistry, kb: KbContext): void {
+export function registerPluginsTools(
+  registry: IToolRegistry,
+  kb: KbContext,
+  /**
+   * Public-demo lockdown (see `CoreConfig.publicDemo`): both creation doors
+   * refuse every call there, so neither tool is offered. Listed, each was a
+   * tool an agent would call and see fail every time (an MCP client's
+   * certification run counted `my_plugin` among its failures).
+   */
+  publicDemo = false,
+): void {
+  if (publicDemo) return;
   // ONE object on both surfaces, so the rewrite below reaches both of them.
   // The registry holds this object, and re-registering under the same name
   // would throw as a duplicate.

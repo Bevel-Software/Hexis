@@ -1,18 +1,17 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { createToolContextResolver } from '../tool-context.js';
 import { createToolHandlerFactory } from '../tool-handler.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { registerWorkspaceTools } from '../../workspace/workspace.tools.js';
-import { RoutineWritePolicyService } from '../../workspace/routine-write-policy.js';
-import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
-import { SpillStore } from '../../workspace/spill-store.js';
-import { DocExtractService, WorkerDocumentExtractor } from '../../workspace/index.js';
+import {
+  InternalTokenService,
+  RoutineWritePolicyService,
+  VersionControlHooks,
+  createToolAuthMiddleware,
+  registerWorkspaceTools,
+} from '../../../__tests__/tool-wiring.js';
+import { DocExtractService, SpillStore, ToolDescriptionNotes, WorkerDocumentExtractor } from '../../workspace/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 const WS = 'target-company-state';
@@ -25,17 +24,29 @@ const authService = { getUserById: async (id: string) => ({ id, email: 'e@x', na
 const workspaceService = {
   getOrCreateForUser: async () => ({ id: WS }),
   getWorkspacePath: async () => '/tmp/ws',
-  unzipFile: async (ws: string, p: string, d?: string, guardWrite?: (target: string) => Promise<void>) => {
+  unzipFile: async (
+    ws: string,
+    p: string,
+    d?: string,
+    judge?: {
+      entry(target: string, kind: 'file' | 'dir'): Promise<void>;
+      skipped(target: string, name: string, why: unknown): Error | null;
+    },
+  ) => {
     recorded.push(['unzip', ws, p, d]);
     if (archiveEntries.length === 0) return { extracted: [p], skipped: [] };
-    // Mirrors the real extraction: a guard refusal skips that entry with its message.
+    // Mirrors the real extraction: the judge's refusal skips that entry with
+    // its message, unless the judge says the entry decides the whole archive.
     const extracted: string[] = [];
     const skipped: { path: string; reason: string }[] = [];
     for (const target of archiveEntries) {
       try {
-        await guardWrite?.(target);
+        await judge?.entry(target, 'file');
         extracted.push(target);
       } catch (err) {
+        if ((err as { kind?: string }).kind === 'archive-refused') throw err;
+        const whole = judge?.skipped(target, target, err);
+        if (whole) throw whole;
         skipped.push({ path: target, reason: (err as Error).message });
       }
     }
@@ -45,11 +56,14 @@ const workspaceService = {
     throw new Error('no such file');
   },
 } as never;
+// The stub extraction above lands nothing, so no lock or commit is asked of it.
 const versionControlService = {} as never;
 const events = {} as never;
 const accessControl = {
   canRead: async () => true,
   canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+  // `unzip` asks the write rule at HEAD of each entry on this protected branch; no rules there means allow.
+  canWriteBatchAtRef: async () => null,
 } as never;
 
 const internalToken = new InternalTokenService({ secret: 's' });
@@ -105,16 +119,16 @@ describe('Phase 4 tools (core subset)', () => {
     expect(recorded).toContainEqual(['unzip', WS, 'knowledge-base/a.zip', undefined]);
   });
 
-  it('unzip never extracts a roles.yaml — extraction bypasses the filesystem gate that checks it', async () => {
+  it('unzip refuses an archive carrying a root roles.yaml whole: the archive judge never lands one from an archive', async () => {
     archiveEntries = ['knowledge-base/KnowledgeBase/notes.md', 'knowledge-base/roles.yaml'];
     const base = await start();
     const res = await post(`${base}/api/agent/tools/unzip`, { path: 'knowledge-base/a.zip', branch: WS });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
-    expect(body.extracted).toEqual(['knowledge-base/KnowledgeBase/notes.md']);
-    expect(body.skipped).toEqual([
-      { path: 'knowledge-base/roles.yaml', reason: expect.stringContaining('roles.yaml is never extracted') },
-    ]);
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string; kind: string };
+    expect(body.kind).toBe('archive-refused');
+    expect(body.error).toBe(
+      'roles.yaml never comes from an archive: edit the file itself, where the change is checked. Nothing in the archive was landed.',
+    );
   });
 
   it('the registered core tool appears in the internal manual', async () => {

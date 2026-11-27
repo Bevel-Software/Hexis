@@ -222,6 +222,7 @@ function settingsActions(settings: MenuSections): CommandAction[] {
   };
   return [
     ...settings.defaultItems.map((item) => toAction(item, false)),
+    ...settings.appSections.flatMap((section) => section.items.map((item) => toAction(item, false))),
     ...settings.adminItems.map((item) => toAction(item, true)),
   ].filter((a): a is CommandAction => a !== null);
 }

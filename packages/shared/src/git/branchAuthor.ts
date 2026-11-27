@@ -7,13 +7,16 @@
  * Authorship lookup must use the same transformation so a branch the user
  * could create via the UI is also recognised as theirs on delete.
  *
- * Returns `null` when the email is missing or sanitizes to an empty string —
+ * Returns `null` when the email is missing, sanitizes to an empty string, or
+ * sanitizes to a prefix no branch can carry (`_ops@…` gives `-ops`, and a
+ * branch name cannot start with `-`), so no branch could be theirs by it —
  * authorship MUST NOT silently fall back to a default identity like `user`.
  * If the helper returned a fallback, any user without a valid localpart
  * would be granted ownership of every `user/...` branch on origin, which is
  * the opposite of the safety property `isBranchAuthoredBy` is meant to
- * provide. The frontend's `slugifyDraftName` can keep its UI-side `user`
- * fallback at the call site because draft creation is not access-gated.
+ * provide. A person with no usable localpart gets their own `suggestions/`
+ * prefix instead ({@link ownDraftPrefixFor}), which the branch switcher and
+ * the server both use.
  */
 export function branchAuthorLocalpart(
   email: string | null | undefined,
@@ -25,6 +28,9 @@ export function branchAuthorLocalpart(
   // Sanitized can be all dashes (`-`, `--`) when every char was non-alphanumeric;
   // treat that as no usable identity.
   if (!sanitized.replace(/-/g, '')) return null;
+  // `<localpart>/…` is the whole branch name's start, and git (and
+  // `assertValidBranchName`) refuse a name that starts with `-`.
+  if (sanitized.startsWith('-')) return null;
   return sanitized;
 }
 
@@ -56,17 +62,44 @@ export function branchSegment(raw: string): string {
 }
 
 /**
- * The `suggestions/<who>-<id8>/` prefix every one of this user's suggestion
- * branches carries (`…/knowledge` for the Knowledge bundle, a skill segment
- * for skill proposals). SHARED so the client that names the branch and the
- * server that judges "may this caller delete it" can never disagree. The
- * user-id slice is what makes the identity collision-proof — `branchSegment`
- * alone is lossy (`alex+ops@…` and `alex-ops@…` both clean to `alex-ops`).
+ * The `suggestions/<who>-<id8>/` prefix this user's Knowledge suggestion
+ * bundle (`…/knowledge`) carries, and their drafts when their address has no
+ * usable localpart ({@link ownDraftPrefixFor}). A skill proposal is named by
+ * the library's own rule (`suggestions/<who>/<skill>`) and is not under it.
+ * SHARED so the client that names the branch and the server that judges "may
+ * this caller delete it" can never disagree. The user-id slice is what makes
+ * the identity collision-proof — `branchSegment` alone is lossy (`alex+ops@…`
+ * and `alex-ops@…` both clean to `alex-ops`).
  */
 export function suggestionsBranchPrefixFor(user: { email: string; id: string }): string {
   const who = branchSegment(user.email.split('@')[0]);
   const id = branchSegment(user.id).slice(0, 8) || 'user';
   return `suggestions/${who}-${id}/`;
+}
+
+/**
+ * The prefix that makes a draft `user`'s own, to manage and delete later:
+ * `<email-localpart>/`, or, for an address with no usable localpart, their
+ * {@link suggestionsBranchPrefixFor} prefix, which exists for every signed-in
+ * user. {@link isBranchAuthoredBy} or {@link isOwnSuggestionsBranch}
+ * recognises either as theirs.
+ */
+export function ownDraftPrefixFor(user: { email: string; id: string }): string {
+  const local = branchAuthorLocalpart(user.email);
+  return local !== null ? `${local}/` : suggestionsBranchPrefixFor(user);
+}
+
+/**
+ * True when `branchName` carries one of the two prefixes that make a branch
+ * `user`'s own ({@link ownDraftPrefixFor} gives a new draft one of them): the
+ * authorship half of "may this person delete it", read by the server's rule
+ * and by the branch switcher's delete button alike.
+ */
+export function isOwnBranch(
+  branchName: string,
+  user: { email: string | null | undefined; id: string | null | undefined },
+): boolean {
+  return isBranchAuthoredBy(branchName, user.email) || isOwnSuggestionsBranch(branchName, user);
 }
 
 /**

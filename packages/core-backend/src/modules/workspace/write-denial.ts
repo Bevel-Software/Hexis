@@ -1,4 +1,4 @@
-import { branchAuthorLocalpart, suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
+import { ownDraftPrefixFor } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
 import { ToolError } from '../tool-helpers/index.js';
 import { AccessDeniedError, toKbRelative } from '../access-model/index.js';
@@ -64,8 +64,7 @@ function reasonOf(err: AccessDeniedError): string {
  * manage and delete.
  */
 function draftNameFor(user: { email: string; id: string }, path: string): string {
-  const local = branchAuthorLocalpart(user.email);
-  const prefix = local !== null ? `${local}/` : suggestionsBranchPrefixFor(user);
+  const prefix = ownDraftPrefixFor(user);
   const base = path.split('/').filter(Boolean).pop() ?? 'change';
   const slug = base.toLowerCase().replace(/\.[a-z0-9]+$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'change';
   return `${prefix}propose-${slug}`;
@@ -95,6 +94,9 @@ export function proposalTitleFor(path: string): string {
  * read-before-write gate's question (`IChangeReadGate`): they can READ the
  * path, or it starts a new folder directly under one of the three roots.
  * Nothing is created here — the agent decides whether to follow the steps.
+ * When the gate refuses — the caller cannot read the path, and it starts no
+ * new folder directly under a root — that is the reason given, whatever the
+ * branch.
  *
  * Without a gate the read verdict alone decides, which is the same answer
  * everywhere but at a root.
@@ -114,9 +116,11 @@ export async function writeDenial(
     return new ToolError(`${err.message} ${cannotProposeReason}`, 403, { ...details });
   };
 
-  if (!kb.isProtectedBranch(input.branch)) {
-    return refuse(`Proposing is not available: "${input.branch}" is not a branch that accepts change requests.`);
-  }
+  // Read first, branch second: a caller who cannot read the path could not
+  // propose on any branch, so naming the branch would send them to another
+  // one for the same refusal.
+  const acceptsRequests = kb.isProtectedBranch(input.branch);
+  const notAcceptingRequests = `Proposing is not available: "${input.branch}" is not a branch that accepts change requests.`;
   // The lock gate reports workspace paths, the git gates repo-relative ones.
   const rel = toKbRelative(path, kbDirName) ?? path.replace(/^\.?\/+/, '');
   const workspaceId = workspaceIdForBranch(input.branch);
@@ -130,9 +134,12 @@ export async function writeDenial(
       : await accessControl.canRead(workspaceId, input.userEmail, rel);
   } catch {
     // Fail closed: offering a route the caller may not take is worse than none.
+    // On a branch that takes no requests that is the certain reason; a retry would not change it.
+    if (!acceptsRequests) return refuse(notAcceptingRequests);
     return refuse('Proposing is not offered: whether you can read this path could not be determined; try again.');
   }
   if (!mayChange) return refuse('Proposing is not available: you cannot read this path.');
+  if (!acceptsRequests) return refuse(notAcceptingRequests);
 
   const draft = draftNameFor({ email: input.userEmail, id: input.userId }, path);
   const details: WriteDeniedDetails = {

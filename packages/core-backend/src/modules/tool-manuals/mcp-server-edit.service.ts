@@ -236,6 +236,9 @@ export class McpServerEditService {
     const description =
       write.description ?? (typeof priorExt.description === 'string' ? priorExt.description : undefined);
     const local = write.local ?? (priorExt.local === true);
+    // Not on the form, so the stored list survives every save, as stored:
+    // the save neither makes nor mends it, and discovery judges it on read.
+    const excludeTools = priorExt.excludeTools;
 
     // The WHOLE writable surface, mirroring what discovery scans — effective
     // values, not just the incoming patch: a reserved ref smuggled through a
@@ -336,6 +339,7 @@ export class McpServerEditService {
       ...(variables.length > 0 ? { variables } : {}),
       ...(description ? { description } : {}),
       ...(local === true && write.transport !== 'stdio' ? { local: true } : {}),
+      ...(excludeTools !== undefined ? { excludeTools } : {}),
     };
     if (manifest === null && Object.keys(extEntry).length > 0) {
       throw new McpServerEditError(`${PLUGIN_MANIFEST_FILE} is missing or unparsable — fix the file first.`, 422);

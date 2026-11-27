@@ -1,4 +1,8 @@
-import type { AuthUser, ValidationReport } from '@bevel-software/platform-shared';
+import type { AuthUser, FilesChange, ValidationReport } from '@bevel-software/platform-shared';
+import { callFireAndForget, type FireAndForgetListener } from '../../shared/fire-and-forget.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('version-control');
 
 /**
  * Version-control lifecycle hooks — the generic seam that replaced the
@@ -7,7 +11,17 @@ import type { AuthUser, ValidationReport } from '@bevel-software/platform-shared
  * composition root, right after `createCoreServices` returns. Core registers
  * none, so a core-only deployment runs every hook point as a no-op.
  *
- * Three hook kinds, with deliberately different failure semantics:
+ * Four hook kinds, with deliberately different failure semantics:
+ *
+ *   - `commitLanded` — INFORMATIONAL. Runs in `GitService` when a commit it
+ *     made is final: right after `git commit` for a save, an autosave
+ *     checkpoint, a batch, a branch merge and a `commit_change`; after the
+ *     push lands for a change-request merge, whose commit is redone on the new
+ *     tip if the push is rejected because the target advanced (any other
+ *     refusal throws, and nothing is reported). Carries the commit's
+ *     workspace-relative paths and the person. The one place a commit is reported from; the composition root
+ *     hands it to the file-change notifier. A hook that throws, or whose
+ *     promise rejects, is logged and can neither fail nor unwind the commit.
  *
  *   - `commitValidation` — ADVISORY. Runs at commit time in `GitService`
  *     (`commit` / `commitFile`), exactly where the injected `IKbValidator`
@@ -83,6 +97,15 @@ export type AgentReadHook = (ctx: AgentOperationContext) => Promise<void>;
 export type PreWriteHook = (ctx: AgentOperationContext) => Promise<void>;
 
 /**
+ * Told of every commit the git service lands — a single-file save, an autosave
+ * checkpoint, a batch, a merge, a `commit_change` — when it lands: pushed, or
+ * awaiting its push. The one place a commit is reported from, so no committer
+ * can be forgotten; the composition root hands it to the file-change notifier.
+ * Fire-and-forget: a hook may answer a promise, which nobody awaits.
+ */
+export type CommitLandedHook = FireAndForgetListener<FilesChange>;
+
+/**
  * The registry instance. ONE per composition (created in
  * `createCoreServices`, shared by `GitService` and exposed as
  * `VersionControlService.hooks` for the composition root to register against).
@@ -91,6 +114,7 @@ export class VersionControlHooks {
   private readonly commitValidation: CommitValidationHook[] = [];
   private readonly agentRead: AgentReadHook[] = [];
   private readonly preWrite: PreWriteHook[] = [];
+  private readonly commitLandedHooks: CommitLandedHook[] = [];
 
   /** Register an advisory commit-time validation hook. */
   onCommitValidation(hook: CommitValidationHook): void {
@@ -105,6 +129,21 @@ export class VersionControlHooks {
   /** Register a blocking pre-write hook. */
   onPreWrite(hook: PreWriteHook): void {
     this.preWrite.push(hook);
+  }
+
+  onCommitLanded(hook: CommitLandedHook): void {
+    this.commitLandedHooks.push(hook);
+  }
+
+  /**
+   * Report a landed commit to every hook, each isolated: a reactor that throws,
+   * or whose promise rejects, is logged and cannot fail — or unwind — the
+   * commit it was told of.
+   */
+  commitLanded(change: FilesChange): void {
+    for (const hook of this.commitLandedHooks) {
+      callFireAndForget(hook, change, log, 'a commit-landed hook failed:');
+    }
   }
 
   /**

@@ -68,7 +68,8 @@ write:
   or move the file to a folder whose rules fit.
 - **You can only change what you can read**, on every branch, drafts
   included, whatever `write` says. Such a write is refused with `write-denied`,
-  naming the place you cannot read, and proposing it is not offered: it would
+  naming the path (`edit_file` and a copy's or move's source get `read_file`'s
+  refusal), and proposing it is not offered: it would
   vanish from you the moment it landed. Two exceptions. Anyone may start a new
   folder directly under `{{knowledgeBaseDir}}/`, `{{skillsDir}}/` or
   `{{pluginsDir}}/`, and its `access.md` is seeded with the creator's own read

@@ -145,11 +145,13 @@ function elapsed(started: number): number {
 }
 
 /**
- * A chain-internal result that is the tool saying it failed. A downstream
- * MCP server answers a failed call with `{ isError: true, content }` as a
- * VALUE (the UTCP mcp protocol hands it through rather than throwing), and
- * the direct path records that as an error — so must the chain path, or the
- * same failure would read `ok` inside a chain and `error` outside one.
+ * A chain-internal result that is the tool saying it failed: a call that
+ * answers `{ isError: true, content }` as a VALUE rather than throwing. The
+ * direct path records that as an error, so must the chain path, or the same
+ * failure would read `ok` inside a chain and `error` outside one. (A
+ * connected MCP server's `isError` no longer arrives this way: the `mcp`
+ * protocol throws it, see `downstream-tool-errors.ts` in platform-mcp-core,
+ * and a thrown call is recorded as an error on both paths.)
  */
 function isErrorShaped(result: unknown): boolean {
   return typeof result === 'object' && result !== null && (result as { isError?: unknown }).isError === true;

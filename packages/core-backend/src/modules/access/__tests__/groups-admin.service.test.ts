@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
 import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AccessControlService } from '../access-control.service.js';
@@ -110,8 +110,8 @@ describe('GroupsAdminService', () => {
     service = new GroupsAdminService(
       workspace,
       versionControl.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -272,7 +272,7 @@ describe('GroupsAdminService', () => {
       '---\nread:\n  - deny everyone\n  - Sara <sara@x.io>\nwrite:\n  - Sara <sara@x.io>\n---\n',
     );
     await write(repo, 'Plugins/Sara/Notes.md', "---\nread: ['group/GTM Team']\n---\n# Notes\n");
-    const access = new AccessControlService(stubWorkspace(root) as never, KB, new NodeFs());
+    const access = new AccessControlService(stubWorkspace(root) as never, KB, realDisk());
     expect(await access.canRead(workspaceIdForBranch(DEFAULT_BRANCH), ADMIN.email, 'Plugins/Sara/Notes.md')).toBe(false);
 
     await service.renameGroup(ADMIN, 'gtm team', 'Go To Market');
@@ -289,7 +289,7 @@ describe('GroupsAdminService', () => {
     // `assertCanWriteAtRef`); this stub does the same through the live model.
     function gatedService(): { gated: GroupsAdminService; gatedCommits: { summary: string }[] } {
       const workspace = stubWorkspace(root);
-      const access = new AccessControlService(workspace as never, KB, new NodeFs());
+      const access = new AccessControlService(workspace as never, KB, realDisk());
       const versionControl = stubVersionControl();
       const svc = versionControl.svc as unknown as Record<string, unknown>;
       svc.commitChanges = async (ws: string, user: AuthUser, summary: string, onlyPaths: string[] = []) => {
@@ -300,7 +300,7 @@ describe('GroupsAdminService', () => {
         versionControl.commits.push({ summary });
         return {} as unknown;
       };
-      const gated = new GroupsAdminService(workspace, versionControl.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
+      const gated = new GroupsAdminService(workspace, versionControl.svc, access, realDisk(), KB, () => DEFAULT_BRANCH);
       return { gated, gatedCommits: versionControl.commits };
     }
 
@@ -395,8 +395,8 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       versionControl.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -442,8 +442,8 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       versionControl.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -482,8 +482,8 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       versionControl.svc,
-      new AccessControlService(workspace as never, KB, new NodeFs()),
-      new NodeFs(),
+      new AccessControlService(workspace as never, KB, realDisk()),
+      realDisk(),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -538,8 +538,8 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       const svc = new GroupsAdminService(
         workspace,
         stubVersionControl().svc,
-        new AccessControlService(workspace as never, KB, new NodeFs()),
-        new NodeFs(),
+        new AccessControlService(workspace as never, KB, realDisk()),
+        realDisk(),
         KB,
         () => DEFAULT_BRANCH,
       );
@@ -581,8 +581,8 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       await write(repo2, 'team/access.md', '---\nwrite:\n  - Reviewer\n---\n');
       await write(repo2, 'secret/Plan.md', '---\nread:\n  - deny everyone\n  - Reviewer\n---\n# Plan\n');
       const workspace = stubWorkspace(root2);
-      const access = new AccessControlService(workspace as never, KB, new NodeFs());
-      const svc = new GroupsAdminService(workspace, stubVersionControl().svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH);
+      const access = new AccessControlService(workspace as never, KB, realDisk());
+      const svc = new GroupsAdminService(workspace, stubVersionControl().svc, access, realDisk(), KB, () => DEFAULT_BRANCH);
       const rowsFor = async (email: string) =>
         (await svc.getRoster(email)).groups.find((g) => g.canonical === 'reviewer')!.bareNameResolvesToRole;
 
@@ -620,8 +620,8 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       const svc = new GroupsAdminService(
         workspace,
         stubVersionControl().svc,
-        new AccessControlService(workspace as never, KB, new NodeFs()),
-        new NodeFs(),
+        new AccessControlService(workspace as never, KB, realDisk()),
+        realDisk(),
         KB,
         () => DEFAULT_BRANCH,
       );

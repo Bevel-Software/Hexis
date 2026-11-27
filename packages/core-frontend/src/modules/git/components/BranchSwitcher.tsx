@@ -5,8 +5,8 @@ import { ChevronDown, GitBranch, Plus, Lock, Check, GitPullRequest, Trash2, Load
 import {
   protectedBranchDisplayName,
   currentBranchModel,
-  branchAuthorLocalpart,
-  isBranchAuthoredBy,
+  isOwnBranch,
+  ownDraftPrefixFor,
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
 import { useGit } from '../state/git.context';
@@ -20,20 +20,17 @@ import { fetchFileAccess } from '../../access';
 
 /**
  * Convert a free-text "what are you changing?" answer into a branch name slug.
- * Non-technical users type a sentence; we kebab-case it and prefix the user's
- * email local-part so the name still matches the documented convention.
+ * Non-technical users type a sentence; we kebab-case it and give it the
+ * prefix that makes a draft its maker's own (`ownDraftPrefixFor`, the rule the
+ * server uses too): their email local-part, or their own `suggestions/` prefix
+ * when the address has no usable local-part, so they can always delete it.
  */
-function slugifyDraftName(email: string, text: string): string {
-  // `branchAuthorLocalpart` returns null for missing / unsanitizable emails;
-  // the UI keeps a friendly `user` placeholder so the create form never blocks
-  // on a malformed identity. Authorship checks elsewhere use the strict
-  // helper and refuse delete when localpart is null.
-  const localPart = branchAuthorLocalpart(email) ?? 'user';
+function slugifyDraftName(user: { email: string; id: string }, text: string): string {
   const slug = text
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return `${localPart}/${slug || 'draft'}`;
+  return `${ownDraftPrefixFor(user)}${slug || 'draft'}`;
 }
 
 /**
@@ -282,8 +279,12 @@ export function BranchSwitcher() {
    */
   async function doCreate() {
     const text = newBranchName.trim();
-    if (!text) return;
-    const name = user?.email ? slugifyDraftName(user.email, text) : text;
+    // A draft is always named for its maker here, so the name sent is one the
+    // server creates as sent (it only renames a name with no prefix) and the
+    // navigation below lands on the branch that was made. With nobody signed
+    // in there is nobody to name it for, and the server would refuse the call.
+    if (!text || !user) return;
+    const name = slugifyDraftName(user, text);
     try {
       // Create the branch server-side on the current workspace's clone, then
       // navigate to the new branch's URL. The URL change triggers the
@@ -518,7 +519,8 @@ export function BranchSwitcher() {
               //      auto-deletes the head). Pure local tidy-up, anyone can
               //      do it because there's nothing left on origin to push
               //      the delete to.
-              //   2. Authored draft — branch matches `<my-localpart>/...`.
+              //   2. Authored draft — branch matches `<my-localpart>/...`, or
+              //      their own `suggestions/<who>-<id8>/...` prefix.
               //      The current user owns it; delete pushes the remote
               //      ref away too so the discard is total. Confirm dialog
               //      lives in doDelete because this is destructive for
@@ -530,7 +532,7 @@ export function BranchSwitcher() {
               //      `GitService.deleteBranch` is the authoritative check.
               // The current branch and protected branches are never
               // deletable (regression-guarded server-side too).
-              const isAuthoredByMe = isBranchAuthoredBy(b.name, user?.email);
+              const isAuthoredByMe = isOwnBranch(b.name, { email: user?.email, id: user?.id });
               const isOrphan = b.hasRemote === false;
               const canDelete =
                 !b.isProtected && !current && (isOrphan || isAuthoredByMe || isAdmin);

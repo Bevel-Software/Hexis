@@ -89,12 +89,31 @@ export interface AdminMenuItemHelpers {
  * Skills & Tools is NOT one of these. It is an `AppDef`, reached from the app
  * switcher.
  */
+/**
+ * A labelled section of the profile menu an app defines (see
+ * {@link AdminMenuItem.section}). Rows naming the same `id` share it; the
+ * label and order are the first such row's.
+ */
+export interface AdminMenuSection {
+  id: string;
+  /** The section's heading, such as "Infrastructure only". */
+  label: string;
+  /** Position among the app's sections; 100 when absent. */
+  order?: number;
+}
+
 export interface AdminMenuItem {
   id: string;
   label: ReactNode;
   icon?: ReactNode;
-  /** 'admin' rows render under the "Admin only" section (admin users only). */
-  section?: 'default' | 'admin';
+  /**
+   * 'admin' rows render under the "Admin only" section (admin users only).
+   * An {@link AdminMenuSection} puts the row under a section of the app's own,
+   * labelled, between the default rows and "Admin only" — for rows meant for
+   * the holders of a role the app defines. Who sees each row is still its
+   * `isShown`; the section shows while any of its rows does.
+   */
+  section?: 'default' | 'admin' | AdminMenuSection;
   /** Merge position among core + registered rows of the same section. */
   order?: number;
   /**
@@ -111,6 +130,28 @@ export interface AdminMenuItem {
    * typecheck for every row the enterprise shell already contributes.
    */
   path?: string;
+  /**
+   * The page this row opens at `path`: a settings page of the app's own.
+   *
+   * A row with a `path` and a `page` is mounted inside the settings layout
+   * beside core's pages, and listed in the settings nav under its section —
+   * so an app's settings are reached, linked to and switched between the way
+   * core's are, instead of each opening a dialog over whatever is behind it.
+   * `path` is one absolute address (`/agents-settings`), written as the
+   * browser and the router both read it. A row brings no page when its path
+   * is a route pattern (a parameter `:id`, a splat, an optional segment), has
+   * a query or a fragment, is relative, or is a spelling either of them would
+   * resolve to something else (`/teams/../secrets`, a doubled slash, a
+   * backslash, a percent-encoded letter). The page is mounted
+   * only at an address nothing else answers: not a settings page of core's,
+   * a route the shell answers itself, an app's path or anything under it, a
+   * top-level route of the registry, or a path an earlier row named (with or
+   * without a page), each as the router matches it (another case, a trailing
+   * slash and percent-encoding are the same address). A row that names such
+   * an address keeps its place in the dropdown, and its page is neither
+   * mounted nor listed in the settings nav.
+   */
+  page?: ReactElement;
   onSelect?(helpers: AdminMenuItemHelpers): void;
   /**
    * Whether the dropdown offers this row to `user` right now. Asked each time
@@ -351,6 +392,8 @@ export interface AppDef {
    * link to such a file lands here. `element` is then rendered under the
    * `/workspace/*` route, so it must show its folder surface
    * (`KnowledgeSurface` with `roots`) for a location it does not route itself.
+   * Its own screens go in that same surface (`nav` and `page`), so the app
+   * has one sidebar on every screen: its navigation above its folders.
    *
    * Two apps claiming one root is a composition error: the shell throws when
    * it is mounted, naming the root and both apps. So is claiming a root core

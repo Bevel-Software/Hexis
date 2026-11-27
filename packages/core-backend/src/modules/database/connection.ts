@@ -2,6 +2,9 @@ import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('database');
 import { PII_CIPHERTEXT_PREFIX, PiiParam, derivePiiKeys, type PiiKeys } from '../../shared/column-crypto.js';
 
 /**
@@ -188,6 +191,15 @@ export function createDb(databaseUrl: string, opts: DbOptions = {}) {
     // connection could outlive. The default schema sets nothing, so an
     // operator's own `search_path` stays in force there.
     ...(dbSchema === DEFAULT_DB_SCHEMA ? {} : { options: `-c search_path=${dbSchema}` }),
+  });
+  // An IDLE client's failure — its backend terminated by the server (a
+  // restart, a `drop database … with (force)`, an administrator's
+  // `pg_terminate_backend`), a dropped network — is emitted on the pool, and
+  // an 'error' event nobody listens to ends the process. Logged and let go:
+  // the pool has already discarded that client, and the next query opens a
+  // fresh one. A query in flight is not this path; it fails to its caller.
+  pool.on('error', (err) => {
+    log.warn('an idle database connection was closed by the server; the next query opens a new one:', { err });
   });
   const db = drizzle(pool, { schema });
   schemas.set(db, dbSchema);

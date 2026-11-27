@@ -52,6 +52,12 @@ export interface FakeDownstreamOptions {
    * with nothing restarted here.
    */
   tools?: () => Array<{ name: string; description?: string; inputSchema: unknown }>;
+  /**
+   * When set, every call runs (and counts as an execution) and answers this
+   * text as its own failure, `isError: true`: a tool that ran and said it
+   * failed, as opposed to a transport that refused the request.
+   */
+  failsWith?: string;
 }
 
 export async function startFakeDownstreamMcpServer(opts: FakeDownstreamOptions = {}): Promise<FakeDownstreamMcpServer> {
@@ -76,6 +82,7 @@ export async function startFakeDownstreamMcpServer(opts: FakeDownstreamOptions =
     }));
     server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
       executions += 1;
+      if (opts.failsWith !== undefined) return { isError: true, content: [{ type: 'text', text: opts.failsWith }] };
       const text = String((request.params.arguments as { text?: unknown } | undefined)?.text ?? '');
       return { content: [{ type: 'text', text: JSON.stringify({ echoed: text }) }] };
     });

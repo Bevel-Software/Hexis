@@ -45,6 +45,7 @@ import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
 import { traceFiles } from '../utils/file-trace';
 import { displayFileName } from '../utils/display-file-name';
 import { useConfirm } from '../../../shared/components';
+import { mergedRunner } from './mergedRunner';
 
 const PERSIST_DEBOUNCE_MS = 200;
 // Bounded concurrency cap for upload requests. The server serializes git
@@ -383,10 +384,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setBootstrapAttempt((n) => n + 1);
   }, []);
 
-  const refreshFileTree = useCallback(async () => {
+  /**
+   * `stillWanted` lets a caller whose request was overtaken drop its answer:
+   * a tree that arrives after a later request's answer must not replace
+   * that answer.
+   */
+  const refreshFileTree = useCallback(async (stillWanted?: () => boolean) => {
     if (!workspaceId) return null;
     try {
       let tree = await listFiles(workspaceId);
+      if (stillWanted && !stillWanted()) return null;
       // Reconcile with in-flight optimistic deletes — see the ref's
       // JSDoc for the disappear/reappear/disappear bug this avoids.
       for (const pending of pendingDeletePathsRef.current) {
@@ -1582,7 +1589,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // event bus pushes a `file-changed` event to every session focused on
   // this workspace+branch. We:
   //
-  //   1. Refresh the file tree (the path may be new or deleted).
+  //   1. Refresh the file tree, unless the event says the listing is the
+  //      same (`listingUnchanged`); a burst of events shares its requests.
   //   2. For an open tab matching the changed path, refetch the content
   //      and replace the buffer unconditionally. The dirty bit is cleared
   //      because the local buffer is now superseded by what's on disk.
@@ -1647,9 +1655,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // encodings. Without this, every feature branch with `/` in the
     // name silently drops every event.
     const subscribedCanon = canonicalizeWorkspaceId(subscribedWorkspaceId);
+    // The tree is asked for again only when the event does not rule a change
+    // of it out (`listingUnchanged`: an existing file's content changed and
+    // nobody's access with it), and a burst of events shares its requests.
+    // Stopped with the subscription, so a request queued for this workspace
+    // is not made once another one is open.
+    const tree = mergedRunner((isLatest) => refreshFileTree(isLatest));
+    const refreshTree = tree.request;
     const offFileChanged = bus.subscribe('file-changed', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
-      void refreshFileTree();
+      if (!event.listingUnchanged) refreshTree();
       // (No access-denied tab recovery here: a tab whose read 403s auto-closes
       // immediately, so there is never a denied tab to revive. A re-granted
       // file reappears in the refreshed tree instead.)
@@ -1703,7 +1718,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     });
     const offFsTreeChanged = bus.subscribe('fs-tree-changed', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
-      void refreshFileTree();
+      if (!event.listingUnchanged) refreshTree();
     });
     // Belt-and-suspenders: also refetch on `lock-released` for any open
     // tab. The teammate's save emits both `lock-released` and (when the
@@ -1753,6 +1768,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         });
     });
     return () => {
+      tree.stop();
       offFileChanged();
       offFsTreeChanged();
       offLockReleased();

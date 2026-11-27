@@ -66,7 +66,7 @@ import { PushNeedsAgentResolutionError, VersionControlDomainError } from '../../
 import type { KbContext } from '../../shared/kb-context.js';
 import type { IAdminAccessService } from '../admin/index.js';
 import type { IAccessControl } from '../access/index.js';
-import type { FileChangeNotifier, WorkspaceMutex } from '../kb-fs/index.js';
+import type { WorkspaceMutex } from '../kb-fs/index.js';
 import { LockingFilesystem } from '../kb-fs/index.js';
 import type { IFsProbe, ITreeWalker } from '../../shared/fs.contract.js';
 import {
@@ -146,8 +146,6 @@ export interface StarterPackServiceDeps {
   pluginLocks: PluginIdentityLocks;
   /** The SSE bus: `fs-tree-changed` sends every open tree on the branch to fetch again. */
   events?: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void };
-  /** The post-commit hook catalogs refresh on — the plugin's skills appear without a restart. */
-  fileChanges?: FileChangeNotifier;
   /**
    * One choice at a time on this replica: the second of two quick clicks
    * finds the first one's answer recorded. Across replicas the recorded
@@ -434,7 +432,7 @@ export class StarterPackService implements IStarterPackService, FirstRunStarterS
       const writes = await this.plan(user, pack, files, path.join(basePath, kb.kbDirName));
       const fsys = new LockingFilesystem(
         { basePath, contained: true },
-        { versionControl, workspaceId: ws.id, branch, user, kbDirName: kb.kbDirName, fileChanges: this.deps.fileChanges },
+        { versionControl, workspaceId: ws.id, branch, user, kbDirName: kb.kbDirName },
       );
       let written: string[] = [];
       try {
