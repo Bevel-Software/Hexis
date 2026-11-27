@@ -42,6 +42,7 @@ import remarkFrontmatter from 'remark-frontmatter';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
+import { stripHtmlComments } from '@bevel-software/platform-shared';
 import { CopyAnchorButton } from './CopyAnchorButton';
 import { KbImage, type KbImageResolver } from './KbImage';
 import { isExternalHref, normalizeHref } from '../../../../shared/markdown/hrefs';
@@ -137,13 +138,53 @@ function revealComments(node: HastNode): void {
 }
 
 /**
+ * Shows the source of an HTML block whose comment is never closed. Such a
+ * comment has no end, so rehype-raw makes no comment node of it and
+ * {@link rehypeRevealComments} has nothing to reveal: the block rendered to
+ * nothing, and with it every line after the `<!--` in the same block. Runs
+ * BEFORE rehype-raw, on the HTML still as the text the markdown held, and
+ * replaces the whole block with that text; rehype-raw then never parses it.
+ *
+ * Whether a comment is left open is asked of `stripHtmlComments`, the rule
+ * that decides what a comment withholds from agents, so the reviewer is shown
+ * the block in every case that rule calls open. It calls `<!-->` open, which
+ * HTML reads as an empty comment: that block is shown as its source too.
+ */
+function rehypeRevealOpenComments() {
+  return (tree: HastNode) => revealOpenComments(tree);
+}
+
+function revealOpenComments(node: HastNode): void {
+  if (!node.children) return;
+  node.children = node.children.map((child) => {
+    if (child.type !== 'raw' || !stripHtmlComments(child.value ?? '').unterminated) {
+      revealOpenComments(child);
+      return child;
+    }
+    const code: HastNode = {
+      type: 'element',
+      tagName: 'code',
+      properties: {},
+      children: [{ type: 'text', value: child.value ?? '' }],
+    };
+    // An HTML block sits at the root and can span lines: a `<pre>` keeps them
+    // as the lines they are.
+    return node.type === 'root'
+      ? { type: 'element', tagName: 'pre', properties: {}, children: [code] }
+      : code;
+  });
+}
+
+/**
  * The diff pipeline for a CHANGED fragment: {@link KB_DIFF_REHYPE_PLUGINS}
- * plus the comment reveal, so an HTML comment a change adds or removes is on
- * screen. (Other markdown that renders nothing, such as an unused link
- * reference definition, still renders nothing here.) Unchanged fragments keep the plain diff pipeline: a comment nobody
- * touched stays out of the way, as it does on the page.
+ * plus the two comment reveals, so an HTML comment a change adds or removes
+ * is on screen, closed or not. (Other markdown that renders nothing, such as
+ * an unused link reference definition, still renders nothing here.) Unchanged
+ * fragments keep the plain diff pipeline: a comment nobody touched stays out
+ * of the way, as it does on the page.
  */
 export const KB_DIFF_CHANGE_REHYPE_PLUGINS: PluginList = [
+  rehypeRevealOpenComments,
   rehypeRaw,
   rehypeRevealComments,
   rehypeSanitize,
