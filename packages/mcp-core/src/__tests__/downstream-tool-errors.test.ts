@@ -68,7 +68,7 @@ describe('downstreamErrorText', () => {
 });
 
 describe('DownstreamToolError.redactedWith', () => {
-  it('passes on only the fields the spec names, the secret out of every string the server wrote', () => {
+  it('passes on only the text fields the spec names, the secret out of every string the server wrote', () => {
     const KEY = 'sk-live-1234567890abcdef';
     const redactor = new SecretRedactor();
     redactor.remember(KEY);
@@ -87,14 +87,13 @@ describe('DownstreamToolError.redactedWith', () => {
       { type: 'resource_link', uri: 'file:///b', name: 'b', size: 42 },
       { type: `kind-${KEY}`, note: KEY },
     ] as unknown as CallToolResult['content']);
-    const redacted = failure.redactedWith(redactor);
+    const redacted = failure.redactedWith((text) => redactor.redact(text));
     expect(redacted.message).toBe('refused [redacted]');
     expect(redacted.content).toEqual([
       { type: 'text', text: 'key [redacted]', annotations: { audience: ['user'], priority: 1 } },
       { type: 'resource_link', uri: 'https://x.example/?k=[redacted]', name: 'link', description: 'uses [redacted]' },
       { type: 'resource', resource: { uri: 'https://x.example/[redacted]', text: '[redacted]' } },
-      { type: 'resource', resource: { uri: 'file:///a', mimeType: 'application/[redacted]', blob: 'AAAA[redacted]' } },
-      { type: 'image', data: '[redacted]', mimeType: 'image/png; key=[redacted]' },
+      // The blob-only resource and the image are left out: a payload is not text.
       { type: 'resource_link', uri: 'file:///b', name: 'b', size: 42 },
     ]);
     // Nowhere: not in a field, a MIME type, a payload, or a key the server chose.
@@ -188,6 +187,39 @@ describe('a downstream isError over a real MCP connection', () => {
     ]);
   });
 
+  it('takes a short credential out even glued to other text, and a short value that is not one only where it stands alone', async () => {
+    installDownstreamToolErrors();
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const client = await CodeModeUtcpClient.create(
+      process.cwd(),
+      new UtcpClientConfigSerializer().validateDict({ variables: { short_SESSION_TOKEN: 'a9B2', short_REGION: 'us' } }),
+    );
+    cleanups.push(() => client.close());
+    // Neither header is credential-named: only the variable's name says `a9B2` is a credential.
+    const template = serializer.validateDict({
+      name: 'short',
+      call_template_type: 'mcp',
+      config: {
+        mcpServers: {
+          srv: {
+            transport: 'http',
+            url: server.url,
+            timeout: 10,
+            terminate_on_close: true,
+            headers: { 'X-Trace': '${SESSION_TOKEN}', 'X-Region': '${REGION}' },
+          },
+        },
+      },
+    });
+    expect(await registerManual(client, template)).toEqual({ ok: true });
+    server.reportToolErrors('Session xa9B2y refused for users in region us.');
+
+    const result = await dispatchToolCall(client, { ...echo, utcpName: 'short.srv.echo', mcpName: 'short_srv_echo', manualName: 'short' }, { text: 'hi' });
+
+    expect(result.content).toEqual([{ type: 'text', text: 'Session x[redacted]y refused for users in region [redacted].' }]);
+  });
+
   /** A manual at `url` whose server sends `${TOKEN}` in a header no credential rule would name. */
   const tracedManual = (name: string, url: string) =>
     serializer.validateDict({
@@ -232,6 +264,85 @@ describe('a downstream isError over a real MCP connection', () => {
     server.reportToolErrors('refused second-value-5678');
 
     expect((await dispatchToolCall(client, echoOf('alpha'), {})).content).toEqual([{ type: 'text', text: 'refused [redacted]' }]);
+  });
+
+  /**
+   * A client and the verdict of registering manual `name` at `url`, which
+   * sends `Authorization: Bearer ${TOKEN}`. The token comes from the process
+   * environment, the last tier the substitutor reads: a value in the client's
+   * own `variables` is substituted itself when the client is built.
+   */
+  async function registerWithToken(name: string, url: string, token: string) {
+    const key = `${name}_TOKEN`;
+    process.env[key] = token;
+    cleanups.push(async () => {
+      delete process.env[key];
+    });
+    const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    cleanups.push(() => client.close());
+    const template = serializer.validateDict({
+      name,
+      call_template_type: 'mcp',
+      config: {
+        mcpServers: {
+          srv: { transport: 'http', url, timeout: 10, terminate_on_close: true, headers: { Authorization: 'Bearer ${TOKEN}' } },
+        },
+      },
+    });
+    return { client, registration: await registerManual(client, template) };
+  }
+
+  it('takes the credentials out of a failure the server threw, not only one it reported', async () => {
+    installDownstreamToolErrors();
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const { client } = await registerWithToken('thrown', server.url, 'sk-live-1234567890abcdef');
+    server.failToolCalls('rejected sk-live-1234567890abcdef');
+
+    const result = await dispatchToolCall(client, { ...echo, utcpName: 'thrown.srv.echo', mcpName: 'thrown_srv_echo', manualName: 'thrown' }, { text: 'hi' });
+
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain('rejected [redacted]');
+    expect(text).not.toContain('sk-live-1234567890abcdef');
+  });
+
+  it('leaves what the caller sent as it is, so a guess at the key comes back the same right or wrong', async () => {
+    installDownstreamToolErrors();
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const { client } = await registerWithToken('quoted', server.url, 'sk-live-Q7xZ2abcdefgh');
+    server.reportToolErrors("Project '{text}' not found");
+    const call = (text: string) =>
+      dispatchToolCall(client, { ...echo, utcpName: 'quoted.srv.echo', mcpName: 'quoted_srv_echo', manualName: 'quoted' }, { text });
+
+    // `sk-live-Q7xZ` is a head of the key, `sk-live-Q7xA` is not: both come back as sent.
+    expect((await call('sk-live-Q7xZ')).content).toEqual([{ type: 'text', text: "Project 'sk-live-Q7xZ' not found" }]);
+    expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: "Project 'sk-live-Q7xA' not found" }]);
+  });
+
+  it('refuses a value every call would read as another variable, naming the variable and not the value', async () => {
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+
+    const { client, registration } = await registerWithToken('dollar', server.url, 'Pa$$w0rdSecretTail9');
+
+    expect(registration.ok).toBe(false);
+    const error = (registration as { error: string }).error;
+    expect(error).toContain('${TOKEN}');
+    expect(error).not.toContain('w0rdSecretTail9');
+    expect(await client.getTools()).toEqual([]);
+  });
+
+  it('takes the credentials out of what a server quoted back when registration failed', async () => {
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    server.failWithAuthError(true, 'Unauthorized: {authorization}');
+
+    const { registration } = await registerWithToken('refused', server.url, 'sk-live-1234567890abcdef');
+
+    expect(registration.ok).toBe(false);
+    expect((registration as { error: string }).error).not.toContain('sk-live-1234567890abcdef');
   });
 
   it('leaves a successful call untouched once installed', async () => {

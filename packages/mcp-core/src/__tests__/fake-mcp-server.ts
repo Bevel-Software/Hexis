@@ -42,12 +42,17 @@ export interface FakeMcpServer {
    * the client rejects with an `McpError`. Nothing about it is session-shaped.
    */
   failToolCalls(reason: string | null): void;
-  /** Answer every request 401, as a server that has stopped accepting our key. */
-  failWithAuthError(on: boolean): void;
+  /**
+   * Answer every request 401, as a server that has stopped accepting our key,
+   * with `message` as the error; `{authorization}` in it repeats the request's
+   * Authorization header, as a server that echoes what it refused.
+   */
+  failWithAuthError(on: boolean, message?: string): void;
   /**
    * Make every tool call report its own failure the way a working server does
    * when the call cannot be done (a missing entitlement, a bad argument): it
-   * RETURNS `isError: true` with this text, rather than throwing.
+   * RETURNS `isError: true` with this text, rather than throwing. `{text}`
+   * in it repeats the call's `text` argument, as a server that quotes it.
    */
   reportToolErrors(text: string | null): void;
 }
@@ -72,7 +77,7 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
   let counter = 0;
   let toolFailure: string | null = null;
   let reportedFailure: string | null = null;
-  let authFailure = false;
+  let authFailure: string | null = null;
 
   function buildServer(): Server {
     const server = new Server({ name, version: '0.0.0' }, { capabilities: { tools: {} } });
@@ -84,12 +89,12 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
       // reaches the caller as an exception, which is the only failure shape
       // recovery could ever mistake for session loss.
       if (toolFailure) throw new Error(toolFailure);
-      if (reportedFailure) return { isError: true, content: [{ type: 'text', text: reportedFailure }] };
+      const text = String((request.params.arguments as { text?: unknown } | undefined)?.text ?? '');
+      if (reportedFailure) return { isError: true, content: [{ type: 'text', text: reportedFailure.replaceAll('{text}', text) }] };
       if (tool === 'bump') {
         counter += 1;
         return { content: [{ type: 'text', text: JSON.stringify({ counter }) }] };
       }
-      const text = String((request.params.arguments as { text?: unknown } | undefined)?.text ?? '');
       return { content: [{ type: 'text', text: JSON.stringify({ echoed: text }) }] };
     });
     return server;
@@ -113,8 +118,8 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
 
   const http: HttpServer = createServer((req, res) => {
     void (async () => {
-      if (authFailure) {
-        jsonRpcError(res, 401, -32000, 'Unauthorized');
+      if (authFailure !== null) {
+        jsonRpcError(res, 401, -32000, authFailure.replaceAll('{authorization}', String(req.headers.authorization ?? '')));
         return;
       }
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
@@ -179,8 +184,8 @@ export async function startFakeMcpServer(name = 'fake'): Promise<FakeMcpServer> 
     failToolCalls: (reason: string | null) => {
       toolFailure = reason;
     },
-    failWithAuthError: (on: boolean) => {
-      authFailure = on;
+    failWithAuthError: (on: boolean, message = 'Unauthorized') => {
+      authFailure = on ? message : null;
     },
     reportToolErrors: (text: string | null) => {
       reportedFailure = text;

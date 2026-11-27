@@ -580,6 +580,31 @@ describe('ConnectionProbeService: what the probe concludes', () => {
       expect(r?.detail).not.toContain(literal);
     });
 
+    it('redacts a short credential the provider echoes glued to other text', async () => {
+      const svc = build({ type: 'http', healthCheck: DECLARED_PROBE }, async () => 'ab12');
+      vi.mocked(fetch).mockResolvedValue(new Response('Key xab12y refused.', { status: 401 }));
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      expect(r?.detail).not.toContain('ab12');
+      expect(r?.detail).toContain('x[redacted]y refused.');
+    });
+
+    it('redacts a value only the process environment supplies, as a real call reads it', async () => {
+      process.env.acme_API_KEY = SECRET;
+      try {
+        createClientMock.mockResolvedValue({});
+        registerManualMock.mockResolvedValue({ ok: false, error: `401 Unauthorized: bad token ${SECRET}` });
+
+        const r = await build({ type: 'mcp', callTemplate: MCP_TEMPLATE_WITH_KEY }, async () => null).probe('u1', 'a@b.c', 'acme');
+
+        expect(r?.status).toBe('failed');
+        expect(r?.detail).not.toContain(SECRET);
+      } finally {
+        delete process.env.acme_API_KEY;
+      }
+    });
+
     it('redacts a literal token the manual put in the query string', async () => {
       const literal = 'sk-live-in-the-query-string';
       const svc = build({

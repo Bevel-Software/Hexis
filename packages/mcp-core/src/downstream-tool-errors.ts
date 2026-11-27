@@ -1,8 +1,7 @@
 import { CommunicationProtocol, type CallTemplate } from '@utcp/sdk';
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { SecretRedactor, rememberCallCredentials } from './secret-redactor.js';
-import { manualSecrets } from './call-secrets.js';
+import { callRedactor, manualSecrets } from './call-secrets.js';
 import { utcpManualName } from './utcp-namespace.js';
 
 /**
@@ -25,22 +24,24 @@ export class DownstreamToolError extends Error {
   }
 
   /**
-   * The same failure with every secret `redactor` holds taken out of it. Each
-   * content block is rebuilt from the fields the MCP spec gives its kind
-   * ({@link BLOCK_FIELDS}), so no key the server chose (`_meta`, an extension)
-   * is passed on, and a block of a kind the spec does not name is left out.
-   * Every string in those fields is redacted, a MIME type and binary data
-   * included: a payload that literally contains a secret is altered rather
-   * than passed on. Only a block's `type` (one of the spec's kinds, since it
-   * chose the fields) and numbers (a size, a priority) pass as they came. The
-   * message is redacted too.
+   * The same failure with `redact` applied to every string the server wrote.
+   * Each content block is rebuilt from the text fields the MCP spec gives its
+   * kind ({@link BLOCK_FIELDS}), so no key the server chose (`_meta`, an
+   * extension) is passed on, and a block of a kind it does not name is left
+   * out. That leaves out binary payloads too (an image's or audio's `data`, a
+   * resource's `blob`): encoded, a secret in one would pass any text search,
+   * and a failure's words are in its text. Only a block's `type` (one of the
+   * named kinds, since it chose the fields) and numbers (a size, a priority)
+   * pass as they came. The message is redacted too.
    */
-  redactedWith(redactor: SecretRedactor): DownstreamToolError {
+  redactedWith(redact: (text: string) => string): DownstreamToolError {
     const content = this.content.flatMap((block) => {
       const fields = BLOCK_FIELDS[block.type];
-      return fields ? [specFields(block, fields, redactor) as typeof block] : [];
+      const kept = fields ? (specFields(block, fields, redact) as typeof block) : null;
+      // A resource whose only content was a blob says nothing once it is gone.
+      return kept && !(kept.type === 'resource' && !('text' in (kept.resource ?? {}))) ? [kept] : [];
     });
-    return new DownstreamToolError(redactor.redact(this.message), content);
+    return new DownstreamToolError(redact(this.message), content);
   }
 
   /**
@@ -55,29 +56,27 @@ export class DownstreamToolError extends Error {
   }
 }
 
-/** The fields the MCP spec gives each kind of content block, and the nested objects within them. */
+/** The text fields the MCP spec gives each kind of content block that carries text, and the nested objects within them. */
 const BLOCK_FIELDS: Readonly<Record<string, readonly string[]>> = {
   text: ['type', 'text', 'annotations'],
-  image: ['type', 'data', 'mimeType', 'annotations'],
-  audio: ['type', 'data', 'mimeType', 'annotations'],
   resource_link: ['type', 'uri', 'name', 'title', 'description', 'mimeType', 'size', 'annotations'],
   resource: ['type', 'resource', 'annotations'],
 };
 const NESTED_FIELDS: Readonly<Record<string, readonly string[]>> = {
-  resource: ['uri', 'mimeType', 'text', 'blob'],
+  resource: ['uri', 'mimeType', 'text'],
   annotations: ['audience', 'priority', 'lastModified'],
 };
 /** `object` reduced to `fields`: every string redacted, numbers kept, a block's `type` (a spec kind) kept. */
-function specFields(object: object, fields: readonly string[], redactor: SecretRedactor): Record<string, unknown> {
+function specFields(object: object, fields: readonly string[], redact: (text: string) => string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const field of fields) {
     if (!(field in object)) continue;
     const value = (object as Record<string, unknown>)[field];
     const nested = NESTED_FIELDS[field];
     if (field === 'type' || typeof value === 'number') out[field] = value;
-    else if (nested && value && typeof value === 'object' && !Array.isArray(value)) out[field] = specFields(value, nested, redactor);
-    else if (typeof value === 'string') out[field] = redactor.redact(value);
-    else if (Array.isArray(value)) out[field] = value.filter((item) => typeof item === 'string').map((item) => redactor.redact(item));
+    else if (nested && value && typeof value === 'object' && !Array.isArray(value)) out[field] = specFields(value, nested, redact);
+    else if (typeof value === 'string') out[field] = redact(value);
+    else if (Array.isArray(value)) out[field] = value.filter((item) => typeof item === 'string').map((item) => redact(item));
   }
   return out;
 }
@@ -126,12 +125,17 @@ type ResultProcessor = {
  * fails if a release renames it.
  *
  * The server's words are quoted back to the caller, and a server can echo the
- * credential the call carried. So `callTool` is wrapped too: a failure leaves
- * it with every secret the call carried taken out: each value substituted into
- * the manual when it registered, as the substitutor resolved it
- * (`call-secrets.ts`), and every credential the template spells out in full
- * (`rememberCallCredentials`).
- * Streaming goes through `callTool` in this protocol, so the same wrap covers it.
+ * credential the call carried. So `callTool` is wrapped too: every failure
+ * leaves it with every secret the call carried taken out (`callRedactor`):
+ * each value substituted into the manual when it registered, as the
+ * substitutor resolved it (`call-secrets.ts`), and every credential the
+ * template spells out in full. A `DownstreamToolError` is rebuilt redacted;
+ * any other failure (a JSON-RPC error a handler threw, an HTTP error with the
+ * response body in its message) keeps its class, code and cause, with its
+ * message and stack redacted in place, so the token classifier still reads
+ * it. Text the caller sent in the call's arguments is left as it is
+ * (`SecretRedactor.redact`). Streaming goes through `callTool` in this
+ * protocol, so the same wrap covers it.
  */
 export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
   const target = protocol as unknown as ResultProcessor;
@@ -151,15 +155,27 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
       try {
         return await call.call(this, caller, toolName, args, template);
       } catch (err) {
-        if (!(err instanceof DownstreamToolError)) throw err;
-        const redactor = new SecretRedactor();
-        for (const value of manualSecrets(caller, utcpManualName(String(template.name ?? '')))) redactor.remember(value);
-        rememberCallCredentials(redactor, template);
-        throw err.redactedWith(redactor);
+        const redactor = callRedactor(manualSecrets(caller, utcpManualName(String(template.name ?? ''))), template);
+        const sent = stringsIn(args);
+        const redact = (text: string) => redactor.redact(text, sent);
+        if (err instanceof DownstreamToolError) throw err.redactedWith(redact);
+        if (err instanceof Error) {
+          err.message = redact(err.message);
+          if (typeof err.stack === 'string') err.stack = redact(err.stack);
+          throw err;
+        }
+        throw typeof err === 'string' ? redact(err) : err;
       }
     };
   }
   return protocol;
+}
+
+/** Every string in a call's arguments, however deeply nested. */
+function stringsIn(value: unknown, depth = 0): string[] {
+  if (typeof value === 'string') return [value];
+  if (!value || typeof value !== 'object' || depth > 32) return [];
+  return Object.values(value).flatMap((item) => stringsIn(item, depth + 1));
 }
 
 /**

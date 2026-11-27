@@ -494,8 +494,11 @@ export class ConnectionProbeService implements IConnectionProbeService {
     );
     for (const name of names) {
       try {
-        const value = await this.secretsVault.resolve(userId, utcpNamespacedKey(manualName, name));
-        if (value) redactor.remember(value);
+        // The vault, then the process environment: the tiers a real call
+        // resolves through, as in `substitute`.
+        const key = utcpNamespacedKey(manualName, name);
+        const value = (await this.secretsVault.resolve(userId, key)) ?? process.env[key];
+        if (value) redactor.rememberSubstituted(name, value);
       } catch {
         // A variable we cannot read is one the provider cannot echo either.
       }
@@ -542,7 +545,7 @@ export class ConnectionProbeService implements IConnectionProbeService {
       }
       if (value === null) throw new Error(`\${${name}} isn't set yet, so there was nothing to test.`);
       values.set(name, value);
-      redactor?.remember(value);
+      redactor?.rememberSubstituted(name, value);
     }
     return template.replace(varRefPattern(), (_full, braced?: string, bare?: string) => {
       const name = braced ?? bare;

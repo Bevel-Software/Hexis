@@ -9,9 +9,9 @@ import type { CallTemplate } from '@utcp/sdk';
  */
 
 /**
- * Below this, a value is redacted only where it stands ALONE — see
- * {@link SecretRedactor}. It is still redacted; what it may not do is match
- * inside a longer run of letters and digits.
+ * Below this, a substituted value not known to be a credential is redacted only
+ * where it stands ALONE — see {@link SecretRedactor}. It is still redacted;
+ * what it may not do is match inside a longer run of letters and digits.
  */
 const MIN_SECRET_CHARS = 6;
 /** The shortest leading run of a secret we will treat as an echo of it. */
@@ -31,55 +31,103 @@ const REDACTED = '[redacted]';
  *
  * Leading PREFIXES count as well as whole values, because that echo is usually
  * masked in the middle ("sk-live-abcd…wxyz"): a whole-value search finds
- * nothing there and prints the head of the key regardless.
+ * nothing there and prints the head of the key regardless. So do the other
+ * spellings a value travels in: trimmed, url-encoded and JSON-escaped.
  *
- * SHORT values are redacted too — a four-character key is still the key, and a
- * provider that quotes it back would otherwise hand it to any reader who can
- * probe the tool. They are matched only where they stand alone, though,
- * bounded by something other than a letter or digit. Not every value this
- * class is told about is a credential: it is handed whatever every `${VAR}`
- * in the manual resolved to, so a `${VERSION}` of `1` or a
- * `${REGION}` of `us` arrives here alongside the token. Blanking those
- * wherever their characters happened to fall would turn `answered 401` into
- * `answered 40[redacted]` and destroy the message that makes the verdict
- * useful — so the short ones may only match a run of their own.
+ * A KNOWN credential ({@link remember}) is taken out wherever it appears,
+ * whatever its length: a four-character key is still the key, and one echoed
+ * glued to other text (`xa9B2y`) is still echoed. The price is paid in the
+ * message: a short credential blanks its characters wherever they fall.
+ *
+ * A value that is only known to have been SUBSTITUTED ({@link rememberSubstituted})
+ * is one too when its variable's name says so. Otherwise it may be anything:
+ * this class is handed whatever every `${VAR}` in the manual resolved to, so a
+ * `${VERSION}` of `1` or a `${REGION}` of `us` arrives alongside the token.
+ * Blanking those wherever their characters happened to fall would turn
+ * `answered 401` into `answered 40[redacted]` and destroy the message that
+ * makes the verdict useful, so a SHORT one of those may only match a run of
+ * its own. Six characters or more, it is taken out wherever it appears too.
+ *
+ * Text the CALLER sent is not a disclosure: where the quote repeats one of
+ * the caller's own strings ({@link redact}'s `callerText`), what lies within
+ * that repeat is left as it is. Otherwise a tool that echoes its input would
+ * answer the caller's guesses: a guess at the next character of a key would
+ * come back `[redacted]` exactly when it was right.
  */
 export class SecretRedactor {
-  private readonly values = new Set<string>();
+  /** Taken out wherever they appear. */
+  private readonly credentials = new Set<string>();
+  /** Substituted values not known to be credentials: a short one only where it stands alone. */
+  private readonly substituted = new Set<string>();
 
+  /** A known credential: a value the request sent as one. */
   remember(value: string): void {
-    // Blank is not a secret, and a blank needle matches everywhere: `''` would
-    // put `[redacted]` between every character of the message.
-    if (value.trim()) this.values.add(value);
+    for (const spelling of spellings(value)) this.credentials.add(spelling);
   }
 
-  redact(text: string): string {
-    let out = text;
-    // Longest SECRET first: when one value is a prefix of another (a key and
-    // that same key with a suffix), redacting the short one first eats the head
-    // of the long one and leaves its tail printed.
-    const secrets = [...this.values].sort((a, b) => b.length - a.length);
-    // Every whole value first. Only then any echoed head: two values can share
-    // a head (`sk-live-…`), and a head pass for one that ran before the other's
-    // own turn would eat that shared head and leave the other's tail printed.
-    for (const secret of secrets) {
-      out = secret.length < MIN_SECRET_CHARS ? out.replace(standingAlone(secret), REDACTED) : out.split(secret).join(REDACTED);
+  /**
+   * The value `${name}` resolved to. A credential when the name says so
+   * ({@link carriesCredential}); otherwise see the class comment.
+   */
+  rememberSubstituted(name: string, value: string): void {
+    if (carriesCredential(name)) {
+      this.remember(value);
+      return;
     }
-    // Then every echoed head of every value, longest first across all of them,
-    // and each one present, not only the first: a provider can quote a value
-    // and a masked head of it in one message ("sk-live-abcd…").
-    const heads = new Set<string>();
-    for (const secret of secrets) {
-      if (secret.length < MIN_SECRET_CHARS) continue;
-      for (let len = secret.length - 1; len >= Math.min(secret.length, MIN_ECHOED_PREFIX_CHARS); len--) {
-        heads.add(secret.slice(0, len));
+    for (const spelling of spellings(value)) this.substituted.add(spelling);
+  }
+
+  /**
+   * `text` with every secret taken out, each run of taken-out characters as
+   * one `[redacted]`. Every match is found in the text as it came, so no value
+   * can match inside a marker another one left, and echoes that overlap are
+   * both taken out. `callerText`: the strings the caller sent with the request
+   * (see the class comment).
+   */
+  redact(text: string, callerText: readonly string[] = []): string {
+    const repeats = callerText.flatMap((sent) => occurrences(text, sent).map((at) => [at, at + sent.length] as const));
+    const hidden = new Uint8Array(text.length);
+    const hide = (start: number, end: number) => {
+      if (!repeats.some(([from, to]) => from <= start && end <= to)) hidden.fill(1, start, end);
+    };
+    for (const secret of new Set([...this.credentials, ...this.substituted])) {
+      if (secret.length < MIN_SECRET_CHARS && !this.credentials.has(secret)) {
+        for (const match of text.matchAll(standingAlone(secret))) hide(match.index, match.index + secret.length);
+        continue;
+      }
+      // The whole value, and any echoed head of it: each run that starts with
+      // its first characters, taken as far as it goes on matching.
+      const head = secret.length > MIN_ECHOED_PREFIX_CHARS ? secret.slice(0, MIN_ECHOED_PREFIX_CHARS) : secret;
+      for (const at of occurrences(text, head)) {
+        let end = at + head.length;
+        while (end - at < secret.length && text[end] === secret[end - at]) end++;
+        hide(at, end);
       }
     }
-    for (const head of [...heads].sort((a, b) => b.length - a.length)) {
-      if (out.includes(head)) out = out.split(head).join(REDACTED);
+    let out = '';
+    for (let i = 0; i < text.length; i++) {
+      if (!hidden[i]) out += text[i];
+      else if (i === 0 || !hidden[i - 1]) out += REDACTED;
     }
     return out;
   }
+}
+
+/** The spellings a value can travel in: as it is, trimmed, url-encoded, JSON-escaped (with `/` escaped or not). */
+function spellings(value: string): string[] {
+  const trimmed = value.trim();
+  // Blank is not a secret, and a blank needle matches everywhere.
+  if (!trimmed) return [];
+  const escaped = JSON.stringify(value).slice(1, -1);
+  return [value, trimmed, encodeURIComponent(value), escaped, escaped.replaceAll('/', '\\/')].filter((spelling) => spelling.trim());
+}
+
+/** Where `needle` starts in `text`, every time, overlapping ones included. */
+function occurrences(text: string, needle: string): number[] {
+  const found: number[] = [];
+  if (!needle) return found;
+  for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) found.push(at);
+  return found;
 }
 
 /**
@@ -93,13 +141,9 @@ export class SecretRedactor {
  * hostname in the provider's message into `[redacted]`, which destroys the
  * quote this class exists to keep readable.
  *
- * The cost is a narrow one, and the right way round: a sub-six-character value
- * whose edge is punctuation and which the provider echoes glued to a word
- * character (`sk-ab` for a value of `-ab`) is not redacted. That intersection
- * is far rarer than a punctuation-shaped `${VAR}`, and over-redaction cannot be
- * recovered from by the reader while this miss still needs a credential short
- * enough to carry almost no secret in the first place. Values of six
- * characters or more never come here at all.
+ * Only a short substituted value not known to be a credential comes here
+ * (see {@link SecretRedactor}); a known credential, and any value of six
+ * characters or more, is taken out wherever it appears.
  */
 function standingAlone(value: string): RegExp {
   // Letters and digits of ANY script are word characters here: a value that
@@ -113,32 +157,40 @@ function escapeRegExp(value: string): string {
 }
 
 /**
- * Names — of a header or of a query parameter — whose value IS a credential
- * rather than a description of the request. Matched as substrings and on
- * purpose generously: a name wrongly treated as secret costs one blanked word
- * in an error message, while one wrongly treated as public costs the
- * credential. `signature` and `hmac` earn their place because a signed url
- * (`X-Amz-Signature`, an Azure SAS) grants access exactly as a bearer token
- * does — the secret is what derived it, and the derivation is what is sent.
+ * Names — of a header, a query parameter, an environment variable, an auth
+ * field or a `${VAR}` — whose value IS a credential rather than a description
+ * of the request. Matched as substrings and on purpose generously: a name
+ * wrongly treated as secret costs its value, blanked wherever it appears in a
+ * quoted message (inside other words too, when the value is short), while one
+ * wrongly treated as public costs the credential. `signature` and `hmac` earn
+ * their place because a signed url (`X-Amz-Signature`, an Azure SAS) grants
+ * access exactly as a bearer token does — the secret is what derived it, and
+ * the derivation is what is sent.
  */
 const CREDENTIAL_MARKERS = [
   'auth',
   'key',
   'token',
   'secret',
-  'password',
+  'pass',
+  'pwd',
   'cookie',
-  'credential',
+  'cred',
+  'session',
+  'bearer',
+  'jwt',
+  'private',
   'signature',
   'hmac',
 ];
 
 /**
  * The same, for names too short to match as substrings: `sig` inside a word
- * would swallow `design`, `assign` and `signal`, and blanking those would eat
- * the message rather than protect anything in it.
+ * would swallow `design`, `assign` and `signal`, `pin` would swallow
+ * `mapping`, and blanking those would eat the message rather than protect
+ * anything in it.
  */
-const CREDENTIAL_WORDS = /(?:^|[-_])(sig|hash)(?:$|[-_])/;
+const CREDENTIAL_WORDS = /(?:^|[-_])(sig|hash|pin|pat|otp|sid|pw)(?:$|[-_])/;
 
 export function carriesCredential(fieldName: string): boolean {
   const name = fieldName.toLowerCase();

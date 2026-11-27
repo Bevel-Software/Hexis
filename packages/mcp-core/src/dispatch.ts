@@ -5,7 +5,13 @@ import type { ProxiedTool } from './proxied-tool.js';
 import { toCallToolResult, toolError, describeToolFailure, renderProgress } from './results.js';
 import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
-import { installSubstitutionCapture, recordingSubstitutions, rememberManualSecrets } from './call-secrets.js';
+import {
+  callRedactor,
+  installSubstitutionCapture,
+  recordingSubstitutions,
+  rememberManualSecrets,
+  valuesReadOnEveryCall,
+} from './call-secrets.js';
 import { utcpManualName } from './utcp-namespace.js';
 import { DownstreamToolError } from './downstream-tool-errors.js';
 import { removeExcludedTools } from './excluded-tools.js';
@@ -44,20 +50,34 @@ export async function registerManual(
   // carry, so they are kept for the manual (`call-secrets.ts`): a downstream
   // error quoted back is redacted against them.
   installSubstitutionCapture(client);
+  const manualName = utcpManualName(String(manual.name ?? ''));
+  const resolved = new Map<string, Set<string>>();
+  // A failure is the server's or the transport's words, which can quote what
+  // the registration sent: redacted before anyone logs or shows it.
+  const failed = (error: string) => ({ ok: false as const, error: callRedactor(resolved, manual).redact(error) });
   try {
-    const [result, values] = await recordingSubstitutions(() => client.registerManual(manual));
+    const result = await recordingSubstitutions(resolved, () => client.registerManual(manual));
     if (result && result.success === false) {
-      const errors = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
-      return { ok: false, error: errors };
+      return failed(Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error');
     }
-    rememberManualSecrets(client, utcpManualName(String(manual.name ?? '')), values);
+    rememberManualSecrets(client, manualName, resolved);
     // The same one point is where the tools a manual leaves out
     // (`excludeTools`) come off the client: a session recovery or a catalog
     // refresh registers through here too, so none of them can bring one back.
     await removeExcludedTools(client, manual);
+    const toolNames = (result?.manual?.tools ?? []).map((tool) => tool.name);
+    const readAgain = await valuesReadOnEveryCall(client, manualName, toolNames, resolved);
+    if (readAgain.length > 0) {
+      await client.deregisterManual(manualName);
+      // Our own words, naming variables only: nothing in them to redact.
+      return {
+        ok: false,
+        error: `The value of ${readAgain.map((name) => `\${${name}}`).join(', ')} contains \`$\` followed by a name, which every call would read as another variable, so this server cannot be called with that value.`,
+      };
+    }
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return failed(err instanceof Error ? err.message : String(err));
   }
 }
 
