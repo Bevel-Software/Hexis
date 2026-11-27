@@ -154,6 +154,14 @@ function rehypeRevealOpenComments() {
   return (tree: HastNode) => revealOpenComments(tree);
 }
 
+/**
+ * The elements whose content is a run of text, where a `<pre>` may not sit.
+ * Markdown only lets a comment stay open in an HTML BLOCK, and a block's
+ * parent is the document, a quote or a list item, so nothing is expected to
+ * reach these: the set is what keeps the markup valid if something does.
+ */
+const HOLDS_INLINE_CONTENT = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'em', 'strong', 'del', 'a', 'td', 'th']);
+
 function revealOpenComments(node: HastNode): void {
   if (!node.children) return;
   node.children = node.children.map((child) => {
@@ -167,11 +175,11 @@ function revealOpenComments(node: HastNode): void {
       properties: {},
       children: [{ type: 'text', value: child.value ?? '' }],
     };
-    // An HTML block sits at the root and can span lines: a `<pre>` keeps them
-    // as the lines they are.
-    return node.type === 'root'
-      ? { type: 'element', tagName: 'pre', properties: {}, children: [code] }
-      : code;
+    // An HTML block can span lines, at the root as inside a quote or a list
+    // item: a `<pre>` keeps them as the lines they are.
+    return node.type === 'element' && HOLDS_INLINE_CONTENT.has(node.tagName ?? '')
+      ? code
+      : { type: 'element', tagName: 'pre', properties: {}, children: [code] };
   });
 }
 

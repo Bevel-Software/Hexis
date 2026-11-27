@@ -254,6 +254,15 @@ describe('MarkdownDiffViewer', () => {
         expect(container.textContent ?? '').toContain('<div>\n<!-- tucked in a block');
       });
 
+      it.each([
+        ['a quote', 'a\n\n> <!-- open in a quote\n> its second line\n'],
+        ['a list item', 'a\n\n- <!-- open in a list item\n  its second line\n'],
+      ])('keeps its lines apart inside %s', (_where, current) => {
+        const { container } = render(<MarkdownDiffViewer payload={payload('a\n', current)} />);
+        const block = container.querySelector('pre');
+        expect(block?.textContent).toMatch(/^<!-- open in a (quote|list item)\nits second line$/);
+      });
+
       it('is shown as text: markup inside it never becomes markup', () => {
         const { container } = render(
           <MarkdownDiffViewer payload={payload('x\n', 'x\n\n<!-- <img src=q onerror="alert(1)">\n')} />,
