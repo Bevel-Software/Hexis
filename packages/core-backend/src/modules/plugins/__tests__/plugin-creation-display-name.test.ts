@@ -5,14 +5,13 @@ import path from 'node:path';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pluginDisplayNameOf, pluginIdentityOf, type AuthUser } from '@bevel-software/platform-shared';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { KbPluginSource } from '../discovery/kb-plugin-source.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { PluginProvisionService } from '../plugin-provision.service.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
 import { CREATE_PLUGIN } from '../plugins.tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
 
 /**
  * Both doors into plugin creation, through the code each one really runs.
@@ -79,8 +78,8 @@ async function makeHarness(
     { invalidate: vi.fn() } as unknown as IAccessControl,
     testKbContext({ kbDirName: KB }),
     undefined,
-    new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB })),
-    new NodeFs(),
+    realPluginSource(realDisk(), testKbContext({ kbDirName: KB })),
+    realDisk(),
   );
 
   const app = express();
@@ -190,7 +189,7 @@ describe('creation derives and stores the display name the same way through ever
     await h.byTool('design');
     // `access.md` is what makes a folder exist to discovery; provisioning
     // wrote it, so the catalog sees both plugins.
-    const { plugins } = await new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB })).discover(path.join(h.dir, KB));
+    const { plugins } = await realPluginSource(realDisk(), testKbContext({ kbDirName: KB })).discover(path.join(h.dir, KB));
     // Walk order, which is the folders' — `design` before `Sales Team`.
     expect(plugins.map((p) => [p.name, p.displayName])).toEqual([
       ['design', 'design'],
