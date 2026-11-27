@@ -4972,6 +4972,22 @@ describe('a path with nothing at it answers 404 not_found on every file tool', (
     }
   });
 
+  // The old 500s told the two apart ("Path is not a directory" against
+  // "Directory not found"), which confirmed a file the caller may not read
+  // exists. Listing a denied file and a missing path is now ONE answer.
+  it('list_files on a file the caller may not read answers exactly as on a missing path', async () => {
+    const base = await start('write', denyReads(new Set(['Knowledge/Secret.md'])));
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Secret.md`, 'real content\n');
+    const ask = async (name: string): Promise<{ status: number; body: string }> => {
+      const res = await post(`${base}/api/agent/tools/list_files`, { branch: 'main', path: `${FOLDER}/${name}` });
+      return { status: res.status, body: (await res.text()).replaceAll(name, '<name>') };
+    };
+    const present = await ask('Secret.md');
+    expect(present.status).toBe(404);
+    expect(await ask('Ghost.md')).toEqual(present);
+  });
+
   // Folders are never gated in a listing, so a folder whose files the caller
   // may not read still lists — empty — and its denial is never turned into
   // a not_found.
