@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Writable } from 'node:stream';
+import { createServer, type Server } from 'node:http';
 import { createPinoLogger } from '../logging.js';
 
 /** A pino logger writing JSON lines into memory, wrapped the way the shell wraps it. */
@@ -92,5 +93,92 @@ describe('createPinoLogger — the err field', () => {
     const { lines, logger } = capture();
     logger.error('failed', { err: 'just text\n[forged]' });
     expect((lines()[0]?.err as { message: string }).message).toBe('just text\\n[forged]');
+  });
+});
+
+/**
+ * Logging a timeout or an abort never fails the call that logged it. The
+ * errors are the real ones — what `fetch` rejects with when its
+ * `AbortSignal.timeout` fires or its `AbortController` aborts — and pino's
+ * own error serializer lists every key of what it is handed, inherited ones
+ * included. On 2026-11-23 that listing reached DOMException's `code` getter
+ * on the escaped copy and threw `Value of "this" must be of DOMException`
+ * out of the caller's `catch`.
+ */
+describe('createPinoLogger — timeouts and aborts', () => {
+  let server: Server;
+  let url = '';
+  beforeAll(async () => {
+    server = createServer(() => undefined); // accepts, never answers
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    url = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
+  });
+  afterAll(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const rejectionOf = async (run: () => Promise<unknown>): Promise<Error> => {
+    try {
+      await run();
+    } catch (err) {
+      return err as Error;
+    }
+    throw new Error('expected the call to reject');
+  };
+  const realTimeout = () => rejectionOf(() => fetch(url, { signal: AbortSignal.timeout(20) }));
+  const realAbort = () =>
+    rejectionOf(() => {
+      const controller = new AbortController();
+      const pending = fetch(url, { signal: controller.signal });
+      controller.abort();
+      return pending;
+    });
+  type Rec = { type: string; name?: string; message: string; stack: string; code?: number; errors?: Rec[] };
+
+  it('writes one record for a real timeout and a real abort, with type, name, message and stack', async () => {
+    const { lines, logger } = capture();
+    const timeout = await realTimeout();
+    const abort = await realAbort();
+    expect(timeout).toBeInstanceOf(DOMException);
+    expect(abort).toBeInstanceOf(DOMException);
+    expect(() => logger.warn('catalog-revision loopback threw:', { err: timeout })).not.toThrow();
+    expect(() => logger.error('skill get_skill loopback threw:', { err: abort })).not.toThrow();
+    const [first, second] = lines();
+    expect(lines()).toHaveLength(2);
+    expect(first?.msg).toBe('catalog-revision loopback threw:');
+    expect(first?.err).toMatchObject({ type: 'DOMException', name: 'TimeoutError', message: timeout.message, code: 23 });
+    expect((first?.err as Rec).stack.startsWith(`TimeoutError: ${timeout.message}`)).toBe(true);
+    expect(second?.err).toMatchObject({ type: 'DOMException', name: 'AbortError', message: abort.message, code: 20 });
+    expect((second?.err as Rec).stack).toContain('AbortError');
+  });
+
+  it('holds when the DOMException is a cause, and when it is among an AggregateError`s failures', async () => {
+    const { lines, logger } = capture();
+    const timeout = await realTimeout();
+    const abort = await realAbort();
+    expect(() => logger.error('loopback threw:', { err: new Error('all-tools loopback', { cause: timeout }) })).not.toThrow();
+    expect(() => logger.error('several threw:', { err: new AggregateError([abort, timeout], 'both') })).not.toThrow();
+    const [caused, aggregate] = lines().map((l) => l.err as Rec);
+    expect(caused?.message).toBe(`all-tools loopback: ${timeout.message}`);
+    expect(caused?.stack).toContain('caused by: TimeoutError');
+    expect(aggregate?.errors?.map((e) => [e.type, e.name, e.message])).toEqual([
+      ['DOMException', 'AbortError', abort.message],
+      ['DOMException', 'TimeoutError', timeout.message],
+    ]);
+  });
+
+  it('never throws into its caller: a record pino cannot make becomes a plain record saying why', () => {
+    const { lines, logger } = capture();
+    const fields = {
+      get detail(): string {
+        throw new TypeError('this field refuses to be read');
+      },
+    };
+    expect(() => logger.error('skill list_skills loopback threw:', fields)).not.toThrow();
+    expect(lines()).toHaveLength(1);
+    expect(lines()[0]).toMatchObject({
+      level: 50,
+      msg: 'skill list_skills loopback threw: [the log record could not be serialized: TypeError: this field refuses to be read]',
+    });
   });
 });

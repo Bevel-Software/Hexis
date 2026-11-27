@@ -34,9 +34,10 @@ export const INSTRUCTIONS_TOKEN_BUDGET = 2_000;
  * knowledge-base tools, the purpose prefix) and input schema. Measured over
  * every registrar the root mounts, the change-request readers and `open_page`
  * included: 46 tools, 17,278 tokens at 0.35.0 (an earlier figure of 15,710
- * left those five out).
+ * left those five out). 18,000 since `merge_change_request` came back
+ * (about 430: 47 tools).
  */
-export const TOOL_LIST_TOKEN_BUDGET = 17_500;
+export const TOOL_LIST_TOKEN_BUDGET = 18_000;
 
 /** The ceiling for a section a distribution adds, which core's checks cannot see: the same as core's own. */
 export const SECTION_TOKEN_BUDGET = 2_500;
@@ -54,27 +55,48 @@ export const SECTION_TOKEN_BUDGETS: Readonly<Record<string, number>> = Object.fr
   'directory-structure': SECTION_TOKEN_BUDGET,
   'where-a-new-file-goes': SECTION_TOKEN_BUDGET,
   'working-with-files': SECTION_TOKEN_BUDGET,
-  'access-control': SECTION_TOKEN_BUDGET,
+  // 2,525 since it says which writes to a path you cannot read get
+  // `read_file`'s refusal instead of `write-denied` (`edit_file` and a copy's
+  // or move's source): an agent told otherwise reads the wrong answer as a
+  // proposable write. SECTION_TOKEN_BUDGET (2,500) before.
+  'access-control': 2_525,
   'drafts-and-change-requests': SECTION_TOKEN_BUDGET,
   skills: SECTION_TOKEN_BUDGET,
   tools: SECTION_TOKEN_BUDGET,
   // A tool that sends a file (`format: file-path`) is declared in the `.tool`
-  // itself, and the section was at its ceiling before that paragraph.
-  'tool-manuals': 2_700,
+  // itself, and the section was at its ceiling before that paragraph. 2,750
+  // since it also says how a file goes as one part of a form: where that is
+  // declared, what each part is sent as and what refuses the call (the review
+  // asked for each, and a tool author learns it nowhere else); 2,700 before.
+  'tool-manuals': 2_750,
   // The page contract is long by nature (the frame, the bridge, the link
   // rules, pages that load live data), and an agent fetches it only to build
-  // a page. 5,600 since an Allow is remembered by the page's content (a rule
-  // a page author must know); 5,500 before.
-  'html-views': 5_600,
+  // a page. 5,650 since `uploadFile` lists the refusal of a whole zip, what
+  // it carries in place of an `error.code` and which entries cause it; 5,600
+  // since an Allow is remembered by the page's content (a rule a page
+  // author must know); 5,500 before.
+  'html-views': 5_650,
   conventions: SECTION_TOKEN_BUDGET,
   'new-knowledge-base': SECTION_TOKEN_BUDGET,
 });
 
 /**
- * Every core section at once: what `section: "all"` returns. 23,000 since the
- * `onboarding` section (about 1,200) was added; 21,500 before.
+ * Every core section at once: what `section: "all"` returns. 23,450 since
+ * `access-control` says which writes to an unreadable path get `read_file`'s
+ * refusal (about 15); 23,425 since
+ * `html-views` lists the refusal of a whole zip to a page's `uploadFile`
+ * (about 70: what it carries in place of an `error.code`, and which entries
+ * cause it); 23,350 since
+ * `drafts-and-change-requests` says how an agent applies a request (about 75:
+ * the rule it replaces said no agent tool does); 23,250 since
+ * `tool-manuals` says how a tool sends a file as one part of a form (about
+ * 120: a tool author has no other place to learn the declaration); 23,100
+ * since `where-a-new-file-goes` opened with the rule to read an area's README
+ * first (about 90: two sessions had restructured one folder against its
+ * README); 23,000 since the `onboarding` section (about 1,200) was added;
+ * 21,500 before.
  */
-export const WHOLE_GUIDE_TOKEN_BUDGET = 23_000;
+export const WHOLE_GUIDE_TOKEN_BUDGET = 23_450;
 
 /** One task: the start section plus the sections it routes the task to. */
 export const TASK_TOKEN_BUDGET = 6_000;

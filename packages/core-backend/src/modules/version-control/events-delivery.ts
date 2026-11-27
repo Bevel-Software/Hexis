@@ -18,10 +18,13 @@
  *     as "outside the knowledge base, readable".
  *   - `approval-changed`: the person may read the approved path on the
  *     request's target branch — judged as a file event on that branch is,
- *     from the server's checkout of it (a cached read of the access rules
- *     from disk, no git), and only for a target the server holds no checkout
- *     of from its published ref. Never by reading the request's detail, which
- *     diffs the branch pair with several git subprocesses per person per event.
+ *     from the server's checkout of it (the access rules held for the commit
+ *     the checkout stands on: the first read of a commit runs a few git
+ *     reads, `ls-tree`, `diff-index` and at times `cat-file`, and where no
+ *     map of the commit answers, the rules are read from disk), and only for
+ *     a target the server holds no checkout of from its published ref. Never
+ *     by reading the request's detail, which diffs the branch pair with
+ *     several git subprocesses per person per event.
  *   - `change-request-opened`: the person may see the request, by the rule the
  *     request tools list and 404 by (`maySeeChangeRequest`): its author, or
  *     someone who may read one of its files — both names of a move — at its
@@ -143,7 +146,7 @@ export function createEventAccess(deps: {
       if (repoPaths.length === 0) return new Set();
       const unique = [...new Set(repoPaths)];
       // The branch's own checkout, when the server has one (the default
-      // branch always): the same disk read a file event on that branch gets.
+      // branch always): the checkout a file event on that branch is judged from.
       const own = workspaceIdForBranch(targetBranch);
       const verdicts = (await deps.workspaces.hasWorkspace(own))
         ? await deps.accessControl.canReadBatch(own, email, unique)

@@ -24,8 +24,9 @@ import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
-import type { IAccessControl } from '../../access/index.js';
-import { AccessDeniedError, PushAccessRefusedError } from '../../access-model/index.js';
+import { SourceHeadMovedError } from '../source-head-moved-error.js';
+import { frontmatterHead, frontmatterHeadOfBytes, type IAccessControl } from '../../access/index.js';
+import { AccessDeniedError, PushAccessRefusedError, fencedHead } from '../../access-model/index.js';
 import { canonicalEmail } from '../../../shared/email-identity.js';
 import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
@@ -53,7 +54,6 @@ import {
 } from '../../../shared/domain-errors.js';
 import {
   GitRunError,
-  assertOneSpecPerLine,
   redactGitToken,
   type GitCredentials,
   type GitRunOptions,
@@ -61,6 +61,7 @@ import {
   type IGitRunner,
 } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from './node-git-runner.js';
+import { catFileBatchBytes } from '../../../shared/cat-file-batch.js';
 import { printable } from '../../../shared/printable.js';
 import { branchForWorkspaceId } from '../../../shared/workspace-id.js';
 import { sanitizeError } from '../sanitize-error.js';
@@ -1305,6 +1306,8 @@ export class GitService implements IGitService {
         await this.assertNoBytesBesideRepo(workspaceId, cwd, relativePath, repoRelativePath);
         return null;
       }
+      // Read now, while HEAD still holds the bytes this commit replaces.
+      const contentEdit = await this.contentEditOf(cwd, scoped, repoRelativePath);
 
       // **No access check at commit time.** Per the "disk is the source of
       // truth" rule, by the time content is on disk it must not be rejected.
@@ -1344,10 +1347,15 @@ export class GitService implements IGitService {
         throw new VersionControlValidationError('commit summary must be a single line');
       }
 
+      // Committed WITH the pathspec, as a scoped `commitChanges` is: it records
+      // this one path, so an entry something else left staged neither rides
+      // along under this user's name nor makes `contentEdit` (told from this
+      // path's status alone) describe a commit that holds more.
       await this.git(cwd, [
         'commit',
         `--author=${user.name} <${user.email}>`,
         '-m', subject,
+        '--', repoRelativePath,
       ]);
       // The commit exists from here on: reported now, before the attribution
       // read, which can fail without unmaking it — with the files the commit
@@ -1367,7 +1375,44 @@ export class GitService implements IGitService {
         authorEmail: authorEmail ?? '',
         subject: subj ?? subject,
         committedAt: committedAt?.trim() ?? new Date().toISOString(),
+        ...(contentEdit ? { contentEdit } : {}),
       };
+    }
+  }
+
+  /**
+   * Whether the one-path change `git status` just reported (`porcelain`, its
+   * `--porcelain=v1` answer for the path) is an edit of a file that was
+   * already there: the fact `CommitAttribution.contentEdit` carries. Told
+   * from the status code alone, so it costs no process: a tracked file
+   * modified, with nothing added (`A`, `??`), removed (`D`), renamed (`R`) or
+   * turned into another kind of entry (`T`). Anything else, or more than one
+   * line, answers `undefined`.
+   *
+   * The file's leading `---` block on disk is compared with the one at HEAD,
+   * each read as the access gate reads a file's own entries (its start, up to
+   * the frontmatter's end). That is for every kind of file: the gate enforces
+   * a `.txt` or `.csv` that opens with one too. A comparison that fails
+   * counts as changed.
+   */
+  private async contentEditOf(
+    cwd: string,
+    porcelain: string,
+    repoRelativePath: string,
+  ): Promise<{ frontmatterChanged: boolean } | undefined> {
+    const lines = porcelain.split('\n').filter((l) => l.trim());
+    if (lines.length !== 1) return undefined;
+    const code = lines[0]!.slice(0, 2);
+    if (!/^(?: M|M |MM)$/.test(code)) return undefined;
+    try {
+      const [before, after] = await Promise.all([
+        this.blobAtRef(cwd, 'HEAD', repoRelativePath),
+        frontmatterHead(path.join(cwd, repoRelativePath)),
+      ]);
+      if (!before) return { frontmatterChanged: true };
+      return { frontmatterChanged: fencedHead(frontmatterHeadOfBytes(before.bytes)) !== fencedHead(after) };
+    } catch {
+      return { frontmatterChanged: true };
     }
   }
 
@@ -2127,6 +2172,19 @@ export class GitService implements IGitService {
       appliedChangeNumber?: number;
       /** The request's stored title, so a merge commit in the old message format is recognised too. */
       appliedChangeTitle?: string;
+      /**
+       * The source commit the caller's approval gate judged. When given, the
+       * merge lands that commit or nothing: if the published source is at any
+       * other commit once the fetch below has run, it refuses with
+       * {@link SourceHeadMovedError} before anything is merged or pushed, and
+       * leaves the clone on the published target with nothing uncommitted.
+       *
+       * Compared HERE, inside the reservation, and not by the caller: the
+       * caller read the head before it asked the gate, and a push landing
+       * between that reading and this fetch would otherwise be merged on the
+       * strength of approvals given to the commit before it.
+       */
+      expectedSourceHead?: string;
     } = {},
   ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
@@ -2187,6 +2245,21 @@ export class GitService implements IGitService {
         // discards a prior attempt's state, never real work.
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
+        // The source commit this attempt merges, read once from the ref the
+        // fetch above just wrote and named by its id from here on. The ref
+        // itself can move again under this reservation: `resolvePrShas`
+        // fetches into a clone before it takes the clone's turn. So the paths
+        // `authorize` judges and the commit merged are one commit, and it is
+        // the commit a caller's `expectedSourceHead` was compared with.
+        //
+        // After the reset above, so a refusal on a LATER attempt leaves the
+        // clone on the published target too: the attempt before it committed
+        // a merge whose push was rejected, and that commit is gone by here.
+        const { stdout: sourceTipOut } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}`]);
+        const sourceTip = sourceTipOut.trim();
+        if (opts.expectedSourceHead !== undefined && sourceTip !== opts.expectedSourceHead) {
+          throw new SourceHeadMovedError(sourceBranch);
+        }
 
         if (opts.authorize) {
           // The tip this attempt merges into, and the paths it writes against
@@ -2196,7 +2269,7 @@ export class GitService implements IGitService {
           const changedPaths = await this.prChangedPathsAt(
             cwd,
             `origin/${targetBranch}`,
-            `origin/${sourceBranch}`,
+            sourceTip,
             { forAccessCheck: true },
           );
           await opts.authorize({ sha: targetSha.trim(), changedPaths });
@@ -2205,7 +2278,7 @@ export class GitService implements IGitService {
         // `--no-commit --no-ff` so we author the merge commit as the human and
         // never fast-forward past the merge record.
         try {
-          await this.git(cwd, ['merge', '--no-commit', '--no-ff', `origin/${sourceBranch}`]);
+          await this.git(cwd, ['merge', '--no-commit', '--no-ff', sourceTip]);
         } catch (err) {
           const paths = await this.conflictedPaths(cwd);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
@@ -4588,7 +4661,8 @@ export class GitService implements IGitService {
    * lossless round trip: every byte sequence that is not valid UTF-8 comes
    * back as U+FFFD and the file is ruined. A past version has to be delivered
    * byte for byte, so this reads through `cat-file --batch`, whose framing is
-   * in BYTES (`<oid> <type> <size>\n<size bytes>\n`) rather than characters.
+   * in BYTES (`<oid> <type> <size>\n<size bytes>\n`) rather than characters,
+   * with the one reader of that protocol (`catFileBatchBytes`).
    *
    * One invocation, and absence is a PROTOCOL answer (`<spec> missing`) rather
    * than a parsed error message — which also covers `<sha>^` of a root commit,
@@ -4606,31 +4680,14 @@ export class GitService implements IGitService {
   ): Promise<{ bytes: Buffer; blobId: string } | null> {
     // The spec has to be ONE line: the path is refused a control character
     // twice over before it gets here (at the route's normaliser and again at
-    // `assertValidRelativePath`), and this is the fence at the protocol —
+    // `assertValidRelativePath`), and the reader refuses one at the protocol —
     // `--batch` would otherwise read `<sha>:Docs/x.md\nzzz` as two object
     // names and answer about the first, under the gates of the second.
-    const spec = `${ref}:${repoRelativePath}`;
-    assertOneSpecPerLine([spec]);
-    const { stdout } = await this.gitBytes(cwd, ['cat-file', '--batch'], {
-      input: `${spec}\n`,
-    });
-    const nl = stdout.indexOf(0x0a);
-    if (nl < 0) throw new Error('unexpected end of git cat-file output');
-    // The spec may itself contain spaces (a KB file routinely does), hence the
-    // endsWith checks rather than a split — same protocol reading as the
-    // access resolver's `catFileBatch`.
-    const header = stdout.subarray(0, nl).toString('utf-8');
-    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) return null;
-    const [blobId, type, rawSize] = header.split(' ');
+    const [outcome] = await catFileBatchBytes(this.gitRunner, cwd, [`${ref}:${repoRelativePath}`]);
     // A tree here would be the per-file gate bypassed, and `assertNotTreeAtRef`
     // is what refuses it before this runs; anything else non-blob (a tag, a
     // commit) is not a file either. Nothing to serve in either case.
-    if (type !== 'blob' || blobId === undefined) return null;
-    const size = Number(rawSize);
-    if (!Number.isSafeInteger(size) || size < 0) {
-      throw new Error(`unexpected git cat-file header: ${header}`);
-    }
-    return { bytes: stdout.subarray(nl + 1, nl + 1 + size), blobId };
+    return outcome?.kind === 'blob' ? { bytes: outcome.bytes, blobId: outcome.objectId } : null;
   }
 
   /**
@@ -4859,27 +4916,6 @@ export class GitService implements IGitService {
   private async asRepositoryAdministrator<T>(cwd: string, run: () => Promise<T>): Promise<T> {
     const repository = (await this.workspaceService.repositoryOfCheckout?.(cwd)) ?? null;
     return repository ? repository.exclusive(run) : run();
-  }
-
-  /**
-   * {@link git}, with stdout as raw BYTES.
-   *
-   * A sibling rather than an `encoding` option on `git()` itself: every other
-   * caller in this service reads text, and the two return types (`string` vs
-   * `Buffer`) are not interchangeable at any call site. Same
-   * `GIT_LITERAL_PATHSPECS` and same runner deadline — the only difference is
-   * that the bytes are not decoded.
-   */
-  private gitBytes(
-    cwd: string,
-    args: string[],
-    opts?: Omit<GitRunOptions, 'encoding'>,
-  ): Promise<GitRunResult<Buffer>> {
-    return this.gitRunner.run(cwd, args, {
-      ...opts,
-      encoding: 'buffer',
-      env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
-    });
   }
 }
 

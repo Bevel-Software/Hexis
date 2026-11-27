@@ -27,11 +27,14 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/index.js';
+import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../../agent-scope/index.js';
 import { realDisk } from '../../../__tests__/real-disk.js';
-import type { WorkspaceService } from '../workspace.service.js';
+import { ArchiveRefusedError, type ArchiveEntryJudge, type ArchiveLanding, type WorkspaceService } from '../workspace.service.js';
 import { DEFAULT_KB_LAYOUT, isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { normalizeWorkspacePath } from '../../kb-fs/index.js';
 import { GIT_INTERNALS_MESSAGE, PathNotFoundError } from '../../../shared/domain-errors.js';
+import { setLogger } from '../../../shared/logging.js';
+import type { ILogger } from '../../../shared/logger.contract.js';
 import { AccessDeniedError } from '../../access-model/index.js';
 import { proposalTitleFor } from '../write-denial.js';
 import { NOT_FOUND_NEXT_STEP } from '../not-found.js';
@@ -106,6 +109,18 @@ let unzipCalls: [string, string | undefined][] = [];
  * in `workspace.service.test.ts`.
  */
 let unzipEntries: string[] = [];
+/**
+ * The paths of every batch handed to the filesystem's `writeFiles`, one entry
+ * per call: how `unzip` lands an archive, as one batch.
+ */
+let batches: string[][] = [];
+/**
+ * The lock's own gates as the batch stand-in meets them: asked once per write,
+ * in lock order, where the real `LockingFilesystem.writeFiles` takes each
+ * path's lock (and `acquireLock` asks the write rule and read-before-write).
+ * A throw is that lock refused. Null: every lock is given.
+ */
+let lockGate: ((wsPath: string) => Promise<void>) | null = null;
 /** Every folder turn a tool took, as `workspaceId:dir`. */
 let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
@@ -153,6 +168,14 @@ let patternMatcher: RipgrepPatternMatcher | undefined;
 let docExtractor: WorkerDocumentExtractor | undefined;
 let matcherOptions: RipgrepPatternMatcherOptions = {};
 
+// The one owner of the shared harness server: start() closes the previous one
+// before it opens another, and afterEach closes the last.
+async function closeHttpServer(): Promise<void> {
+  const open = httpServer;
+  httpServer = undefined;
+  if (open) await new Promise<void>((r) => open.close(() => r()));
+}
+
 async function start(
   scope: 'read' | 'write' = 'write',
   access: IAccessControl = allowAll,
@@ -160,6 +183,7 @@ async function start(
   userEmail = 'e@x',
 ): Promise<string> {
   raceHook = null;
+  await closeHttpServer();
   await patternMatcher?.close();
   patternMatcher = new RipgrepPatternMatcher(matcherOptions);
   await docExtractor?.close();
@@ -238,9 +262,24 @@ async function start(
     check?: (
       pending: readonly { path: string; content: string }[],
     ) => Promise<{ path: string; content: string }[]>,
+    refused?: (path: string, err: unknown) => void,
   ) => {
     await runRaceHook();
-    const landing = check ? await check(writes) : writes;
+    // Each lock in turn, as the real batch takes them: a refused one is the
+    // caller's `refused` to drop (or to refuse the batch with, before
+    // anything lands), and without one it refuses the batch.
+    let locked = writes;
+    for (const w of [...writes].sort((x, y) => (x.path < y.path ? -1 : 1))) {
+      try {
+        await lockGate?.(w.path);
+      } catch (err) {
+        if (!refused) throw err;
+        refused(w.path, err);
+        locked = locked.filter((l) => l.path !== w.path);
+      }
+    }
+    batches.push(locked.map((w) => w.path));
+    const landing = check ? await check(locked) : locked;
     for (const w of landing) await plainWriteFile(w.path, w.content);
     for (const p of deletes) await fs.deleteFile(p);
   };
@@ -248,6 +287,8 @@ async function start(
   workspacePathCalls = [];
   unzipCalls = [];
   unzipEntries = [];
+  batches = [];
+  lockGate = null;
   folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
@@ -283,8 +324,9 @@ async function start(
       unzipFile: async (
         _id: string,
         zipRel: string,
-        destRel?: string,
-        guardWrite?: (wsRelativePath: string) => Promise<void>,
+        destRel: string | undefined,
+        judge: ArchiveEntryJudge | undefined,
+        landing: ArchiveLanding,
       ) => {
         // Recorded so a test can assert the PATHS the tool handed over — both
         // ends normalised into the repository.
@@ -294,17 +336,41 @@ async function start(
         } catch {
           throw new PathNotFoundError(zipRel);
         }
+        // As the real service: every entry judged first, then the ones that
+        // passed handed to the landing in one call, and every entry that will
+        // not land put to the judge's `skipped`, which may refuse the archive.
         const extracted: string[] = [];
         const skipped: { path: string; reason: string }[] = [];
+        const skip = (entry: string, why: unknown): void => {
+          const whole = judge?.skipped(entry, entry, why);
+          if (whole) throw whole;
+          skipped.push({ path: entry, reason: why instanceof Error ? why.message : String(why) });
+        };
         for (const entry of unzipEntries) {
           try {
-            await guardWrite?.(entry);
+            await judge?.entry(entry, 'file');
             extracted.push(entry);
           } catch (err) {
-            skipped.push({ path: entry, reason: err instanceof Error ? err.message : 'refused' });
+            if (err instanceof ArchiveRefusedError) throw err;
+            skip(entry, err);
           }
         }
-        return { destination: '', extracted, skipped };
+        const refusedAtLock = new Set<string>();
+        if (extracted.length > 0) {
+          await landing.writeFiles(
+            extracted.map((path) => ({ path, content: Buffer.from(`bytes of ${path}`) })),
+            'Extract',
+            [],
+            undefined,
+            judge &&
+              ((path, err) => {
+                judge.refusedAtLock(path, err);
+                skip(path, err);
+                refusedAtLock.add(path);
+              }),
+          );
+        }
+        return { destination: '', extracted: extracted.filter((p) => !refusedAtLock.has(p)), skipped };
       },
     } as never,
     versionControlService: {} as never,
@@ -360,8 +426,7 @@ beforeEach(() => {
   matcherOptions = {};
 });
 afterEach(async () => {
-  if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-  httpServer = undefined;
+  await closeHttpServer();
   await patternMatcher?.close();
   patternMatcher = undefined;
   await docExtractor?.close();
@@ -405,6 +470,25 @@ describe('workspace file primitives', () => {
     const res = await post(`${base}/api/agent/tools/edit_file`, { path: `${KB_DIR}/a.md`, old_string: 'world', new_string: "cost: $& $1 $' $$" });
     expect(res.status).toBe(200);
     expect(String(await fs.readFile(`${KB_DIR}/a.md`))).toBe("hello\ncost: $& $1 $' $$\n");
+  });
+
+  // "Not found" and "appears N times" are facts about the file's text, so a
+  // caller who may not read the file must not get them: every guess, right,
+  // wrong or repeated, gets the read refusal, and nothing is written.
+  it('edit_file refuses a file the caller may not read as read_file does, whatever old_string guesses', async () => {
+    const path = `${KB_DIR}/Secret/pay.md`;
+    const base = await start('write', denyReads(new Set(['Secret/pay.md'])));
+    await fs.writeFile(path, 'Salary: 120000\nSalary: 120000\nBonus: 5000\n');
+    const read = await post(`${base}/api/agent/tools/read_file`, { path });
+    const refusal = await read.text();
+    expect(read.status).toBe(403);
+    expect(refusal).toContain(`permission to read \\"${path}\\"`);
+    for (const guess of ['Bonus: 5000', 'Bonus: 9999', 'Salary: 120000']) {
+      const res = await post(`${base}/api/agent/tools/edit_file`, { path, old_string: guess, new_string: 'x' });
+      expect(res.status, guess).toBe(403);
+      expect(await res.text(), guess).toBe(refusal);
+    }
+    expect(String(await fs.readFile(path))).toBe('Salary: 120000\nSalary: 120000\nBonus: 5000\n');
   });
 
   /**
@@ -2440,6 +2524,14 @@ describe('start_session', () => {
   let sessionExtractor: WorkerDocumentExtractor | undefined;
   let created: Array<{ userId: string; startedAt: Date }> = [];
 
+  // The one owner of the harness server: a test that starts a second app
+  // closes the first here before it is replaced, and afterEach closes the last.
+  async function closeSessionServer(): Promise<void> {
+    const open = server;
+    server = undefined;
+    if (open) await new Promise<void>((r) => open.close(() => r()));
+  }
+
   async function startSessionApp(
     source: 'external' | 'internal' = 'external',
     // The default fake returns one fixed id, which is what most of these
@@ -2456,12 +2548,16 @@ describe('start_session', () => {
     starterPacks?: FirstRunStarterSource,
     // Who may read what: everything, unless a test about the note's gate says otherwise.
     access: IAccessControl = allowAll,
+    // What the connection was made as, as the context resolver hands it over.
+    connectionScope?: ConnectionScope,
   ): Promise<string> {
+    await closeSessionServer();
     created = [];
     const registry = new ToolRegistry();
     const resolve = async (auth: ToolAuth, signal: AbortSignal): Promise<ToolContext> => ({
       user: { id: 'user-42', email: 'e@x', name: 'N' },
       scope: auth.scope,
+      ...(connectionScope ? { connectionScope } : {}),
       source: auth.source,
       abortSignal: signal,
       workspaceService: (defaultWorkspaceDir
@@ -2515,10 +2611,61 @@ describe('start_session', () => {
   }
 
   afterEach(async () => {
-    if (server) await new Promise<void>((r) => server!.close(() => r()));
-    server = undefined;
+    await closeSessionServer();
     await sessionExtractor?.close();
     sessionExtractor = undefined;
+  });
+
+  describe('connectedAs: what the connection was made as', () => {
+    const SHIP_IT = { path: 'Agents/ship-it-reviewer.agent', name: 'Ship It reviewer' };
+    const startAs = async (connectionScope?: ConnectionScope) => {
+      const base = await startSessionApp('external', undefined, undefined, undefined, allowAll, connectionScope);
+      const res = await postRaw(`${base}/api/agent/tools/start_session`);
+      expect(res.status).toBe(200);
+      return (await res.json()) as { sessionId: string; connectedAs: unknown };
+    };
+
+    it('is null for a connection made as Everything', async () => {
+      expect(await startAs()).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
+      expect(await startAs(ConnectionScope.everything())).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
+    });
+
+    it('is the path and name of the agent configuration a narrowed connection was made as', async () => {
+      const scope = ConnectionScope.narrowed(SHIP_IT, { skills: [], connectors: [], platformTools: null }, 'fp');
+      expect(await startAs(scope)).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: SHIP_IT });
+    });
+
+    it('is never answered to a connection whose configuration cannot be used: it is served nothing, start_session included', async () => {
+      // Connect-As-An-Agent's rule, not reopened for this field: the refusal
+      // carries why, and no session (so no `connectedAs`) is minted.
+      const unusable = ConnectionScope.unavailable(SHIP_IT, 'It cannot be read.', 'fp');
+      const base = await startSessionApp('external', undefined, undefined, undefined, allowAll, unusable);
+      const res = await postRaw(`${base}/api/agent/tools/start_session`);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'It cannot be read.', code: NOT_AVAILABLE_TO_CONNECTION });
+      expect(created).toHaveLength(0);
+    });
+
+    it('is declared in the description and the output schema', async () => {
+      const registry = new ToolRegistry();
+      const extractor = new WorkerDocumentExtractor();
+      registerWorkspaceTools(
+        registry, express.Router(), ((_req, _res, next) => next()) as express.RequestHandler, (() => () => {}) as never,
+        new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract'), extractor), allowAll, testKbContext({ kbDirName: KB_DIR }),
+        { recoveryBotEmail: RECOVERY_BOT, hooks: new VersionControlHooks(), notes: new ToolDescriptionNotes() },
+        new RoutineWritePolicyService(),
+        {} as never,
+      );
+      const def = await registry
+        .listExternal()
+        .then((tools) => tools.find((t) => t.name === 'start_session')!)
+        .finally(() => extractor.close());
+      expect(def.description).toContain('Returns `{ sessionId, defaultBranch, connectedAs }`');
+      const outputs = def.outputs as { properties: Record<string, { type: unknown; required?: string[] }>; required: string[] };
+      expect(outputs.required).toEqual(['sessionId', 'defaultBranch', 'connectedAs']);
+      expect(outputs.properties.connectedAs.type).toEqual(['object', 'null']);
+      expect(outputs.properties.connectedAs.required).toEqual(['path', 'name']);
+    });
   });
 
   it('returns the sink-minted id as sessionId', async () => {
@@ -2673,7 +2820,7 @@ describe('start_session', () => {
     const startSession = async () => {
       const base = await startSessionApp('external', undefined, wsDir);
       // `postRaw`: the tool takes no arguments, and `post` adds a branch.
-      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; firstRun?: string };
+      return (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string; connectedAs: unknown; firstRun?: string };
     };
 
     it('is there while the knowledge folder holds only the starter guide', async () => {
@@ -2686,6 +2833,8 @@ describe('start_session', () => {
 
       expect(res.sessionId).toBe('thread-xyz');
       expect(res.firstRun).toBe(firstRunNote(`${KB_DIR}/KnowledgeBase`));
+      // The note rides beside the connection, not instead of it.
+      expect(res.connectedAs).toBeNull();
       expect(res.firstRun).toContain(`\`${FIRST_RUN_SECTION_ID}\``);
     });
 
@@ -2738,7 +2887,7 @@ describe('start_session', () => {
       const closed = { ...allowAll, canRead: async () => false } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, undefined, closed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
 
     it('judges the folder as the caller may see it: a page they may not read leaves the note standing', async () => {
@@ -2771,7 +2920,7 @@ describe('start_session', () => {
       } as unknown as IAccessControl;
       const base = await startSessionApp('external', undefined, wsDir, starter, pageClosed);
       const res = (await (await postRaw(`${base}/api/agent/tools/start_session`)).json()) as { firstRun?: string };
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
 
     it('never costs the session id: a workspace it cannot read answers with the id and the default branch', async () => {
@@ -2779,7 +2928,7 @@ describe('start_session', () => {
 
       const res = await startSession();
 
-      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state' });
+      expect(res).toEqual({ sessionId: 'thread-xyz', defaultBranch: 'target-company-state', connectedAs: null });
     });
   });
 });
@@ -3622,6 +3771,22 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(KB('Locked/free.md'))).toBe(false);
     });
 
+    it('copy_file refuses a source the caller cannot read as read_file refuses it, the dry run too, and copies nothing', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Secret/plan.md'), 'plan');
+      // A draft is not write-gated and the destination is readable: only the
+      // read gate on the source stands between the caller and the copy.
+      const args = { branch: 'someone/draft', src: KB('Secret/plan.md'), dest: KB('Sales/plan.md') };
+      const read = await call(base, 'read_file', { branch: args.branch, path: args.src });
+      expect(read.status).toBe(403);
+      for (const body of [{ ...args, dryRun: true }, args]) {
+        const res = await call(base, 'copy_file', body);
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual(read.body);
+      }
+      expect(await exists(args.dest)).toBe(false);
+    });
+
     it('a move the caller may not write: the dry run says so, the real call is a write-denied with proposal steps', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Locked/deal.md') };
@@ -4338,14 +4503,14 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(title).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
   });
 
-  /** Access control whose read verdict is `readable` and which records every call. */
-  const readVerdict = (readable: boolean | 'throws') => {
+  /** Access control whose read verdict is `readable` (for every path, or as it says per path) and which records every call. */
+  const readVerdict = (readable: boolean | 'throws' | ((rel: string) => boolean)) => {
     const calls: string[] = [];
     const ac = {
       canRead: async (_w: string, _u: string, rel: string) => {
         calls.push(rel);
         if (readable === 'throws') throw new Error('git failed');
-        return readable;
+        return typeof readable === 'function' ? readable(rel) : readable;
       },
       canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
       // The move/delete preflight asks these before it ever reaches the
@@ -4514,6 +4679,27 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(json.proposal).toBeUndefined();
     expect(json.cannotProposeReason).toBe('Proposing is not available: you cannot read this path.');
     expect(json.error).toContain('you cannot read this path');
+  });
+
+  // The QA finding behind this: on a draft the branch sentence masked the
+  // no-read one, sending the agent to another branch for the same refusal.
+  // A move must read what it moves, and an edit the file it edits, so an
+  // unreadable path is a read refusal there before any write is judged: they
+  // have no write-denied answer.
+  // A copy must read its source too, so that one path stays readable here:
+  // the case is about the destination it may not write.
+  it.each(CALLS.filter(([tool]) => tool !== 'move_file' && tool !== 'edit_file'))('%s: without read access the no-read sentence wins on a branch that takes no change requests too', async (tool, body) => {
+    const { ac } = readVerdict((rel) => rel === 'a.md');
+    const base = await start('write', ac);
+    await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
+    await fs.writeFile(DENIED, 'old text\n');
+    await freeDestinationFor(tool);
+    denyWrites();
+    const { status, json } = await call(base, tool, { ...body, branch: 'someone/draft' });
+    expect(status).toBe(403);
+    expect(json).toMatchObject({ kind: 'write-denied', canPropose: false });
+    expect(json.proposal).toBeUndefined();
+    expect(json.cannotProposeReason).toBe('Proposing is not available: you cannot read this path.');
   });
 
   it('on a branch that takes no change requests the denial says the branch is not proposable', async () => {
@@ -5033,6 +5219,98 @@ describe('agent read/write hooks', () => {
     for (const name of ['one.md', 'two.md', 'three.md']) {
       await expect(readFile(join(tempDir, `${KB_DIR}/${name}`), 'utf8')).rejects.toThrow();
     }
+  });
+
+  it('unzip lands every extracted file through the filesystem\'s batch, in one call', async () => {
+    const base = await start();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/access.md`, `${KB_DIR}/out/page.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    // One batch, so an `access.md` that came in the archive and the files beside it
+    // are committed together: the batch's all-or-none commit is asserted end to end
+    // in `unzip-lands-as-one-commit.test.ts`.
+    expect(batches).toEqual([[`${KB_DIR}/out/access.md`, `${KB_DIR}/out/page.md`]]);
+    expect(await readFile(join(tempDir, `${KB_DIR}/out/page.md`), 'utf8')).toBe(`bytes of ${KB_DIR}/out/page.md`);
+    expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('unsaved');
+  });
+
+  it('unzip skips an entry whose lock the gate refuses, with the gate\'s own refusal, and lands the rest', async () => {
+    const base = await start();
+    // The write rule as `acquireLock` asks it, at each path's lock.
+    lockGate = async (wsPath) => {
+      if (wsPath.endsWith('/refused.md')) {
+        throw new AccessDeniedError({ path: wsPath, eligibleRoles: ['Admin'], eligibleUsers: [] });
+      }
+    };
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/refused.md`, `${KB_DIR}/out/ok.md`];
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+    expect(body.extracted).toEqual([`${KB_DIR}/out/ok.md`]);
+    expect(body.skipped).toEqual([
+      { path: `${KB_DIR}/out/refused.md`, reason: `You don't have permission to write to "${KB_DIR}/out/refused.md". Eligible: Admin.` },
+    ]);
+    expect(batches).toEqual([[`${KB_DIR}/out/ok.md`]]);
+  });
+
+  it('unzip lands nothing when a lock\'s gate fails rather than refuses, with text that names no infrastructure', async () => {
+    const base = await start();
+    lockGate = async (wsPath) => {
+      if (wsPath.endsWith('/infra.md')) throw new Error('connect ECONNREFUSED db-internal:5432');
+    };
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/infra.md`, `${KB_DIR}/out/ok.md`];
+    const warnings: string[] = [];
+    const capture: ILogger = {
+      debug: () => {},
+      info: () => {},
+      warn: (m: string) => void warnings.push(m),
+      error: () => {},
+      child: () => capture,
+    };
+    const restore = setLogger(capture);
+    let res: Awaited<ReturnType<typeof post>>;
+    try {
+      res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    } finally {
+      setLogger(restore);
+    }
+    expect(res.status).toBe(503);
+    const text = JSON.stringify(await res.json());
+    expect(text).toContain('Whether these files may be written could not be checked, so nothing was landed.');
+    expect(text).not.toContain('db-internal');
+    // The cause stays on the server, and nothing landed.
+    expect(warnings.filter((m) => m.startsWith('archive: checking'))).toHaveLength(1);
+    expect(batches).toEqual([]);
+    await expect(readFile(join(tempDir, `${KB_DIR}/out/ok.md`), 'utf8')).rejects.toThrow();
+  });
+
+  it('unzip leaves an entry the write hook refused out of the batch', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/keep.md`, `${KB_DIR}/out/blocked.md`];
+    refuseWrites('Not in this conversation.', `${KB_DIR}/out/blocked.md`);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(200);
+    expect(batches).toEqual([[`${KB_DIR}/out/keep.md`]]);
+  });
+
+  it('unzip lands nothing when the write hook refuses an access.md the archive holds', async () => {
+    const base = await start();
+    record();
+    await fs.writeFile(`${KB_DIR}/a.zip`, 'not-really-a-zip');
+    unzipEntries = [`${KB_DIR}/out/access.md`, `${KB_DIR}/out/page.md`];
+    refuseWrites('Not in this conversation.', `${KB_DIR}/out/access.md`);
+    const res = await post(`${base}/api/agent/tools/unzip`, { path: `${KB_DIR}/a.zip`, sessionId: 's1' });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      `"${KB_DIR}/out/access.md" could not land: Not in this conversation. ` +
+        "An archive's access rules land with its files or not at all, so nothing in it was landed.",
+    );
+    expect(batches).toEqual([]);
   });
 
   it('unzip skips the refused entry with the hook\'s message and extracts the others', async () => {

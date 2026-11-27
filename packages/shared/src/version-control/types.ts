@@ -173,7 +173,16 @@ export type ChangeRequestDetail = PullRequestDetail;
  * Empty when the merge changed nothing on the branch — including the case
  * where there was nothing to merge.
  */
-export type ChangeRequestUpdateResult = ChangeRequestDetail & { updatedPaths: string[] };
+export type ChangeRequestUpdateResult = ChangeRequestDetail & {
+  updatedPaths: string[];
+  /**
+   * Set only when the update landed but the approvals on the files it left
+   * alone could not be carried onto the new head. A sentence for the reader:
+   * the approvals show as out of date until the carry succeeds, and the next
+   * read of the request tries it again.
+   */
+  approvalCarryNotice?: string;
+};
 export type ChangeRequestState = PullRequestState;
 export type ChangedFile = PullRequestFile;
 

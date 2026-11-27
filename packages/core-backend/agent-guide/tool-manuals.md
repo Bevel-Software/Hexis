@@ -172,6 +172,14 @@ path or a `__tmp__/…` ref, and the platform sends the file, read as the person
 on the default branch; one they cannot read refuses the call. A
 `remote: false` tool runs in the local server, which sends the path as written.
 
+For a file sent as one part of a form, set that `content_type` to
+`multipart/form-data` and declare that body input as an object: each property
+is a part. One with `format: file-path` is sent as the file, with the name in
+its path and the media type of its extension; text goes as written, other
+values as JSON. A part left out or `null` is not sent. A file part that is
+there but is not one path refuses the call, as does a file that cannot be
+read, before anything is sent.
+
 ### Adding a third-party tool
 
 When asked to add a product as a tool ("add Notion", "wire up Linear"), never

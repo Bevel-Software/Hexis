@@ -25,7 +25,6 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   codeModeMetaTools,
   META_TOOL_NAMES,
-  RETIRED_TOOL_NAMES,
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
@@ -34,7 +33,6 @@ import {
   flattenManualTool,
   toListedTool,
   toolError,
-  retiredToolMessage,
   seedBevelHostedManualVars,
   printable,
   skillPromptText,
@@ -197,16 +195,9 @@ export async function discoverTools(
 
 /**
  * The names this server never serves from the deployment it proxies: the
- * meta-tools (it serves its own trio, over the merged registry) and the
- * retired tools (no agent surface serves those at all).
- *
- * A retired name is in here because this server can be pointed at an OLDER
- * deployment that still advertises it. Discovery would then register a working
- * copy, and `tools.find` would resolve and dispatch it — an agent merging a
- * change request through a stale deployment, which is exactly what removing
- * the tool was for. Purged from the registry so no chain can reach it either.
+ * meta-tools (it serves its own trio, over the merged registry).
  */
-const UNSERVED_REMOTE_TOOLS: ReadonlySet<string> = new Set([...META_TOOL_NAMES, ...RETIRED_TOOL_NAMES]);
+const UNSERVED_REMOTE_TOOLS: ReadonlySet<string> = META_TOOL_NAMES;
 
 /**
  * Purge the deployment's copies of those names from the registry. Runs at
@@ -233,8 +224,7 @@ async function removeUnservedRemoteTools(client: CodeModeUtcpClient): Promise<vo
 /**
  * Belt to `discoverTools`'s registry removal: whatever a repository
  * implementation declined to remove must still never reach the MCP listing,
- * where a remote `list_tools` would shadow — or duplicate — the local trio,
- * and where a stale deployment's retired tool would be listed as callable.
+ * where a remote `list_tools` would shadow — or duplicate — the local trio.
  */
 export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
   return tools.filter((t) => !UNSERVED_REMOTE_TOOLS.has(t.mcpName));
@@ -1303,11 +1293,6 @@ export async function createHexisMcpServer(
           // returns a truncation notice instead of a ref that resolves nowhere.
           return await dispatchMetaTool(live, name, request.params.arguments ?? {});
         }
-        // Before the lookup, never after it: pointed at an older deployment
-        // that still advertises a retired tool, a discovered copy would
-        // otherwise be found and dispatched — the removed behaviour, performed.
-        const retired = retiredToolMessage(name);
-        if (retired) return toolError(retired);
         const tool = tools.find((t) => t.mcpName === name);
         // On a narrowed connection, a tool off the surface is one its agent
         // does not load: refused by name and agent, never "unknown" — the tool

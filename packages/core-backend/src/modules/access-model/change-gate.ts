@@ -55,8 +55,11 @@ export type ChangeReadVerdict =
   | {
       allowed: false;
       /**
-       * The repo-relative path the caller cannot read: the target itself when
-       * it exists, otherwise the folder it would land in (`''` = the root).
+       * The repo-relative path being changed (`''` = the root), whether or not
+       * something is at it: a refused path is named the same either way. The
+       * verdict itself can still differ, where a file's own entries deny a
+       * caller who may read its folder: the file is refused while it is there
+       * and the name is allowed once it is not.
        */
       unreadable: string;
     };

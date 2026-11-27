@@ -1,15 +1,21 @@
 import { useMemo } from 'react';
 import Markdown from 'react-markdown';
+import { Parser } from 'yaml';
 import { isFrontmatterFence, type FileDiffPayload } from '@bevel-software/platform-shared';
-import { computeDiff, type DiffLine, parseFrontmatter, labelFor, type FrontmatterData } from '../../workspace';
-import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
 import {
+  computeDiff,
+  type DiffLine,
+  parseFrontmatter,
+  labelFor,
+  type FrontmatterData,
   KB_REMARK_PLUGINS,
   KB_DIFF_REHYPE_PLUGINS,
+  KB_DIFF_CHANGE_REHYPE_PLUGINS,
   useKbMarkdownComponents,
   type KbImageResolver,
-} from '../../workspace/components/renderers/kbMarkdownPipeline';
-import type { KbLinkTarget } from '../../workspace';
+  type KbLinkTarget,
+} from '../../workspace';
+import { escapeSpacesInLinkDestinations } from '../../../shared/markdown/Markdown';
 
 const MAX_RENDERED_LINES = 5000;
 
@@ -104,6 +110,7 @@ export function MarkdownDiffViewer({
         lines: [] as DiffLine[],
         bodyBlocks: [] as DisplayBlock[],
         frontmatterChanged: false,
+        frontmatterComments: [] as DiffLine[],
         oldFrontmatter: {} as FrontmatterData,
         newFrontmatter: {} as FrontmatterData,
       };
@@ -111,13 +118,18 @@ export function MarkdownDiffViewer({
     const lines = computeDiff(baseline, current);
     const oldFmEnd = frontmatterLineCount(baseline);
     const newFmEnd = frontmatterLineCount(current);
-    const split = splitDiffByFrontmatter(lines, oldFmEnd, newFmEnd);
+    const split = splitDiffByFrontmatter(
+      lines,
+      { end: oldFmEnd, commentLines: yamlCommentLines(baseline, oldFmEnd) },
+      { end: newFmEnd, commentLines: yamlCommentLines(current, newFmEnd) },
+    );
     return {
       tooLarge: false as const,
       rawLineCount,
       lines,
       bodyBlocks: groupDiffBlocks(split.body),
       frontmatterChanged: split.frontmatter.some((l) => l.type !== 'same'),
+      frontmatterComments: split.changedComments,
       oldFrontmatter: parseFrontmatter(baseline).data,
       newFrontmatter: parseFrontmatter(current).data,
     };
@@ -141,6 +153,7 @@ export function MarkdownDiffViewer({
           newData={data.newFrontmatter}
         />
       )}
+      <FrontmatterCommentLines lines={data.frontmatterComments} />
       <DiffPreview
         blocks={data.bodyBlocks}
         onOpenFile={onOpenFile}
@@ -181,23 +194,57 @@ function frontmatterLineCount(content: string): number {
 }
 
 /**
+ * The lines of `content` (indices into `content.split('\n')`) on which its
+ * frontmatter carries a YAML comment, on a line of its own or after a value.
+ * The YAML parser decides what is a comment, so a `#` inside a quoted value or
+ * a block scalar is not one. `fmEnd` is {@link frontmatterLineCount}'s answer.
+ */
+function yamlCommentLines(content: string, fmEnd: number): Set<number> {
+  const found = new Set<number>();
+  if (fmEnd === 0) return found;
+  // The YAML between the fences; its line 0 is line 1 of `content`.
+  const yaml = content.split('\n').slice(1, fmEnd - 1).join('\n');
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+    } else if (node && typeof node === 'object') {
+      const token = node as { type?: unknown; offset?: unknown };
+      if (token.type === 'comment' && typeof token.offset === 'number') {
+        found.add(1 + countNewlines(yaml.slice(0, token.offset)));
+      }
+      Object.values(node).forEach(visit);
+    }
+  };
+  for (const token of new Parser().parse(yaml)) visit(token);
+  return found;
+}
+
+/** One side of the diff: its frontmatter's length and its comment lines. */
+interface FrontmatterSide {
+  /** Exclusive upper bound: the number of frontmatter lines on this side. */
+  end: number;
+  commentLines: Set<number>;
+}
+
+/**
  * Walk the diff lines, tracking old- and new-line cursors, and split them
  * into the lines that fall inside the frontmatter region and the lines
- * that fall inside the body. `oldFmEnd` / `newFmEnd` are exclusive upper
- * bounds (i.e. the number of frontmatter lines on each side).
+ * that fall inside the body. `changedComments` are the removed and added
+ * frontmatter lines that carry a YAML comment on their own side.
  */
 function splitDiffByFrontmatter(
   lines: DiffLine[],
-  oldFmEnd: number,
-  newFmEnd: number,
-): { frontmatter: DiffLine[]; body: DiffLine[] } {
+  oldFm: FrontmatterSide,
+  newFm: FrontmatterSide,
+): { frontmatter: DiffLine[]; body: DiffLine[]; changedComments: DiffLine[] } {
   const frontmatter: DiffLine[] = [];
   const body: DiffLine[] = [];
+  const changedComments: DiffLine[] = [];
   let oldIdx = 0;
   let newIdx = 0;
   for (const line of lines) {
-    const inOldFm = oldIdx < oldFmEnd;
-    const inNewFm = newIdx < newFmEnd;
+    const inOldFm = oldIdx < oldFm.end;
+    const inNewFm = newIdx < newFm.end;
     if (line.type === 'same') {
       if (inOldFm && inNewFm) frontmatter.push(line);
       else body.push(line);
@@ -206,14 +253,16 @@ function splitDiffByFrontmatter(
     } else if (line.type === 'removed') {
       if (inOldFm) frontmatter.push(line);
       else body.push(line);
+      if (inOldFm && oldFm.commentLines.has(oldIdx)) changedComments.push(line);
       oldIdx++;
     } else {
       if (inNewFm) frontmatter.push(line);
       else body.push(line);
+      if (inNewFm && newFm.commentLines.has(newIdx)) changedComments.push(line);
       newIdx++;
     }
   }
-  return { frontmatter, body };
+  return { frontmatter, body, changedComments };
 }
 
 function FrontmatterDiffPanel({
@@ -262,6 +311,31 @@ function FrontmatterDiffPanel({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * The changed frontmatter lines that carry a YAML comment, as the marked
+ * source lines they are. The panel above shows the PARSED frontmatter, and a
+ * comment parses to nothing, so a request whose only change was one showed the
+ * reviewer an unmarked page.
+ */
+function FrontmatterCommentLines({ lines }: { lines: DiffLine[] }) {
+  if (lines.length === 0) return null;
+  return (
+    <div className="mb-4 space-y-1 font-mono text-xs">
+      {lines.map((line, i) =>
+        line.type === 'removed' ? (
+          <del key={i} className="block whitespace-pre-wrap break-words rounded-sm bg-danger-soft px-2 py-0.5 text-danger">
+            {line.text}
+          </del>
+        ) : (
+          <ins key={i} className="block whitespace-pre-wrap break-words rounded-sm bg-ok-soft px-2 py-0.5 text-ok no-underline">
+            {line.text}
+          </ins>
+        ),
+      )}
     </div>
   );
 }
@@ -368,10 +442,15 @@ function DiffPreview({
 
   // Each block is parsed as a standalone document, so the space-escaping that
   // makes `[Foo](Some File.md)` resolve has to be applied per fragment.
-  const fragment = (text: string, fragmentComponents = components) => (
+  // A changed fragment shows its HTML comments as source (see
+  // KB_DIFF_CHANGE_REHYPE_PLUGINS).
+  const fragment = (
+    text: string,
+    { changed, fragmentComponents = components }: { changed: boolean; fragmentComponents?: typeof components },
+  ) => (
     <Markdown
       remarkPlugins={KB_REMARK_PLUGINS}
-      rehypePlugins={KB_DIFF_REHYPE_PLUGINS}
+      rehypePlugins={changed ? KB_DIFF_CHANGE_REHYPE_PLUGINS : KB_DIFF_REHYPE_PLUGINS}
       components={fragmentComponents}
     >
       {escapeSpacesInLinkDestinations(text)}
@@ -382,18 +461,21 @@ function DiffPreview({
     <div className="prose prose-sm max-w-none">
       {blocks.map((block, i) => {
         if (block.type === 'same') {
-          return <div key={i}>{fragment(block.lines.join('\n'))}</div>;
+          return <div key={i}>{fragment(block.lines.join('\n'), { changed: false })}</div>;
         }
         return (
           <div key={i} className="my-2">
             {block.removed.length > 0 && (
               <div className="bg-red-50 border-l-2 border-red-700 px-3 py-1 rounded-sm">
-                {fragment(block.removed.join('\n'), baselineComponents)}
+                {fragment(block.removed.join('\n'), {
+                  changed: true,
+                  fragmentComponents: baselineComponents,
+                })}
               </div>
             )}
             {block.added.length > 0 && (
               <div className="bg-emerald-50 border-l-2 border-emerald-700 px-3 py-1 rounded-sm mt-1">
-                {fragment(block.added.join('\n'))}
+                {fragment(block.added.join('\n'), { changed: true })}
               </div>
             )}
           </div>

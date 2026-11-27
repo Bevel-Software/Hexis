@@ -1,8 +1,10 @@
 /**
- * Version-control domain errors. This is the single source of truth — every error
- * raised by the version-control domain (branches, changes, change requests, access
- * control, locks) lives here. Route handlers shape responses via the
- * `.status` + `.payload` contract on the base class.
+ * Version-control domain errors that cross a module boundary (branches, changes,
+ * change requests, access control, locks) live here. An error only its own
+ * module raises and reads lives in that module instead (for example
+ * `ApprovalCarryPendingError` and `MergeBlockedError` in version-control).
+ * Route handlers shape responses via the `.status` + `.payload` contract on
+ * the base class.
  *
  * Lives in `src/shared` (not `modules/version-control`) because the classes are
  * consumed across module boundaries — access, diff, plugins and workspace all
@@ -673,8 +675,8 @@ export class ChangeRequestConflictsError extends VersionControlDomainError {
 
 /**
  * A direct branch merge was asked to do what an open change request is
- * waiting for a person to do: merge `sourceBranch` into `targetBranch`.
- * Carries the request's number so the caller can point the person at it.
+ * there to do under its approvals: merge `sourceBranch` into `targetBranch`.
+ * Carries the request's number so the caller can apply that instead.
  */
 export class OpenChangeRequestBlocksMergeError extends VersionControlDomainError {
   readonly kind = 'open-change-request-blocks-merge' as const;
@@ -685,7 +687,7 @@ export class OpenChangeRequestBlocksMergeError extends VersionControlDomainError
   ) {
     super(
       `Change request #${number} proposes merging "${sourceBranch}" into "${targetBranch}" and is still open. ` +
-        `A change request is merged by a person: ask the user to review #${number} in the app.`,
+        `Apply #${number} with \`merge_change_request\`, or ask the user to apply it in the app.`,
       409,
       { kind: 'open-change-request-blocks-merge', sourceBranch, targetBranch, number },
     );

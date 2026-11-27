@@ -42,6 +42,7 @@ import remarkFrontmatter from 'remark-frontmatter';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
+import { stripHtmlComments } from '@bevel-software/platform-shared';
 import { CopyAnchorButton } from './CopyAnchorButton';
 import { KbImage, type KbImageResolver } from './KbImage';
 import { isExternalHref, normalizeHref } from '../../../../shared/markdown/hrefs';
@@ -92,6 +93,110 @@ export const KB_REHYPE_PLUGINS: PluginList = [rehypeRaw, rehypeSanitize, rehypeS
  * markup for a feature the surface does not offer.
  */
 export const KB_DIFF_REHYPE_PLUGINS: PluginList = [rehypeRaw, rehypeSanitize];
+
+/** The slice of a hast node the comment reveal below reads and writes. */
+interface HastNode {
+  type: string;
+  value?: string;
+  tagName?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+}
+
+/**
+ * Turns every HTML comment into visible source text: `<!-- x -->` becomes an
+ * inline `<code>` showing exactly that. A comment renders to nothing, so in a
+ * CHANGED fragment it left the reviewer an empty red or green bar and a file
+ * to approve without seeing the line it adds (an agent can hide instructions
+ * to other agents there). Runs after rehype-raw, which is what turns the
+ * markdown's HTML into comment nodes, and before rehype-sanitize, which would
+ * drop them; the `<code>` it leaves is text sanitize keeps.
+ */
+function rehypeRevealComments() {
+  return (tree: HastNode) => revealComments(tree);
+}
+
+function revealComments(node: HastNode): void {
+  if (!node.children) return;
+  node.children = node.children.map((child) => {
+    if (child.type !== 'comment') {
+      revealComments(child);
+      return child;
+    }
+    const code: HastNode = {
+      type: 'element',
+      tagName: 'code',
+      properties: {},
+      children: [{ type: 'text', value: `<!--${child.value ?? ''}-->` }],
+    };
+    // A comment on a line of its own sits at the root: give it a block, so it
+    // reads as the line it is rather than running into its neighbour.
+    return node.type === 'root'
+      ? { type: 'element', tagName: 'p', properties: {}, children: [code] }
+      : code;
+  });
+}
+
+/**
+ * Shows the source of an HTML block whose comment is never closed. Such a
+ * comment has no end, so rehype-raw makes no comment node of it and
+ * {@link rehypeRevealComments} has nothing to reveal: the block rendered to
+ * nothing, and with it every line after the `<!--` in the same block. Runs
+ * BEFORE rehype-raw, on the HTML still as the text the markdown held, and
+ * replaces the whole block with that text; rehype-raw then never parses it.
+ *
+ * Whether a comment is left open is asked of `stripHtmlComments`, the rule
+ * that decides what a comment withholds from agents, so the reviewer is shown
+ * the block in every case that rule calls open. It calls `<!-->` open, which
+ * HTML reads as an empty comment: that block is shown as its source too.
+ */
+function rehypeRevealOpenComments() {
+  return (tree: HastNode) => revealOpenComments(tree);
+}
+
+/**
+ * The elements whose content is a run of text, where a `<pre>` may not sit.
+ * Markdown only lets a comment stay open in an HTML BLOCK, and a block's
+ * parent is the document, a quote or a list item, so nothing is expected to
+ * reach these: the set is what keeps the markup valid if something does.
+ */
+const HOLDS_INLINE_CONTENT = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'em', 'strong', 'del', 'a', 'td', 'th']);
+
+function revealOpenComments(node: HastNode): void {
+  if (!node.children) return;
+  node.children = node.children.map((child) => {
+    if (child.type !== 'raw' || !stripHtmlComments(child.value ?? '').unterminated) {
+      revealOpenComments(child);
+      return child;
+    }
+    const code: HastNode = {
+      type: 'element',
+      tagName: 'code',
+      properties: {},
+      children: [{ type: 'text', value: child.value ?? '' }],
+    };
+    // An HTML block can span lines, at the root as inside a quote or a list
+    // item: a `<pre>` keeps them as the lines they are.
+    return node.type === 'element' && HOLDS_INLINE_CONTENT.has(node.tagName ?? '')
+      ? code
+      : { type: 'element', tagName: 'pre', properties: {}, children: [code] };
+  });
+}
+
+/**
+ * The diff pipeline for a CHANGED fragment: {@link KB_DIFF_REHYPE_PLUGINS}
+ * plus the two comment reveals, so an HTML comment a change adds or removes
+ * is on screen, closed or not. (Other markdown that renders nothing, such as
+ * an unused link reference definition, still renders nothing here.) Unchanged
+ * fragments keep the plain diff pipeline: a comment nobody touched stays out
+ * of the way, as it does on the page.
+ */
+export const KB_DIFF_CHANGE_REHYPE_PLUGINS: PluginList = [
+  rehypeRevealOpenComments,
+  rehypeRaw,
+  rehypeRevealComments,
+  rehypeSanitize,
+];
 
 export interface KbMarkdownComponentOptions {
   /**

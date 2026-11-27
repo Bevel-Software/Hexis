@@ -229,7 +229,7 @@ describe('probeFirstCall — fresh connections, one first call each', () => {
   it('refuses a count that is not a positive integer, before opening anything', async () => {
     const url = 'http://127.0.0.1:1';
     await expect(probeFirstCall({ baseUrl: url, bearer: BEARER, connections: 0 })).rejects.toThrow(/positive integer/);
-    // `runPooled` clamps its limit with `Math.max(1, …)`, so an unchecked zero
+    // `mapPooled` clamps its limit with `Math.max(1, …)`, so an unchecked zero
     // would silently run one attempt at a time and report it as the burst.
     await expect(probeFirstCall({ baseUrl: url, bearer: BEARER, concurrency: 0 })).rejects.toThrow(
       /concurrency must be a positive integer/,
