@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../../kb-fs/node-fs.js';
+import { realDisk } from '../../../../__tests__/real-disk.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -75,7 +75,7 @@ describe('KbPluginSource — bundles', () => {
   });
 
   it('finds bundles at any depth and reads them as plugins that link skill roots', async () => {
-    const { plugins, warnings } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     const byName = new Map(plugins.map((p) => [p.name, p]));
     expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'ledger', 'padded', 'unnamed']);
     // The bundle dialect's own rule — a declared display name, else the
@@ -123,7 +123,7 @@ describe('KbPluginSource — bundles', () => {
   });
 
   it('expands mcpProfile through the registry, following extends and reporting unknowns', async () => {
-    const { plugins, warnings } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     const example = plugins.find((p) => p.name === 'example-plugin')!;
     expect(example.mcpServers).toEqual({
       confluence: { type: 'streamable-http', url: 'https://mcp.confluence.example' },
@@ -160,7 +160,7 @@ describe('KbPluginSource — bundles', () => {
         ],
       }),
     );
-    const { plugins, warnings } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     const example = plugins.find((p) => p.name === 'example-plugin')!;
     expect(example.mcpServers).toEqual({
       jira: { type: 'stdio', command: 'npx', args: ['-y', 'jira-mcp'] },
@@ -178,7 +178,7 @@ describe('KbPluginSource — bundles', () => {
 
   it('cuts an extends cycle instead of hanging, and keeps what it collected', async () => {
     await write('plugins/loop/plugin.bundle.json', JSON.stringify({ name: 'loop', mcpProfile: 'loop-a' }));
-    const { plugins, warnings } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     const loop = plugins.find((p) => p.name === 'loop')!;
     expect(loop.mcpServers).toEqual({ 'flat-http': { type: 'streamable-http', url: 'https://flat.example' } });
     expect(warnings.some((w) => w.includes('cycle'))).toBe(true);
@@ -186,7 +186,7 @@ describe('KbPluginSource — bundles', () => {
 
   it('a missing registry leaves the plugins standing, servers-less, with a warning per profile', async () => {
     await fs.rm(path.join(kb, 'configs'), { recursive: true });
-    const { plugins, warnings } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     expect(plugins.find((p) => p.name === 'example-plugin')!.mcpServers).toBeNull();
     expect(warnings.some((w) => w.includes('no registry'))).toBe(true);
   });
@@ -230,7 +230,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
     // beneath: a container, not a plugin.
     await write('Plugins/functional/access.md', '---\n---\nread:\n  - everyone\n');
 
-    const { plugins, warnings } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     // Folders are visited in locale order (case-insensitive), depth first.
     // Position means nothing: only the two files make a plugin.
     expect(plugins.map((p) => [p.name, p.folder, p.linksAreManaged, p.exists])).toEqual([
@@ -249,7 +249,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
     await write('Plugins/b/GTM/plugin.json', '{}');
     // Different spelling, same manifest slug: still one plugin.
     await write('Plugins/c/gtm/plugin.json', '{}');
-    const { plugins, warnings } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     expect(plugins.map((p) => p.folder)).toEqual(['Plugins/a/GTM']);
     expect(warnings).toEqual([
       'Plugins/b/GTM: plugin name "gtm" is already used by Plugins/a/GTM — plugin skipped',
@@ -265,7 +265,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
     await write('Plugins/Nested/plugin.json', `{"name":${'['.repeat(20000)}${']'.repeat(20000)}}`);
     await write('Plugins/Ops/plugin.json', JSON.stringify({ name: 'Not An Identifier' }));
     await write('Plugins/Plain/plugin.json', '{}');
-    const { plugins, warnings } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     expect(plugins.map((p) => [p.name, p.displayName, p.folder])).toEqual([
       // Both fields present: both are read, and `Plugins/GTM` says nothing.
       ['go-to-market', 'Go To Market', 'Plugins/GTM'],
@@ -299,7 +299,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
     await write('configs/mcp/registry.json', JSON.stringify(REGISTRY));
     await write('Plugins/b/close/plugin.bundle.json', JSON.stringify({ name: 'close', mcpProfile: 'empty', sourceSkillRoots: ['Skills/x'] }));
     await write('Plugins/b/ex/plugin.bundle.json', JSON.stringify({ name: 'ex', mcpProfile: 'base', sourceSkillRoots: ['Skills/x'] }));
-    const { plugins } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     const at = (n: string) => plugins.find((p) => p.name === n)!;
     expect([at('full'), at('empty'), at('none'), at('close'), at('ex')].map((p) => [p.manifestPath, p.mcpServersPath, p.mcpServers === null])).toEqual([
       ['Plugins/Full/plugin.json', 'Plugins/Full/mcp.json', false],
@@ -328,7 +328,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
           : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never),
     ];
     try {
-      const { plugins, warnings, unreadable } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+      const { plugins, warnings, unreadable } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
       // The container could not be listed: nothing beneath it was seen. The
       // manifest could not be read: an identity nobody could see, so the
       // plugin is not listed under a guessed one. Both are holes, not absence.
@@ -356,7 +356,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
         ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
         : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
     try {
-      const { plugins, unreadable } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+      const { plugins, unreadable } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
       expect(unreadable).toEqual(['Plugins/Hidden/plugin.json']);
       expect(plugins.map((p) => p.name)).toEqual(['gtm']);
     } finally {
@@ -373,7 +373,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
         ? Promise.reject(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }))
         : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
     try {
-      const { plugins, unreadable } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+      const { plugins, unreadable } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
       expect(plugins.map((p) => p.name)).toEqual(['gtm']);
       expect(unreadable).toEqual([]);
     } finally {
@@ -382,7 +382,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
   });
 
   it('a knowledge base without a plugins root has no plugins and no complaint', async () => {
-    const { plugins, warnings, unreadable } = await new KbPluginSource(new NodeFs(), kbContext).discover(kb);
+    const { plugins, warnings, unreadable } = await new KbPluginSource(realDisk(), kbContext).discover(kb);
     expect(plugins).toEqual([]);
     expect(warnings).toEqual([]);
     expect(unreadable).toEqual([]);
