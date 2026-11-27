@@ -36,7 +36,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-
+  extractFrontmatter,
   renderKbLayoutPlaceholders,
   resolveKbLayout,
   type KbLayout,
@@ -162,12 +162,18 @@ export const CORE_SECTION_IDS: readonly string[] = Object.freeze([
  */
 const MANAGED_GUIDE_HEADER_LINE = '> **This file is managed by the platform.**';
 
-/** How far down a file the header's blockquote can sit: under the title and a sentence or two, never further. */
+/**
+ * How far down a file's BODY the header's blockquote can sit: under the title
+ * and a sentence or two, never further. Counted after a leading frontmatter
+ * block, because the releases of 2026-09-09..2026-10-06 wrote the guide with
+ * its own `read: everyone` frontmatter, which put the header on line 14.
+ */
 const MANAGED_GUIDE_HEADER_WITHIN_LINES = 12;
 
 /** Whether `text` is a copy of the guide a release wrote to disk, of any vintage. */
 export function isManagedGuide(text: string): boolean {
-  return text
+  const body = extractFrontmatter(text)?.body ?? text;
+  return body
     .split('\n', MANAGED_GUIDE_HEADER_WITHIN_LINES)
     .some((line) => line.trimStart().startsWith(MANAGED_GUIDE_HEADER_LINE));
 }

@@ -278,6 +278,27 @@ describe('the guide is composed from the platform\'s sections', () => {
     const deep = `# Notes\n${'\n'.repeat(20)}> **This file is managed by the platform.** (quoted from the old guide)\n`;
     expect(isManagedGuide(deep)).toBe(false);
   });
+
+  it('recognises a copy whose header sits below the frontmatter a release wrote, and still nothing else', () => {
+    // The head of AGENTS.md as the releases of 2026-09-09..2026-10-06 wrote
+    // it: an 8-line `read: everyone` frontmatter, the header on line 14.
+    const frontmatter =
+      "---\n# This file's own access rule: readable by every signed-in person and their\n" +
+      "# agents, whatever the root access.md says. Agents are told to read this file\n" +
+      '# before their first action, and the root rules grant read to nobody by\n' +
+      '# default — without this line a non-admin\'s agent would fail on step one.\nread:\n  - everyone\n---\n';
+    const releaseCopy =
+      `${frontmatter}# Knowledge base\n\nThis is a git-backed knowledge base. You are the primary agent responsible for\nmaintaining it.\n\n` +
+      '> **This file is managed by the platform.** It lives at the repository root as\n> `AGENTS.md`, and every server restart replaces it.\n';
+    expect(releaseCopy.split('\n').findIndex((line) => line.startsWith('> **This file'))).toBe(13);
+    expect(isManagedGuide(releaseCopy)).toBe(true);
+    expect(isManagedGuide(releaseCopy.replace(/\n/g, '\r\n'))).toBe(true);
+    // The frontmatter buys no extra depth: a quotation deep in the body of
+    // the organisation's own file stays theirs, and so does a file with
+    // frontmatter and no header at all.
+    expect(isManagedGuide(`${frontmatter}# Notes\n${'\n'.repeat(20)}> **This file is managed by the platform.** (quoted)\n`)).toBe(false);
+    expect(isManagedGuide(`${frontmatter}# Acme conventions\n\nOur own rules.\n`)).toBe(false);
+  });
 });
 
 /**

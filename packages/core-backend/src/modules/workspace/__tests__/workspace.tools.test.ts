@@ -1016,6 +1016,14 @@ describe("the agent guide at the guide's name", () => {
     const base = await start();
     await fs.writeFile(`${KB_DIR}/AGENTS.md`, '# Knowledge base\n\n> **This file is managed by the platform.** Stale.\n');
     expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
+    // Nor a copy from the releases that wrote the guide with its own
+    // frontmatter, which put the header on line 14 of the file.
+    const releaseCopy =
+      "---\n# The guide's own access rule.\n#\n#\n#\nread:\n  - everyone\n---\n# Knowledge base\n\n" +
+      'This is a git-backed knowledge base. You are the primary agent responsible for\nmaintaining it.\n\n' +
+      '> **This file is managed by the platform.** Stale.\n';
+    await fs.writeFile(`${KB_DIR}/AGENTS.md`, releaseCopy);
+    expect(await read(base)).toEqual({ path: GUIDE, content: 'THE PLATFORM GUIDE\n', canWrite: false });
   });
 
   it("never tells a caller who may not read the knowledge base's own file that it exists", async () => {
