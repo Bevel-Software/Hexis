@@ -31,7 +31,7 @@ export type IssuerCheck =
  *
  *  - `verified`: the issuer is an OIDC issuer, and its token endpoint accepted
  *    the application id and secret (it went on to refuse the made-up code,
- *    and refused a made-up client as a client);
+ *    and refused the same client id with a made-up secret as a client);
  *  - `unverified`: the issuer is fine, but the token endpoint's answer says
  *    nothing definite about the credentials — saved, labelled Unverified;
  *  - `rejected`: a definitive no — the issuer (on the issuer field) or the
@@ -188,16 +188,16 @@ async function requestMadeUpCode(
  * and says the credentials passed ONLY where the provider authenticates the
  * client before it looks at the code. Not every provider does: Microsoft Entra
  * refuses a malformed code first (AADSTS9002313), for any client id at all. So
- * a code refusal is followed by the same request as a client that cannot
- * exist, with a made-up secret: only a provider that refuses that client with
- * `invalid_client` has shown it checks clients first, and only then is the
+ * a code refusal is followed by the same request with the same client id and
+ * a made-up secret: only a provider that refuses that with `invalid_client`
+ * has shown it checks the secret before the code, and only then is the
  * configuration Verified. Nothing else is read as an answer either way.
  *
  * THE SECRET GOES ONLY TO THE TOKEN ENDPOINT THIS ISSUER PUBLISHES, over
  * https, with redirects refused so it is never re-sent to a redirect target —
  * and never into a log line or a returned message: every message here is
  * fixed text, and the provider's response body is read for its `error` code
- * alone. The control request carries no real credential.
+ * alone. The control request carries the client id, never the real secret.
  *
  * The ONE function both "Test sign-in configuration" and the settings save
  * call, so the button can never say "verified" about values the save refuses.
@@ -214,9 +214,8 @@ export async function checkOidcConfiguration(
 
   const answer = await requestMadeUpCode(issuer.tokenEndpoint, config, fetchImpl);
   if (!answer) return NO_ANSWER;
-  const { status, errorCode } = answer;
 
-  if (errorCode === CLIENT_REJECTION) {
+  if (answer.errorCode === CLIENT_REJECTION) {
     return {
       outcome: 'rejected',
       reason: 'credentials',
@@ -224,26 +223,26 @@ export async function checkOidcConfiguration(
       error: 'The provider rejected the application ID or secret.',
     };
   }
-  if (errorCode === CODE_REJECTION) {
-    const control = await requestMadeUpCode(
-      issuer.tokenEndpoint,
-      { ...config, clientId: madeUp(), clientSecret: madeUp() },
-      fetchImpl,
-    );
+  if (answer.errorCode === CODE_REJECTION) {
+    const control = await requestMadeUpCode(issuer.tokenEndpoint, { ...config, clientSecret: madeUp() }, fetchImpl);
     if (!control) return NO_ANSWER;
     if (control.errorCode === CLIENT_REJECTION) return { outcome: 'verified' };
     return {
       outcome: 'unverified',
-      error:
-        'The application ID and secret could not be verified — the provider refuses the test code before it checks them (invalid_grant).',
+      error: `The application ID and secret could not be verified — the provider did not refuse a made-up secret with invalid_client${observed(control)}.`,
     };
   }
-  // Only a standard error code is echoed (the one list the vault reads a
-  // refusal by too) — anything else could be text of the provider's choosing,
-  // the secret included.
-  const code = isStandardTokenErrorCode(errorCode) ? ` (${errorCode})` : ` (HTTP ${status})`;
   return {
     outcome: 'unverified',
-    error: `The application ID and secret could not be verified — the provider gave an answer that does not say whether they are right${code}.`,
+    error: `The application ID and secret could not be verified — the provider gave an answer that does not say whether they are right${observed(answer)}.`,
   };
+}
+
+/**
+ * What the provider answered, for a message. Only a standard error code is
+ * echoed (the one list the vault reads a refusal by too): anything else could
+ * be text of the provider's choosing, the secret included.
+ */
+function observed({ status, errorCode }: { status: number; errorCode: string }): string {
+  return isStandardTokenErrorCode(errorCode) ? ` (${errorCode})` : ` (HTTP ${status})`;
 }

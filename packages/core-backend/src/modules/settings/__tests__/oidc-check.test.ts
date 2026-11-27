@@ -28,25 +28,32 @@ const json = (status: number, body: unknown) =>
 /** A provider: discovery answers `discovery`, the token endpoint answers `token`. */
 function provider(
   discovery: () => Response | Promise<Response>,
-  token?: (clientId: string) => Response | Promise<Response>,
+  token?: (clientId: string, secret: string) => Response | Promise<Response>,
 ) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url === DISCOVERY_URL) return discovery();
-    if (url === TOKEN_URL && token) return token(basicClientId(init));
+    if (url === TOKEN_URL && token) return token(...basicCredentials(init));
     throw new Error(`unexpected fetch ${url}`);
   }) as unknown as typeof fetch & ReturnType<typeof vi.fn>;
 }
 
-/** The client id a token request authenticates as (HTTP Basic). */
-function basicClientId(init?: RequestInit): string {
+/** The client id and secret a token request authenticates with (HTTP Basic). */
+function basicCredentials(init?: RequestInit): [clientId: string, secret: string] {
   const auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? '';
   const decoded = Buffer.from(auth.replace(/^Basic /, ''), 'base64').toString('utf8');
-  return decodeURIComponent(decoded.slice(0, decoded.indexOf(':')));
+  const colon = decoded.indexOf(':');
+  return [decodeURIComponent(decoded.slice(0, colon)), decodeURIComponent(decoded.slice(colon + 1))];
 }
 
-/** Duende, Keycloak and the like: the client is checked first, then the code. */
-const checksClientFirst = (clientId: string) =>
+const isRealClient = (clientId: string, secret: string) => clientId === CONFIG.clientId && secret === CONFIG.clientSecret;
+
+/** Duende, Keycloak and the like: the client and its secret are checked first, then the code. */
+const checksClientFirst = (clientId: string, secret: string) =>
+  isRealClient(clientId, secret) ? json(400, { error: 'invalid_grant' }) : json(401, { error: 'invalid_client' });
+
+/** A provider that knows its client ids before the code, but checks the secret only after it. */
+const checksSecretAfterCode = (clientId: string) =>
   clientId === CONFIG.clientId ? json(400, { error: 'invalid_grant' }) : json(401, { error: 'invalid_client' });
 
 /** Microsoft Entra: a malformed code is refused before the client is looked at, for any client. */
@@ -141,17 +148,16 @@ describe('checkOidcConfiguration — token probe', () => {
     expect(String(init.body)).not.toContain(SECRET);
     const discoveryInit = fetchImpl.mock.calls[0][1] as RequestInit;
     expect(JSON.stringify(discoveryInit)).not.toContain(Buffer.from(`app-id:${SECRET}`).toString('base64'));
-    // The control request goes to the same endpoint, as a made-up client with
-    // a made-up secret: no real credential travels with it.
+    // The control request goes to the same endpoint, as the same client with
+    // a made-up secret: the real secret never travels with it.
     const [controlUrl, controlInit] = fetchImpl.mock.calls[2] as [string, RequestInit];
     expect(controlUrl).toBe(TOKEN_URL);
     expect(controlInit.redirect).toBe('error');
-    const controlClient = basicClientId(controlInit);
-    expect(controlClient).not.toBe(CONFIG.clientId);
-    expect(controlClient).toMatch(/^hexis-configuration-check-[0-9a-f]{32}$/);
+    const [controlClient, controlSecret] = basicCredentials(controlInit);
+    expect(controlClient).toBe(CONFIG.clientId);
+    expect(controlSecret).toMatch(/^hexis-configuration-check-[0-9a-f]{32}$/);
+    expect(JSON.stringify(controlInit)).not.toContain(SECRET);
     expect(JSON.stringify(controlInit)).not.toContain(Buffer.from(`app-id:${SECRET}`).toString('base64'));
-    const controlAuth = (controlInit.headers as Record<string, string>).Authorization;
-    expect(Buffer.from(controlAuth.replace(/^Basic /, ''), 'base64').toString('utf8')).not.toContain(SECRET);
   });
 
   it('invalid_client: the provider rejected the application id or secret — on the secret field', async () => {
@@ -174,7 +180,7 @@ describe('checkOidcConfiguration — token probe', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it('invalid_grant, and a made-up client refused with invalid_client: credentials verified', async () => {
+  it('invalid_grant, and a made-up secret refused with invalid_client: credentials verified', async () => {
     const result = await checkOidcConfiguration(CONFIG, provider(() => json(200, DISCOVERY), checksClientFirst));
     expect(result).toEqual({ outcome: 'verified' });
   });
@@ -187,7 +193,19 @@ describe('checkOidcConfiguration — token probe', () => {
     expect(result).toEqual({
       outcome: 'unverified',
       error:
-        'The application ID and secret could not be verified — the provider refuses the test code before it checks them (invalid_grant).',
+        'The application ID and secret could not be verified — the provider did not refuse a made-up secret with invalid_client (invalid_grant).',
+    });
+  });
+
+  it('a provider that checks the client id first but the secret after the code: a wrong secret is never verified', async () => {
+    const result = await checkOidcConfiguration(
+      { ...CONFIG, clientSecret: 'wrong_secret' },
+      provider(() => json(200, DISCOVERY), checksSecretAfterCode),
+    );
+    expect(result).toEqual({
+      outcome: 'unverified',
+      error:
+        'The application ID and secret could not be verified — the provider did not refuse a made-up secret with invalid_client (invalid_grant).',
     });
   });
 
@@ -197,15 +215,17 @@ describe('checkOidcConfiguration — token probe', () => {
     ['no answer at all', () => {
       throw new TypeError('fetch failed');
     }],
-  ])('invalid_grant, then %s for the made-up client: could not be verified', async (_name, control) => {
+  ])('invalid_grant, then %s for the made-up secret: could not be verified', async (_name, control) => {
     const result = await checkOidcConfiguration(
       CONFIG,
       provider(
         () => json(200, DISCOVERY),
-        (clientId) => (clientId === CONFIG.clientId ? json(400, { error: 'invalid_grant' }) : control()),
+        (clientId, secret) => (isRealClient(clientId, secret) ? json(400, { error: 'invalid_grant' }) : control()),
       ),
     );
     expect(result.outcome).toBe('unverified');
+    // The message names what the control answered, never a code it did not give.
+    if (result.outcome === 'unverified') expect(result.error).not.toContain('(invalid_grant)');
   });
 
   it.each([
