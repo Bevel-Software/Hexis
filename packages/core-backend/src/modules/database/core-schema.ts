@@ -52,6 +52,16 @@ export const users = pgTable('users', {
    */
   sessionVersion: integer('session_version').default(0).notNull(),
   /**
+   * For the deployment admin (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set):
+   * which `ADMIN_PASSWORD` its current session generation belongs to, as an
+   * HMAC keyed with the JWT secret, never the password. That password lives
+   * in the environment, not in `passwordHash`, so no password write moves the
+   * generation on; each boot compares this with the current password and
+   * moves `sessionVersion` on when they differ (`AuthService.
+   * endSessionsOfAnotherAdminPassword`). NULL on every other account.
+   */
+  envAdminStamp: text('env_admin_stamp'),
+  /**
    * The one onboarding fact the server keeps: has this person concluded the
    * connect-your-agent setup (the welcome page's Done, or the reminder
    * pill's dismiss — one field, both doors). False drives the pill in every

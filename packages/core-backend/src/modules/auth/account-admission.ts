@@ -101,6 +101,24 @@ export class SessionEndedError extends Error {
 export const SESSION_ENDED_MESSAGE =
   'Your password was changed after this session was opened. Sign in again with the new password.';
 
+/** What a session token refused for no reason worth wording is told. */
+export const INVALID_SESSION_MESSAGE = 'Invalid or expired token';
+
+/**
+ * The words of the 401 a refused session token gets, from what
+ * `AuthService.resolveSession` threw: a switched-off account and a session
+ * a password change ended are told why, anything else gets the generic
+ * line. Every route that checks a session answers through this, so no
+ * surface falls back to "invalid token" for a refusal another one words.
+ * (An {@link AuthBackendError} is not a refusal: routes answer it with 500
+ * before asking this.)
+ */
+export function sessionRefusalMessage(err: unknown): string {
+  return err instanceof AccountDeactivatedError || err instanceof SessionEndedError
+    ? err.message
+    : INVALID_SESSION_MESSAGE;
+}
+
 /**
  * Whether the account behind a credential is on could not be asked — the
  * database failed. Not the caller's fault and not a verdict on them: a

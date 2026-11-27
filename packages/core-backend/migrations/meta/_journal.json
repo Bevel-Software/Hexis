@@ -176,6 +176,13 @@
       "when": 1795459122962,
       "tag": "0024_access_head_seeds",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1795693604534,
+      "tag": "0025_env_admin_stamp",
+      "breakpoints": true
     }
   ]
 }

@@ -1,14 +1,12 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { toolDef } from '../../tool-helpers/tool-def.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
+import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
+import { toolDef } from '../../tool-helpers/index.js';
 import { InternalTokenService } from '../internal-token.service.js';
 import { createManualAuthMiddleware } from '../tool-auth.middleware.js';
 import type { IExternalApiKeyService } from '../external-api-key.interface.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import { AuthBackendError } from '../../auth/account-admission.js';
+import { AuthBackendError, SESSION_ENDED_MESSAGE, SessionEndedError, type AuthService } from '../../auth/index.js';
 
 /**
  * The manual endpoints (`/agent/utcp`, `/agent/internal/utcp`) accept a browser
@@ -20,6 +18,8 @@ const KEY = 'bevel_validkey';
 const JWT = 'browser-jwt';
 /** A valid session, presented while its account cannot be looked up. */
 const JWT_DURING_OUTAGE = 'browser-jwt-during-outage';
+/** A session a password change ended. */
+const JWT_ENDED = 'browser-jwt-ended';
 
 const fakeExternalApiKeys = {
   looksLikeExternalApiKey: (t: string) => typeof t === 'string' && t.startsWith('bevel_'),
@@ -31,6 +31,7 @@ const fakeAuth = {
   resolveSession: async (t: string) => {
     if (t === JWT) return { userId: 'u-jwt', email: 'jwt@x' };
     if (t === JWT_DURING_OUTAGE) throw new AuthBackendError(new Error('the database is down'));
+    if (t === JWT_ENDED) throw new SessionEndedError();
     throw new Error('bad jwt');
   },
   isActive: async () => true,
@@ -78,6 +79,13 @@ describe('createManualAuthMiddleware (read-only manual endpoints)', () => {
     const { base } = await start();
     expect((await get(base, '/api/agent/utcp')).status).toBe(401);
     expect((await get(base, '/api/agent/utcp', 'garbage')).status).toBe(401);
+  });
+
+  it('401s a session a password change ended, and says why', async () => {
+    const { base } = await start();
+    const r = await get(base, '/api/agent/utcp', JWT_ENDED);
+    expect(r.status).toBe(401);
+    expect(await r.json()).toEqual({ error: SESSION_ENDED_MESSAGE });
   });
 
   it('answers 500, not 401, when the session’s account cannot be looked up', async () => {

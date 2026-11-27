@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { createMcpAuthMiddleware } from '../mcp-auth.middleware.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
 import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { AccountDeactivatedError, AuthBackendError } from '../../auth/account-admission.js';
+import type { IExternalApiKeyService } from '../../tool-auth/index.js';
+import {
+  AccountDeactivatedError,
+  AuthBackendError,
+  SESSION_ENDED_MESSAGE,
+  SessionEndedError,
+  type AuthService,
+} from '../../auth/index.js';
+import { InternalTokenService } from '../../../__tests__/tool-wiring.js';
 
 const RESOURCE_METADATA_URL = 'https://bevel.example/.well-known/oauth-protected-resource/api/mcp';
 
@@ -467,6 +472,18 @@ describe('createMcpAuthMiddleware — a switched-off account', () => {
     expect(next).not.toHaveBeenCalled();
     expect(status).toHaveBeenCalledWith(401);
     expect(json.mock.calls[0][0].error).toContain('switched off');
+  });
+
+  it('401s a session a password change ended, and says why', async () => {
+    const auth = makeAuthService();
+    (auth.resolveSession as ReturnType<typeof vi.fn>) = vi.fn(async () => {
+      throw new SessionEndedError();
+    });
+    const { req, res, next, status, json } = makeReqRes('Bearer some.jwt.token');
+    await makeMw({ auth })(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(401);
+    expect(json).toHaveBeenCalledWith({ error: SESSION_ENDED_MESSAGE });
   });
 
   it('500s — not 401s — when the session account cannot be looked up', async () => {
