@@ -2,6 +2,12 @@ import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { ARGUMENTS_DO_NOT_MATCH_KIND, argumentsDoNotMatchMessage, checkFor } from './tool-interface.js';
 import { NOT_JSON_KIND, pageInsteadOfJson } from './results.js';
 import { isPlatformHostedUrl } from './utcp-namespace.js';
+import {
+  openSubstitutionScope,
+  recordSubstitutions,
+  runRedacted,
+  streamRedacted,
+} from './substituted-secrets.js';
 
 /**
  * The guards the tool client puts in front of a call to a tool THIS SERVER DOES
@@ -21,6 +27,11 @@ import { isPlatformHostedUrl } from './utcp-namespace.js';
  * Installed on the UTCP client, which is the one place both of ITS call paths
  * meet: `callToolStreaming` is the MCP dispatch path and `callTool` is what
  * `call_tool_chain` bridges every in-isolate tool function to.
+ *
+ * Whatever a guarded call throws leaves with every value the client
+ * substituted into it redacted (`substituted-secrets.ts`): the URL scheme
+ * check, the upstream's answer and the transport all see the substituted
+ * template, and any of them may quote it back.
  *
  * Nothing here changes a call. A call that matches its schema is passed on with
  * exactly the arguments that were given — no argument is added, removed,
@@ -178,6 +189,7 @@ export function installCallGuards(client: CodeModeUtcpClient): void {
   const hasCallTool = typeof client.callTool === 'function';
   const hasStreaming = typeof client.callToolStreaming === 'function';
   if (!hasCallTool && !hasStreaming) return;
+  recordSubstitutions(client);
 
   const repositoryTool = async (toolName: string): Promise<RepositoryTool | undefined> =>
     (await client.config.tool_repository.getTool(toolName)) as RepositoryTool | undefined;
@@ -201,11 +213,13 @@ export function installCallGuards(client: CodeModeUtcpClient): void {
   if (hasCallTool && (client.callTool as unknown as Record<symbol, unknown>)[GUARDED] !== true) {
     const callTool = client.callTool.bind(client);
     const guarded = async function guardedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
-      const refusal = await argumentRefusal(client, toolName, toolArgs);
-      if (refusal) throw new ArgumentsDoNotMatchError(refusal);
-      const result = await callTool(toolName, toolArgs);
-      await guardResult(toolName, result);
-      return result;
+      return runRedacted(openSubstitutionScope(), async () => {
+        const refusal = await argumentRefusal(client, toolName, toolArgs);
+        if (refusal) throw new ArgumentsDoNotMatchError(refusal);
+        const result = await callTool(toolName, toolArgs);
+        await guardResult(toolName, result);
+        return result;
+      });
     };
     (guarded as unknown as Record<symbol, unknown>)[GUARDED] = true;
     client.callTool = guarded as typeof client.callTool;
@@ -217,12 +231,17 @@ export function installCallGuards(client: CodeModeUtcpClient): void {
       toolName: string,
       toolArgs: Record<string, unknown>,
     ): AsyncGenerator<unknown, void, unknown> {
-      const refusal = await argumentRefusal(client, toolName, toolArgs);
-      if (refusal) throw new ArgumentsDoNotMatchError(refusal);
-      for await (const chunk of callToolStreaming(toolName, toolArgs)) {
-        await guardResult(toolName, chunk);
-        yield chunk;
-      }
+      // The guarded stream is a plain `for await`, run through
+      // `streamRedacted`: opening it, every step and closing it run in the
+      // call's scope and are redacted on the way out.
+      yield* streamRedacted(openSubstitutionScope(), async function* () {
+        const refusal = await argumentRefusal(client, toolName, toolArgs);
+        if (refusal) throw new ArgumentsDoNotMatchError(refusal);
+        for await (const chunk of callToolStreaming(toolName, toolArgs)) {
+          await guardResult(toolName, chunk);
+          yield chunk;
+        }
+      });
     };
     (guardedStreaming as unknown as Record<symbol, unknown>)[GUARDED] = true;
     client.callToolStreaming = guardedStreaming as typeof client.callToolStreaming;

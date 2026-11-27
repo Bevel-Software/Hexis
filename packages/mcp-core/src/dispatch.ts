@@ -5,6 +5,7 @@ import type { ProxiedTool } from './proxied-tool.js';
 import { toCallToolResult, toolError, describeToolFailure, renderProgress } from './results.js';
 import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
+import { inSubstitutionScope, openSubstitutionScope, redactSubstitutedText } from './substituted-secrets.js';
 
 /**
  * Register one manual on a client, reduced to a verdict.
@@ -36,15 +37,18 @@ export async function registerManual(
   // (`call-guards.ts`).
   installGetHasNoBody();
   installCallGuards(client);
+  // Registration substitutes the manual's own template, so its failure is
+  // redacted against those values exactly as a call's is.
+  const scope = openSubstitutionScope();
   try {
-    const result = await client.registerManual(manual);
+    const result = await inSubstitutionScope(scope, () => client.registerManual(manual));
     if (result && result.success === false) {
       const errors = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
-      return { ok: false, error: errors };
+      return { ok: false, error: redactSubstitutedText(errors, scope) };
     }
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: redactSubstitutedText(err instanceof Error ? err.message : String(err), scope) };
   }
 }
 
