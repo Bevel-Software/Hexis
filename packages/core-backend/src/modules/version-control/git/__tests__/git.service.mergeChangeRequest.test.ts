@@ -704,3 +704,186 @@ describe('GitService.mergeChangeRequest', () => {
     });
   });
 });
+
+/**
+ * A change request's approvals are for one commit of its branch. The caller
+ * reads that commit, asks the gate about it, and only then merges, so a push
+ * landing in between would be merged on approvals given to the commit before
+ * it. `expectedSourceHead` is how the caller says which commit it means.
+ */
+describe('GitService.mergeChangeRequest: the source commit the caller names', () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-merge-cr-head-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const FEATURE = 'alice/add';
+  const featureDir = () => path.join(root, `feat-${FEATURE.replace(/\W/g, '_')}`);
+  const tipOf = async (upstream: string, branch: string) =>
+    (await gitOut(upstream, ['rev-parse', `refs/heads/${branch}`])).trim();
+  /** A second commit on the feature branch, pushed after its head was read. */
+  async function pushLater(file: string): Promise<void> {
+    await fs.writeFile(path.join(featureDir(), file), 'pushed after the head was read\n');
+    await runGit(featureDir(), ['add', '-A']);
+    await runGit(featureDir(), ['commit', '-m', `later: ${file}`]);
+    await runGit(featureDir(), ['push', 'origin', FEATURE]);
+  }
+
+  it('merges that commit when the published source is still at it', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {
+      await fs.writeFile(path.join(dir, 'approved.md'), 'approved\n');
+    });
+    const readHead = await tipOf(upstream, FEATURE);
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new VersionControlHooks(), testKbContext());
+    const result = await git.mergeChangeRequest(
+      baseWsId, FEATURE, BASE, { subject: 'Add (#1)', body: 'Merged via Bevel' }, USER,
+      { expectedSourceHead: readHead },
+    );
+
+    expect(result.kind).toBe('merged');
+    const merged = (await gitOut(upstream, ['ls-tree', '-r', '--name-only', BASE])).split('\n');
+    expect(merged).toContain('approved.md');
+    // The merge commit's second parent is the commit the caller named.
+    expect((await gitOut(upstream, ['rev-parse', `${BASE}^2`])).trim()).toBe(readHead);
+  });
+
+  it('merges the commit it read, and hands authorize that commit\'s paths, when the source ref moves after the reading', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {
+      await fs.writeFile(path.join(dir, 'approved.md'), 'approved\n');
+    });
+    const readHead = await tipOf(upstream, FEATURE);
+    // A runner like the real one, except that right after the merge has read
+    // the source's commit, a later commit is pushed to the source and fetched
+    // into this very clone: what a request's detail read does, outside the
+    // clone's turn. From then on `origin/<source>` names the later commit.
+    const real = new NodeGitRunner();
+    let moved = false;
+    const racing: IGitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: (async (cwd: string, args: string[], opts?: unknown) => {
+        const answer = await real.run(cwd, args, opts as never);
+        if (!moved && args[0] === 'rev-parse' && args[1] === `origin/${FEATURE}`) {
+          moved = true;
+          await pushLater('later.md');
+          await runGit(baseRepo, ['fetch', 'origin', `+refs/heads/${FEATURE}:refs/remotes/origin/${FEATURE}`]);
+        }
+        return answer;
+      }) as IGitRunner['run'],
+    };
+    const git = new GitService(
+      stubWorkspaceService(baseWsId, baseRepo), new VersionControlHooks(), testKbContext(), undefined, null, racing,
+    );
+    const judged: string[][] = [];
+
+    const result = await git.mergeChangeRequest(
+      baseWsId, FEATURE, BASE, { subject: 'Add (#1)', body: 'Merged via Bevel' }, USER,
+      { expectedSourceHead: readHead, authorize: async (t) => { judged.push(t.changedPaths); } },
+    );
+
+    expect(result.kind).toBe('merged');
+    // The ref did move in this clone, to a commit that is not the one read.
+    expect(moved).toBe(true);
+    expect((await gitOut(baseRepo, ['rev-parse', `origin/${FEATURE}`])).trim()).not.toBe(readHead);
+    // What authorize judged and what landed are the commit that was read.
+    expect(judged).toEqual([['approved.md']]);
+    expect((await gitOut(upstream, ['rev-parse', `${BASE}^2`])).trim()).toBe(readHead);
+    expect((await gitOut(upstream, ['ls-tree', '-r', '--name-only', BASE])).split('\n')).not.toContain('later.md');
+  });
+
+  it('refuses, with nothing merged or pushed and the clone clean on the target, when the source was pushed to after its head was read', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {
+      await fs.writeFile(path.join(dir, 'approved.md'), 'approved\n');
+    });
+    const readHead = await tipOf(upstream, FEATURE);
+    await pushLater('unapproved.md');
+    const targetBefore = await tipOf(upstream, BASE);
+    const cloneBefore = (await gitOut(baseRepo, ['rev-parse', 'HEAD'])).trim();
+
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new VersionControlHooks(), testKbContext());
+    await expect(
+      git.mergeChangeRequest(
+        baseWsId, FEATURE, BASE, { subject: 'Add (#1)', body: 'Merged via Bevel' }, USER,
+        { expectedSourceHead: readHead },
+      ),
+    ).rejects.toMatchObject({ status: 409, payload: { kind: 'source-head-moved' } });
+
+    expect(await tipOf(upstream, BASE)).toBe(targetBefore);
+    expect((await gitOut(baseRepo, ['rev-parse', 'HEAD'])).trim()).toBe(cloneBefore);
+    expect(await gitOut(baseRepo, ['status', '--porcelain'])).toBe('');
+  });
+
+  it('leaves no unpushed merge in the clone when the source moves while a rejected push is retried', async () => {
+    const { upstream, seedDir, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {
+      await fs.writeFile(path.join(dir, 'approved.md'), 'approved\n');
+    });
+    const readHead = await tipOf(upstream, FEATURE);
+    // A runner like the real one, except that just before the first push a
+    // teammate's commit lands on the target (so that push is rejected and the
+    // merge is tried again) and a later commit lands on the source.
+    const real = new NodeGitRunner();
+    let pushes = 0;
+    const racing: IGitRunner = {
+      defaultTimeoutMs: real.defaultTimeoutMs,
+      credentials: real.credentials,
+      run: (async (cwd: string, args: string[], opts?: unknown) => {
+        if (args[0] === 'push' && pushes++ === 0) {
+          await fs.writeFile(path.join(seedDir, 'teammate.md'), 'meanwhile\n');
+          await runGit(seedDir, ['add', '-A']);
+          await runGit(seedDir, ['commit', '-m', 'teammate']);
+          await runGit(seedDir, ['push', 'origin', BASE]);
+          await pushLater('unapproved.md');
+        }
+        return real.run(cwd, args, opts as never);
+      }) as IGitRunner['run'],
+    };
+    const git = new GitService(
+      stubWorkspaceService(baseWsId, baseRepo), new VersionControlHooks(), testKbContext(), undefined, null, racing,
+    );
+
+    await expect(
+      git.mergeChangeRequest(
+        baseWsId, FEATURE, BASE, { subject: 'Add (#1)', body: 'Merged via Bevel' }, USER,
+        { expectedSourceHead: readHead },
+      ),
+    ).rejects.toMatchObject({ payload: { kind: 'source-head-moved' } });
+
+    // The first attempt committed a merge and its push was rejected. The
+    // refusal on the second attempt must not leave that commit in the clone.
+    expect(pushes).toBe(1);
+    const published = await tipOf(upstream, BASE);
+    expect((await gitOut(baseRepo, ['rev-parse', 'HEAD'])).trim()).toBe(published);
+    expect(await gitOut(baseRepo, ['status', '--porcelain'])).toBe('');
+    expect((await gitOut(upstream, ['ls-tree', '-r', '--name-only', BASE])).split('\n')).not.toContain('approved.md');
+  });
+
+  it('merges the later commit once the caller names it', async () => {
+    const { upstream, baseWsId, baseRepo } = await seed(root, { 'base.md': 'base\n' });
+    await pushFeatureBranch(root, upstream, FEATURE, async (dir) => {
+      await fs.writeFile(path.join(dir, 'approved.md'), 'approved\n');
+    });
+    const firstHead = await tipOf(upstream, FEATURE);
+    await pushLater('second.md');
+    const git = new GitService(stubWorkspaceService(baseWsId, baseRepo), new VersionControlHooks(), testKbContext());
+    const merge = (head: string) =>
+      git.mergeChangeRequest(
+        baseWsId, FEATURE, BASE, { subject: 'Add (#1)', body: 'Merged via Bevel' }, USER,
+        { expectedSourceHead: head },
+      );
+    await expect(merge(firstHead)).rejects.toMatchObject({ payload: { kind: 'source-head-moved' } });
+
+    const result = await merge(await tipOf(upstream, FEATURE));
+
+    expect(result.kind).toBe('merged');
+    const merged = (await gitOut(upstream, ['ls-tree', '-r', '--name-only', BASE])).split('\n');
+    expect(merged).toEqual(expect.arrayContaining(['approved.md', 'second.md']));
+  });
+});

@@ -24,6 +24,7 @@ import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
+import { SourceHeadMovedError } from '../source-head-moved-error.js';
 import { frontmatterHead, frontmatterHeadOfBytes, type IAccessControl } from '../../access/index.js';
 import { AccessDeniedError, PushAccessRefusedError, fencedHead } from '../../access-model/index.js';
 import { canonicalEmail } from '../../../shared/email-identity.js';
@@ -2171,6 +2172,19 @@ export class GitService implements IGitService {
       appliedChangeNumber?: number;
       /** The request's stored title, so a merge commit in the old message format is recognised too. */
       appliedChangeTitle?: string;
+      /**
+       * The source commit the caller's approval gate judged. When given, the
+       * merge lands that commit or nothing: if the published source is at any
+       * other commit once the fetch below has run, it refuses with
+       * {@link SourceHeadMovedError} before anything is merged or pushed, and
+       * leaves the clone on the published target with nothing uncommitted.
+       *
+       * Compared HERE, inside the reservation, and not by the caller: the
+       * caller read the head before it asked the gate, and a push landing
+       * between that reading and this fetch would otherwise be merged on the
+       * strength of approvals given to the commit before it.
+       */
+      expectedSourceHead?: string;
     } = {},
   ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
@@ -2231,6 +2245,21 @@ export class GitService implements IGitService {
         // discards a prior attempt's state, never real work.
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
+        // The source commit this attempt merges, read once from the ref the
+        // fetch above just wrote and named by its id from here on. The ref
+        // itself can move again under this reservation: `resolvePrShas`
+        // fetches into a clone before it takes the clone's turn. So the paths
+        // `authorize` judges and the commit merged are one commit, and it is
+        // the commit a caller's `expectedSourceHead` was compared with.
+        //
+        // After the reset above, so a refusal on a LATER attempt leaves the
+        // clone on the published target too: the attempt before it committed
+        // a merge whose push was rejected, and that commit is gone by here.
+        const { stdout: sourceTipOut } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}`]);
+        const sourceTip = sourceTipOut.trim();
+        if (opts.expectedSourceHead !== undefined && sourceTip !== opts.expectedSourceHead) {
+          throw new SourceHeadMovedError(sourceBranch);
+        }
 
         if (opts.authorize) {
           // The tip this attempt merges into, and the paths it writes against
@@ -2240,7 +2269,7 @@ export class GitService implements IGitService {
           const changedPaths = await this.prChangedPathsAt(
             cwd,
             `origin/${targetBranch}`,
-            `origin/${sourceBranch}`,
+            sourceTip,
             { forAccessCheck: true },
           );
           await opts.authorize({ sha: targetSha.trim(), changedPaths });
@@ -2249,7 +2278,7 @@ export class GitService implements IGitService {
         // `--no-commit --no-ff` so we author the merge commit as the human and
         // never fast-forward past the merge record.
         try {
-          await this.git(cwd, ['merge', '--no-commit', '--no-ff', `origin/${sourceBranch}`]);
+          await this.git(cwd, ['merge', '--no-commit', '--no-ff', sourceTip]);
         } catch (err) {
           const paths = await this.conflictedPaths(cwd);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
