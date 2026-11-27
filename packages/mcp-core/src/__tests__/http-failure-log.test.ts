@@ -67,13 +67,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function tool(name: string, url: string, auth: Record<string, unknown>) {
+function tool(name: string, url: string, auth: Record<string, unknown> | undefined) {
   return {
     name,
     description: name,
     inputs: { type: 'object', properties: {} },
     outputs: { type: 'object', properties: {} },
-    tool_call_template: { call_template_type: 'http', http_method: 'GET', url, auth },
+    tool_call_template: { call_template_type: 'http', http_method: 'GET', url, ...(auth ? { auth } : {}) },
   };
 }
 
@@ -90,6 +90,14 @@ function manual() {
       tool('unreachable', `${deadBase}/anything`, bearer),
       tool('ok', `${base}/ok`, bearer),
       tool('basic_unauthorized', `${base}/unauthorized`, basic),
+      tool('oauth_unauthorized', `${base}/ok`, {
+        auth_type: 'oauth2',
+        token_url: `${base}/unauthorized/token`,
+        client_id: 'reporting-client',
+        client_secret: '${CLIENT_SECRET}',
+      }),
+      tool('key_in_query', `${base}/unauthorized?key=\${API_KEY}`, undefined),
+      tool('key_in_path', `${base}/bad-gateway/hooks/\${API_KEY}`, undefined),
     ],
   };
 }
@@ -147,6 +155,47 @@ describe('a failed http tool call', () => {
 
     expectNotPrinted(password, Buffer.from(`reporting-user:${password}`).toString('base64'));
     expect(printed.join('\n')).toMatch(/status 401/);
+  });
+
+  it('logs no part of a key written into the URL, in the query or the path, and still names the host', async () => {
+    const secret = key();
+    const client = await clientWith({ svc_API_KEY: secret });
+
+    await expect(client.callTool('svc.key_in_query', {})).rejects.toThrow();
+    await expect(client.callTool('svc.key_in_path', {})).rejects.toThrow();
+
+    expectNotPrinted(secret);
+    expect(printed.join('\n')).toContain(`Executing HTTP tool 'svc.key_in_query' with URL: ${base} and method: GET`);
+  });
+
+  it('logs no part of the client secret when the OAuth token fetch is refused', async () => {
+    const secret = key();
+    const client = await clientWith({ svc_CLIENT_SECRET: secret });
+
+    await expect(client.callTool('svc.oauth_unauthorized', {})).rejects.toThrow();
+
+    expectNotPrinted(secret, Buffer.from(`reporting-client:${secret}`).toString('base64'));
+    expect(printed.join('\n')).toMatch(/OAuth2 with .* failed for 'reporting-client':.*status 401/);
+  });
+
+  it('logs no part of the key when discovering the manual is refused', async () => {
+    const secret = key();
+    const client = await UtcpClient.create(
+      process.cwd(),
+      new UtcpClientConfigSerializer().validateDict({ variables: { locked_API_KEY: secret } }),
+    );
+
+    const registered = await client.registerManual({
+      name: 'locked',
+      call_template_type: 'http',
+      http_method: 'GET',
+      url: `${base}/unauthorized/manual`,
+      auth: { auth_type: 'api_key', api_key: 'Bearer ${API_KEY}', var_name: 'Authorization', location: 'header' },
+    } as Parameters<typeof client.registerManual>[0]);
+
+    expect(registered.success).toBe(false);
+    expectNotPrinted(secret);
+    expect(printed.join('\n')).toMatch(/Error discovering tools from HTTP provider 'locked':.*status 401/);
   });
 
   it('logs no key when calls with different keys fail at the same time', async () => {

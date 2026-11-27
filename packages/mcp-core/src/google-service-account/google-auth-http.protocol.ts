@@ -11,27 +11,32 @@ import type { IServiceAccountTokenSource } from './service-account-token.contrac
  * which the stock protocol sends as `Authorization: Bearer <token>` and strips
  * on a cross-origin redirect). Every other call passes through untouched.
  *
- * Being the one `http` protocol of the process, it is also where a failure is
- * written to the log. The stock protocol prints the raw axios error, whose
- * request config and socket header carry the credentials the call was made
- * with (an `Authorization: Bearer <shared key>` three times over). Here a
- * failure is logged by its message, error class, code and HTTP status only, so
- * the error object, and the credentials in it, never reach stdout or stderr.
+ * Being the one `http` protocol of the process, it is also what writes the
+ * protocol's log lines, and the stock ones carry credentials: a failure prints
+ * the raw axios error, whose request config and socket header hold the
+ * `Authorization: Bearer <shared key>` three times over, and every call and
+ * discovery prints its full URL, where a key written into the query or the
+ * path travels. Here a URL is logged by its origin only, and a failure by its
+ * message, error class, code and HTTP status only, so neither reaches stdout
+ * or stderr.
  */
 export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
   constructor(private readonly tokens: IServiceAccountTokenSource) {
     super();
-    // `_logError` is the stock protocol's one error sink: tool calls, discovery
-    // and OAuth token fetches all pass through it. It is private in the type
-    // declarations, so it is replaced on the instance rather than overridden.
-    // Checked, not assumed: a release that renamed it would otherwise put the
-    // raw error back in the log without a word.
-    const hooks = this as unknown as { _logError?: unknown };
-    if (typeof hooks._logError !== 'function') {
-      throw new Error('@utcp/http no longer exposes _logError; failed calls would log their credentials');
+    // `_logInfo` and `_logError` are the stock protocol's two log sinks: tool
+    // calls, discovery and OAuth token fetches all write through them. They are
+    // private in the type declarations, so they are replaced on the instance
+    // rather than overridden. Checked, not assumed: a release that renamed one
+    // would otherwise put the credentials back in the log without a word.
+    const hooks = this as unknown as Record<'_logInfo' | '_logError', unknown>;
+    if (typeof hooks._logInfo !== 'function' || typeof hooks._logError !== 'function') {
+      throw new Error('@utcp/http no longer exposes _logInfo and _logError; its log lines would carry credentials');
     }
+    hooks._logInfo = (message: string): void => {
+      console.log(`[HttpCommunicationProtocol] ${originsOnly(message)}`);
+    };
     hooks._logError = (message: string, error: unknown): void => {
-      console.error(`[HttpCommunicationProtocol Error] ${message} ${describeFailure(error)}`);
+      console.error(`[HttpCommunicationProtocol Error] ${originsOnly(message)} ${describeFailure(error)}`);
     };
   }
 
@@ -59,6 +64,22 @@ export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
     const accessToken = await this.tokens.accessToken(auth);
     return { ...template, auth: { auth_type: 'oauth2_user', access_token: accessToken } } as CallTemplate;
   }
+}
+
+/**
+ * Every URL in a log line cut down to its origin, as the URL parser the request
+ * itself uses reads it: the user info, path, query and fragment, where a key
+ * can be written, are dropped. A word that only looks like a URL and does not
+ * parse is dropped whole.
+ */
+function originsOnly(message: string): string {
+  return message.replace(/\bhttps?:\/\/\S+/gi, (url) => {
+    try {
+      return new URL(url).origin;
+    } catch {
+      return '<url>';
+    }
+  });
 }
 
 /**
