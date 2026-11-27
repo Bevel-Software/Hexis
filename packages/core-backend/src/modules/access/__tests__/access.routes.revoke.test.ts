@@ -4,15 +4,14 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { IAccessControl, GrantSources } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService, VersionControlEventBus } from '../../version-control/index.js';
+import type { ITreeWalker } from '../../../shared/fs.contract.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { ADMIN_ROOT_WRITE_MESSAGE } from '../access-mutation.service.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 
 /**
  * HTTP-level contract tests for the revoke route's CLASSIFICATION + MODE logic —
@@ -131,6 +130,12 @@ async function makeHarness(opts: {
 
   const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
   const db = usersDbDouble();
+  // Only the roles admin's reference scan walks the tree; revoke never does,
+  // so a walk here fails the test instead of answering a silent empty tree.
+  const refuse = (): never => {
+    throw new Error('the revoke route must not walk the tree');
+  };
+  const noWalk: ITreeWalker = { walk: refuse, walkKb: refuse, walkFiles: refuse };
 
   const app = express();
   app.use(express.json());
@@ -138,7 +143,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), noWalk));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
