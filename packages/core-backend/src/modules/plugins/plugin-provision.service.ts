@@ -308,8 +308,9 @@ export class PluginProvisionService {
    * Ensure the caller's personal folder exists — idempotent, keyed to the
    * stable user id. Returns `created: false` when it is already there, and
    * with it the `name` and `displayName` the existing manifest carries (see
-   * {@link persistedNames}): the answer is what the file says, so the call
-   * that made the folder and every call after it agree.
+   * {@link persistedNames}): the answer is what the file says when the call
+   * reads it, so a repeated call with no edit in between answers as the call
+   * that made the folder did.
    */
   async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
@@ -485,8 +486,8 @@ export class PluginProvisionService {
    * `name` that is not an identifier.
    *
    * An ensure that found the folder already there answers with the FILE's
-   * answer, never the folder's spelling: the folder is an input to no name,
-   * and an idempotent call whose second answer differed from its first would
+   * answer, never the folder's spelling wherever the manifest names it, and
+   * an idempotent call whose second answer differed from its first would
    * be this service telling the caller a plugin had been renamed.
    */
   private async persistedNames(folder: string, fallback: string): Promise<{ name: string; displayName: string }> {
