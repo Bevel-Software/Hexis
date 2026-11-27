@@ -118,7 +118,7 @@ export interface ProvisionedPlugin {
   /**
    * True when the personal-folder ensure found the folder open to someone
    * besides its owner, as the access resolver answers it (rules inherited
-   * from above included, so a missing or unreadable `access.md` counts), and
+   * from above included), or without a readable `access.md` of its own, and
    * rewrote its `access.md` to owner-only. Always false for a named plugin.
    */
   repaired: boolean;
@@ -595,22 +595,26 @@ export class PluginProvisionService {
    * Whether the folder `folderRel` (repo-relative) is `ownerEmail`'s alone,
    * as the access resolver answers it, rules inherited from above included:
    * nobody else holds read, write, download or owner on the folder, the owner
-   * holds owner, and nobody else may read its `access.md`. Writing that file
-   * is not asked: the resolver's `access.md` rescue lets Admin write it,
-   * whatever it says.
+   * holds owner, and holds it by the folder's OWN `access.md` (so a missing
+   * or unparsable file, which the resolver leaves out of the model, never
+   * counts, however private the rules above happen to be), and nobody else
+   * may read that file. Writing it is not asked: the resolver's `access.md`
+   * rescue lets Admin write it, whatever it says.
    */
   private async isOwnersAlone(wsId: string, folderRel: string, ownerEmail: string): Promise<boolean> {
     const owner = canonicalEmail(ownerEmail);
     const onlyOwner = (h: { roles: string[]; principals?: unknown[]; users: { email: string }[] }) =>
       h.roles.length === 0 && (h.principals ?? []).length === 0 && h.users.every((u) => canonicalEmail(u.email) === owner);
-    const [readers, writers, owners, downloaders, fileReaders] = await Promise.all([
+    const [readers, writers, owners, downloaders, fileReaders, ownerSources] = await Promise.all([
       this.accessControl.eligibleReaders(wsId, folderRel),
       this.accessControl.eligibleWriters(wsId, folderRel),
       this.accessControl.eligibleOwners(wsId, folderRel),
       this.accessControl.eligibleDownloaders(wsId, folderRel),
       this.accessControl.eligibleReaders(wsId, `${folderRel}/access.md`),
+      this.accessControl.grantSources(wsId, 'folder', folderRel, { kind: 'user', email: ownerEmail }),
     ]);
     return (
+      ownerSources.owner?.[0]?.kind === 'direct' &&
       readers.restricted &&
       fileReaders.restricted &&
       [readers, writers, owners, downloaders, fileReaders].every(onlyOwner) &&

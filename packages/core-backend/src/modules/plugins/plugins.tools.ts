@@ -55,7 +55,7 @@ const PROVISIONED_OUTPUT = {
     name: { type: 'string', description: 'The plugin identity (its manifest name), as grants and the marketplace spell it.' },
     displayName: { type: 'string', description: 'What people see it called — the manifest `displayName`, exactly as persisted: for `create_plugin`, the name that was asked for, trimmed; for `my_plugin`, the personal folder\'s own label.' },
     created: { type: 'boolean', description: 'False when the folder already existed.' },
-    repaired: { type: 'boolean', description: 'For `my_plugin`: true when someone besides its owner had access to the folder, through its own rules or rules inherited from above, and its rules have been rewritten so only its owner has access. Tell the person.' },
+    repaired: { type: 'boolean', description: 'For `my_plugin`: true when someone besides its owner had access to the folder (through its own rules or rules inherited from above) or the folder had no readable access.md of its own, and its rules have been rewritten so only its owner has access. Tell the person.' },
   },
 } as const;
 

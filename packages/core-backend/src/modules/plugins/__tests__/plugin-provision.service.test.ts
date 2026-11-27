@@ -698,6 +698,21 @@ describe('PluginProvisionService.ensurePersonalPlugin on a folder somebody else 
     expect(await h.accessControl.canRead('ws-main', 'bob@example.com', `Plugins/${folder}`)).toBe(false);
   });
 
+  it('repairs a missing or unparsable access.md even when the rules above happen to leave the folder the owner\'s alone — its own file is the boundary', async () => {
+    // Rules at the plugins root that, inherited, give the folder to Ali alone.
+    const ownerOnlyAbove = personalAccessMd(USER);
+    for (const rules of [null, '---\nread: [\n']) {
+      const h = await makeHarness();
+      await fs.mkdir(path.join(h.dir, KB, 'Plugins'), { recursive: true });
+      await fs.writeFile(path.join(h.dir, KB, 'Plugins', 'access.md'), ownerOnlyAbove);
+      await seed(h.dir, rules === null ? { 'skills/diary/SKILL.md': '# Diary\n' } : { 'access.md': rules, 'skills/diary/SKILL.md': '# Diary\n' });
+      const result = await h.svc.ensurePersonalPlugin(USER);
+      expect(result.repaired, String(rules)).toBe(true);
+      expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+      expect((await h.svc.ensurePersonalPlugin(USER)).repaired).toBe(false);
+    }
+  });
+
   it('leaves rules that name only the owner as they are, wording and all', async () => {
     const h = await makeHarness();
     // The owner's own words in a comment, and a denial: neither names anyone in.
