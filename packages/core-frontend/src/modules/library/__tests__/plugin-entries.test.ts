@@ -115,6 +115,13 @@ describe('pluginEntriesFor', () => {
     expect(names(pluginEntriesFor([], [summary({})], { kind: 'all' }, [], 'you', 'Yours'))).toEqual([null]);
   });
 
+  it('a named own space still answers to its default name, which the breadcrumb keeps showing', () => {
+    expect(names(pluginEntriesFor([], [summary({})], { kind: 'all' }, [], 'personal plug', 'Atelier'))).toEqual([null]);
+    expect(names(pluginEntriesFor([], [summary({})], { kind: 'all' }, [], 'atel', 'Atelier'))).toEqual([null]);
+    // The alias is the own space's alone: no plugin row is found by it.
+    expect(names(pluginEntriesFor([], [summary({ displayName: 'GTM' })], { kind: 'owned' }, [], 'personal', 'Atelier'))).toEqual([null]);
+  });
+
   it('lists no plugins for a plugin page or the personal page', () => {
     expect(pluginEntriesFor([], [summary({})], { kind: 'group', plugin: 'gtm' }, [], '', 'Yours')).toEqual([]);
     expect(pluginEntriesFor([], [summary({})], { kind: 'ungrouped' }, [], '', 'Yours')).toEqual([]);
