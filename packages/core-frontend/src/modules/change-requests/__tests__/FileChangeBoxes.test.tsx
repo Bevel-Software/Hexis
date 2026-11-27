@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
   readFileAtForkPoint: vi.fn(),
   fetchPrDetail: vi.fn(),
   approvePrFile: vi.fn(),
+  revertPrFile: vi.fn(),
   mergePullRequest: vi.fn(),
   cancelPullRequest: vi.fn(),
 }));
@@ -26,7 +27,10 @@ vi.mock('../services/change-requests.api', () => ({
   readFileAtForkPoint: api.readFileAtForkPoint,
 }));
 vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: api.fetchPrDetail }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: api.approvePrFile }));
+vi.mock('../../pr/services/pr-approvals.api', () => ({
+  approvePrFile: api.approvePrFile,
+  revertPrFile: api.revertPrFile,
+}));
 vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: api.mergePullRequest }));
 vi.mock('../../pr/services/pr-cancel.api', () => ({ cancelPullRequest: api.cancelPullRequest }));
 
@@ -115,6 +119,7 @@ beforeEach(() => {
   api.approvePrFile.mockResolvedValue([]);
   api.mergePullRequest.mockResolvedValue(undefined);
   api.cancelPullRequest.mockResolvedValue(undefined);
+  api.revertPrFile.mockResolvedValue({ closed: false, remainingPaths: ['Docs/other.md'] });
 });
 
 describe('FileChangeBoxes: who may decide', () => {
@@ -159,6 +164,35 @@ describe('FileChangeBoxes: who may decide', () => {
     expect(
       await screen.findByText('Published: the file now reads with that change.'),
     ).toBeInTheDocument();
+  });
+});
+
+describe('FileChangeBoxes: Decline and Withdraw', () => {
+  it('Decline takes only THIS file out of the request, leaving its other files proposed', async () => {
+    renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+
+    await waitFor(() => expect(api.revertPrFile).toHaveBeenCalledWith(CR.number, PATH));
+    expect(api.cancelPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('a Decline the server refuses says so', async () => {
+    api.revertPrFile.mockRejectedValue(new Error('You may not decline this file.'));
+    renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('You may not decline this file.');
+  });
+
+  it("Withdraw is still the author's take-back of the whole request", async () => {
+    renderBoxes({ mine: true, canDecide: false, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Withdraw' }));
+
+    await waitFor(() => expect(api.cancelPullRequest).toHaveBeenCalledWith(CR.number));
+    expect(api.revertPrFile).not.toHaveBeenCalled();
   });
 });
 
