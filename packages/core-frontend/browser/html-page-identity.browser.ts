@@ -122,7 +122,8 @@ async function host(page: Page) {
     const w = window as unknown as HostWindow;
     const frame = document.getElementById('f') as HTMLIFrameElement;
     const client = new w.PageToolsHost.PageToolsClient(pagePath, (input, init) => fetch(input, init));
-    const consent = new w.PageToolsHost.PageConsent(() => Promise.resolve(true));
+    // Nothing remembered: this browser has allowed no page before.
+    const consent = new w.PageToolsHost.PageConsent(() => Promise.resolve(true), { remembered: () => false, remember: () => undefined });
     w.arrived = [];
     w.held = [];
     w.decided = [];

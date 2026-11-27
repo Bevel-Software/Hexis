@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('tools');
-import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
+import { hasHttpStatus, ToolError, type ToolContext, type ToolHandler } from './tool.contract.js';
 import {
   assertBranchProvided,
   BranchNotFoundError,
@@ -17,6 +17,8 @@ import { routeToolName, routeToolSchemasForRequest } from './route-tool-schemas.
 import { ConnectionScope, NOT_AVAILABLE_TO_CONNECTION } from '../agent-scope/index.js';
 import { alwaysWritable, READ_ONLY_CODE, refuseWriteTool, type IWriteAccess } from '../write-access/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
+import type { ToolAuth } from '../tool-auth/index.js';
+import { declaresWrite, type IToolRegistry, type UtcpTool } from '../tool-registry/index.js';
 
 function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
   return (
@@ -138,6 +140,131 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   if (typeof v !== 'object' || v === null) return false;
   const prototype: unknown = Object.getPrototypeOf(v);
   return prototype === Object.prototype || prototype === null;
+}
+
+/**
+ * The context a hosted platform tool runs with, or the refusal its connection
+ * is answered. The connection's scope is decided here, before the tool runs,
+ * for every caller of a hosted platform tool — MCP, a chain, the local server,
+ * a script with a key, and this process calling the tool as a function. A
+ * connection made as an agent configuration that does not list the tool is
+ * refused it by name: the ONE policy, `ConnectionScope.platformToolRefusal`,
+ * which the platform-tool routes the handler does not host (the plugin-creation
+ * routes) ask as well.
+ */
+async function admitToolCall(
+  resolve: ResolveToolContext,
+  auth: ToolAuth,
+  abortSignal: AbortSignal,
+  sessionId: string | undefined,
+  toolName: string,
+  discovery: boolean,
+): Promise<{ ctx: ToolContext } | { refusal: { error: string; code: typeof NOT_AVAILABLE_TO_CONNECTION } }> {
+  const ctx = await resolve(auth, abortSignal, sessionId);
+  const scope =
+    ctx.connectionScope ?? (auth.agentPath ? ConnectionScope.gone(auth.agentPath) : ConnectionScope.everything());
+  // The handler narrows by the scope decided here, so a context built
+  // without one cannot read as Everything inside the tool either.
+  ctx.connectionScope = scope;
+  const refusal = scope.platformToolRefusal(toolName, { discovery });
+  return refusal ? { refusal } : { ctx };
+}
+
+/**
+ * A hosted discovery read, as the pieces its route is mounted from: the name
+ * the connection's scope judges it by, the handler, and the options the route
+ * passes `toolHandler`. A module that returns one lets this process call the
+ * read as a function (see {@link createInProcessToolCaller}) through the
+ * route's own context, scope check and handler.
+ */
+export interface HostedRead {
+  name: string;
+  handler: ToolHandler;
+  options: Pick<ToolHandlerOptions, 'discovery'>;
+}
+
+/** A hosted read called as a function: the caller it runs as, and its arguments. */
+export type InProcessRead = (auth: ToolAuth, args?: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * Calls a hosted read as a function, for code in this process that has
+ * already authenticated its caller: the hosted MCP endpoint, which reads the
+ * skills behind `prompts/list` and `prompts/get`. Over HTTP that was a request
+ * the server sent itself, which waited on the event loop it was already
+ * running on, behind a limit of its own.
+ *
+ * Of what the route runs once its auth has passed, it runs the caller's
+ * context, the connection's scope, then the handler (not the argument check or
+ * the branch resolution: see below). A connection refused the tool gets
+ * the `ToolError` the route answers as a 403, and whatever the handler throws
+ * is thrown on.
+ *
+ * Only for a read. The route's write gates do not run here, so a tool the
+ * catalog declares a write ({@link declaresWrite} on its external def, or on
+ * its internal def when it has no external one), or does not list at all, is
+ * refused with a `ToolError` before anything else runs. The catalog is listed
+ * to find out until it confirms the tool a read, and then not again. The
+ * route's argument check and branch resolution do not run here either: the
+ * read must take no branch of the handler's resolving and be called with
+ * arguments this process built, and a tool that needs either is called
+ * through its route.
+ */
+export function createInProcessToolCaller(
+  resolve: ResolveToolContext,
+  /** The tool catalog, whose defs say which tools write. */
+  catalog: Pick<IToolRegistry, 'listExternal' | 'listInternal'>,
+) {
+  const confirmedReads = new Set<string>();
+  return function inProcess(tool: HostedRead): InProcessRead {
+    return async (auth, args = {}) => {
+      if (!confirmedReads.has(tool.name)) {
+        await assertDeclaredRead(catalog, tool.name);
+        confirmedReads.add(tool.name);
+      }
+      // Nobody can go away mid-call: the signal is never aborted.
+      const admitted = await admitToolCall(
+        resolve,
+        auth,
+        new AbortController().signal,
+        undefined,
+        tool.name,
+        tool.options.discovery === true,
+      );
+      if ('refusal' in admitted) {
+        throw new ToolError(admitted.refusal.error, 403, { code: admitted.refusal.code });
+      }
+      return await handlerResult(tool.handler(args, admitted.ctx));
+    };
+  };
+}
+
+/**
+ * Refuse a tool the catalog does not declare a read. A tool is judged by its
+ * external def, the one its read-only hint is read from, and by its internal
+ * def only when it has no external one; a tool the catalog lists under
+ * neither is refused too. Listed with no caller context, as the read-only
+ * hints list the external tools.
+ */
+async function assertDeclaredRead(
+  catalog: Pick<IToolRegistry, 'listExternal' | 'listInternal'>,
+  name: string,
+): Promise<void> {
+  const named = (defs: UtcpTool[]) => defs.filter((def) => def.name === name);
+  let defs = named(await catalog.listExternal({}));
+  if (defs.length === 0) defs = named(await catalog.listInternal({}));
+  if (defs.length === 0) {
+    throw new ToolError(`The tool ${name} is not in the tool catalog and cannot be called in process.`, 500);
+  }
+  if (defs.some(declaresWrite)) {
+    throw new ToolError(`The tool ${name} declares a write and cannot be called in process; call it at its route.`, 500);
+  }
+}
+
+/** A read answers a value; a stream is a tool this caller is not for. */
+async function handlerResult(out: Promise<unknown> | AsyncIterable<unknown>): Promise<unknown> {
+  const value = await out;
+  if (isAsyncIterable(value)) throw new ToolError('This tool streams its answer and cannot be called in process.', 500);
+  return value;
 }
 
 /**
@@ -269,24 +396,15 @@ export function createToolHandlerFactory(
           : handling === 'none'
             ? withoutBranch(args)
             : args;
-        const ctx = await resolve(auth, abort.signal, sessionId);
-        // The connection's scope, before the tool runs, for every caller of a
-        // hosted platform tool — MCP, a chain, the local server, a script with
-        // a key. A connection made as an agent configuration that does not
-        // list this tool is refused it by name: the ONE policy,
-        // `ConnectionScope.platformToolRefusal`, which the platform-tool routes
-        // this handler does not host (the plugin-creation routes) ask as well.
+        // The caller's context and the connection's scope, before the tool
+        // runs (see `admitToolCall`).
         const toolName = routeToolSchemasForRequest(req.originalUrl)?.name ?? routeToolName(req.originalUrl);
-        const scope =
-          ctx.connectionScope ?? (auth.agentPath ? ConnectionScope.gone(auth.agentPath) : ConnectionScope.everything());
-        // The handler narrows by the scope decided here, so a context built
-        // without one cannot read as Everything inside the tool either.
-        ctx.connectionScope = scope;
-        const refusal = scope.platformToolRefusal(toolName, { discovery: opts.discovery === true });
-        if (refusal) {
-          res.status(403).json(refusal);
+        const admitted = await admitToolCall(resolve, auth, abort.signal, sessionId, toolName, opts.discovery === true);
+        if ('refusal' in admitted) {
+          res.status(403).json(admitted.refusal);
           return;
         }
+        const { ctx } = admitted;
         if (resolved) ctx.branch = resolved.branch;
         let out = await handler(toolArgs, ctx);
         // A defaulted call's answer says which branch it ran on, so a caller

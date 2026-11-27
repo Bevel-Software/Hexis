@@ -41,12 +41,14 @@ async function makeHarness(overrides: {
   await fs.writeFile(path.join(workspaceDir, 'knowledge-base/a.md'), 'agent version\n');
   await fs.writeFile(path.join(workspaceDir, 'knowledge-base/added.md'), 'agent-added\n');
 
+  const GRANTED_AT = '2026-01-01T00:00:00.000Z';
   const acquireLock = vi.fn(async (_ws: string, _branch: string, relPath: string) => {
     const result = overrides.acquire
       ? overrides.acquire(relPath)
       : { acquired: true, lock: { holderName: 'Alice' } };
     calls.push(`acquire:${relPath}:${result.acquired}`);
-    return result;
+    // A granted lock carries when it was granted, as the lock service's does.
+    return result.acquired ? { ...result, lock: { ...result.lock, acquiredAt: GRANTED_AT } } : result;
   });
   const releaseLockNoCommit = vi.fn(async (_ws: string, _branch: string, relPath: string) => {
     calls.push(`releaseNoCommit:${relPath}`);
@@ -56,7 +58,10 @@ async function makeHarness(overrides: {
     overrides.commit?.();
     return { sha: 'abc', summary } as never;
   });
-  const versionControl = { acquireLock, releaseLockNoCommit, commitChanges } as unknown as IVersionControlService;
+  // A batch's ownership check answers the lock the acquire granted: the same
+  // `acquiredAt`, which is what makes it that lock and not a later one.
+  const heartbeatLock = vi.fn(async () => ({ holderName: 'Alice', acquiredAt: GRANTED_AT }));
+  const versionControl = { acquireLock, heartbeatLock, releaseLockNoCommit, commitChanges } as unknown as IVersionControlService;
 
   const revertPlan = vi.fn(async (_ws: string, paths: string[]) => ({
     workspaceDir,
@@ -129,6 +134,25 @@ describe('rejectPathsLocked', () => {
     expect(h.calls.some((c) => c.startsWith('commit:'))).toBe(false);
     expect(await fs.readFile(path.join(h.workspaceDir, 'knowledge-base/a.md'), 'utf-8')).toBe('agent version\n');
     await expect(fs.access(path.join(h.workspaceDir, 'knowledge-base/added.md'))).resolves.toBeUndefined();
+  }, 15_000);
+
+  it('names the holder of a contended lock whole, a name with a dot in it included', async () => {
+    const h = await makeHarness({
+      acquire: (relPath) =>
+        relPath.endsWith('added.md')
+          ? { acquired: false, lock: { holderName: 'J. Smith' } }
+          : { acquired: true, lock: { holderName: 'Alice' } },
+    });
+    workspaceDir = h.workspaceDir;
+
+    await expect(
+      rejectPathsLocked(h.versionControl, h.diff, WORKSPACE_ID, USER, 'knowledge-base', [
+        'knowledge-base/a.md',
+        'knowledge-base/added.md',
+      ]),
+    ).rejects.toThrow(
+      'Couldn\'t revert: "knowledge-base/added.md" is being edited by J. Smith. No changes were committed — try again when the files are free.',
+    );
   }, 15_000);
 
   it('surfaces a commit failure as a VersionControlValidationError and releases without committing', async () => {

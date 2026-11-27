@@ -2,6 +2,7 @@ import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { PathHeldError } from '../kb-fs/index.js';
 import type { IStarterPackService } from './onboarding.contract.js';
 import '../auth/index.js'; // Express Request augmentation (req.userId)
 
@@ -66,14 +67,16 @@ export function createOnboardingRoutes(
     try {
       res.json(await starterPacks.choose(user, id.trim()));
     } catch (err) {
-      if (err instanceof VersionControlDomainError) {
-        res.status(err.status).json({ error: err.message });
+      // The batch write's held-lock refusal: one of the pack's paths is
+      // being written by someone else right now. Nothing was committed.
+      // Asked first: it is a domain error too, and this route answers it in
+      // its own words rather than with its sentence about a path and holder.
+      if (err instanceof PathHeldError) {
+        res.status(409).json({ error: 'Someone is editing the knowledge base right now. Try again in a moment.' });
         return;
       }
-      // The batch write's status-less refusal: one of the pack's paths is
-      // being written by someone else right now. Nothing was committed.
-      if (err instanceof Error && /locked by /.test(err.message)) {
-        res.status(409).json({ error: 'Someone is editing the knowledge base right now. Try again in a moment.' });
+      if (err instanceof VersionControlDomainError) {
+        res.status(err.status).json({ error: err.message });
         return;
       }
       log.error('adding a starter pack failed:', { err });

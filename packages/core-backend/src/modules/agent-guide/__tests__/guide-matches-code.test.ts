@@ -59,11 +59,12 @@ const NOT_THE_REGISTRYS: Readonly<Record<string, string>> = {
   snake_case: 'a naming style',
   serper_everyone: 'an example manual id',
   serper_finance: 'an example manual id',
-  notion_search: 'an example of a connected server tool as a page calls it',
   // `.tool` and `plugin.json` fields: the file formats, not tool schemas.
   access_type: 'a Google sign-in parameter, in an `authParams` example',
   tool_call_template: 'a `.tool` field',
   call_template_type: 'a `.tool` field',
+  body_field: 'a `.tool` http call template field',
+  content_type: 'a `.tool` http call template field',
   mcpServers: 'a `plugin.json` / `mcp.json` key',
   clientId: 'an `oauth` block field',
   authorizationUrl: 'an `oauth` block field',

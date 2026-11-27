@@ -7,7 +7,7 @@ import { SearchPalette } from './SearchPalette';
 import { useLayout, useMediaQuery, toggleSidebar, useSidebar, TOOLBAR_STACK_QUERY } from '../../layout';
 import { useActiveAppId, useAppRegistry } from '../../../core/registry';
 import { SidebarToggle } from '../../layout/components/SidebarToggle';
-import { isSettingsNavPath } from '../../settings';
+import { isSettingsNavPath, useSettingsNavPaths } from '../../settings';
 import { InviteButton } from '../../onboarding/components/InviteButton';
 
 /**
@@ -50,8 +50,9 @@ export function Toolbar() {
   // branch switcher, for one) does not fit alongside the toolbar essentials,
   // so it drops onto a second row instead of overflowing offscreen.
   const isCompact = useMediaQuery(TOOLBAR_STACK_QUERY);
+  const settingsPaths = useSettingsNavPaths();
   const hasSidebar =
-    onLibrary || canToggleExplorer || (isSettingsNavPath(location.pathname) && !isCompact);
+    onLibrary || canToggleExplorer || (isSettingsNavPath(location.pathname, settingsPaths) && !isCompact);
 
   // Registry-contributed left-cluster items. The CORE toolbar has none of its
   // own: the branch switcher is an enterprise contribution scoped (by the

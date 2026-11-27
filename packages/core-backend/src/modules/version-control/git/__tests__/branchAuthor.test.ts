@@ -2,6 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   branchAuthorLocalpart,
   isBranchAuthoredBy,
+  isOwnBranch,
+  isOwnSuggestionsBranch,
+  ownDraftPrefixFor,
 } from '@bevel-software/platform-shared';
 
 describe('branchAuthorLocalpart', () => {
@@ -23,6 +26,16 @@ describe('branchAuthorLocalpart', () => {
     expect(branchAuthorLocalpart('')).toBeNull();
     expect(branchAuthorLocalpart(null)).toBeNull();
     expect(branchAuthorLocalpart(undefined)).toBeNull();
+  });
+
+  it('returns null when the localpart sanitizes to a prefix no branch name can start with', () => {
+    // `_ops` sanitizes to `-ops`, and `-ops/fix` is no branch name: nothing
+    // could ever be theirs by that prefix, so it is no identity.
+    expect(branchAuthorLocalpart('_ops@example.com')).toBeNull();
+    expect(branchAuthorLocalpart('+team@example.com')).toBeNull();
+    expect(isBranchAuthoredBy('-ops/fix', '_ops@example.com')).toBe(false);
+    // A dash further in is an ordinary prefix.
+    expect(branchAuthorLocalpart('ops_@example.com')).toBe('ops-');
   });
 
   it('returns null when the localpart sanitizes to nothing (no auth identity)', () => {
@@ -76,5 +89,32 @@ describe('isBranchAuthoredBy', () => {
     // could delete other people's branches whose prefix happens to start
     // with their own localpart.
     expect(isBranchAuthoredBy('alice-extra/foo', 'alice@example.com')).toBe(false);
+  });
+});
+
+describe('ownDraftPrefixFor', () => {
+  it('is the localpart prefix authorship recognises', () => {
+    const user = { id: 'u-1', email: 'John.Doe@example.com' };
+    expect(ownDraftPrefixFor(user)).toBe('john-doe/');
+    expect(isBranchAuthoredBy(`${ownDraftPrefixFor(user)}fix`, user.email)).toBe(true);
+  });
+
+  it('falls back to the suggestions prefix for an address with no usable localpart, still theirs', () => {
+    const user = { id: 'abcdef123456', email: '---@example.com' };
+    expect(ownDraftPrefixFor(user)).toBe('suggestions/user-abcdef12/');
+    expect(isOwnSuggestionsBranch(`${ownDraftPrefixFor(user)}fix`, user)).toBe(true);
+  });
+
+  it('falls back the same way for a localpart no branch name can start with', () => {
+    const user = { id: 'abcdef123456', email: '_ops@example.com' };
+    expect(ownDraftPrefixFor(user)).toBe('suggestions/_ops-abcdef12/');
+    expect(isOwnBranch(`${ownDraftPrefixFor(user)}fix`, user)).toBe(true);
+  });
+
+  it("is not another person's: the id slice tells two people with the same localpart apart", () => {
+    const mine = { id: 'abcdef123456', email: '---@example.com' };
+    const theirs = { id: 'zyxwvu987654', email: '---@example.com' };
+    expect(isOwnBranch(`${ownDraftPrefixFor(mine)}fix`, theirs)).toBe(false);
+    expect(isOwnSuggestionsBranch(`${ownDraftPrefixFor(mine)}fix`, theirs)).toBe(false);
   });
 });

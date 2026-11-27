@@ -2,12 +2,13 @@ import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testKbContext } from '../../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../../tool-auth/tool-auth.middleware.js';
-import { createToolContextResolver } from '../../../tool-helpers/tool-context.js';
-import { createToolHandlerFactory } from '../../../tool-helpers/tool-handler.js';
-import { createManualRoutes } from '../../../tool-registry/manual.routes.js';
+import { ToolRegistry, createManualRoutes } from '../../../tool-registry/index.js';
+import {
+  InternalTokenService,
+  createToolAuthMiddleware,
+  createToolContextResolver,
+  createToolHandlerFactory,
+} from '../../../../__tests__/tool-wiring.js';
 import { ToolError } from '../../../tool-helpers/index.js';
 import { VersionControlHooks } from '../../version-control-hooks.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../../../workspace/index.js';
@@ -18,6 +19,7 @@ import {
   BranchNotFoundError,
   ChangeRequestConflictsError,
   OpenChangeRequestBlocksMergeError,
+  VersionControlDomainError,
 } from '../../../../shared/domain-errors.js';
 
 const WS = 'target-company-state';
@@ -83,10 +85,18 @@ function detailOf(files: Record<string, unknown>[]): Record<string, unknown> {
 const BIG = () => detailOf(Array.from({ length: 27 }, (_, i) => addedFile(i)));
 
 let calls: unknown[][] = [];
+/** The name the stub service answers for an asked draft name; a test sets the one it needs. */
+const draftNames = new Map<string, string>();
 /** What the service answers `openChangeRequest` with; a test replaces it. */
 let opened: Record<string, unknown> = BIG();
 /** Set to make `openChangeRequest` throw instead. */
 let openFails: Error | undefined;
+/** The per-file approval state of the request `merge_change_request` reads; a test replaces it. */
+let mergeApprovals: { path: string; isApproved: boolean; inMergeGate: boolean; viewerCanApprove: boolean }[] = [];
+/** The paths `approveFile` recorded an approval on. */
+let approvedPaths = new Set<string>();
+/** Set to make `mergeChangeRequest` throw instead (the gate's refusal). */
+let mergeFails: Error | undefined;
 const externalApiKeyService = {
   looksLikeExternalApiKey: (t: string) => typeof t === 'string' && t.startsWith('bevel_'),
   verifyAndLoadToken: async (t: string) =>
@@ -122,6 +132,10 @@ const versionControlService = {
     calls.push(['createBranch', ws, name]);
     return { name, isProtected: false, hasRemote: true };
   },
+  // The service's own rule is tested with the service
+  // (`version-control.service.draft-name.test.ts`); here it answers the name
+  // a test set for the asked one, and otherwise the name as asked.
+  draftNameFor: async (_ws: string, name: string) => draftNames.get(name) ?? name,
   acquireLock: async (ws: string, branch: string, path: string) => {
     calls.push(['acquireLock', ws, branch, path]);
     return { acquired: true, lock: { branch, path, holderUserId: 'user-A', holderName: 'N' } };
@@ -129,17 +143,46 @@ const versionControlService = {
   releaseLock: async (ws: string, branch: string, path: string) => {
     calls.push(['releaseLock', ws, branch, path]);
   },
-  getChangeRequestDetail: async (number: number) => ({
-    number,
-    url: `https://bevel.example.com/change-requests/${number}`,
-    headSha: 'head-1',
-    approvals: [],
-    state: 'open',
-    title: 'T',
-    base: 'main',
-  }),
-  mergeChangeRequest: async (number: number) => {
-    calls.push(['mergeChangeRequest', number]);
+  // Request #9 does not exist. An approval recorded by `approveFile` shows on
+  // the next read, as the real detail does.
+  getChangeRequestDetail: async (number: number, opts: { fresh?: boolean }) => {
+    calls.push(['getChangeRequestDetail', number, opts.fresh]);
+    if (number === 9) return null;
+    return {
+      number,
+      url: `https://bevel.example.com/change-requests/${number}`,
+      headSha: 'head-1',
+      files: mergeApprovals.map((a) => ({ path: a.path })),
+      approvals: mergeApprovals.map((a) => ({ ...a, isApproved: a.isApproved || approvedPaths.has(a.path) })),
+      state: 'open',
+      title: 'T',
+      base: 'main',
+      authorId: 'author-hash',
+    };
+  },
+  approveFile: async (number: number, path: string, user: { id: string }, _files: unknown, headSha: string) => {
+    calls.push(['approveFile', number, path, user.id, headSha]);
+    if (path === 'Raced.md') throw new ToolError("You don't have write access on this file's path", 403);
+    if (path === 'Broken.md') throw new ToolError('approval store down', 503);
+    // A request updated meanwhile: read again, it holds a file nobody may read.
+    if (path === 'Grows.md') mergeApprovals.push({ path: 'Secret/Late.md', isApproved: false, inMergeGate: true, viewerCanApprove: false });
+    approvedPaths.add(path);
+    return [];
+  },
+  mergeChangeRequest: async (
+    number: number,
+    user: { id: string },
+    headSha: string,
+    approvals: { path: string; isApproved: boolean }[],
+    _state: string,
+    _title: string,
+    base: string,
+    _ws: string,
+    opts?: { bypass?: boolean },
+  ) => {
+    calls.push(['mergeChangeRequest', number, user.id, headSha, approvals.filter((a) => a.isApproved).map((a) => a.path), base, opts]);
+    if (mergeFails) throw mergeFails;
+    if (number === 5) return { kind: 'conflicts-need-resolution', conflictedPaths: ['A.md', 'Secret/B.md'] };
     return { kind: 'merged', result: { prNumber: number, sha: 'sha-1', mergedAt: '2026-09-17T00:00:00Z' } };
   },
   mergeBranch: async (user: { id: string }, source: string, target: string) => {
@@ -351,8 +394,12 @@ const post = (url: string, bearer: string, body: unknown = {}) =>
 
 beforeEach(() => {
   calls = [];
+  draftNames.clear();
   opened = BIG();
   openFails = undefined;
+  mergeApprovals = [];
+  approvedPaths = new Set();
+  mergeFails = undefined;
 });
 afterEach(async () => {
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
@@ -444,15 +491,140 @@ describe('registerVersionControlTools', () => {
     });
   });
 
-  // An agent proposes and syncs; a person merges.
   describe('merging', () => {
-    it('merge_change_request is gone: its old path answers who merges now, and never merges', async () => {
+    const file = (path: string, over: Partial<(typeof mergeApprovals)[number]> = {}) => ({
+      path,
+      isApproved: false,
+      inMergeGate: true,
+      viewerCanApprove: true,
+      ...over,
+    });
+    const mergeCalls = () => calls.filter((c) => c[0] === 'mergeChangeRequest');
+    const approveCalls = () => calls.filter((c) => c[0] === 'approveFile').map((c) => c[2]);
+
+    it('merge_change_request approves what the caller may, at the current head, then merges on those approvals', async () => {
+      mergeApprovals = [
+        file('Mine.md'),
+        file('Theirs.md', { viewerCanApprove: false }),
+        file('Done.md', { isApproved: true }),
+        file('Unbound.md', { inMergeGate: false }),
+      ];
       const base = await start();
       const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
-      expect(res.status).toBe(410);
-      expect(((await res.json()) as { error: string }).error).toMatch(/a change request is merged by a person in the app/);
-      expect(calls.some((c) => c[0] === 'mergeChangeRequest')).toBe(false);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        number: 4,
+        url: 'https://bevel.example.com/change-requests/4',
+        outcome: { kind: 'merged', sha: 'sha-1', mergedAt: '2026-09-17T00:00:00Z' },
+        approved: ['Mine.md'],
+      });
+      expect(calls).toContainEqual(['approveFile', 4, 'Mine.md', 'user-A', 'head-1']);
+      expect(approveCalls()).toEqual(['Mine.md']);
+      // The gate is handed the approvals as they stand AFTER the approval, read fresh, and no bypass.
+      expect(mergeCalls()).toEqual([['mergeChangeRequest', 4, 'user-A', 'head-1', ['Mine.md', 'Done.md'], 'main', { bypass: false }]]);
+      expect(calls.filter((c) => c[0] === 'getChangeRequestDetail')).toEqual([
+        ['getChangeRequestDetail', 4, true],
+        ['getChangeRequestDetail', 4, true],
+      ]);
     });
+
+    it("merge_change_request answers the gate's refusal, and keeps the approval it recorded", async () => {
+      mergeApprovals = [file('Mine.md'), file('Theirs.md', { viewerCanApprove: false })];
+      mergeFails = new VersionControlDomainError('Waiting on approval for Theirs.md', 409, {
+        mergeBlockedReasons: ['Theirs.md is not approved'],
+      });
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'Waiting on approval for Theirs.md',
+        mergeBlockedReasons: ['Theirs.md is not approved'],
+        approved: ['Mine.md'],
+      });
+      expect(approveCalls()).toEqual(['Mine.md']);
+    });
+
+    it('merge_change_request withholds the words of a refusal from a caller who may not read every file of the request', async () => {
+      // `Secret/` is readable by nobody; the gate's refusal quotes the path it waits on.
+      mergeApprovals = [file('Mine.md'), file('Secret/Plan.md', { viewerCanApprove: false })];
+      mergeFails = new VersionControlDomainError('Waiting on approval for Secret/Plan.md from Ada', 409, {
+        mergeBlockedReasons: ['Secret/Plan.md is not approved'],
+      });
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toEqual({
+        error: 'The reason names files you do not have access to read.',
+        approved: ['Mine.md'],
+      });
+      expect(JSON.stringify(body)).not.toMatch(/Secret|Ada/);
+    });
+
+    it('merge_change_request scopes its answer to the request it merges, read again after its approvals', async () => {
+      // Readable when first read; approving `Grows.md` stands for an update that adds `Secret/Late.md` meanwhile.
+      mergeApprovals = [file('Grows.md')];
+      mergeFails = new VersionControlDomainError('Waiting on approval for Secret/Late.md from Ada', 409, {
+        mergeBlockedReasons: ['Secret/Late.md is not approved'],
+      });
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toEqual({
+        error: 'The reason names files you do not have access to read.',
+        approved: ['Grows.md'],
+      });
+      expect(JSON.stringify(body)).not.toMatch(/Secret|Ada/);
+    });
+
+    it('merge_change_request passes bypass through only when asked, for the gate to judge', async () => {
+      const base = await start();
+      await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4, bypass: true });
+      expect(mergeCalls()[0]![6]).toEqual({ bypass: true });
+    });
+
+    it('merge_change_request returns conflicts-need-resolution with the conflicting paths the caller may read, and counts the rest', async () => {
+      mergeApprovals = [file('A.md', { isApproved: true }), file('Secret/B.md', { isApproved: true })];
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 5 });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        number: 5,
+        outcome: { kind: 'conflicts-need-resolution', conflictedPaths: ['A.md'], withheldConflicts: 1 },
+      });
+    });
+
+    it('merge_change_request leaves a file whose approval is refused (403) out of `approved`, and to the gate', async () => {
+      // Access changed between the read and the approval.
+      mergeApprovals = [file('Raced.md'), file('Mine.md')];
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { approved: string[] }).approved).toEqual(['Mine.md']);
+    });
+
+    it('merge_change_request does not merge when an approval fails for any other reason, and says what it had approved', async () => {
+      mergeApprovals = [file('Mine.md'), file('Broken.md')];
+      const base = await start();
+      const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'approval store down', approved: ['Mine.md'] });
+      expect(mergeCalls()).toEqual([]);
+    });
+
+    it('merge_change_request answers 404 for a request the caller may not see, or that does not exist, and touches nothing', async () => {
+      mergeApprovals = [file('Mine.md')];
+      const base = await start();
+      for (const number of [13, 9]) {
+        const res = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number });
+        expect(res.status, String(number)).toBe(404);
+      }
+      expect(calls.filter((c) => c[0] === 'getChangeRequestDetail').map((c) => c[1])).toEqual([9]);
+      expect(approveCalls()).toEqual([]);
+      expect(mergeCalls()).toEqual([]);
+    });
+
 
     it('merge_branch merges as the caller and returns merged', async () => {
       const base = await start();
@@ -475,7 +647,7 @@ describe('registerVersionControlTools', () => {
       expect(res.status).toBe(409);
       const body = JSON.stringify(await res.json());
       expect(body).toContain('#12');
-      expect(body).toMatch(/review #12 in the app/);
+      expect(body).toMatch(/Apply #12 with `merge_change_request`/);
     });
 
     it('merge_branch requires both branches', async () => {
@@ -484,19 +656,21 @@ describe('registerVersionControlTools', () => {
       expect(calls.some((c) => c[0] === 'mergeBranch')).toBe(false);
     });
 
-    it('no catalog offers merge_change_request or any approval tool; merge_branch documents the sync path', async () => {
+    it('both catalogs offer merge_change_request as the one tool that approves or bypasses; merge_branch documents the sync path', async () => {
       await start();
       for (const tools of [await registryRef!.listInternal(), await registryRef!.listExternal()]) {
         const names = tools.map((t) => t.name);
-        expect(names).not.toContain('merge_change_request');
+        expect(names).toContain('merge_change_request');
         expect(names).toContain('merge_branch');
         expect(names.filter((n) => /approv|bypass/i.test(n))).toEqual([]);
         for (const t of tools) {
+          if (t.name === 'merge_change_request') continue;
           const inputs = JSON.stringify(t.inputs);
           expect(inputs, t.name).not.toMatch(/"(bypass|approve|unapprove)"/);
         }
         const mergeBranch = tools.find((t) => t.name === 'merge_branch')!;
-        expect(mergeBranch.description).toMatch(/a person merges/);
+        expect(mergeBranch.description).toMatch(/never lands a change request/);
+        expect(mergeBranch.description).toMatch(/`merge_change_request` applies that one/);
         expect(mergeBranch.description).toMatch(/SYNC/);
         // Every outcome is named, and the asynchronous commit the merge waits for.
         for (const kind of ['merged', 'nothing-to-merge', 'pending-commits', 'conflicts-need-resolution']) {
@@ -809,6 +983,18 @@ describe('registerVersionControlTools', () => {
     // and 500s with "Remote branch not found in upstream origin". No fromBase:
     // the base is the workspace's own checked-out branch (HEAD).
     expect(calls).toContainEqual(['createBranch', WS, 'me/new-draft']);
+  });
+
+  it('create_branch creates the draft under the name the service gives it, and answers the name it made', async () => {
+    draftNames.set('copilot-check', 'named/by-the-service');
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/create_branch`, writeTok(), {
+      name: 'copilot-check',
+      branch: WS,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ branch: { name: 'named/by-the-service' } });
+    expect(calls).toContainEqual(['createBranch', WS, 'named/by-the-service']);
   });
 
   it('create_branch rejects `branch` naming the draft being created with a 400, not a clone 500', async () => {

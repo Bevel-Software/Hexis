@@ -3,7 +3,6 @@ import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { utcpNameToTsInterfaceName, findToolsByNames, sanitizeIdentifier } from './code-mode-names.js';
 import { chainExample, type ChainExample, type ChainExampleTool } from './chain-example.js';
 import { toCallToolResult, toolError, describeToolFailure, withTransportDetail, omitImagePayloads } from './results.js';
-import { retiredToolInFailure } from './retired-tools.js';
 import { withCallExample } from './tool-interface.js';
 import { toolTitle } from './tool-title.js';
 import {
@@ -348,14 +347,6 @@ export async function dispatchMetaTool(
     // each come back as the sentence that says so.
     const outcome = await runToolChain(client, code, timeout);
     if (!outcome.ok) {
-      // A chain that died calling a REMOVED tool gets the reason it was
-      // removed, not the runtime's "is not a function". Read from the failure
-      // itself, never from the chain's source: a chain that merely mentions
-      // the name and died of something else keeps its own reason. A migration
-      // notice answers alone — the transport detail below would be noise
-      // beside an answer that is not about the transport.
-      const retired = retiredToolInFailure(outcome.error);
-      if (retired) return toolError(retired);
       // An MCP caller is answered with TEXT and nothing else, so the
       // transport's own status and body are folded into it. `runToolChain`
       // composes the message with `describeToolFailure` (which lifts an
@@ -402,11 +393,6 @@ export async function dispatchMetaTool(
   } catch (err) {
     // `runToolChain` answers rather than throws, so a chain no longer reaches
     // here — what does is a catalog read, a name lookup or the spill write.
-    // The retired-tool mapping is kept all the same: it costs nothing, and it
-    // is the one answer that must survive however the failure arrived.
-    const failure = describeToolFailure(err);
-    const retired = name === CALL_TOOL_CHAIN_NAME ? retiredToolInFailure(failure) : undefined;
-    if (retired) return toolError(retired);
-    return toolError(`The "${name}" tool failed: ${failure}`);
+    return toolError(`The "${name}" tool failed: ${describeToolFailure(err)}`);
   }
 }

@@ -158,14 +158,7 @@ describe('call_tool_chain when the result cannot be delivered', () => {
   });
 });
 
-/**
- * `merge_change_request` is retired from every agent tool set, the in-app
- * chat's included. A chain still calling it gets who merges now, not the
- * runtime's "is not a function".
- */
-describe('call_tool_chain and a retired tool', () => {
-  const RETIRED_CALL = 'return KNOWLEDGE_BASE.merge_change_request({ body: { number: 4 } })';
-
+describe('call_tool_chain when the chain fails', () => {
   async function runWith(chainClient: CodeModeUtcpClient, code: string) {
     const { createCallToolChainTool } = await import('../code-mode.tool.js');
     const tool = createCallToolChainTool(chainClient, { write: vi.fn() } as never, 'KNOWLEDGE_BASE') as unknown as {
@@ -174,29 +167,7 @@ describe('call_tool_chain and a retired tool', () => {
     return tool.execute({ code });
   }
 
-  // The runner resolves a failed chain as `{ result: null, logs: ['[ERROR] Code
-  // execution failed: …'] }` — it does not throw.
-  it('answers a failed call to merge_change_request with the plain message, as the runner reports it', async () => {
-    const chainClient = {
-      callToolChain: vi.fn(async () => ({
-        result: null,
-        logs: ['[ERROR] Code execution failed: TypeError: KNOWLEDGE_BASE.merge_change_request is not a function'],
-      })),
-    } as unknown as CodeModeUtcpClient;
-    const out = await runWith(chainClient, RETIRED_CALL);
-    expect(out.success).toBe(false);
-    expect(out.error).toMatch(/a change request is merged by a person in the app/);
-  });
-
-  /**
-   * A real runner whose `KNOWLEDGE_BASE` namespace exists and serves a live
-   * tool, but not the retired one — the shape a deployment actually has.
-   *
-   * Not a client with no manuals: there `KNOWLEDGE_BASE` is undefined too, so
-   * the chain dies of `ReferenceError: KNOWLEDGE_BASE is not defined` without
-   * ever naming a tool. That failure proves nothing about a call to a removed
-   * one — it would only satisfy a check that scanned the chain's source.
-   */
+  /** A real runner whose `KNOWLEDGE_BASE` namespace exists and serves a live tool. */
   async function realRunnerWithKnowledgeBase(): Promise<CodeModeUtcpClient> {
     addFunctionToUtcpDirectCall('kb_manual', async () => ({
       utcp_version: '1.0.0',
@@ -222,43 +193,18 @@ describe('call_tool_chain and a retired tool', () => {
     return client;
   }
 
-  it('answers it through a real code-mode runner, not a mock', async () => {
+  it('names the tool a real runner could not find', async () => {
     const client = await realRunnerWithKnowledgeBase();
     try {
-      const out = await runWith(client, RETIRED_CALL);
+      const out = await runWith(client, 'return KNOWLEDGE_BASE.no_such_tool({})');
       expect(out.success).toBe(false);
-      expect(out.error).toMatch(/a change request is merged by a person in the app/);
-    } finally {
-      await client.close();
-    }
-  });
-
-  it('leaves a real runner\'s unrelated failure alone, name in the source or not', async () => {
-    // The retired name sits in a comment while the chain dies of something
-    // else: the agent must still be told what actually killed it.
-    const client = await realRunnerWithKnowledgeBase();
-    try {
-      const out = await runWith(
-        client,
-        '// merge_change_request is gone\nreturn KNOWLEDGE_BASE.no_such_tool({})',
-      );
-      expect(JSON.stringify(out)).not.toMatch(/merged by a person in the app/);
       expect(JSON.stringify(out)).toContain('no_such_tool');
     } finally {
       await client.close();
     }
   });
 
-  it('answers a thrown failure the same way', async () => {
-    const chainClient = {
-      callToolChain: vi.fn(async () => {
-        throw new TypeError('KNOWLEDGE_BASE.merge_change_request is not a function');
-      }),
-    } as unknown as CodeModeUtcpClient;
-    expect((await runWith(chainClient, RETIRED_CALL)).error).toMatch(/merged by a person in the app/);
-  });
-
-  it('leaves an unrelated failure as it was', async () => {
+  it('answers a thrown failure with its own message', async () => {
     const chainClient = { callToolChain: vi.fn(async () => { throw new Error('boom'); }) } as unknown as CodeModeUtcpClient;
     expect((await runWith(chainClient, 'return KNOWLEDGE_BASE.read_file({})')).error).toBe('boom');
   });

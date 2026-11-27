@@ -5,7 +5,7 @@ import {
   AccessDeclarationsError,
   DECLARATION_SCAN_FILE_CAP,
 } from '../access-declarations.js';
-import { registerAccessFrontmatterExtensions } from '../../access-model/access-grammar.js';
+import { registerAccessFrontmatterExtensions } from '../../access-model/index.js';
 
 /**
  * The declaration scan: WHICH files under a folder declare access rules, and
@@ -44,7 +44,12 @@ function buildTree(files: Record<string, string>): FileTreeEntry {
 
 function makeWorkspace(files: Record<string, string>): IWorkspaceService {
   return {
-    listFiles: async () => buildTree(files),
+    // The entry at the path, as the service's own folder listing answers it.
+    listFilesUnder: async (_id: string, wsPath: string) =>
+      wsPath
+        .split('/')
+        .filter(Boolean)
+        .reduce<FileTreeEntry | null>((node, segment) => node?.children?.find((c) => c.name === segment) ?? null, buildTree(files)),
     readFile: async (_id: string, relativePath: string) => {
       const text = files[relativePath];
       if (text === undefined) throw new Error(`ENOENT ${relativePath}`);

@@ -1,8 +1,9 @@
 import { splitCallLine } from '@bevel-software/platform-mcp-core';
+import { GET_AGENT_GUIDE_TOOL } from '../agent-instructions/index.js';
 import type { UtcpTool } from './tool.contract.js';
 
-/** The one tool that returns the platform's guide (see `modules/agent-guide`). */
-export const GET_AGENT_GUIDE_TOOL = 'get_agent_guide';
+/** The one tool that returns the platform's guide, as agent-instructions names it. */
+export { GET_AGENT_GUIDE_TOOL };
 
 /**
  * The sentence every tool of the platform's own OPENS with: what to do before

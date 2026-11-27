@@ -63,6 +63,7 @@ import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
+import { mapPooled } from '../../shared/map-pooled.js';
 
 const log = logger('user-access-removal');
 
@@ -75,21 +76,6 @@ const ROLES_YAML = 'roles.yaml';
  * simultaneously and trips EMFILE on a large base.
  */
 const READ_CONCURRENCY = 16;
-
-/** `items.map(fn)` with at most `limit` in flight, results in input order. */
-async function mapPooled<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
-}
 
 /** A removal this service refuses (guard) or cannot run. */
 export class UserAccessRemovalError extends VersionControlDomainError {

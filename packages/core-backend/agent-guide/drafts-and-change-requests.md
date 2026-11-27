@@ -1,6 +1,8 @@
 ## Drafts and change requests
 
-An agent drafts, proposes and syncs; people approve and apply, in the app.
+An agent drafts, proposes and syncs. Applying a request takes an approval on
+each file from someone who may write it: you can give only the person's own
+approval.
 
 - **Start a draft** with `create_branch`: `name` is the new draft and `branch`
   the branch it forks from, usually `{{defaultBranch}}`:
@@ -15,15 +17,20 @@ An agent drafts, proposes and syncs; people approve and apply, in the app.
 - **Saving shares.** Every write is committed as the person and shared,
   moments after the call returns; there is no separate push. `branch_status`
   lists writes still landing. `share_current_branch` is only for sharing
-  again after a refused push, and `commit_change` only for a file a tool left
-  uncommitted (`unzip` does).
+  again after a refused push, and `save_file` only for a file a tool could
+  not commit.
 - **Propose** with `open_change_request`
   (`sourceBranch` = the draft, `targetBranch` = the protected branch, a
   `title`), then give the person the request's `url`. It first brings the
   latest target into the draft. The answer lists `approvals` (who must approve
-  each file) and `mergeBlockedReasons`. Reviewing, approving and merging happen
-  in the app; someone who may approve every file it changes may merge their own
-  request there.
+  each file) and `mergeBlockedReasons`.
+- **Apply** with `merge_change_request`. It records the person's approval on
+  each file they may approve, then merges, as Apply does in the app; someone
+  who may approve every file may so merge their own request. It is live for
+  everyone at once, like a direct write to that branch. It is refused while a
+  file waits on someone else: give the person the `url` for those approvers.
+  An Admin may pass `bypass: true` to merge without them, only when the person
+  asked for exactly that.
 - **Edit** an open request with `update_change_request`: `description`
   replaces the text whole, `appendDescription` adds a paragraph. Allowed for its
   author and anyone who may merge it.
@@ -40,7 +47,7 @@ An agent drafts, proposes and syncs; people approve and apply, in the app.
   the draft) does the same without conflict handling.
 - **`merge_branch` into a protected branch** merges only what you could write
   there directly, never a change to `roles.yaml`, and refuses a draft whose
-  open request targets that branch: ask the person to review it in the app.
+  open request targets that branch: apply that request instead.
 - **Read history** with `list_file_changes` (a file's commits: who, when,
   subject), `read_file_at` (the file at a commit, given as the full sha, or on
   another branch) and `compare_file` (the diff of a commit, or between two

@@ -20,12 +20,14 @@ import type {
   ShareChangesRequest,
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
-import { isFolderPlaceholder } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder, isOwnBranch } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
-import type { IAccessControl } from '../../access/index.js';
-import { AccessDeniedError } from '../../access-model/index.js';
+import { SourceHeadMovedError } from '../source-head-moved-error.js';
+import { frontmatterHead, frontmatterHeadOfBytes, type IAccessControl } from '../../access/index.js';
+import { AccessDeniedError, PushAccessRefusedError, fencedHead } from '../../access-model/index.js';
+import { canonicalEmail } from '../../../shared/email-identity.js';
 import { WorkspaceIdMutex, type WorkspaceMutex, assertInsideRepo, cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS, readRefSha } from '../../kb-fs/index.js';
 import { isAbsence } from '../../../shared/fs.contract.js';
 import { utf8Text } from '../../../shared/utf8-text.js';
@@ -34,8 +36,6 @@ import { linkedAncestor } from '../../../shared/no-link-below.js';
 import {
   assertValidBranchName,
   assertValidRelativePath,
-  isBranchAuthoredBy,
-  isOwnSuggestionsBranch,
 } from '../../kb-fs/index.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import {
@@ -52,7 +52,6 @@ import {
 } from '../../../shared/domain-errors.js';
 import {
   GitRunError,
-  assertOneSpecPerLine,
   redactGitToken,
   type GitCredentials,
   type GitRunOptions,
@@ -60,6 +59,7 @@ import {
   type IGitRunner,
 } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from './node-git-runner.js';
+import { catFileBatchBytes } from '../../../shared/cat-file-batch.js';
 import { printable } from '../../../shared/printable.js';
 import { branchForWorkspaceId } from '../../../shared/workspace-id.js';
 import { sanitizeError } from '../sanitize-error.js';
@@ -282,6 +282,67 @@ async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
   }
 }
 
+/**
+ * The deployment's live accounts, as the protected-branch push gate asks for
+ * them. The gate asks first whether the user who authored an unpushed commit
+ * may write what it changed; an author who is not a live account — an address
+ * nobody owns, or an account that was switched off, whose old grants vouch
+ * for nothing — is never asked, and the commit is held to the PUSHER's access
+ * alone, so it is never let through unchecked.
+ *
+ * The one question is `AuthService.findActiveAccountsByEmail`, and the port
+ * has its shape so the composition root hands the auth service over as it
+ * is: which accounts are live is answered there, in one place. A lookup that
+ * fails rejects, and the push fails with it: an unanswered question is never
+ * read as "unknown author".
+ */
+export interface CommitAuthorDirectory {
+  /** The live accounts among `emails`, keyed by canonical address; switched-off and unknown addresses are left out. */
+  findActiveAccountsByEmail(emails: readonly string[]): Promise<ReadonlyMap<string, unknown>>;
+}
+
+/** One commit the next push would publish: who authored it, and the files it changed. */
+interface UnpushedCommit {
+  authorEmail: string;
+  paths: string[];
+}
+
+/**
+ * Parse `git log -z --name-only --format=%x00%H%x00%ae`. With `-z` git prints
+ * every file name raw and NUL-terminated (no quoting, no octal escapes, so a
+ * name with an umlaut is its real path), and each record opens with the
+ * format's own NUL. A file name is never empty, so an empty field always
+ * opens a record: `""`, the sha, the author, then the files up to the next
+ * empty field (the first carrying the newline git puts after the header).
+ * Output of any other shape throws: a gate that guessed at a listing it could
+ * not read would check fewer files than the push publishes.
+ */
+function parseUnpushedLog(stdout: string): UnpushedCommit[] {
+  const fields = stdout.split('\0');
+  const commits: UnpushedCommit[] = [];
+  let i = 0;
+  // Trailing NULs (after the last file, or after an empty commit's header)
+  // leave empty fields at the end: nothing follows them.
+  const end = (() => {
+    let e = fields.length;
+    while (e > 0 && fields[e - 1] === '') e--;
+    return e;
+  })();
+  while (i < end) {
+    if (fields[i] !== '' || i + 2 >= fields.length || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(fields[i + 1])) {
+      throw new Error('the unpushed commits could not be listed: git log answered in an unexpected shape');
+    }
+    const commit: UnpushedCommit = { authorEmail: fields[i + 2], paths: [] };
+    i += 3;
+    for (let first = true; i < end && fields[i] !== ''; i++, first = false) {
+      const name = first && fields[i].startsWith('\n') ? fields[i].slice(1) : fields[i];
+      if (name !== '') commit.paths.push(name);
+    }
+    commits.push(commit);
+  }
+  return commits;
+}
+
 export class GitService implements IGitService {
   // Per-workspace fetch state, kept OUTSIDE the workspace mutex on purpose.
   // `git fetch` only writes `refs/remotes/origin/*` and packs new objects —
@@ -338,10 +399,47 @@ export class GitService implements IGitService {
      * one rather than none.
      */
     private readonly gitRunner: IGitRunner = new NodeGitRunner(),
+    /**
+     * Matches an unpushed commit's author to a platform user for the
+     * protected-branch push gate (see `CommitAuthorDirectory`). Absent, no
+     * author is matched and every unpushed commit is held to the pusher's
+     * access; the composition root wires the user store.
+     */
+    private readonly commitAuthors: CommitAuthorDirectory | null = null,
   ) {}
 
   private get kbDirName(): string {
     return this.kb.kbDirName;
+  }
+
+  /**
+   * Every commit this service lands is reported here, once, to the hooks the
+   * composition root registered (`VersionControlHooks.onCommitLanded`): a
+   * single-file commit, a batch, a merge. Paths go out workspace-relative, as
+   * the notifier's contract has them. The hooks run isolated, so a reactor can
+   * neither fail nor unwind the commit it hears of. This is the ONE place a
+   * commit is announced from — a new way of committing reports here or it is
+   * not announced at all, which a test pins.
+   */
+  private landed(workspaceId: string, branch: string, user: AuthUser, repoRelativePaths: readonly string[]): void {
+    this.hooks.commitLanded({
+      workspaceId,
+      branch,
+      paths: repoRelativePaths.map((p) => `${this.kbDirName}/${p}`),
+      byUser: user,
+    });
+  }
+
+  /**
+   * The files the commit at HEAD changed, repo-relative, read from the commit
+   * itself rather than from the status listing that preceded it: every file
+   * of a new folder (status shows the folder), both ends of a rename (status
+   * shows one entry). A read that fails must not lose the report, so callers
+   * fall back to what they knew before the commit.
+   */
+  private async committedPaths(cwd: string): Promise<string[]> {
+    const { stdout } = await this.git(cwd, ['diff-tree', '--root', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', 'HEAD']);
+    return stdout.split('\0').filter(Boolean);
   }
 
   /**
@@ -892,16 +990,15 @@ export class GitService implements IGitService {
    * predicate is the existing source of truth for `Admin`-role membership
    * inside the access model — no separate `isAdmin()` plumbing needed.
    *
-   * Two authorship conventions: `<localpart>/…` UI drafts, and the
-   * `suggestions/<who>-<id8>/…` namespace the propose flow files its branches
-   * under — a user resetting THEIR OWN suggestion bundle is deleting their
-   * own branch.
+   * Authorship is read by `isOwnBranch`, the one predicate the branch
+   * switcher's delete button reads too. Two conventions make a branch
+   * theirs: `<localpart>/…` drafts, and their `suggestions/<who>-<id8>/…`
+   * prefix, which holds the Knowledge bundle the propose flow files (a user
+   * resetting THEIR OWN bundle is deleting their own branch) and the drafts
+   * of a person whose address has no usable localpart.
    */
   async mayDeleteBranch(workspaceId: string, name: string, user: AuthUser): Promise<boolean> {
-    const isAuthor =
-      isBranchAuthoredBy(name, user.email) ||
-      isOwnSuggestionsBranch(name, { email: user.email, id: user.id });
-    if (isAuthor) return true;
+    if (isOwnBranch(name, { email: user.email, id: user.id })) return true;
     return this.accessControl
       ? await this.accessControl.canWrite(workspaceId, user.email, 'roles.yaml')
       : false;
@@ -1082,6 +1179,10 @@ export class GitService implements IGitService {
         args.push('-m', req.description.trim());
       }
       await this.git(cwd, args);
+      // The commit exists from here on: reported now, before the attribution
+      // read, which can fail without unmaking it — with the files the commit
+      // holds, or the status listing if even that read fails.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => touched));
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1202,6 +1303,8 @@ export class GitService implements IGitService {
         await this.assertNoBytesBesideRepo(workspaceId, cwd, relativePath, repoRelativePath);
         return null;
       }
+      // Read now, while HEAD still holds the bytes this commit replaces.
+      const contentEdit = await this.contentEditOf(cwd, scoped, repoRelativePath);
 
       // **No access check at commit time.** Per the "disk is the source of
       // truth" rule, by the time content is on disk it must not be rejected.
@@ -1241,11 +1344,20 @@ export class GitService implements IGitService {
         throw new VersionControlValidationError('commit summary must be a single line');
       }
 
+      // Committed WITH the pathspec, as a scoped `commitChanges` is: it records
+      // this one path, so an entry something else left staged neither rides
+      // along under this user's name nor makes `contentEdit` (told from this
+      // path's status alone) describe a commit that holds more.
       await this.git(cwd, [
         'commit',
         `--author=${user.name} <${user.email}>`,
         '-m', subject,
+        '--', repoRelativePath,
       ]);
+      // The commit exists from here on: reported now, before the attribution
+      // read, which can fail without unmaking it — with the files the commit
+      // holds (the one path, as it was staged), or that path if the read fails.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => [repoRelativePath]));
 
       const { stdout } = await this.git(cwd, [
         'log',
@@ -1260,7 +1372,44 @@ export class GitService implements IGitService {
         authorEmail: authorEmail ?? '',
         subject: subj ?? subject,
         committedAt: committedAt?.trim() ?? new Date().toISOString(),
+        ...(contentEdit ? { contentEdit } : {}),
       };
+    }
+  }
+
+  /**
+   * Whether the one-path change `git status` just reported (`porcelain`, its
+   * `--porcelain=v1` answer for the path) is an edit of a file that was
+   * already there: the fact `CommitAttribution.contentEdit` carries. Told
+   * from the status code alone, so it costs no process: a tracked file
+   * modified, with nothing added (`A`, `??`), removed (`D`), renamed (`R`) or
+   * turned into another kind of entry (`T`). Anything else, or more than one
+   * line, answers `undefined`.
+   *
+   * The file's leading `---` block on disk is compared with the one at HEAD,
+   * each read as the access gate reads a file's own entries (its start, up to
+   * the frontmatter's end). That is for every kind of file: the gate enforces
+   * a `.txt` or `.csv` that opens with one too. A comparison that fails
+   * counts as changed.
+   */
+  private async contentEditOf(
+    cwd: string,
+    porcelain: string,
+    repoRelativePath: string,
+  ): Promise<{ frontmatterChanged: boolean } | undefined> {
+    const lines = porcelain.split('\n').filter((l) => l.trim());
+    if (lines.length !== 1) return undefined;
+    const code = lines[0]!.slice(0, 2);
+    if (!/^(?: M|M |MM)$/.test(code)) return undefined;
+    try {
+      const [before, after] = await Promise.all([
+        this.blobAtRef(cwd, 'HEAD', repoRelativePath),
+        frontmatterHead(path.join(cwd, repoRelativePath)),
+      ]);
+      if (!before) return { frontmatterChanged: true };
+      return { frontmatterChanged: fencedHead(frontmatterHeadOfBytes(before.bytes)) !== fencedHead(after) };
+    } catch {
+      return { frontmatterChanged: true };
     }
   }
 
@@ -1383,6 +1532,10 @@ export class GitService implements IGitService {
       // committed" and restore their pre-edit bytes, which here would publish
       // a compensating revert of a commit that DID land. The attribution read
       // is best-effort; on failure fall back to what we already know.
+      // The commit exists: report it, with the files it holds — both ends of a
+      // rename, every file of a new folder — or the scoped status listing if
+      // that read fails. Neither the read nor the hooks can throw here.
+      this.landed(workspaceId, branch, user, await this.committedPaths(cwd).catch(() => touched));
       let sha = '';
       let authorName = user.name;
       let authorEmail = user.email;
@@ -1449,13 +1602,7 @@ export class GitService implements IGitService {
       // gating it here again just refuses every non-admin the product
       // promised a plugin to.
       if (this.kb.isProtectedBranch(branch) && !opts?.systemAuthorized) {
-        const touched = await this.unpushedTouchedPaths(cwd);
-        await this.assertCanWriteAtRef(
-          workspaceId,
-          `origin/${branch}`,
-          user.email,
-          touched,
-        );
+        await this.assertUnpushedCommitsMayLand(workspaceId, cwd, branch, user);
       }
 
       // No `-u`: it writes the upstream into the config during the push, and
@@ -1811,8 +1958,13 @@ export class GitService implements IGitService {
     opts: { subject: string; body: string; publish?: (ops: ReservedPushOps) => Promise<void> },
     resolvedPaths: string[],
   ): Promise<MergeIntoBranchOutcome> {
+    // What this merge brings onto the branch: the index holds the merged tree.
+    // NUL-delimited and with renames as a delete plus an add, so every path is
+    // named verbatim, both ends of a rename included.
+    const { stdout: merged } = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-renames', '-z']);
     await this.git(cwd, ['commit', `--author=${user.name} <${user.email}>`, '-m', opts.subject, '-m', opts.body]);
     this.accessControl?.invalidate(workspaceId);
+    this.landed(workspaceId, branch, user, merged.split('\0').filter(Boolean));
     // The publish runs here, inside the reservation the merge was made in,
     // over this checkout's own push and pull-rebase (the merge kept as a
     // merge) — the caller's policy, the git layer's moves. Whatever it
@@ -2017,6 +2169,19 @@ export class GitService implements IGitService {
       appliedChangeNumber?: number;
       /** The request's stored title, so a merge commit in the old message format is recognised too. */
       appliedChangeTitle?: string;
+      /**
+       * The source commit the caller's approval gate judged. When given, the
+       * merge lands that commit or nothing: if the published source is at any
+       * other commit once the fetch below has run, it refuses with
+       * {@link SourceHeadMovedError} before anything is merged or pushed, and
+       * leaves the clone on the published target with nothing uncommitted.
+       *
+       * Compared HERE, inside the reservation, and not by the caller: the
+       * caller read the head before it asked the gate, and a push landing
+       * between that reading and this fetch would otherwise be merged on the
+       * strength of approvals given to the commit before it.
+       */
+      expectedSourceHead?: string;
     } = {},
   ): Promise<AppliedMergeResult> {
     assertValidBranchName(sourceBranch);
@@ -2077,6 +2242,21 @@ export class GitService implements IGitService {
         // discards a prior attempt's state, never real work.
         await this.git(cwd, ['checkout', targetBranch]);
         await this.git(cwd, ['reset', '--hard', `origin/${targetBranch}`]);
+        // The source commit this attempt merges, read once from the ref the
+        // fetch above just wrote and named by its id from here on. The ref
+        // itself can move again under this reservation: `resolvePrShas`
+        // fetches into a clone before it takes the clone's turn. So the paths
+        // `authorize` judges and the commit merged are one commit, and it is
+        // the commit a caller's `expectedSourceHead` was compared with.
+        //
+        // After the reset above, so a refusal on a LATER attempt leaves the
+        // clone on the published target too: the attempt before it committed
+        // a merge whose push was rejected, and that commit is gone by here.
+        const { stdout: sourceTipOut } = await this.git(cwd, ['rev-parse', `origin/${sourceBranch}`]);
+        const sourceTip = sourceTipOut.trim();
+        if (opts.expectedSourceHead !== undefined && sourceTip !== opts.expectedSourceHead) {
+          throw new SourceHeadMovedError(sourceBranch);
+        }
 
         if (opts.authorize) {
           // The tip this attempt merges into, and the paths it writes against
@@ -2086,7 +2266,7 @@ export class GitService implements IGitService {
           const changedPaths = await this.prChangedPathsAt(
             cwd,
             `origin/${targetBranch}`,
-            `origin/${sourceBranch}`,
+            sourceTip,
             { forAccessCheck: true },
           );
           await opts.authorize({ sha: targetSha.trim(), changedPaths });
@@ -2095,7 +2275,7 @@ export class GitService implements IGitService {
         // `--no-commit --no-ff` so we author the merge commit as the human and
         // never fast-forward past the merge record.
         try {
-          await this.git(cwd, ['merge', '--no-commit', '--no-ff', `origin/${sourceBranch}`]);
+          await this.git(cwd, ['merge', '--no-commit', '--no-ff', sourceTip]);
         } catch (err) {
           const paths = await this.conflictedPaths(cwd);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
@@ -2124,8 +2304,10 @@ export class GitService implements IGitService {
         // finalize the row (a transient database fault between the push and the
         // update) has one, and it is the only place its file list survives — so
         // it is looked for rather than assumed absent (cubic P2 on #347).
-        const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only']);
-        if (staged.trim() === '') {
+        // NUL-delimited and with renames as a delete plus an add, so every path
+        // the merge touches is named verbatim, both ends of a rename included.
+        const { stdout: staged } = await this.git(cwd, ['diff', '--cached', '--name-only', '--no-renames', '-z']);
+        if (staged === '') {
           const { stdout: sha } = await this.git(cwd, ['rev-parse', 'HEAD']);
           await this.git(cwd, ['merge', '--abort']).catch(() => undefined);
           const own =
@@ -2145,6 +2327,10 @@ export class GitService implements IGitService {
 
         try {
           await this.git(cwd, ['push', 'origin', `HEAD:refs/heads/${targetBranch}`]);
+          // This merge commit is provisional until its push lands: a rejected
+          // push resets the checkout and the next attempt commits anew. So it
+          // is reported here, once, for the attempt that landed on the target.
+          this.landed(baseWorkspaceId, targetBranch, user, staged.split('\0').filter(Boolean));
           this.accessControl?.invalidate(baseWorkspaceId);
           // A commit of this request's own, with the subject the reader verifies.
           return { kind: 'merged' as const, sha: sha.trim(), mergeCommit: sha.trim() };
@@ -2280,12 +2466,25 @@ export class GitService implements IGitService {
   }
 
   /**
-   * Paths changed in commits that exist locally but not on the upstream ref —
-   * i.e. exactly what the next `push` would publish. Falls back to "every
-   * commit not reachable from any remote ref" when there's no upstream yet
-   * (first push).
+   * The commits that exist locally but not on the upstream ref — exactly what
+   * the next `push` would publish — each with its author and the files it
+   * changed, by their real paths (see `parseUnpushedLog`). Falls back to
+   * "every commit not reachable from any remote ref" when there's no upstream
+   * yet (first push).
+   *
+   * Walked along the first parent, with a merge's changes taken against its
+   * first parent: a merge brings in another branch's commits, and what it
+   * publishes is what its merger chose to bring in, so the merge, by its
+   * merger, answers for them. Walking into the merged branch instead would
+   * hold a draft's authors to the protected branch's rules, which a merge
+   * through review exists to spare them.
+   *
+   * `--no-renames`: with rename detection `--name-only` prints a moved file
+   * under its new path alone, and the path it was removed from would go
+   * unchecked. A move is a removal there and an addition here, and both are
+   * listed.
    */
-  private async unpushedTouchedPaths(cwd: string): Promise<string[]> {
+  private async unpushedCommits(cwd: string): Promise<UnpushedCommit[]> {
     let range: string[];
     try {
       await this.git(cwd, ['rev-parse', '--verify', '--quiet', '@{u}']);
@@ -2294,14 +2493,93 @@ export class GitService implements IGitService {
       range = ['HEAD', '--not', '--remotes'];
     }
     const { stdout } = await this.git(cwd, [
-      'log', '--name-only', '--pretty=format:', ...range,
+      'log', '-z', '-m', '--first-parent', '--no-renames', '--name-only', '--format=%x00%H%x00%ae', ...range,
     ]);
-    const set = new Set<string>();
-    for (const line of stdout.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed) set.add(trimmed);
+    return parseUnpushedLog(stdout);
+  }
+
+  /**
+   * The paths of `paths` that `email` may not write at `ref`, in the order
+   * given. None when the ref holds no access rules yet (bootstrap:
+   * default-allow, as `assertCanWriteAtRef` reads it).
+   */
+  private async unwritableAtRef(workspaceId: string, ref: string, email: string, paths: string[]): Promise<string[]> {
+    if (!this.accessControl || paths.length === 0) return [];
+    const result = await this.accessControl.canWriteBatchAtRef(workspaceId, ref, email, paths);
+    return result ? paths.filter((p) => !result.get(p)) : [];
+  }
+
+  /**
+   * The protected-branch push gate. A file an unpushed commit changed may
+   * land when the user who authored the commit may write it, or the pusher
+   * may:
+   *
+   *   - the author, so a push that carries a colleague's earlier commits
+   *     (stranded by a failed push of theirs) lands when THEY could write
+   *     what they changed, whatever the pusher's own access to those files;
+   *   - the pusher, so a commit nobody else can vouch for (its author lost
+   *     the right since, or never had it) does not block the branch for
+   *     everyone: a person who may write the file themselves shares it by
+   *     pushing, as they could by saving it.
+   *
+   * The pusher's own commits, and a commit whose author the platform cannot
+   * match to a user, are held to the pusher's access alone. Access is
+   * resolved at `origin/<branch>`, the published state, as before.
+   *
+   * A refusal is a `PushAccessRefusedError`: the platform refused, not the
+   * repository host, and it names the file and its writers when the pusher
+   * may read that file.
+   */
+  private async assertUnpushedCommitsMayLand(
+    workspaceId: string,
+    cwd: string,
+    branch: string,
+    user: AuthUser,
+  ): Promise<void> {
+    if (!this.accessControl) return;
+    const ref = `origin/${branch}`;
+    const pusher = canonicalEmail(user.email);
+    const matched = new Map<string, boolean>();
+    // Keyed by the canonical address of whoever a commit is judged as, so
+    // one person's commits under two spellings are one check.
+    const judged = new Map<string, { email: string; paths: Set<string> }>();
+    for (const commit of await this.unpushedCommits(cwd)) {
+      if (commit.paths.length === 0) continue;
+      const author = canonicalEmail(commit.authorEmail);
+      let email = user.email;
+      if (author !== '' && author !== pusher) {
+        let isUser = matched.get(author);
+        if (isUser === undefined) {
+          isUser = this.commitAuthors
+            ? (await this.commitAuthors.findActiveAccountsByEmail([commit.authorEmail])).size > 0
+            : false;
+          matched.set(author, isUser);
+        }
+        if (isUser) email = commit.authorEmail;
+      }
+      const key = canonicalEmail(email);
+      const entry = judged.get(key) ?? { email, paths: new Set<string>() };
+      for (const p of commit.paths) entry.paths.add(p);
+      judged.set(key, entry);
     }
-    return [...set];
+    for (const [key, { email, paths }] of judged) {
+      let refusedPaths = await this.unwritableAtRef(workspaceId, ref, email, [...paths]);
+      // What a colleague may not write, the pusher may still carry when they
+      // may write it themselves.
+      if (key !== pusher) refusedPaths = await this.unwritableAtRef(workspaceId, ref, user.email, refusedPaths);
+      if (refusedPaths.length === 0) continue;
+      const refused = refusedPaths[0];
+      const eligible = await this.accessControl.eligibleWritersAtRef(workspaceId, ref, refused);
+      // Named only to a pusher who may read it: the commit may be someone
+      // else's, on a file the pusher cannot see. Null (no rules at the
+      // ref) reads as deny, as every caller of the at-ref reads treats it.
+      const readable = (await this.accessControl.canReadAtRef(workspaceId, ref, user.email, refused)) === true;
+      throw new PushAccessRefusedError(
+        branch,
+        { path: refused, eligibleRoles: eligible?.roles ?? [], eligibleUsers: eligible?.users ?? [] },
+        readable,
+      );
+    }
   }
 
 
@@ -4380,7 +4658,8 @@ export class GitService implements IGitService {
    * lossless round trip: every byte sequence that is not valid UTF-8 comes
    * back as U+FFFD and the file is ruined. A past version has to be delivered
    * byte for byte, so this reads through `cat-file --batch`, whose framing is
-   * in BYTES (`<oid> <type> <size>\n<size bytes>\n`) rather than characters.
+   * in BYTES (`<oid> <type> <size>\n<size bytes>\n`) rather than characters,
+   * with the one reader of that protocol (`catFileBatchBytes`).
    *
    * One invocation, and absence is a PROTOCOL answer (`<spec> missing`) rather
    * than a parsed error message — which also covers `<sha>^` of a root commit,
@@ -4398,31 +4677,14 @@ export class GitService implements IGitService {
   ): Promise<{ bytes: Buffer; blobId: string } | null> {
     // The spec has to be ONE line: the path is refused a control character
     // twice over before it gets here (at the route's normaliser and again at
-    // `assertValidRelativePath`), and this is the fence at the protocol —
+    // `assertValidRelativePath`), and the reader refuses one at the protocol —
     // `--batch` would otherwise read `<sha>:Docs/x.md\nzzz` as two object
     // names and answer about the first, under the gates of the second.
-    const spec = `${ref}:${repoRelativePath}`;
-    assertOneSpecPerLine([spec]);
-    const { stdout } = await this.gitBytes(cwd, ['cat-file', '--batch'], {
-      input: `${spec}\n`,
-    });
-    const nl = stdout.indexOf(0x0a);
-    if (nl < 0) throw new Error('unexpected end of git cat-file output');
-    // The spec may itself contain spaces (a KB file routinely does), hence the
-    // endsWith checks rather than a split — same protocol reading as the
-    // access resolver's `catFileBatch`.
-    const header = stdout.subarray(0, nl).toString('utf-8');
-    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) return null;
-    const [blobId, type, rawSize] = header.split(' ');
+    const [outcome] = await catFileBatchBytes(this.gitRunner, cwd, [`${ref}:${repoRelativePath}`]);
     // A tree here would be the per-file gate bypassed, and `assertNotTreeAtRef`
     // is what refuses it before this runs; anything else non-blob (a tag, a
     // commit) is not a file either. Nothing to serve in either case.
-    if (type !== 'blob' || blobId === undefined) return null;
-    const size = Number(rawSize);
-    if (!Number.isSafeInteger(size) || size < 0) {
-      throw new Error(`unexpected git cat-file header: ${header}`);
-    }
-    return { bytes: stdout.subarray(nl + 1, nl + 1 + size), blobId };
+    return outcome?.kind === 'blob' ? { bytes: outcome.bytes, blobId: outcome.objectId } : null;
   }
 
   /**
@@ -4651,27 +4913,6 @@ export class GitService implements IGitService {
   private async asRepositoryAdministrator<T>(cwd: string, run: () => Promise<T>): Promise<T> {
     const repository = (await this.workspaceService.repositoryOfCheckout?.(cwd)) ?? null;
     return repository ? repository.exclusive(run) : run();
-  }
-
-  /**
-   * {@link git}, with stdout as raw BYTES.
-   *
-   * A sibling rather than an `encoding` option on `git()` itself: every other
-   * caller in this service reads text, and the two return types (`string` vs
-   * `Buffer`) are not interchangeable at any call site. Same
-   * `GIT_LITERAL_PATHSPECS` and same runner deadline — the only difference is
-   * that the bytes are not decoded.
-   */
-  private gitBytes(
-    cwd: string,
-    args: string[],
-    opts?: Omit<GitRunOptions, 'encoding'>,
-  ): Promise<GitRunResult<Buffer>> {
-    return this.gitRunner.run(cwd, args, {
-      ...opts,
-      encoding: 'buffer',
-      env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
-    });
   }
 }
 

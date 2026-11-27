@@ -22,15 +22,15 @@ import {
   platformFolderRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
-import { FolderTooLargeError, type ReadTreeFilter, EntryExistsError, type WorkspaceService } from './workspace.service.js';
+import { FolderTooLargeError, type ArchiveLandingFor, type ReadTreeFilter, EntryExistsError, type WorkspaceService } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { KbContext } from '../../shared/kb-context.js';
 import type { AuthService } from '../auth/index.js';
-import type { IAccessControl } from '../access/index.js';
-import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable } from '../access-model/index.js';
+import { frontmatterHead, type IAccessControl } from '../access/index.js';
+import { canReadWorkspacePath, resolveReadableMap, toKbRelative, isRolesYamlPath, assertRolesYamlParsable, decidesListing, fencedHead } from '../access-model/index.js';
 import type { ICreatorAccess, IChangeReadGate } from '../access-model/index.js';
 import type { VersionControlEventBus } from '../version-control/index.js';
-import { PathTraversalError, VersionControlDomainError } from '../../shared/domain-errors.js';
+import { PathTraversalError, PushNeedsAgentResolutionError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { normalizeWorkspacePath } from '../kb-fs/index.js';
@@ -38,7 +38,7 @@ import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/index.js'; // Express Request augmentation
-import type { SkillSaveCheck } from './workspace.tools.js';
+import { archiveEntryJudge, type SkillSaveCheck } from './workspace.tools.js';
 import { MAX_UPLOAD_BYTES } from './upload-limits.js';
 import { OCTET_STREAM, rawExtensionOf, rawMimeFor } from './file-readers/raw-mime.js';
 
@@ -70,12 +70,13 @@ function requestPath(value: unknown): string | null {
  * workspace" ownership check.
  *
  * Every file-mutating route on this surface — `PUT /file`, `DELETE /file`,
- * `PATCH /file` (move), `POST /directory`, `POST /upload`, `POST /unzip` —
- * routes its write through `withLock(path, op)`: acquire the per-file
- * version-control lock, perform the op, then release. The release commits the
- * file as a one-file change attributed to the user and pushes it to origin,
- * exactly like the lock-aware filesystem the agent writes through. There
- * is no separate "share" step; save and share are fused.
+ * `PATCH /file` (move), `POST /directory`, `POST /upload` — routes its write
+ * through `withLock(path, op)`: acquire the per-file version-control lock,
+ * perform the op, then release. The release commits the file as a one-file
+ * change attributed to the user and pushes it to origin, exactly like the
+ * lock-aware filesystem the agent writes through. `POST /unzip` lands an
+ * archive's files through that filesystem's batch instead: every lock, then
+ * one commit. There is no separate "share" step; save and share are fused.
  */
 export function createWorkspaceRoutes(
   workspaceService: WorkspaceService,
@@ -90,12 +91,21 @@ export function createWorkspaceRoutes(
   /** Save-time skill check: `PUT /file` on a SKILL.md answers with `warnings` (advisory, never a refusal). */
   skillSaveCheck?: SkillSaveCheck,
   /**
-   * Read-before-write, asked ahead of the lock where a route puts bytes on
-   * disk BEFORE it locks them (archive extraction). Every other route's writes
-   * meet the same gate inside `acquireLock`. Optional so route harnesses that
-   * exercise other behaviour need not wire it.
+   * Read-before-write, asked ahead of the lock by archive extraction: of the
+   * destination, and of each entry, so an entry it refuses is skipped rather
+   * than refusing the whole batch inside its locking. `acquireLock` asks the
+   * same gate of every write lock it grants, a platform-file restore aside.
+   * Optional so route harnesses that exercise other behaviour need not wire
+   * it.
    */
   changeGate?: IChangeReadGate,
+  /**
+   * Where `POST /unzip` lands an archive: the person's lock-aware filesystem
+   * on that workspace, made by the composition root. Optional so route
+   * harnesses that exercise other behaviour need not wire it; without it the
+   * route answers 501 and extracts nothing.
+   */
+  archiveLandingFor?: ArchiveLandingFor,
 ): express.Router {
   const router = express.Router();
   const { kbDirName } = kb;
@@ -277,9 +287,22 @@ export function createWorkspaceRoutes(
     // run the op without touching the lock and let the caller release
     // it on their own schedule (which is what fuses commit + push into
     // one atomic step the user explicitly triggered).
+    // What a listing depends on at this path, before the op and after it: an
+    // op that only edited a file that was already there leaves every open
+    // file explorer's tree right, and the events below say so. `before` is
+    // read once the caller holds the lock, on both paths below: read ahead of
+    // it, another holder's save could land in between, and an op that put
+    // back what was there before that save would be announced as changing
+    // nothing.
+    const mark = async (before: string | null): Promise<{ listingUnchanged?: true }> => {
+      if (before === null || decidesListing(toKbRelative(targetPath, kbDirName) ?? targetPath, kb.layout.pluginsDir)) return {};
+      return (await listingProbe(workspaceId, targetPath)) === before ? { listingUnchanged: true } : {};
+    };
     const existing = await versionControlService.getLock(workspaceId, branch, targetPath);
     if (existing && existing.holderUserId === user.id) {
+      const before = await listingProbe(workspaceId, targetPath);
       const result = await op();
+      const listing = await mark(before);
       // Disk write landed but no commit yet (caller will release later,
       // at which point releaseLock fires its own `file-changed` with a
       // real `newSha`). Emit a null-sha file-changed now so any other
@@ -293,11 +316,12 @@ export function createWorkspaceRoutes(
         newSha: null,
         byUserId: user.id,
         byUserName: user.name,
+        ...listing,
       });
       // Also signal "the file tree may have changed" — covers create /
       // delete / rename through this same path so sidebars refresh even
       // when no specific open tab matches the path.
-      eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch, ...listing });
       return result;
     }
     const acquired = await versionControlService.acquireLock(workspaceId, branch, targetPath, user, {
@@ -334,6 +358,7 @@ export function createWorkspaceRoutes(
     //     return success once disk + lock + enqueue are all done —
     //     the user-visible "save = share" guarantee is satisfied by
     //     the shared per-branch workspace, not by waiting on git.
+    const before = await listingProbe(workspaceId, targetPath);
     let opSucceeded = false;
     let result: T;
     try {
@@ -361,6 +386,8 @@ export function createWorkspaceRoutes(
       // explicit branch makes the intent obvious to readers.
       throw new Error('unreachable: opSucceeded false after try');
     }
+    // Read before the release: after it another writer may hold the path.
+    const listing = await mark(before);
     await versionControlService.releaseLock(workspaceId, branch, targetPath, user);
     // Signal sidebar / explorer to refresh even when no open tab matched
     // the changed path (e.g. someone else just created a new file).
@@ -372,9 +399,29 @@ export function createWorkspaceRoutes(
     // single `fs-tree-changed` after the loop, cutting ~30 redundant tree
     // refreshes down to 1 for a 30-file folder delete.
     if (!options?.skipFsTreeEvent) {
-      eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
+      eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch, ...listing });
     }
     return result;
+  }
+
+  /**
+   * What a listing depends on at `targetPath` as it is on disk now: `null`
+   * when there is no file there (nothing, a folder, a link, a path outside
+   * the repository), otherwise the file's leading `---` block, read as the
+   * access gate reads a file's own entries: for every kind of file, not only
+   * the kinds whose entries the memo keeps, because a `.txt` or `.csv` that
+   * opens with one is enforced too. Two equal answers around a write mean the
+   * write added and removed nothing and changed nobody's access through this
+   * file's own entries.
+   */
+  async function listingProbe(workspaceId: string, targetPath: string): Promise<string | null> {
+    try {
+      const absolute = await absoluteInRepo(workspaceId, targetPath);
+      if (!(await fs.lstat(absolute)).isFile()) return null;
+      return fencedHead(await frontmatterHead(absolute));
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1493,45 +1540,40 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
-      // The destination is asked about BEFORE anything is extracted: this is
-      // the one route whose bytes land on disk ahead of the lock, so the
-      // lock's read gate would find them already there. Same verdict, same
-      // refusal, one step earlier. A destination inside a folder the caller
-      // cannot read is refused whole; a folder they can read — or a new
-      // folder directly under a root — extracts, and each file then meets
-      // the lock as any other write does.
-      //
-      // A new root folder gets its creator's access.md seeded first, as
-      // every other creation route does: extraction would otherwise bring
-      // the folder into existence itself, and the first file's lock would
-      // then find an existing folder the caller cannot read.
-      // Both spellings are already repository paths, so the inferred parent is
-      // one too — the same destination the service resolves.
-      const destDir = destination ?? path.posix.dirname(zipPath);
-      const plan = await creatorAccess.planForCreate(id, user, destDir, 'dir');
-      if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-      await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
-      // Extract first (all files land on disk), then sweep each extracted
-      // file through a lock+release so it commits + pushes as its own
-      // one-file change. Per-file commits mean the validator runs N times
-      // on large archives — fine for the typical "few files" drop, slow
-      // but correct for a 100-file zip. If a single file's release fails
-      // (e.g. validator 422), the loop stops there so the user sees the
-      // first concrete problem rather than a list of N similar failures.
-      //
-      // Each entry is asked about before it is written, through the same
-      // gate: an archive can carry a path into a nested folder the caller
-      // cannot read, which the destination check above cannot see. Such an
-      // entry is skipped and reported, never written and then refused.
-      const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
-        await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
-      });
-      for (const relFile of result.extracted) {
-        // The file is already on disk from the unzip; the release commits +
-        // pushes it.
-        await withLock(id, user, relFile, async () => undefined);
+      const branch = branchForWorkspaceId(id);
+      // The archive is judged by the judge the agent `unzip` tool hands the
+      // extraction (`archiveEntryJudge`, without the agent's own write hook
+      // and policy, which a person in the app never meets): whether the
+      // person may read the archive, before a byte of it is read; whether
+      // they may change the folder it extracts into, before that folder is
+      // looked at; the path rules and the platform's rule files before
+      // anything is written; and each file's write rule and read-before-write
+      // at its lock (an archive can carry a path into a nested folder the
+      // caller cannot read, which the destination's check cannot see). The files that pass go through
+      // the lock-aware filesystem's batch as this person: every lock, then
+      // one commit. A path whose lock is held refuses the whole extraction,
+      // with nothing written. Where the creator's read grant is planned for a
+      // new folder (`creatorAccess`), the batch lands it in that same commit.
+      if (!archiveLandingFor) {
+        res.status(501).json({ error: 'Extracting an archive is not set up on this server.' });
+        return;
       }
-      res.json(result);
+      const landing = await archiveLandingFor(id, branch, user);
+      try {
+        const result = await workspaceService.unzipFile(
+          id,
+          zipPath,
+          destination,
+          archiveEntryJudge({ accessControl, kb, changeGate }, branch, user.email),
+          landing,
+        );
+        eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+        res.json(result);
+      } catch (err) {
+        // Committed, and only the sharing is pending: the tree changed.
+        if (err instanceof PushNeedsAgentResolutionError) eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+        throw err;
+      }
     } catch (err) {
       sendError(res, err);
     }

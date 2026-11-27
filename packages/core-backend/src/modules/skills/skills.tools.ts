@@ -3,7 +3,7 @@ import { callLine } from '@bevel-software/platform-mcp-core';
 import type { IToolRegistry, JsonSchema, UtcpTool } from '../tool-registry/index.js';
 import { TOOL_DESCRIPTION_CAP, GUIDE_FIRST_SENTENCE } from '../tool-registry/index.js';
 import { ToolError, type ToolContext, toolDef, bodyEnvelope, declareRouteTool, CAN_WRITE_CLAUSE, defaultBranchWriteVerdicts, type DefaultBranchWriteDeps } from '../tool-helpers/index.js';
-import type { ToolHandlerFactory } from '../tool-helpers/index.js';
+import type { HostedRead, ToolHandlerFactory } from '../tool-helpers/index.js';
 import type { ISkillService, SkillScope } from './skills.contract.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/index.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
@@ -85,7 +85,7 @@ export function registerSkillsTools(
    * sends the agent to a change request rather than a direct write.
    */
   writeVerdicts?: DefaultBranchWriteDeps,
-): void {
+): SkillReads {
   /**
    * Whether the caller may commit each repo-relative path directly on the
    * default branch — one batch per call, whichever branch was read (see
@@ -147,10 +147,10 @@ export function registerSkillsTools(
   // Both skill routes are also how prompts are read (`discovery`): a
   // connection made as an agent configuration that names skills has them as
   // prompts even when its `platformTools` does not offer these two tools.
-  router.post(
-    '/agent/tools/list_skills',
-    toolAuth,
-    toolHandler(async (args, ctx: ToolContext) => {
+  const listSkills: HostedRead = {
+    name: 'list_skills',
+    options: { discovery: true },
+    handler: async (args, ctx: ToolContext) => {
       const within = ctx.connectionScope?.skillFilter();
       const skills = await skillService.listSkills(ctx.user.email, {
         branch: branchArg(args),
@@ -161,13 +161,13 @@ export function registerSkillsTools(
       // onto a COPY: the summaries may be the catalog shared across users.
       const verdicts = await verdictsFor(ctx, skills.map(skillMdOf));
       return { skills: skills.map((s) => ({ ...s, canWrite: verdicts.get(skillMdOf(s)) === true })) };
-    }, { discovery: true }),
-  );
+    },
+  };
 
-  router.post(
-    '/agent/tools/get_skill',
-    toolAuth,
-    toolHandler(async (args, ctx: ToolContext) => {
+  const getSkill: HostedRead = {
+    name: 'get_skill',
+    options: { discovery: true },
+    handler: async (args, ctx: ToolContext) => {
       const name = typeof args.name === 'string' ? args.name : '';
       const file = typeof args.file === 'string' ? args.file : undefined;
       const version = typeof args.version === 'string' ? args.version : undefined;
@@ -209,8 +209,23 @@ export function registerSkillsTools(
       };
       if (!allowedTools) return { ...result, skill };
       return { ...result, skill, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
-    }, { discovery: true }),
-  );
+    },
+  };
+
+  router.post('/agent/tools/list_skills', toolAuth, toolHandler(listSkills.handler, listSkills.options));
+  router.post('/agent/tools/get_skill', toolAuth, toolHandler(getSkill.handler, getSkill.options));
+  return { listSkills, getSkill };
+}
+
+/**
+ * The two skill reads as their routes are mounted, for a caller in this
+ * process: the hosted MCP endpoint reads the skills behind its prompts by
+ * calling these as functions (`createInProcessToolCaller`), not by sending the
+ * server a request.
+ */
+export interface SkillReads {
+  listSkills: HostedRead;
+  getSkill: HostedRead;
 }
 
 /** The repo-relative `SKILL.md` of a skill, which `list_skills` judges it by. */

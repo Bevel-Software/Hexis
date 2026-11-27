@@ -9,6 +9,7 @@ import {
   McpError,
   ErrorCode,
   type CallToolResult,
+  type ListToolsResult,
   type Tool as McpTool,
   type Prompt,
   type GetPromptResult,
@@ -24,7 +25,6 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import {
   codeModeMetaTools,
   META_TOOL_NAMES,
-  RETIRED_TOOL_NAMES,
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
@@ -33,7 +33,8 @@ import {
   flattenManualTool,
   toListedTool,
   toolError,
-  retiredToolMessage,
+  installDownstreamToolErrors,
+  EXCLUDE_TOOLS_KEY,
   seedBevelHostedManualVars,
   printable,
   skillPromptText,
@@ -48,7 +49,7 @@ import {
   type SkillSummary,
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
-import type { HexisMcpConfig } from './config.js';
+import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 import {
   callKbTool,
   ConnectionKeyRejectedError,
@@ -72,6 +73,12 @@ import {
   resetLocalVariableResolver,
 } from './local-variables.js';
 import { closeRenewal } from './renewal.js';
+
+// A downstream MCP server's `isError` must reach our caller as a failed call,
+// not as a success whose text is the error: `@utcp/mcp` drops the flag when it
+// unwraps a result. Here, because it wraps the `mcp` protocol the import of
+// `@utcp/mcp` above registers, and before any client is built.
+installDownstreamToolErrors();
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
 const SERVER_NAME = 'hexis-mcp';
@@ -196,16 +203,9 @@ export async function discoverTools(
 
 /**
  * The names this server never serves from the deployment it proxies: the
- * meta-tools (it serves its own trio, over the merged registry) and the
- * retired tools (no agent surface serves those at all).
- *
- * A retired name is in here because this server can be pointed at an OLDER
- * deployment that still advertises it. Discovery would then register a working
- * copy, and `tools.find` would resolve and dispatch it — an agent merging a
- * change request through a stale deployment, which is exactly what removing
- * the tool was for. Purged from the registry so no chain can reach it either.
+ * meta-tools (it serves its own trio, over the merged registry).
  */
-const UNSERVED_REMOTE_TOOLS: ReadonlySet<string> = new Set([...META_TOOL_NAMES, ...RETIRED_TOOL_NAMES]);
+const UNSERVED_REMOTE_TOOLS: ReadonlySet<string> = META_TOOL_NAMES;
 
 /**
  * Purge the deployment's copies of those names from the registry. Runs at
@@ -232,8 +232,7 @@ async function removeUnservedRemoteTools(client: CodeModeUtcpClient): Promise<vo
 /**
  * Belt to `discoverTools`'s registry removal: whatever a repository
  * implementation declined to remove must still never reach the MCP listing,
- * where a remote `list_tools` would shadow — or duplicate — the local trio,
- * and where a stale deployment's retired tool would be listed as callable.
+ * where a remote `list_tools` would shadow — or duplicate — the local trio.
  */
 export function withoutRemoteMetaTools(tools: ProxiedTool[]): ProxiedTool[] {
   return tools.filter((t) => !UNSERVED_REMOTE_TOOLS.has(t.mcpName));
@@ -364,13 +363,23 @@ async function prepareLocalManuals(
         console.error(`[hexis-mcp] materialized plugin "${folder}" at ${plugin.pluginRoot}`);
       }
       for (const name of stdioNames) {
-        const prepared = await prepareStdioSpec(servers[name]!, plugin);
-        servers[name] = { ...prepared, transport: 'stdio' };
+        const entry = servers[name]!;
+        const prepared = await prepareStdioSpec(entry, plugin);
+        // The prepared spec is all that reaches the protocol, plus the one
+        // key registration reads: the tools the server leaves out.
+        const leftOut = (entry as unknown as Record<string, unknown>)[EXCLUDE_TOOLS_KEY];
+        servers[name] = {
+          ...prepared,
+          transport: 'stdio',
+          ...(leftOut !== undefined ? { [EXCLUDE_TOOLS_KEY]: leftOut } : {}),
+        };
       }
       out.push(template);
     } catch (err) {
       // A dead key is not one broken server: it fails startup in its own words.
-      if (err instanceof ConnectionKeyRejectedError) throw err;
+      // Nor is a sign-in refused for good: it fails discovery, which leaves
+      // the saying of it to renewal.ts.
+      if (err instanceof ConnectionKeyRejectedError || err instanceof SignInRefusedError) throw err;
       console.error(
         `[hexis-mcp] skipping local server "${String(template.name)}": ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -428,6 +437,18 @@ export function discoveryNoticeTool(reason: string): McpTool {
 }
 
 /**
+ * The one-tool listing once the workspace has refused this process's sign-in
+ * for good (OAuth mode, see renewal.ts): the same notice tool, saying that
+ * the tools DID load and what brings them back.
+ */
+function signInRefusedNoticeTool(sentence: string): McpTool {
+  return {
+    ...discoveryNoticeTool(sentence),
+    description: `hexis-mcp can no longer reach this workspace: ${sentence} The same sentence is on its stderr log.`,
+  };
+}
+
+/**
  * Stand up the local MCP server — ANSWER FIRST, DISCOVER AFTER.
  *
  * What comes back is a server that can be connected and can answer
@@ -480,6 +501,24 @@ export async function createHexisMcpServer(
     catalogCheck?: false | { minIntervalMs?: number };
   } = {},
 ): Promise<HexisMcpHandle> {
+  /**
+   * SIGN-IN REFUSED FOR GOOD (OAuth mode). renewal.ts calls this once, when
+   * the workspace refused the refresh and the store held nothing newer: from
+   * then on every listing is the notice and every call answers the sentence.
+   * Installed FIRST, before the handshake's own reads, because any read this
+   * server makes may be the one that meets the refusal, and renewal.ts says
+   * it to the listener only that once.
+   */
+  let signInRefused: string | null = null;
+  let announceSignInRefused = (): void => {};
+  // An embedding host's own listener is told as well, never replaced.
+  const hostSignInEnded = config.onSignInEnded;
+  const reportSignInRefused = (sentence: string): void => {
+    signInRefused = sentence;
+    announceSignInRefused();
+    hostSignInEnded?.(sentence);
+  };
+  if (config.renewConnectionKey) config.onSignInEnded = reportSignInRefused;
   const {
     mcpUrl,
     agentInstructions,
@@ -731,6 +770,12 @@ export async function createHexisMcpServer(
       noteManualReregistered(live, REMOTE_MANUAL_NAME);
       console.error('[hexis-mcp] remote manual re-registered with the renewed credential.');
     });
+  };
+  // From here a refused sign-in also tells the client the list changed, so
+  // it re-lists and shows the notice.
+  announceSignInRefused = (): void => {
+    if (closed) return;
+    void server?.sendToolListChanged().catch(() => {});
   };
   if (config.renewConnectionKey) {
     config.onConnectionKeyRenewed = swapRemoteCredential;
@@ -1045,11 +1090,14 @@ export async function createHexisMcpServer(
       // newline in it would start a line of its own in the operator log and an
       // ANSI escape would paint their terminal. The CLIENT-facing copies below
       // keep the reason verbatim — they travel inside a JSON-RPC string, where
-      // it is already data rather than a line.
-      console.error(
-        `[hexis-mcp] tool discovery failed: ${printable(discoveryError)} ` +
-          'The server stays connected and answers tools/list with this notice; restart it once the cause is fixed.',
-      );
+      // it is already data rather than a line. A sign-in refused for good
+      // mid-discovery is not said here: renewal.ts said it once already.
+      if (!(err instanceof SignInRefusedError)) {
+        console.error(
+          `[hexis-mcp] tool discovery failed: ${printable(discoveryError)} ` +
+            'The server stays connected and answers tools/list with this notice; restart it once the cause is fixed.',
+        );
+      }
       // Whatever got built before the failure — including any stdio children
       // already spawned — goes now. The SDK server does not: it is how the
       // client learns any of this.
@@ -1081,6 +1129,9 @@ export async function createHexisMcpServer(
     closeRenewal(config);
     if (config.onConnectionKeyRenewed === swapRemoteCredential) {
       config.onConnectionKeyRenewed = undefined;
+    }
+    if (config.onSignInEnded === reportSignInRefused) {
+      config.onSignInEnded = hostSignInEnded;
     }
     // Discovery now runs in the BACKGROUND, so teardown can land in the
     // middle of it — mid-download, mid-spawn. `closed` is already true, so
@@ -1146,7 +1197,17 @@ export async function createHexisMcpServer(
       },
     );
 
+    // A refused sign-in decides every answer the listing gives: any read it
+    // makes — discovery, the catalog check, the tool hints — may be the one
+    // that met the refusal. Applied at each return rather than by awaiting
+    // the listing from a wrapper, whose extra tick would let a closing
+    // transport answer a parked listing first (see the shutdown guard below).
+    const answered = (listing: ListToolsResult): ListToolsResult =>
+      signInRefused !== null ? { tools: [signInRefusedNoticeTool(signInRefused)] } : listing;
+
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+      // Before anything that could ask the workspace: nothing is left to ask it with.
+      if (signInRefused !== null) return answered({ tools: [] });
       await ready;
       // A listing is the one moment a stale toolset is answered out loud, so
       // the check is AWAITED here: the list handed back is the current one, a
@@ -1161,11 +1222,13 @@ export async function createHexisMcpServer(
       // The failure goes IN the listing, not into an empty one: an empty
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
-      if (discoveryError !== null) return { tools: [discoveryNoticeTool(discoveryError)] };
+      if (discoveryError !== null) return answered({ tools: [discoveryNoticeTool(discoveryError)] });
       // A connection whose agent configuration cannot be used loads NOTHING — not
       // Everything — and the one sentence saying why rides the listing's
       // `_meta`, as it does on the hosted endpoint (the handshake carries it too).
-      if (connection?.unavailable) return { tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } };
+      if (connection?.unavailable) {
+        return answered({ tools: [], _meta: { [CONNECTION_META_KEY]: connection.unavailable } });
+      }
       // Shutdown can land DURING discovery: every phase boundary then returns
       // early, which is a clean return — no error, and `tools` still empty.
       // Answering that with an empty listing would show the reader exactly
@@ -1176,8 +1239,9 @@ export async function createHexisMcpServer(
       // The hints are read per listing, so an admin's change on the Tools page
       // is in the very next one (see `fetchToolHints`) — from a deployment
       // that serves them; an older one keeps the conservative false default.
+      // Not once the sign-in is refused: the answer is the notice regardless.
       let listedHints: Record<string, boolean> = {};
-      if (toolHintsAdvertised) {
+      if (toolHintsAdvertised && signInRefused === null) {
         const read = ++hintReadsStarted;
         listedHints = await fetchToolHints(config, hints);
         if (read > hintReadCached) {
@@ -1186,7 +1250,7 @@ export async function createHexisMcpServer(
         }
       }
       if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
-      return { tools: listedTools(tools, apps.tools, listedHints) };
+      return answered({ tools: listedTools(tools, apps.tools, listedHints) });
     });
 
     // The deployment's MCP App views, served from here so a host connected
@@ -1214,6 +1278,7 @@ export async function createHexisMcpServer(
       // must not be told it does not exist because the catalog is still
       // arriving. (After the first list this is already settled.)
       await ready;
+      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       if (discoveryError !== null) {
         throw new McpError(
           ErrorCode.InternalError,
@@ -1227,6 +1292,8 @@ export async function createHexisMcpServer(
       // the manual between its deregister and its register, where a repository
       // lookup finds nothing.
       while (reregisterInProgress) await reregisterInProgress;
+      // The sign-in may have ended while this call waited.
+      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       // Shutdown can land while a call waits here, and `shutdown` waits only
       // for the re-registration, not for callers parked behind it. Dispatching
       // now would run against a client being torn down, so the caller gets the
@@ -1242,11 +1309,6 @@ export async function createHexisMcpServer(
           // returns a truncation notice instead of a ref that resolves nowhere.
           return await dispatchMetaTool(live, name, request.params.arguments ?? {});
         }
-        // Before the lookup, never after it: pointed at an older deployment
-        // that still advertises a retired tool, a discovered copy would
-        // otherwise be found and dispatched — the removed behaviour, performed.
-        const retired = retiredToolMessage(name);
-        if (retired) return toolError(retired);
         const tool = tools.find((t) => t.mcpName === name);
         // On a narrowed connection, a tool off the surface is one its agent
         // does not load: refused by name and agent, never "unknown" — the tool

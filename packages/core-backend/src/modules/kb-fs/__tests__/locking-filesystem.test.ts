@@ -4,13 +4,9 @@ import path from 'node:path';
 import os from 'node:os';
 import type { AuthUser, IVersionControlService } from '@bevel-software/platform-shared';
 import { LocalFilesystem } from '@mastra/core/workspace';
-import { LockingFilesystem } from '../locking-filesystem.js';
+import { LockingFilesystem, PathHeldError } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
-import {
-  makeAgentRolesYamlWriteValidator,
-  RolesYamlInvalidError,
-  RolesYamlNewRoleError,
-} from '../../access-model/roles-yaml-guard.js';
+import { makeAgentRolesYamlWriteValidator } from '../../access-model/index.js';
 
 /** The clone folder at the workspace root: every path the filesystem mutates lives under it. */
 const KB = 'knowledge-base';
@@ -22,23 +18,32 @@ const USER: AuthUser = {
 };
 
 function makeVersionControl(): IVersionControlService {
+  const acquireLock = vi.fn().mockResolvedValue({
+    acquired: true,
+    lock: {
+      branch: 'feat',
+      path: 'Foo.md',
+      holderUserId: 'user-1',
+      holderName: 'Alice',
+      acquiredAt: '',
+      lastHeartbeatAt: '',
+      expiresAt: '',
+    },
+  });
   return {
-    acquireLock: vi.fn().mockResolvedValue({
-      acquired: true,
-      lock: {
-        branch: 'feat',
-        path: 'Foo.md',
-        holderUserId: 'user-1',
-        holderName: 'Alice',
-        acquiredAt: '',
-        lastHeartbeatAt: '',
-        expiresAt: '',
-      },
-    }),
+    acquireLock,
     releaseLock: vi.fn().mockResolvedValue(null),
     releaseLockNoCommit: vi.fn().mockResolvedValue(undefined),
     releaseLockUntouched: vi.fn().mockResolvedValue(undefined),
-    heartbeatLock: vi.fn(),
+    // A renewal or an ownership check answers the lock the path's last acquire
+    // granted, as the lock service answers the lock its holder still holds.
+    heartbeatLock: vi.fn(async (_w: string, _b: string, p: string) => {
+      const calls = acquireLock.mock.calls;
+      for (let i = calls.length - 1; i >= 0; i--) {
+        if (calls[i]![2] === p) return ((await acquireLock.mock.results[i]!.value) as { lock?: unknown }).lock ?? {};
+      }
+      return {};
+    }),
     getLock: vi.fn(),
     commitFileWhileLocked: vi.fn(),
     commitChanges: vi.fn().mockResolvedValue({}),
@@ -179,9 +184,10 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
         { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
       );
 
-      await expect(fsLayer.writeFile('knowledge-base/Locked.md', 'x')).rejects.toThrow(
-        /Skipped editing "knowledge-base\/Locked\.md" — locked by Bob/,
-      );
+      const err = await fsLayer.writeFile('knowledge-base/Locked.md', 'x').catch((e: unknown) => e);
+      expect((err as Error).message).toMatch(/Skipped editing "knowledge-base\/Locked\.md" — locked by Bob/);
+      expect(err).toBeInstanceOf(PathHeldError);
+      expect(err).toMatchObject({ path: 'knowledge-base/Locked.md', holderName: 'Bob' });
       expect(versionControl.acquireLock).toHaveBeenCalledTimes(3);
       expect(versionControl.releaseLock).not.toHaveBeenCalled();
     },
@@ -213,7 +219,7 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
   });
 });
 
-describe('LockingFilesystem.writeFiles — batch with deletes + one batched change event', () => {
+describe('LockingFilesystem.writeFiles — batch with deletes', () => {
   let root: string;
 
   beforeEach(async () => {
@@ -224,12 +230,11 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('locks writes AND deletes, applies both, emits ONE batched onFilesChanged', async () => {
+  it('locks writes AND deletes, applies both, returns the commit', async () => {
     await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
     await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const versionControl = makeVersionControl();
-    const emitted: unknown[] = [];
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -237,7 +242,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -253,23 +257,14 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     expect(await fs.readFile(path.join(root, 'knowledge-base/Tools/new.tool'), 'utf-8')).toContain('http');
     await expect(fs.access(path.join(root, 'knowledge-base/Tools/old.tool'))).rejects.toThrow();
     expect(change).toEqual({});
-    // ONE event carrying the whole batch (sorted), attributed to the user.
-    expect(emitted).toHaveLength(1);
-    expect(emitted[0]).toMatchObject({
-      workspaceId: 'ws-feat',
-      branch: 'feat',
-      paths: ['knowledge-base/Tools/new.tool', 'knowledge-base/Tools/old.tool'],
-      byUser: USER,
-    });
   });
 
-  it('a failing commit releases every lock WITHOUT committing and emits nothing', async () => {
+  it('a failing commit releases every lock WITHOUT committing', async () => {
     await fs.mkdir(path.join(root, 'knowledge-base/Tools'), { recursive: true });
     await fs.writeFile(path.join(root, 'knowledge-base/Tools/old.tool'), '{}');
 
     const versionControl = makeVersionControl();
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('push exploded'));
-    const emitted: unknown[] = [];
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -277,7 +272,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -292,11 +286,10 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     // Every acquired path goes through the NO-COMMIT release — which is what
     // discards the uncommitted bytes (write reverted, delete restored) in the
     // real VersionControlService via git.discardPath. The committing release must
-    // never run, and no change event fires for a failed batch.
+    // never run.
     expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/new.tool', USER);
     expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/Tools/old.tool', USER);
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
-    expect(emitted).toHaveLength(0);
   });
 
   it('a POST-commit push failure releases WITH commit-on-release (arms the worker retry), never the discard path', async () => {
@@ -311,7 +304,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
     (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockRejectedValue(
       new PushNeedsAgentResolutionError('feat', 'knowledge-base/A.md', 'non-fast-forward', 'rebase failed'),
     );
-    const emitted: unknown[] = [];
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -319,7 +311,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
         workspaceId: 'ws-feat',
         branch: 'feat',
         user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
       },
     );
 
@@ -329,25 +320,6 @@ describe('LockingFilesystem.writeFiles — batch with deletes + one batched chan
 
     expect(versionControl.releaseLock).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
-    expect(emitted).toHaveLength(0);
-  });
-
-  it('emits nothing on a no-op commit (clean tree)', async () => {
-    const versionControl = makeVersionControl();
-    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-    const emitted: unknown[] = [];
-    const fsLayer = new LockingFilesystem(
-      { basePath: root, contained: true },
-      {
-        versionControl,
-        workspaceId: 'ws-feat',
-        branch: 'feat',
-        user: USER, kbDirName: KB,
-        fileChanges: { emit: (c: unknown) => emitted.push(c) } as never,
-      },
-    );
-    await fsLayer.writeFiles([{ path: 'knowledge-base/A.md', content: 'same' }], 'noop');
-    expect(emitted).toHaveLength(0);
   });
 });
 
@@ -535,6 +507,24 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/b.md', USER);
   });
 
+  it('writeFiles gives back the locks it holds, untouched, when taking a later one throws', async () => {
+    const versionControl = makeVersionControl();
+    const refusal = Object.assign(new Error('no write access'), { status: 403 });
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w, _b, p: string) => {
+      if (p === 'knowledge-base/b.md') throw refusal;
+      return { acquired: true, lock: { holderName: 'Alice' } };
+    });
+    await expect(
+      layer(versionControl).writeFiles(
+        [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }],
+        'batch',
+      ),
+    ).rejects.toBe(refusal);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/a.md', USER);
+    await expect(fs.access(path.join(root, 'knowledge-base/a.md'))).rejects.toThrow();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+  });
+
   it('a writeFiles check that drops EVERY write commits nothing and releases everything untouched', async () => {
     const versionControl = makeVersionControl();
     const change = await layer(versionControl).writeFiles(
@@ -567,6 +557,580 @@ describe('LockingFilesystem — the caller judges under the lock', () => {
     await expect(fs.access(path.join(root, 'knowledge-base/a.md'))).rejects.toThrow();
     expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(2);
+  });
+
+  /** A lock service whose gates refuse `refusedPath`'s lock. */
+  const gateRefusing = (refusedPath: string, refusal: Error): IVersionControlService => {
+    const versionControl = makeVersionControl();
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w, _b, p: string) => {
+      if (p === refusedPath) throw refusal;
+      return { acquired: true, lock: { holderUserId: 'user-1', holderName: 'Alice' } };
+    });
+    return versionControl;
+  };
+
+  it('writeFiles drops a write whose lock the gates refuse when `refused` takes it as that path\'s alone, and lands the rest', async () => {
+    const refusal = Object.assign(new Error('no write access'), { status: 403 });
+    const versionControl = gateRefusing('knowledge-base/b.md', refusal);
+    const asked: [string, unknown][] = [];
+
+    await layer(versionControl).writeFiles(
+      [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }, { path: 'knowledge-base/c.md', content: 'C' }],
+      'batch',
+      [],
+      undefined,
+      (p, err) => void asked.push([p, err]),
+    );
+
+    expect(asked).toEqual([['knowledge-base/b.md', refusal]]);
+    expect(versionControl.commitChanges).toHaveBeenCalledWith('ws-feat', USER, 'batch', ['knowledge-base/a.md', 'knowledge-base/c.md']);
+    await expect(fs.access(path.join(root, 'knowledge-base/b.md'))).rejects.toThrow();
+    expect(await fs.readFile(path.join(root, 'knowledge-base/c.md'), 'utf-8')).toBe('C');
+  });
+
+  it('a `refused` that throws refuses the whole batch with what it threw, untouched', async () => {
+    const versionControl = gateRefusing('knowledge-base/b.md', Object.assign(new Error('no write access'), { status: 403 }));
+    const verdict = new Error('the archive is refused');
+
+    await expect(
+      layer(versionControl).writeFiles(
+        [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }],
+        'batch',
+        [],
+        undefined,
+        () => {
+          throw verdict;
+        },
+      ),
+    ).rejects.toBe(verdict);
+
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/a.md', USER);
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, 'knowledge-base/a.md'))).rejects.toThrow();
+  });
+
+  it('a delete the gates refuse is never offered to `refused`: it refuses the batch', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/b.md'), 'B');
+    const refusal = Object.assign(new Error('no write access'), { status: 403 });
+    const versionControl = gateRefusing('knowledge-base/b.md', refusal);
+    const asked: string[] = [];
+
+    await expect(
+      layer(versionControl).writeFiles([{ path: 'knowledge-base/a.md', content: 'A' }], 'batch', ['knowledge-base/b.md'], undefined, (p) =>
+        void asked.push(p),
+      ),
+    ).rejects.toBe(refusal);
+
+    expect(asked).toEqual([]);
+    expect(await fs.readFile(path.join(root, 'knowledge-base/b.md'), 'utf-8')).toBe('B');
+  });
+
+  it('a write dropped at its lock takes its creator seed with it when no other write wants the seed', async () => {
+    const versionControl = gateRefusing('knowledge-base/KnowledgeBase/Mine/a.md', Object.assign(new Error('no'), { status: 403 }));
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      {
+        versionControl,
+        workspaceId: 'ws-feat',
+        branch: 'feat',
+        user: USER,
+        kbDirName: KB,
+        creatorAccess: {
+          planForCreate: async (_ws, _u, p: string) =>
+            p.startsWith('knowledge-base/KnowledgeBase/Mine/')
+              ? { kind: 'seed-access-md', wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md', apply: () => 'seed\n' }
+              : null,
+          noteAccessFileWritten: () => {},
+        },
+      },
+    );
+
+    await fsLayer.writeFiles(
+      [{ path: 'knowledge-base/KnowledgeBase/Mine/a.md', content: 'A' }, { path: 'knowledge-base/other.md', content: 'O' }],
+      'batch',
+      [],
+      undefined,
+      () => {},
+    );
+
+    const locked = (versionControl.acquireLock as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2]);
+    expect(locked).not.toContain('knowledge-base/KnowledgeBase/Mine/access.md');
+    expect(versionControl.commitChanges).toHaveBeenCalledWith('ws-feat', USER, 'batch', ['knowledge-base/other.md']);
+    await expect(fs.access(path.join(root, 'knowledge-base/KnowledgeBase/Mine'))).rejects.toThrow();
+  });
+});
+
+describe('LockingFilesystem.writeFiles — a batch longer than a lease', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const LEASE_MS = 60_000;
+
+  /**
+   * The lock service's leases, as the real one keeps them. An acquire takes a
+   * path that has no live lease, stamping it with the moment it was taken
+   * (`acquiredAt`) and a lease of `LEASE_MS`; a live lease is refused, the
+   * same user's own included. A heartbeat refreshes only a live lease held by
+   * the same user and answers that lock, its `acquiredAt` unchanged; anything
+   * else it refuses as not held (`lock-not-held`). A release ends the lease
+   * the user holds on the path, whoever took it. A path in `unreachable` gets
+   * a heartbeat failure (the lock service down). Its commit takes
+   * `commitMs`, a long commit and push, and each release `releaseMs`;
+   * `liveAtRelease` records, per release, whether the lease was still live.
+   */
+  function leasingVersionControl(commitMs: number, releaseMs = 0) {
+    const rows = new Map<string, { holder: AuthUser; acquiredAt: number; expiresAt: number }>();
+    const lockOf = (p: string) => {
+      const row = rows.get(p)!;
+      return {
+        branch: 'feat',
+        path: p,
+        holderUserId: row.holder.id,
+        holderName: row.holder.name,
+        acquiredAt: new Date(row.acquiredAt).toISOString(),
+        lastHeartbeatAt: new Date(Date.now()).toISOString(),
+        expiresAt: new Date(row.expiresAt).toISOString(),
+      };
+    };
+    /** An acquire by `holder`, as the lock service answers it: the batch's own, or anyone else's. */
+    const acquire = (p: string, holder: AuthUser) => {
+      const now = Date.now();
+      if ((rows.get(p)?.expiresAt ?? 0) > now) return { acquired: false, lock: lockOf(p) };
+      rows.set(p, { holder, acquiredAt: now, expiresAt: now + LEASE_MS });
+      return { acquired: true, lock: lockOf(p) };
+    };
+    const unreachable = new Set<string>();
+    const liveAtCommit: boolean[] = [];
+    let entered: () => void = () => {};
+    const committing = new Promise<void>((resolve) => (entered = resolve));
+    const liveAtRelease: [string, boolean][] = [];
+    const release = () =>
+      vi.fn(async (_w: string, _b: string, p: string, u: AuthUser) => {
+        if (releaseMs > 0) await new Promise((resolve) => setTimeout(resolve, releaseMs));
+        liveAtRelease.push([p, (rows.get(p)?.expiresAt ?? 0) > Date.now()]);
+        if (rows.get(p)?.holder.id === u.id) rows.delete(p);
+      });
+    const heartbeatLock = vi.fn(async (_w: string, _b: string, p: string, u: AuthUser) => {
+      if (unreachable.has(p)) throw new Error('connect ECONNREFUSED: the lock service is unreachable');
+      const now = Date.now();
+      const row = rows.get(p);
+      if (row === undefined || row.holder.id !== u.id || row.expiresAt <= now) {
+        throw new VersionControlValidationError(
+          `Cannot heartbeat lock on "${p}": not held by you (or no longer exists).`,
+          { kind: 'lock-not-held', branch: 'feat', path: p },
+        );
+      }
+      row.expiresAt = now + LEASE_MS;
+      return lockOf(p);
+    });
+    /** How many heartbeats had been sent when the commit began. */
+    const heartbeatsAtCommit: number[] = [];
+    const versionControl = {
+      acquireLock: vi.fn(async (_w: string, _b: string, p: string, u: AuthUser) => acquire(p, u)),
+      heartbeatLock,
+      commitChanges: vi.fn(async (_w: string, _u: AuthUser, _s: string, paths: string[]) => {
+        heartbeatsAtCommit.push(heartbeatLock.mock.calls.length);
+        entered();
+        if (commitMs > 0) await new Promise((resolve) => setTimeout(resolve, commitMs));
+        for (const p of paths) liveAtCommit.push((rows.get(p)?.expiresAt ?? 0) > Date.now());
+        return {};
+      }),
+      releaseLock: release(),
+      releaseLockNoCommit: release(),
+      releaseLockUntouched: release(),
+    } as unknown as IVersionControlService;
+    return { versionControl, liveAtCommit, liveAtRelease, committing, rows, acquire, unreachable, heartbeatsAtCommit };
+  }
+
+  /** A `check` that keeps the batch judging for `ms`, with `judging` resolved once it has begun. */
+  function slowCheck(ms: number) {
+    let begin: () => void = () => {};
+    const judging = new Promise<void>((resolve) => (begin = resolve));
+    const check = async <W,>(writes: readonly W[]): Promise<W[]> => {
+      begin();
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return [...writes];
+    };
+    return { check, judging };
+  }
+
+  /** Every release call, of any kind, naming `p`. */
+  function releasesOf(versionControl: IVersionControlService, p: string): unknown[][] {
+    return [versionControl.releaseLock, versionControl.releaseLockNoCommit, versionControl.releaseLockUntouched].flatMap(
+      (release) => (release as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[2] === p),
+    );
+  }
+
+  const A = 'knowledge-base/a.md';
+  const B = 'knowledge-base/b.md';
+  const BOB: AuthUser = { id: 'user-2', email: 'bob@example.com', name: 'Bob' };
+
+  it('renews every lock it holds until it gives them back, so a batch that outlasts the lease still holds its paths', async () => {
+    const { versionControl, liveAtCommit, committing } = leasingVersionControl(2.5 * LEASE_MS);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+
+    const landing = fsLayer.writeFiles(
+      [{ path: 'knowledge-base/a.md', content: 'A' }, { path: 'knowledge-base/b.md', content: 'B' }],
+      'batch',
+    );
+    await committing;
+    await vi.advanceTimersByTimeAsync(2.5 * LEASE_MS);
+    await landing;
+
+    expect(liveAtCommit).toEqual([true, true]);
+    // Given back, the locks are renewed no more.
+    const renewals = (versionControl.heartbeatLock as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(renewals).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(2 * LEASE_MS);
+    expect((versionControl.heartbeatLock as ReturnType<typeof vi.fn>).mock.calls.length).toBe(renewals);
+  });
+
+  it.each([
+    ['the same person, in their own editor', 'same'],
+    ['another person', 'other'],
+  ] as const)('a lease that lapsed and was taken by %s refuses the batch before any write, and the lost lock is not released', async (_who, whose) => {
+    const { versionControl, rows, acquire, unreachable } = leasingVersionControl(0);
+    const taker = whose === 'same' ? USER : BOB;
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    const { check, judging } = slowCheck(1.5 * LEASE_MS);
+    // a.md's renewals fail (the lock service unreachable for it) while the batch judges.
+    unreachable.add(A);
+    const settled = fsLayer
+      .writeFiles([{ path: A, content: 'A' }, { path: B, content: 'B' }], 'batch', [], check)
+      .then(() => null, (err: unknown) => err);
+    await judging;
+    await vi.advanceTimersByTimeAsync(LEASE_MS + 5_000);
+    // The lease has lapsed: someone takes the path, and renewals answer again.
+    expect(acquire(A, taker).acquired).toBe(true);
+    const editorsLock = rows.get(A);
+    unreachable.clear();
+    await vi.advanceTimersByTimeAsync(0.5 * LEASE_MS - 5_000);
+
+    const err = await settled;
+    expect(err).toBeInstanceOf(PathHeldError);
+    expect(err).toMatchObject({ path: A, holderName: null, lapsed: true, status: 409, payload: { kind: 'path-held', path: A } });
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, A))).rejects.toThrow();
+    await expect(fs.access(path.join(root, B))).rejects.toThrow();
+    // The new holder keeps its lock: nothing released a.md. The lock still held goes back untouched.
+    expect(releasesOf(versionControl, A)).toEqual([]);
+    expect(rows.get(A)).toBe(editorsLock);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', B, USER);
+  });
+
+  it('a renewal refused as not held marks the lock lost, though its lease has not run out, and refuses the batch', async () => {
+    const { versionControl, rows, acquire } = leasingVersionControl(0);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    const { check, judging } = slowCheck(0.5 * LEASE_MS);
+    const settled = fsLayer
+      .writeFiles([{ path: A, content: 'A' }, { path: B, content: 'B' }], 'batch', [], check)
+      .then(() => null, (err: unknown) => err);
+    await judging;
+    await vi.advanceTimersByTimeAsync(10_000);
+    // The lock on a.md ends early (released elsewhere) and Bob takes the path.
+    rows.delete(A);
+    expect(acquire(A, BOB).acquired).toBe(true);
+    await vi.advanceTimersByTimeAsync(0.5 * LEASE_MS - 10_000);
+
+    const err = await settled;
+    expect(err).toBeInstanceOf(PathHeldError);
+    expect(err).toMatchObject({ path: A, holderName: null, status: 409, payload: { kind: 'path-held', path: A } });
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, A))).rejects.toThrow();
+    expect(releasesOf(versionControl, A)).toEqual([]);
+    expect(rows.get(A)?.holder).toBe(BOB);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', B, USER);
+  });
+
+  it('never releases a lock it knows it lost, on any unwind: a check that drops every write leaves the editor its lock', async () => {
+    const { versionControl, rows, acquire } = leasingVersionControl(0);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    let begin: () => void = () => {};
+    const judging = new Promise<void>((resolve) => (begin = resolve));
+    const dropEverything = async <W,>(): Promise<W[]> => {
+      begin();
+      await new Promise((resolve) => setTimeout(resolve, 0.5 * LEASE_MS));
+      return [];
+    };
+    const settled = fsLayer
+      .writeFiles([{ path: A, content: 'A' }], 'batch', [], dropEverything)
+      .then((v) => v, (err: unknown) => err);
+    await judging;
+    await vi.advanceTimersByTimeAsync(10_000);
+    // The lock ends early and the same person's editor takes the path afresh:
+    // the next renewal answers a lock acquired at another moment.
+    rows.delete(A);
+    expect(acquire(A, USER).acquired).toBe(true);
+    await vi.advanceTimersByTimeAsync(0.5 * LEASE_MS - 10_000);
+
+    expect(await settled).toBeNull();
+    expect(releasesOf(versionControl, A)).toEqual([]);
+    expect(rows.get(A)?.holder).toBe(USER);
+  });
+
+  it('a batch whose locks stay its own commits and gives every lock back, as before', async () => {
+    const { versionControl, rows } = leasingVersionControl(0);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    const { check, judging } = slowCheck(1.5 * LEASE_MS);
+    const landing = fsLayer.writeFiles([{ path: A, content: 'A' }, { path: B, content: 'B' }], 'batch', [], check);
+    await judging;
+    await vi.advanceTimersByTimeAsync(1.5 * LEASE_MS);
+
+    await expect(landing).resolves.toEqual({});
+    expect(versionControl.commitChanges).toHaveBeenCalledWith('ws-feat', USER, 'batch', [A, B]);
+    expect(await fs.readFile(path.join(root, A), 'utf-8')).toBe('A');
+    expect(await fs.readFile(path.join(root, B), 'utf-8')).toBe('B');
+    expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', A, USER);
+    expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', B, USER);
+    expect(rows.size).toBe(0);
+  });
+
+  it('a renewal that throws counts the lock as lost: nothing written, nothing committed, the lock not released', async () => {
+    const { versionControl, rows, unreachable } = leasingVersionControl(0);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    const { check, judging } = slowCheck(0.5 * LEASE_MS);
+    // One renewal of a.md fails while the batch judges; the lock service answers again after.
+    unreachable.add(A);
+    const settled = fsLayer
+      .writeFiles([{ path: A, content: 'A' }, { path: B, content: 'B' }], 'batch', [], check)
+      .then(() => null, (err: unknown) => err);
+    await judging;
+    await vi.advanceTimersByTimeAsync(LEASE_MS / 3 + 1_000);
+    unreachable.clear();
+    await vi.advanceTimersByTimeAsync(0.5 * LEASE_MS - LEASE_MS / 3 - 1_000);
+
+    const err = await settled;
+    expect(err).toBeInstanceOf(PathHeldError);
+    expect(err).toMatchObject({ path: A, lapsed: true, status: 409, payload: { kind: 'path-held', path: A } });
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, A))).rejects.toThrow();
+    expect(releasesOf(versionControl, A)).toEqual([]);
+    expect(rows.has(A)).toBe(true);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', B, USER);
+  });
+
+  it('keeps renewing a lock until its own release has returned, so a release slower than a lease still gives back a lock that is its own', async () => {
+    const { versionControl, liveAtRelease, committing } = leasingVersionControl(0, 1.5 * LEASE_MS);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    const landing = fsLayer.writeFiles([{ path: A, content: 'A' }], 'batch');
+    await committing;
+    await vi.advanceTimersByTimeAsync(2 * LEASE_MS);
+    await landing;
+
+    expect(liveAtRelease).toEqual([[A, true]]);
+  });
+
+  it('keeps renewing the locks it has not given back yet, so a release loop longer than a lease still holds each lock it releases', async () => {
+    const paths = ['knowledge-base/r1.md', 'knowledge-base/r2.md', 'knowledge-base/r3.md', 'knowledge-base/r4.md'];
+    const { versionControl, liveAtRelease, committing } = leasingVersionControl(0, 0.4 * LEASE_MS);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    const landing = fsLayer.writeFiles(paths.map((p) => ({ path: p, content: p })), 'batch');
+    // Past the disk writes, which the fake clock does not drive.
+    await committing;
+    // Four releases of 0.4 of a lease each: the loop outlasts one lease.
+    await vi.advanceTimersByTimeAsync(2 * LEASE_MS);
+    await landing;
+
+    expect(liveAtRelease).toEqual(paths.map((p) => [p, true]));
+    // Given back, the locks are renewed no more.
+    const heartbeats = (versionControl.heartbeatLock as ReturnType<typeof vi.fn>).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(2 * LEASE_MS);
+    expect((versionControl.heartbeatLock as ReturnType<typeof vi.fn>).mock.calls.length).toBe(heartbeats);
+  });
+
+  it('a creator seed whose lock is lost while the commit runs is not rolled back when that commit fails', async () => {
+    const { versionControl, rows, acquire } = leasingVersionControl(0);
+    const mine = 'knowledge-base/KnowledgeBase/Mine/a.md';
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
+    const editorsBytes = '---\nread:\n  - Bob <bob@example.com>\n---\n';
+    let editorTookIt = false;
+    let begin: () => void = () => {};
+    const committing = new Promise<void>((resolve) => (begin = resolve));
+    (versionControl.commitChanges as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      // While the commit runs, the lease on the seed lapses, the person's own
+      // editor takes the path and saves its own rules there.
+      rows.delete(seedPath);
+      vi.setSystemTime(Date.now() + 1_000);
+      editorTookIt = acquire(seedPath, USER).acquired;
+      await fs.writeFile(path.join(root, seedPath), editorsBytes);
+      begin();
+      // Long enough for a renewal to come round and find the other grant.
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+      throw new Error('commit exploded');
+    });
+    const creatorAccess = {
+      planForCreate: vi.fn(async (_w: string, _u: AuthUser, p: string) =>
+        p === mine
+          ? { kind: 'seed-access-md', wsRelPath: seedPath, apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n' }
+          : null,
+      ),
+      noteAccessFileWritten: vi.fn(),
+    };
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
+    );
+    const settled = fsLayer
+      .writeFiles([{ path: mine, content: 'A' }], 'batch')
+      .then(() => null, (err: unknown) => err);
+    await committing;
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const err = await settled;
+    expect(editorTookIt).toBe(true);
+    expect(err).toMatchObject({ message: 'commit exploded' });
+    // The seed was not there before the batch, so rolling it back would have
+    // removed the file. It holds what the editor saved, under the editor's lock.
+    expect(await fs.readFile(path.join(root, seedPath), 'utf-8')).toBe(editorsBytes);
+    expect(releasesOf(versionControl, seedPath)).toEqual([]);
+    expect(rows.get(seedPath)?.holder).toBe(USER);
+    // The path still the batch's own releases as a failed commit releases it.
+    expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', mine, USER);
+  });
+
+  it('a creator seed whose write fails after its lock is lost is not put back to what it was', async () => {
+    const { versionControl, rows, acquire } = leasingVersionControl(0);
+    const mine = 'knowledge-base/KnowledgeBase/Mine/a.md';
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
+    const editorsBytes = '---\nread:\n  - Bob <bob@example.com>\n---\n';
+    let editorTookIt = false;
+    let begin: () => void = () => {};
+    const seeding = new Promise<void>((resolve) => (begin = resolve));
+    const original = LocalFilesystem.prototype.writeFile;
+    const spy = vi
+      .spyOn(LocalFilesystem.prototype, 'writeFile')
+      .mockImplementation(async function (this: unknown, p, c, o) {
+        if (p !== seedPath) return original.call(this as LocalFilesystem, p, c, o);
+        // While the seed write runs, its lease lapses, the person's own editor
+        // takes the path and saves its own rules there. Then the write dies.
+        rows.delete(seedPath);
+        vi.setSystemTime(Date.now() + 1_000);
+        editorTookIt = acquire(seedPath, USER).acquired;
+        await fs.writeFile(path.join(root, seedPath), editorsBytes);
+        begin();
+        // Long enough for a renewal to come round and find the other grant.
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
+        throw new Error('disk exploded mid-write');
+      });
+    const creatorAccess = {
+      planForCreate: vi.fn(async (_w: string, _u: AuthUser, p: string) =>
+        p === mine
+          ? { kind: 'seed-access-md', wsRelPath: seedPath, apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n' }
+          : null,
+      ),
+      noteAccessFileWritten: vi.fn(),
+    };
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
+    );
+    let err: unknown;
+    try {
+      const settled = fsLayer
+        .writeFiles([{ path: mine, content: 'A' }], 'batch')
+        .then(() => null, (e: unknown) => e);
+      await seeding;
+      await vi.advanceTimersByTimeAsync(30_000);
+      err = await settled;
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(editorTookIt).toBe(true);
+    // The batch is refused for the lock it lost, with nothing committed.
+    expect(err).toMatchObject({ path: seedPath });
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    // The seed was not there before the batch, so putting it back would have
+    // removed the file. It holds what the editor saved, under the editor's lock.
+    expect(await fs.readFile(path.join(root, seedPath), 'utf-8')).toBe(editorsBytes);
+    expect(releasesOf(versionControl, seedPath)).toEqual([]);
+    expect(rows.get(seedPath)?.holder).toBe(USER);
+  });
+
+  it('a lock lost while the batch writes refuses it before the commit: nothing committed, the lost path neither rolled back nor released', async () => {
+    const { versionControl, rows, acquire } = leasingVersionControl(0);
+    const mine = 'knowledge-base/KnowledgeBase/Mine/a.md';
+    const seedPath = 'knowledge-base/KnowledgeBase/Mine/access.md';
+    let editorTookIt = false;
+    const creatorAccess = {
+      planForCreate: vi.fn(async (_w: string, _u: AuthUser, p: string) =>
+        p === mine
+          ? {
+              kind: 'seed-access-md',
+              wsRelPath: seedPath,
+              // Runs after the caller's writes landed and before the commit:
+              // time passes there, the lease on `mine` lapses, and the
+              // person's editor takes the path.
+              apply: () => {
+                vi.setSystemTime(Date.now() + 15_000);
+                rows.delete(mine);
+                editorTookIt = acquire(mine, USER).acquired;
+                return '---\nread:\n  - Alice <alice@example.com>\n---\n';
+              },
+            }
+          : null,
+      ),
+      noteAccessFileWritten: vi.fn(),
+    };
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
+    );
+    const { check, judging } = slowCheck(50_000);
+    const settled = fsLayer
+      .writeFiles([{ path: mine, content: 'A' }, { path: B, content: 'B' }], 'batch', [], check)
+      .then(() => null, (err: unknown) => err);
+    await judging;
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    const err = await settled;
+    expect(editorTookIt).toBe(true);
+    expect(err).toBeInstanceOf(PathHeldError);
+    expect(err).toMatchObject({ path: mine, holderName: null, status: 409, payload: { kind: 'path-held', path: mine } });
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    // The lost path: no release, and the bytes the batch wrote there stay, under the editor's lock.
+    expect(releasesOf(versionControl, mine)).toEqual([]);
+    expect(rows.get(mine)?.holder).toBe(USER);
+    expect(await fs.readFile(path.join(root, mine), 'utf-8')).toBe('A');
+    // The others release as a failed commit releases them: the dirtied path
+    // with the discard, the seed rolled back and given back untouched.
+    expect(versionControl.releaseLockNoCommit).toHaveBeenCalledWith('ws-feat', 'feat', B, USER);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', seedPath, USER);
+    await expect(fs.access(path.join(root, seedPath))).rejects.toThrow();
   });
 });
 
@@ -714,7 +1278,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
       wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
       apply: (current: string) => current, // grant already present → no-op
     });
-    const emitted: { paths: string[] }[] = [];
     const fsLayer = new LockingFilesystem(
       { basePath: root, contained: true },
       {
@@ -723,7 +1286,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         branch: 'feat',
         user: USER, kbDirName: KB,
         creatorAccess,
-        fileChanges: { emit: (c: { paths: string[] }) => emitted.push(c) } as never,
       },
     );
     await fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/doc.md', content: 'body' }], 'batch');
@@ -734,7 +1296,6 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     // ...but the commit is scoped to the caller's path only.
     const commitPaths = (versionControl.commitChanges as ReturnType<typeof vi.fn>).mock.calls[0][3];
     expect(commitPaths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
-    expect(emitted[0].paths).toEqual(['knowledge-base/KnowledgeBase/Mine/doc.md']);
     // The seeded file is untouched.
     expect(await fs.readFile(path.join(root, 'knowledge-base/KnowledgeBase/Mine/access.md'), 'utf-8')).toBe(
       seedContent,
@@ -804,11 +1365,38 @@ describe('LockingFilesystem — creator read grants on creation', () => {
         ],
         'batch',
       ),
-    ).rejects.toThrow(/locked by Bob/);
+    ).rejects.toSatisfy((err: unknown) => err instanceof PathHeldError && err.path === 'knowledge-base/B.md' && err.holderName === 'Bob');
     expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/A.md', USER);
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
     expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
   }, 10_000);
+
+  it('gives back every caller lock it holds, untouched, when taking a creator seed\'s lock throws', async () => {
+    const versionControl = makeVersionControl();
+    const failure = new Error('Lock contention race on "knowledge-base/KnowledgeBase/Mine/access.md" — please retry.');
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (_w, _b, p: string) => {
+      if (p.endsWith('/access.md')) throw failure;
+      return { acquired: true, lock: { holderUserId: 'user-1', holderName: 'Alice' } };
+    });
+    const creatorAccess = makeCreatorAccess();
+    creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: 'knowledge-base/KnowledgeBase/Mine/access.md',
+      apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n',
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, creatorAccess },
+    );
+
+    await expect(
+      fsLayer.writeFiles([{ path: 'knowledge-base/KnowledgeBase/Mine/a.md', content: 'a' }], 'batch'),
+    ).rejects.toBe(failure);
+
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', 'knowledge-base/KnowledgeBase/Mine/a.md', USER);
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, 'knowledge-base/KnowledgeBase/Mine'))).rejects.toThrow();
+  });
 
   it('a DELETE batch whose later lock is contended deletes nothing — a folder never half-disappears', async () => {
     // The all-or-none property `delete_folder` relies on, asserted on disk:
@@ -1228,7 +1816,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
   }
 
   async function expectRefused(op: Promise<unknown>, versionControl: IVersionControlService): Promise<void> {
-    await expect(op).rejects.toBeInstanceOf(RolesYamlNewRoleError);
+    await expect(op).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-new-role' } });
     expect(versionControl.acquireLock).not.toHaveBeenCalled();
     expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(CURRENT);
   }
@@ -1291,7 +1879,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
     }
 
     async function expectRefusedUnderLock(op: Promise<unknown>, versionControl: IVersionControlService, locks: number): Promise<void> {
-      await expect(op).rejects.toBeInstanceOf(RolesYamlNewRoleError);
+      await expect(op).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-new-role' } });
       expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(locks);
       expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
       expect(versionControl.releaseLock).not.toHaveBeenCalled();
@@ -1325,7 +1913,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
       // change is validity: the same line appended to the rewritten file breaks it.
       const rewritten = 'roles:\n  Admin:\n    - a@x.eu';
       const versionControl = racingVersionControl(() => fs.writeFile(path.join(root, ROLES), rewritten));
-      await expect(layer(versionControl).appendFile(ROLES, '    - b@x.eu\n')).rejects.toBeInstanceOf(RolesYamlInvalidError);
+      await expect(layer(versionControl).appendFile(ROLES, '    - b@x.eu\n')).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-invalid' } });
       expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(1);
       expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
       expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(rewritten);

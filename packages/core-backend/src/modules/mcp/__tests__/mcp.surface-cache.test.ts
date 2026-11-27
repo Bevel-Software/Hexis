@@ -10,8 +10,7 @@ import { join } from 'node:path';
 import type { CallTemplate } from '@utcp/sdk';
 import { McpService, type McpCaller } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/index.js';
-import { createManualRoutes } from '../../tool-registry/manual.routes.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { createManualRoutes, ToolRegistry } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import type { AgentEventInput } from '../../audit/index.js';
 import type { SurfaceCacheOptions } from '../surface-cache.js';
@@ -51,6 +50,21 @@ interface HarnessOptions {
   fillerTools?: { count: number; descriptionBytes: number };
   /** A minting internal-token service, for OAuth/session callers. */
   mint?: () => string;
+  /** The platform tools that list `.tool` manuals and their setup, on the KB manual. */
+  toolListings?: boolean;
+  /**
+   * How the service learns the revision: `'in-process'` hands it a reader that
+   * answers the harness's revision as a function call, as the composition root
+   * does, and refuses a bearer in `refused` with a 401, as the composition
+   * root's reader resolves the bearer and refuses a revoked key; `'throws'`
+   * hands it one that fails; `'stalls'` hands it one that never answers;
+   * `'slow'` hands it one that waits 50 ms and then needs the event loop a few
+   * more times, as a read of a disk or a database does. Absent, it asks the
+   * loopback.
+   */
+  revisionReader?: 'in-process' | 'throws' | 'stalls' | 'slow';
+  /** The limit on an in-process read. Absent, the service's own. */
+  inProcessReadLimitMs?: number;
 }
 
 async function harness(opts: HarnessOptions = {}) {
@@ -72,6 +86,11 @@ async function harness(opts: HarnessOptions = {}) {
       inputs: { type: 'object', properties: { path: { type: 'string' } } },
     }),
   );
+  for (const name of opts.toolListings ? ['list_local_tools', 'list_tool_setup'] : []) {
+    registry.registerExternalTool(
+      toolDef({ name, description: name, path: `/api/agent/tools/${name}`, inputs: { type: 'object', properties: {} } }),
+    );
+  }
   const filler = opts.fillerTools;
   for (let i = 0; i < (filler?.count ?? 0); i++) {
     registry.registerExternalTool(
@@ -97,6 +116,12 @@ async function harness(opts: HarnessOptions = {}) {
     refused: new Set<string>(),
     /** Every tool call the loopback answered: which tool, with which bearer. */
     calls: [] as { tool: string; bearer: string; path?: string }[],
+    /** Requests the loopback's revision route received. */
+    revisionRouteHits: 0,
+    /** Calls the in-process reader answered: the bearer each was handed. */
+    revisionReads: [] as string[],
+    /** The loopback's manual list answers 503, as a server too busy to serve itself does. */
+    catalogFails: false,
     base: '',
   };
   const bearerOf = (req: express.Request) => (req.headers.authorization ?? '').replace(/^Bearer /, '');
@@ -104,14 +129,19 @@ async function harness(opts: HarnessOptions = {}) {
   const app = express();
   app.use(express.json());
   app.get('/api/agent/catalog-revision', (_req, res) => {
+    state.revisionRouteHits += 1;
     res.json({ revision: state.revision, tools: state.extraManuals.length, skills: 0 });
   });
   app.get('/api/agent/all-tools', async (_req, res) => {
     state.builds += 1;
     if (opts.catalogDelayMs) await new Promise((r) => setTimeout(r, opts.catalogDelayMs));
+    if (state.catalogFails) {
+      res.status(503).json({ error: 'busy' });
+      return;
+    }
     res.json({ manuals: state.extraManuals });
   });
-  for (const tool of ['read_file', 'edit_file']) {
+  for (const tool of ['read_file', 'edit_file', 'list_local_tools', 'list_tool_setup']) {
     app.post(`/api/agent/tools/${tool}`, async (req, res) => {
       const bearer = bearerOf(req);
       if (state.refused.has(bearer)) {
@@ -160,6 +190,24 @@ async function harness(opts: HarnessOptions = {}) {
         spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
         publicFrontendUrl: 'http://localhost:5173',
         surfaceCache: opts.surfaceCache,
+        ...(opts.revisionReader
+          ? {
+              readCatalogRevision: async (bearer: string) => {
+                state.revisionReads.push(bearer);
+                if (state.refused.has(bearer)) {
+                  throw Object.assign(new Error('This connection key was revoked.'), { status: 401 });
+                }
+                if (opts.revisionReader === 'throws') throw new Error('the catalog could not be read');
+                if (opts.revisionReader === 'stalls') await new Promise<never>(() => {});
+                if (opts.revisionReader === 'slow') {
+                  await new Promise((r) => setTimeout(r, 50));
+                  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+                }
+                return { revision: state.revision };
+              },
+            }
+          : {}),
+        ...(opts.inProcessReadLimitMs !== undefined ? { inProcessReadLimitMs: opts.inProcessReadLimitMs } : {}),
       },
       undefined,
       undefined,
@@ -427,6 +475,168 @@ describe('McpService — one tool client per person and catalog revision', () =>
   });
 });
 
+describe('McpService — the revision is read in process', () => {
+  it('asks the server nothing over HTTP for the revision, and still serves a second request from the first build', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+
+    const coldList = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    const warmList = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+
+    expect(warmList).toEqual(coldList);
+    expect(state.builds).toBe(1);
+    expect(state.revisionRouteHits).toBe(0);
+    // Asked once per request, with the bearer the request's loopback identity carries.
+    expect(state.revisionReads).toEqual(['bevel_key_1', 'bevel_key_1']);
+  });
+
+  // The reader resolves the bearer when it reads, as the route did over
+  // loopback. A key revoked since its surface was built is then a revision
+  // that could not be read: the request builds a surface of its own, which
+  // its tool calls cannot use either, and keeps nothing.
+  it('serves no cached surface to a bearer the reader refuses: revoked since the surface was built', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+    await (await connect(mcp)).listTools();
+    expect(state.builds).toBe(1);
+
+    state.refused.add('bevel_key_1');
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await (await connect(mcp)).listTools();
+    await (await connect(mcp)).listTools();
+
+    expect(state.revisionReads).toEqual(['bevel_key_1', 'bevel_key_1', 'bevel_key_1']);
+    expect(state.builds).toBe(3);
+    // A refusal is one line, as the route's 401 was over loopback.
+    const lines = errors.mock.calls.map((c) => c.map(String).join(' '));
+    expect(lines.filter((l) => l.includes('catalog-revision refused: HTTP 401 This connection key was revoked.'))).toHaveLength(2);
+    expect(lines.join('\n')).not.toContain('    at ');
+  });
+
+  it('hands the reader, for a caller with no key, the token minted for this request', async () => {
+    let minted = 0;
+    const { state, mcp } = await harness({ revisionReader: 'in-process', mint: () => `minted-${++minted}` });
+    await (await connect(mcp, { tokenId: null, bearer: 'an-oauth-token' })).listTools();
+    expect(state.revisionReads).toEqual(['minted-1']);
+  });
+
+  it('builds anew when the revision the reader answers moves', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+    const before = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    expect(before.some((n) => n.includes('late_arrival'))).toBe(false);
+
+    state.extraManuals = [lateManual(state.base)];
+    state.revision = 'rev-2';
+    const after = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+
+    expect(after.some((n) => n.includes('late_arrival'))).toBe(true);
+    expect(state.builds).toBe(2);
+    expect(state.revisionRouteHits).toBe(0);
+  });
+
+  it('reads the revision with the key of a narrowed connection, which names its agent', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+    await (await connect(mcp, { tokenId: 'key-support', bearer: 'bevel_key_support', agentPath: 'Agents/support.agent' })).listTools();
+    expect(state.revisionReads.at(-1)).toBe('bevel_key_support');
+  });
+
+  it('builds per request when the reader fails, never serving a surface it cannot tell is current', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'throws' });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const first = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    const second = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+
+    expect(second).toEqual(first);
+    expect(first.length).toBeGreaterThan(0);
+    expect(state.builds).toBe(2);
+    // A failed read is not a reason to fall back to asking over HTTP.
+    expect(state.revisionRouteHits).toBe(0);
+  });
+});
+
+describe('McpService — a revision read that never answers', () => {
+  // The loopback request this read replaces ended at its limit and the request
+  // fell back to a surface of its own. A read made in process has no request
+  // to end, so it is held to a limit of its own: one a held event loop cannot
+  // use up (`shared/loop-time-limit.ts`).
+  it('ends at its limit, and the request is served a surface of its own', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'stalls', inProcessReadLimitMs: 150 });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const started = performance.now();
+    const names = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+    expect(names).toContain('read_file');
+    expect(performance.now() - started).toBeGreaterThanOrEqual(140);
+    // Not kept: nothing says the surface is current.
+    await (await connect(mcp)).listTools();
+    expect(state.builds).toBe(2);
+    expect(state.revisionRouteHits).toBe(0);
+    expect(errors.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain('catalog-revision could not be read');
+  });
+
+  it('a held event loop does not use the limit up: the read is waited for and the surface is kept', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'slow', inProcessReadLimitMs: 200 });
+    const client = await connect(mcp);
+    const first = client.listTools();
+    // The read is under way and its limit is running. Hold the loop for four
+    // times the limit: a clock limit has passed when the loop is free again,
+    // and would give the read up before its next turn.
+    await new Promise((r) => setTimeout(r, 20));
+    const until = performance.now() + 800;
+    while (performance.now() < until) {
+      /* busy */
+    }
+    await first;
+    await (await connect(mcp)).listTools();
+    // One build for the two requests: the first one's revision was read.
+    expect(state.builds).toBe(1);
+  });
+});
+
+describe('McpService — a manual list that could not be read', () => {
+  // A request that arrives while the server cannot answer its own manual list
+  // is served the platform manual alone. That surface must never be kept: from
+  // the cache it would hide every `.tool` of the person until their revision
+  // moved, a secret of theirs changed, or the process restarted. With the
+  // revision read in process this matters more than it did, because the
+  // revision is then known even while the list is not.
+  for (const revisionReader of ['in-process', undefined] as const) {
+    it(`serves the request the platform tools alone and keeps nothing, the revision read ${revisionReader ?? 'over loopback'}`, async () => {
+      const { state, mcp } = await harness(revisionReader ? { revisionReader } : {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      state.extraManuals = [lateManual(state.base)];
+
+      state.catalogFails = true;
+      const during = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+      expect(during.some((n) => n.includes('read_file'))).toBe(true);
+      expect(during.some((n) => n.includes('late_arrival'))).toBe(false);
+
+      // The server answers again: the very next request reads the list anew
+      // and is served the person's own tool.
+      state.catalogFails = false;
+      const after = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+      expect(after.some((n) => n.includes('late_arrival'))).toBe(true);
+      expect(state.builds).toBe(2);
+
+      // And that one, built from a list that was read, is kept.
+      const warm = (await (await connect(mcp)).listTools()).tools.map((t) => t.name);
+      expect(warm).toEqual(after);
+      expect(state.builds).toBe(2);
+    });
+  }
+
+  it('does not keep it for a second request arriving while the list still cannot be read', async () => {
+    const { state, mcp } = await harness({ revisionReader: 'in-process' });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    state.catalogFails = true;
+
+    await (await connect(mcp)).listTools();
+    await (await connect(mcp)).listTools();
+
+    // Each request tried the list itself: neither was handed the other's surface.
+    expect(state.builds).toBe(2);
+  });
+});
+
 describe('McpService — a broken tool server', () => {
   it('keeps the client for the hour: a manual that fails to load is no reason to rebuild every minute', async () => {
     let now = 1_000_000;
@@ -485,6 +695,43 @@ describe('McpService — retained heap of warm clients of one catalog', () => {
     expect(state.builds).toBe(300);
     for (let i = 0; i < 300; i++) await warm(i);
     expect(state.builds).toBe(300);
+  });
+});
+
+describe("McpService — a page reaches the person's own tools", () => {
+  const PAGE = 'Dashboards/Roadmap.html';
+  /** A `.tool` manual the person may read, listed by their catalog beside the platform manual. */
+  async function withToolManual() {
+    let minted = 0;
+    const h = await harness({ mint: () => `minted-${++minted}`, toolListings: true });
+    h.state.extraManuals = [lateManual(h.state.base)];
+    const asPage = () => connect(h.mcp, { tokenId: null, bearer: 'eyJ.session', page: PAGE });
+    const asAgent = () => connect(h.mcp, { tokenId: null, bearer: 'eyJ.session' });
+    return { ...h, asPage, asAgent };
+  }
+  const names = async (client: Client) => (await client.listTools()).tools.map((t) => t.name);
+
+  it("lists the person's tools to a page, a .tool manual's and the listing tools included, from the person's cached surface", async () => {
+    const { state, asPage, asAgent } = await withToolManual();
+    const agentTools = await names(await asAgent());
+    expect(state.builds).toBe(1);
+
+    const pageTools = await names(await asPage());
+    expect(pageTools.sort()).toEqual([...agentTools].sort());
+    expect(pageTools).toEqual(expect.arrayContaining(['late_manual_late_arrival', 'list_local_tools', 'list_tool_setup', 'read_file']));
+    // The page is the person: it is served the same surface, not a build of its own.
+    expect(state.builds).toBe(1);
+  });
+
+  it(".tool and listing tools are callable from a page, directly and in a chain", async () => {
+    const { state, asPage } = await withToolManual();
+    const page = await asPage();
+    expect((await page.callTool({ name: 'late_manual_late_arrival', arguments: {} })).isError).toBeFalsy();
+    expect((await page.callTool({ name: 'call_tool_chain', arguments: { code: 'return await late_manual.late_arrival({});' } })).isError).toBeFalsy();
+    expect((await page.callTool({ name: 'list_local_tools', arguments: {} })).isError).toBeFalsy();
+    expect((await page.callTool({ name: 'call_tool_chain', arguments: { code: 'return await KNOWLEDGE_BASE.list_tool_setup({});' } })).isError).toBeFalsy();
+    // The .tool manual's tool answers through read_file in this stub.
+    expect(state.calls.map((c) => c.tool)).toEqual(['read_file', 'read_file', 'list_local_tools', 'list_tool_setup']);
   });
 });
 

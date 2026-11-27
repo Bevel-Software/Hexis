@@ -35,6 +35,15 @@ import { sharedFileRulesSection } from './shared-file-rules.js';
 
 export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
 
+/**
+ * The one tool that returns the platform's guide (see `modules/agent-guide`).
+ * Named here, where the text that sends an agent to it is composed, and read
+ * from here by tool-registry's guide-first sentence: tool-registry already
+ * imports this module (`PREFIXED_TOOLS`), and this module imports no value
+ * from any other module, so neither import closes a cycle.
+ */
+export const GET_AGENT_GUIDE_TOOL = 'get_agent_guide';
+
 /** The tools whose descriptions carry the prefix. Every other tool is untouched. */
 export const PREFIXED_TOOLS: ReadonlySet<string> = new Set(['start_session', 'grep', 'list_files', 'read_file']);
 
@@ -77,10 +86,27 @@ export const PLATFORM_HEADER =
 export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it before answering from memory.";
 
 /**
- * The whole platform-owned part of the handshake text: what Hexis is, then the
- * rules every file tool shares (see `shared-file-rules.ts`). This is what the
- * `header` field carries and what the card shows as fixed and not editable;
- * the admin's preamble follows it.
+ * The first line of the handshake text, ahead of everything else. Clients cut
+ * the instructions they show the model, so the line that must survive the cut
+ * comes first: it sends the agent to the guide, the one text that says in full
+ * what this deployment is and, for a connection made as an agent, what that
+ * connection loads.
+ *
+ * The same line on every handshake, unconditionally — also on a connection
+ * whose `.agent` leaves `get_agent_guide` out of its platform tools. That
+ * connection is already told the same thing by the sentence its platform
+ * tools' descriptions open with (`GUIDE_FIRST_SENTENCE` in tool-registry), so
+ * the line adds no case; which tools a narrowed connection loads is the
+ * agent configuration's rule, not this text's, and is left as it is.
+ */
+export const GUIDE_FIRST_LINE =
+  `Before anything else, call \`${GET_AGENT_GUIDE_TOOL}\` and read the guide: it says what this deployment is and what this connection loads.`;
+
+/**
+ * The whole platform-owned part of the handshake text: the guide-first line,
+ * what Hexis is, then the rules every file tool shares (see
+ * `shared-file-rules.ts`). This is what the `header` field carries and what
+ * the card shows as fixed and not editable; the admin's preamble follows it.
  *
  * A FUNCTION of the layout and the default branch, because the shared rules
  * name the platform files by the root names a deployment chose (`Skills/`,
@@ -88,7 +114,7 @@ export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it b
  * settings. The guide's name is not one of them: it is `AGENTS.md` everywhere.
  */
 export function platformInstructions(layout: KbLayout, defaultBranch = ''): string {
-  return `${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout, defaultBranch)}`;
+  return `${GUIDE_FIRST_LINE}\n\n${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout, defaultBranch)}`;
 }
 
 /**
@@ -97,16 +123,18 @@ export function platformInstructions(layout: KbLayout, defaultBranch = ''): stri
  * No client publishes a limit for `instructions` — what was observed being cut
  * was tool descriptions — so this is not a measured client limit but the
  * arithmetic ceiling of the parts, held low enough that it stays a plausible
- * system-prompt insert (~3,500 tokens): the header, the shared rules under their
+ * system-prompt insert (under ~4,000 tokens): the header, the shared rules under their
  * own cap, and the preamble under its cap plus the marker a cut appends. The
  * test is what makes it a ceiling rather than a hope: a shared rule that grew
  * past it fails before it reaches an agent.
  *
  * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref);
  * 14,900 since it rose by 500 more (the sentence naming the default branch,
- * measured with the longest name the platform accepts — see that cap).
+ * measured with the longest name the platform accepts — see that cap);
+ * 15,100 since the guide-first line opens the text (130 characters with its
+ * blank line).
  */
-export const INSTRUCTIONS_CAP = 14_900;
+export const INSTRUCTIONS_CAP = 15_100;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;

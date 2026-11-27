@@ -306,6 +306,22 @@ describe('what the guide tells an agent', () => {
   });
 
   /**
+   * The area's own README. Two agent sessions made conflicting structural
+   * choices in one person's folder within a quarter of an hour: the space's
+   * README said how it is organised, and neither session read it first.
+   */
+  it("says to read an area's README before structuring files there, and to keep it current", async () => {
+    const placement = section(await composeAgentGuide(DEFAULT_KB_LAYOUT), '## Where a new file goes').replace(/\s+/g, ' ');
+    expect(placement).toContain("**Read the area's `README.md` first.**");
+    // It opens the section's list: the first rule an agent reads there.
+    expect(placement.indexOf('- **')).toBe(placement.indexOf("- **Read the area's `README.md` first.**"));
+    expect(placement).toContain('the `README.md` of that folder and of each folder above it');
+    expect(placement).toContain('its layout rules come before the general ones in this guide');
+    expect(placement).toContain('they never widen what you may read or write');
+    expect(placement).toContain('create or update that README in the same change');
+  });
+
+  /**
    * The personal plugin, where the placement rule was being read backwards.
    * Nothing under the plugins root is in the knowledge graph, and a personal
    * plugin is readable only by its owner — so a note filed there is never found
@@ -493,8 +509,14 @@ describe('the HTML views section', () => {
     expect(text).toContain("on the app's file page and on a skill's page");
     expect(text).not.toMatch(/on a skill page and in any preview/);
     expect(text).toContain('**Reading runs at once; writing asks first.**');
-    expect(text).toContain('"<page name> wants to write to the knowledge base"');
-    expect(text).toContain('Allow while open and Deny');
+    expect(text).toContain('"You\'re allowing changes using your account. Do you want to allow that?"');
+    expect(text).toContain("the buttons Don't allow and Allow");
+    expect(text).toContain("remembers an Allow for the signed-in account and the page's exact content");
+    expect(text).toContain('Signing out clears what the account kept.');
+    // pageConsentMemory.ts keeps 500 per account and keeps nothing where storage fails.
+    expect(text).toContain('never rely on an Allow being kept');
+    expect(text).not.toContain('wants to write to the knowledge base');
+    expect(text).not.toContain('Allow while open');
     expect(text).toContain('rejects the call with `denied`');
     expect(text).toContain('"<page name> uses tools that are only available in the platform"');
     expect(text).toContain('Continue without tools and Open in the platform');

@@ -23,6 +23,7 @@ import {
   VersionControlDomainError,
   VersionControlValidationError,
 } from '../../../shared/domain-errors.js';
+import { SourceHeadMovedError } from '../source-head-moved-error.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import type {
@@ -51,6 +52,14 @@ const MERGE_METHOD = 'merge' as const;
  * "nothing to apply".
  */
 const NOTHING_TO_APPROVE = 'This pull request has no file changes to approve.';
+/**
+ * The hard block a request earns when its branch was pushed to after the gate
+ * read it. It names no file: what changed is for the caller to read again,
+ * under their own access.
+ */
+const REQUEST_CHANGED_SINCE_GATE =
+  'This request changed after its approvals were checked, so it was not applied. ' +
+  'Open it again to see what changed, then apply it once more.';
 const EVERYONE_CANONICAL = 'everyone';
 
 /**
@@ -79,9 +88,19 @@ class ApprovalBusyError extends VersionControlDomainError {
 }
 
 class MergeBlockedError extends VersionControlDomainError {
-  constructor(reasons: string[]) {
+  /**
+   * `awaitingApprovals` marks the one refusal an approval answers: every
+   * reason is a file still waiting on one. The others (already merged,
+   * closed, nothing to approve) are refusals no approval changes, and a
+   * caller that rewords the first must not reword those.
+   */
+  constructor(reasons: string[], opts: { awaitingApprovals?: boolean; waitingPaths?: string[] } = {}) {
     super(`Merge gate rejected: ${reasons.join('; ') || 'unknown'}`, 422, {
       mergeBlockedReasons: reasons,
+      ...(opts.awaitingApprovals ? { awaitingApprovals: true } : {}),
+      // The files those reasons wait on, by path alone: what a caller that
+      // rewords the refusal names, without the approvers the reasons carry.
+      ...(opts.waitingPaths ? { waitingPaths: opts.waitingPaths } : {}),
     });
     this.name = 'MergeBlockedError';
   }
@@ -197,9 +216,10 @@ function eligibleLabel(a: FileApprovalState): string {
  * files) refuse every merge; `warnings` (missing approvals) refuse too, but
  * an admin may merge past them with the bypass flag.
  */
-function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warnings: string[] } {
+function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warnings: string[]; waitingPaths: string[] } {
   const reasons: string[] = [];
   const warnings: string[] = [];
+  const waitingPaths: string[] = [];
 
   if (input.state === 'merged') {
     reasons.push('This pull request has already been merged.');
@@ -224,6 +244,7 @@ function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warn
 
     const hasStale = a.approvedBy.some((e) => e.isStale);
     const label = eligibleLabel(a);
+    waitingPaths.push(a.path);
     if (hasStale) {
       warnings.push(`${label} need to re-approve ${a.path} after the latest push.`);
     } else {
@@ -231,7 +252,7 @@ function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warn
     }
   }
 
-  return { hardReasons: reasons, warnings };
+  return { hardReasons: reasons, warnings, waitingPaths };
 }
 
 function assertValidPath(p: unknown): asserts p is string | undefined {
@@ -534,7 +555,7 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       throw new MergeBlockedError(gate.hardReasons);
     }
     if (gate.warnings.length > 0 && !opts.bypass) {
-      throw new MergeBlockedError(gate.warnings);
+      throw new MergeBlockedError(gate.warnings, { awaitingApprovals: true, waitingPaths: gate.waitingPaths });
     }
 
     // Bypass authority: admin-only. Resolved against `origin/<baseBranch>`
@@ -616,9 +637,19 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         // Named so a merge that finds nothing to merge can tell an empty request
         // apart from one a previous attempt already merged and failed to record
         // (see `ownMergeCommitOn`).
-        { appliedChangeNumber: prNumber, appliedChangeTitle: cr.title },
+        // and pinned to the head the gate above judged: the approvals are for
+        // that commit, so a push that lands after the caller read the request
+        // is refused here, never merged on their strength.
+        { appliedChangeNumber: prNumber, appliedChangeTitle: cr.title, expectedSourceHead: headSha },
       );
     } catch (err) {
+      if (err instanceof SourceHeadMovedError) {
+        await this.db
+          .update(prMergeLog)
+          .set({ succeeded: false, completedAt: new Date(), error: 'the source branch moved after the gate read it' })
+          .where(eq(prMergeLog.id, logRow.id));
+        throw new MergeBlockedError([REQUEST_CHANGED_SINCE_GATE]);
+      }
       const redacted = redactTokens(err instanceof Error ? err.message : String(err), this.git.credentials?.token());
       await this.db
         .update(prMergeLog)

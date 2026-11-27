@@ -5,14 +5,14 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 
 import type { IAccessControl } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService } from '../../version-control/index.js';
+import type { VersionControlEventBus } from '../../version-control/index.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * HTTP contract for `GET /access/overrides`. The scan itself is covered in
@@ -76,7 +76,13 @@ async function makeHarness(opts: {
   const accessControl = { canRead, canReadBatch } as unknown as IAccessControl;
 
   const workspaceService = {
-    listFiles: vi.fn(async () => buildTree(Object.keys(files))),
+    // The entry at the path, as the service's own folder listing answers it.
+    listFilesUnder: vi.fn(async (_id: string, wsPath: string) =>
+      wsPath
+        .split('/')
+        .filter(Boolean)
+        .reduce<FileTreeEntry | null>((node, segment) => node?.children?.find((c) => c.name === segment) ?? null, buildTree(Object.keys(files))),
+    ),
     readFile: vi.fn(async (_id: string, wsRel: string) => {
       const text = files[wsRel];
       if (text === undefined) throw new Error(`ENOENT ${wsRel}`);
@@ -99,7 +105,7 @@ async function makeHarness(opts: {
   });
   app.use(
     '/api',
-    createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()),
+    createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), realDisk()),
   );
 
   const server = await new Promise<Server>((resolve) => {
