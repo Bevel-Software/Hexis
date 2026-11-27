@@ -18,10 +18,9 @@ const MIN_SECRET_CHARS = 6;
 const MIN_ECHOED_PIECE_CHARS = 8;
 /**
  * The length of a piece of the caller's text that counts as repeated
- * wherever it appears; a shorter string of theirs counts only glued to more
- * of theirs or, at times, standing alone. A credential shorter than this
- * withholds every quote made with the caller's text about. See
- * {@link SecretRedactor}.
+ * wherever it appears; a shorter string of theirs counts whole, wherever it
+ * appears. A credential shorter than this withholds every quote made with the
+ * caller's text about. See {@link SecretRedactor}.
  */
 const MIN_CALLER_CHARS = 4;
 /**
@@ -80,11 +79,10 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * whole or not at all: it is withheld, one `[redacted]` for all of it, when it
  * repeats any of that text, case aside, or holds any secret. It repeats it
  * when it has any four characters of a string the caller sent (as sent or in
- * one of the spellings above), or two or more of their shorter strings glued
- * into four characters or more; and, while a substituted value shorter than
- * four characters is held (see above), when one of their shorter strings, or a
- * word of one to three letters or digits inside a longer one, stands alone in
- * it. Anything finer answers guesses. Taking out only what repeats the
+ * one of the spellings above), or any of their shorter strings anywhere, glued
+ * to other text or not; and, while a substituted value shorter than four
+ * characters is held (see above), when a word of one to three letters or
+ * digits inside a longer string of theirs stands alone in it. Anything finer answers guesses. Taking out only what repeats the
  * caller's text leaves the rest of a key whose head a right guess covered,
  * where a wrong guess leaves the key taken out whole; taking out the rest of a
  * key from the secrets answers whether a stretch next to the caller's text
@@ -93,9 +91,9 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * the secrets against words the caller's text is not in, so it says nothing
  * about whether a guess was right. The price is paid in the message: a failure
  * that repeats any piece of a call's arguments, a key's name included, is not
- * quoted. With no secret held there is nothing to keep, and the quote goes as
- * it came. A short guess glued to the server's own words is not recognised as
- * the caller's.
+ * quoted, nor one that has any of their short strings anywhere (a `1` the
+ * call sent withholds every failure with a `1` in it). With no secret held
+ * there is nothing to keep, and the quote goes as it came.
  *
  * Nothing here gives up on a long text: each secret is matched in time linear
  * in the text and the secret, and in space linear in the secret, so no bound
@@ -211,18 +209,14 @@ function repeatsCallerText(text: string, callerText: readonly string[], shortVal
     }
   }
   if (shortStrings.size === 0 && shortWords.size === 0) return false;
-  // How long a run of their short strings, glued, ends at each place.
-  const gluedUpTo = new Int32Array(folded.length + 1);
+  // Their short strings anywhere, glued to other text or not; while a short
+  // value is held, the short words of their longer strings where they stand
+  // alone. One walk, every start tried against both sets.
   for (let at = 0; at < folded.length; at++) {
     for (let length = 1; length < MIN_CALLER_CHARS && at + length <= folded.length; length++) {
-      const end = at + length;
-      const piece = folded.slice(at, end);
-      const theirs = shortStrings.has(piece);
-      if (theirs) {
-        gluedUpTo[end] = Math.max(gluedUpTo[end]!, gluedUpTo[at]! + length);
-        if (gluedUpTo[end]! >= MIN_CALLER_CHARS) return true;
-      }
-      if (shortValueHeld && (theirs || shortWords.has(piece)) && standsAlone(folded, at, end)) return true;
+      const piece = folded.slice(at, at + length);
+      if (shortStrings.has(piece)) return true;
+      if (shortValueHeld && shortWords.has(piece) && standsAlone(folded, at, at + length)) return true;
     }
   }
   return false;

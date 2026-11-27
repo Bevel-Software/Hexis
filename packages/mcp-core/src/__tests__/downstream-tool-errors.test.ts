@@ -136,6 +136,27 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(await failingWith(frozen)()).toMatchObject({ name: 'HttpError', code: 401, message: 'refused [redacted]' });
   });
 
+  it("redacts a thrown error's data, response and cause, keeping its class and code, however its payload nests", async () => {
+    const data: Record<string, unknown> = { echoed: KEY, nested: [{ [KEY]: `bad ${KEY}` }] };
+    data.self = data;
+    const failure = Object.assign(new McpError(-32603, `rejected ${KEY}`, data), {
+      response: { status: 401, data: { error: `refused ${KEY}` } },
+    });
+    Object.defineProperty(failure, 'cause', { value: new Error(`inner: ${KEY}`), configurable: true });
+    const thrown = (await failingWith(failure)()) as McpError & { response: unknown; cause: Error };
+    expect(thrown).toBeInstanceOf(McpError);
+    expect(thrown.code).toBe(-32603);
+    expect(thrown.message).toContain('rejected [redacted]');
+    const payload = thrown.data as Record<string, unknown>;
+    expect(payload).toMatchObject({ echoed: '[redacted]', nested: [{ '[redacted]': 'bad [redacted]' }] });
+    expect(payload.self).toBe(payload);
+    expect(thrown.response).toEqual({ status: 401, data: { error: 'refused [redacted]' } });
+    expect(thrown.cause.message).toBe('inner: [redacted]');
+    // A frozen error comes back as an Error carrying the same fields, redacted.
+    const frozen = Object.freeze(Object.assign(new Error(`refused ${KEY}`), { code: 401, data: { echoed: KEY } }));
+    expect(await failingWith(frozen)()).toMatchObject({ code: 401, message: 'refused [redacted]', data: { echoed: '[redacted]' } });
+  });
+
   it('redacts a thrown string', async () => {
     expect(await failingWith(`refused ${KEY}`)()).toBe('refused [redacted]');
   });
@@ -151,7 +172,7 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted]');
     expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('[redacted]');
     // A failure that quotes none of it and no credential goes as it came.
-    expect(await answer(quoting('This tool requires a Business plan.'), { q: 'hi' })).toBe('This tool requires a Business plan.');
+    expect(await answer(quoting('This tool requires a Business plan.'), { query: 'Quarterly review' })).toBe('This tool requires a Business plan.');
   });
 
   it('counts a boolean or null the caller sent as theirs, so a guess at a key spelled the same reads the same right or wrong', async () => {

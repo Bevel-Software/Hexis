@@ -173,22 +173,67 @@ export function keepDownstreamToolErrors<T extends object>(protocol: T): T {
 }
 
 /**
- * `err` with `redact` applied to its message and stack, or an `Error` in its
- * place, with its name, code and cause, when they cannot be replaced. An own
- * value shadows a prototype getter (a `DOMException`'s message), so only a
- * frozen or non-extensible error needs the replacement.
+ * `err` with `redact` applied to its message, its stack and every string in
+ * its own fields and its cause (a JSON-RPC error's `data`, an HTTP error's
+ * `response`: a chain hands those back to the agent too), keeping its class,
+ * name and code; or an `Error` in its place, with its name, code and the same
+ * fields redacted, when they cannot be replaced. An own value shadows a
+ * prototype getter (a `DOMException`'s message), so only a frozen or
+ * non-extensible error needs the replacement.
  */
 function redactedInPlace(err: Error, redact: (text: string) => string): Error {
-  const message = redact(err.message);
-  try {
-    Object.defineProperty(err, 'message', { value: message, writable: true, configurable: true });
-    if (typeof err.stack === 'string') Object.defineProperty(err, 'stack', { value: redact(err.stack), writable: true, configurable: true });
-    return err;
-  } catch {
-    const replacement = Object.assign(new Error(message, { cause: err.cause }), { code: (err as { code?: unknown }).code });
-    replacement.name = err.name;
-    return replacement;
-  }
+  return redactedCopy(err, redact) as Error;
+}
+
+/**
+ * `value` with `redact` applied to every string in it, keys included, however
+ * deeply nested: objects and arrays are copied, an error is redacted in place
+ * (its class, name and code kept), anything else is kept. Walked without
+ * recursion, each object once, so a payload of any depth or with cycles
+ * comes back whole.
+ */
+function redactedCopy(value: unknown, redact: (text: string) => string): unknown {
+  const copies = new Map<object, unknown>();
+  const pending: Array<() => void> = [];
+  const copy = (item: unknown): unknown => {
+    if (typeof item === 'string') return redact(item);
+    if (!item || typeof item !== 'object') return item;
+    if (copies.has(item)) return copies.get(item);
+    if (item instanceof Error) {
+      const fields = Object.keys(item).filter((key) => key !== 'code');
+      const hasCause = Object.prototype.hasOwnProperty.call(item, 'cause');
+      const message = redact(item.message);
+      try {
+        Object.defineProperty(item, 'message', { value: message, writable: true, configurable: true });
+        if (typeof item.stack === 'string') Object.defineProperty(item, 'stack', { value: redact(item.stack), writable: true, configurable: true });
+        copies.set(item, item);
+        pending.push(() => {
+          for (const key of fields) Object.defineProperty(item, key, { value: copy((item as unknown as Record<string, unknown>)[key]), writable: true, configurable: true, enumerable: true });
+          if (hasCause) Object.defineProperty(item, 'cause', { value: copy(item.cause), writable: true, configurable: true });
+        });
+        return item;
+      } catch {
+        const replacement = new Error(message);
+        replacement.name = item.name;
+        copies.set(item, replacement);
+        pending.push(() => {
+          Object.assign(replacement, { code: (item as { code?: unknown }).code });
+          for (const key of fields) (replacement as unknown as Record<string, unknown>)[key] = copy((item as unknown as Record<string, unknown>)[key]);
+          if (hasCause) Object.defineProperty(replacement, 'cause', { value: copy(item.cause), writable: true, configurable: true });
+        });
+        return replacement;
+      }
+    }
+    const out: Record<string, unknown> | unknown[] = Array.isArray(item) ? [] : {};
+    copies.set(item, out);
+    pending.push(() => {
+      for (const [key, child] of Object.entries(item)) (out as Record<string, unknown>)[Array.isArray(item) ? key : redact(key)] = copy(child);
+    });
+    return out;
+  };
+  const result = copy(value);
+  while (pending.length > 0) pending.pop()!();
+  return result;
 }
 
 /**

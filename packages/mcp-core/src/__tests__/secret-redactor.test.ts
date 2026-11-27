@@ -128,14 +128,22 @@ describe('SecretRedactor', () => {
     for (const [a, b] of [['Q7', 'xZ'], ['AB', 'CD']]) expect(redactor.redact(`no ${a}${b} here`, [a, b])).toBe('[redacted]');
   });
 
+  it('answers the same whether a short guess the server glues its own characters to completes a key', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('a9B2');
+    redactor.remember('sk-live-Q7xZ2abcdefgh');
+    for (const guess of ['a9B', 'a9C']) expect(redactor.redact(`no ${guess}2 here`, [guess])).toBe('[redacted]');
+    for (const guess of ['sk', 'zz']) expect(redactor.redact(`no ${guess}-live-Q7xZ here`, [guess])).toBe('[redacted]');
+  });
+
   it("passes a quote on as it came when it repeats none of the caller's text and holds no secret", () => {
     const redactor = new SecretRedactor();
     redactor.remember('sk-live-Q7xZ2abcdefgh');
     const text = 'This tool requires a Business plan or higher.';
-    expect(redactor.redact(text, ['hi'])).toBe(text);
-    expect(redactor.redact(text, ['Quarterly review', 42, 'x'].map(String))).toBe(text);
-    // A short string of the caller's glued to the server's words is not taken for theirs.
-    expect(redactor.redact('Invalid value: 42 (max 420)', ['2'])).toBe('Invalid value: 42 (max 420)');
+    expect(redactor.redact(text, ['Quarterly review', 'limit', 50].map(String))).toBe(text);
+    // A short string of the caller's counts wherever it appears, glued to other text or not.
+    expect(redactor.redact('Invalid value: 42 (max 420)', ['2'])).toBe('[redacted]');
+    expect(redactor.redact(text, ['hi'])).toBe('[redacted]');
   });
 
   it("withholds a quote that holds a secret while the caller's text is about, and takes it out of one quoted without", () => {
@@ -179,14 +187,15 @@ describe('SecretRedactor', () => {
     redactor.rememberSubstituted('SEP', '.!');
     for (const guess of ['us', 'eu']) {
       expect(redactor.redact(`region ${guess} is closed`, [guess])).toBe('[redacted]');
-      expect(redactor.redact(`no x${guess}y here`, [guess])).toBe(`no x${guess}y here`);
+      expect(redactor.redact(`no x${guess}y here`, [guess])).toBe('[redacted]');
     }
     for (const guess of ['.!', '?!']) expect(redactor.redact(`sep ${guess} refused`, [guess])).toBe('[redacted]');
     // A text that is nothing but the caller's punctuation.
     expect(redactor.redact('?', ['?'])).toBe('[redacted]');
-    // A letter outside the basic plane is a letter: `a` glued to one does not stand alone.
-    expect(redactor.redact('𐐀a and a𐐀', ['a'])).toBe('𐐀a and a𐐀');
-    expect(redactor.redact('𐐀a and a𐐀, then a', ['a'])).toBe('[redacted]');
+    // A short word inside a longer string of theirs counts where it stands alone, while a short value is held;
+    // a letter outside the basic plane is a letter, so `ab` glued to one does not stand alone.
+    expect(redactor.redact('𐐀ab and ab𐐀', ['ab cdefg'])).toBe('𐐀ab and ab𐐀');
+    expect(redactor.redact('𐐀ab and ab𐐀, then ab', ['ab cdefg'])).toBe('[redacted]');
   });
 
   it('takes out a credential shorter than four characters inside other words too', () => {
