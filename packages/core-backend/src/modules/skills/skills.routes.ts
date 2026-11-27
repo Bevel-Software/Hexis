@@ -1,7 +1,7 @@
 import express from 'express';
 import '../auth/index.js'; // Express Request.userId / userEmail augmentation
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IPendingSkillService, ISkillService, PluginMembership } from './skills.contract.js';
+import type { IPendingSkillService, ISkillService, LeftoverPluginGrant, PluginMembership } from './skills.contract.js';
 import type { IAllowedToolsChecker } from './allowed-tools-check.js';
 
 /** The slice of the plugin link index this surface reads — see `PluginLinkIndex`. */
@@ -9,6 +9,7 @@ export interface SkillMembershipSource {
   membership(): Promise<{
     bySkill: Map<string, PluginMembership[]>;
     byPlugin: Map<string, { folder: string }>;
+    leftoverBySkill?: Map<string, LeftoverPluginGrant[]>;
   }>;
 }
 
@@ -67,11 +68,13 @@ export function createSkillsRoutes(
       return;
     }
     let bySkill: Map<string, PluginMembership[]>;
+    let leftoverBySkill: Map<string, LeftoverPluginGrant[]>;
     // Fail closed: memberships without a gate to judge them by name nothing.
     let discoverable: (plugin: string) => boolean = () => false;
     try {
       const membership = await links.membership();
       bySkill = membership.bySkill;
+      leftoverBySkill = membership.leftoverBySkill ?? new Map();
       if (gate) {
         const folders = [...membership.byPlugin.entries()];
         const verdicts = folders.length
@@ -86,9 +89,18 @@ export function createSkillsRoutes(
       }
     } catch {
       bySkill = new Map(); // membership is a decoration; the shelf must not fall with it
+      leftoverBySkill = new Map();
     }
     res.json({
-      skills: skills.map((s) => ({ ...s, plugins: (bySkill.get(s.path) ?? []).filter((m) => discoverable(m.name)) })),
+      skills: skills.map((s) => ({
+        ...s,
+        plugins: (bySkill.get(s.path) ?? []).filter((m) => discoverable(m.name)),
+        // Picked field by field: the index's entry also lists the OTHER
+        // skills the grant opens, which this caller may not be able to read.
+        leftoverGrants: (leftoverBySkill.get(s.path) ?? [])
+          .filter((g) => discoverable(g.plugin))
+          .map(({ plugin, folder, editors }) => ({ plugin, folder, editors })),
+      })),
     });
   });
 

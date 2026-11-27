@@ -610,6 +610,45 @@ describe('PluginPage', () => {
     expect(screen.queryByText(/can't be read by GTM's members/)).not.toBeInTheDocument();
   });
 
+  it('names a grant a link edited out of plugin.json left behind, and who can remove it — to a reader too', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      tools: [connectedTool()],
+      skills: [
+        ...CATALOG.skills,
+        {
+          name: 'beta',
+          description: 'B.',
+          path: 'Skills/QALink/beta',
+          plugins: [],
+          leftoverGrants: [
+            {
+              plugin: 'GTM',
+              folder: 'Skills/QALink/beta',
+              editors: { roles: ['Admin'], users: [{ name: 'Eve', email: 'eve@x.io' }] },
+            },
+          ],
+        },
+      ],
+    });
+    renderPlugin('GTM');
+    const banner = await screen.findByTestId('leftover-grants');
+    expect(banner).toHaveTextContent(
+      "GTM no longer links beta, but Skills/QALink/beta/access.md still grants GTM's members access to it. Admin and Eve can remove the grant.",
+    );
+    // A reader runs no repair: the banner is all the page can do.
+    expect(pluginsMock.repairPluginLinks).not.toHaveBeenCalled();
+  });
+
+  it('reloads after the page-open repair revokes a leftover grant', async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true })]);
+    pluginsMock.repairPluginLinks.mockResolvedValue({ repaired: [], skipped: [], revoked: ['Skills/QALink/beta'] });
+    vi.mocked(CATALOG.reload).mockClear();
+    renderPlugin('GTM');
+    await waitFor(() => expect(CATALOG.reload).toHaveBeenCalled());
+  });
+
   it('names the skill and its editors for a link the manager cannot repair', async () => {
     dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
     pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, brokenLinks: 1 })]);

@@ -28,6 +28,20 @@ export interface PluginMembership {
   granted: boolean;
 }
 
+/**
+ * A plugin's grant on this skill that the plugin's manifest no longer backs:
+ * the link was edited out of plugin.json, and the plugin's members still read
+ * the skill through `folder`'s access rules until one of `editors` removes it.
+ */
+export interface LeftoverPluginGrant {
+  /** The plugin's name. */
+  plugin: string;
+  /** Repo-relative folder whose access.md carries the grant. */
+  folder: string;
+  /** Who can remove it. */
+  editors: { roles: string[]; users: { name: string; email: string }[] };
+}
+
 export interface SkillSummary {
   /** Canonical id = the skill's folder name (e.g. `rfi`). */
   name: string;
@@ -41,6 +55,8 @@ export interface SkillSummary {
    * surfaces, which load skills by name and never by plugin.
    */
   plugins?: PluginMembership[];
+  /** With `plugins`: grants left by links no longer in a manifest (see {@link LeftoverPluginGrant}). */
+  leftoverGrants?: LeftoverPluginGrant[];
   /**
    * Set only on an answer read from a branch OTHER than the default, and only
    * on a skill whose folder DIFFERS there: it exists only on that branch, or

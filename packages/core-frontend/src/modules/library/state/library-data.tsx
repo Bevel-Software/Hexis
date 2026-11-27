@@ -3,7 +3,7 @@ import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode, 
 import { LibraryContext } from './library-context';
 import { SKILLS_DIR } from '@bevel-software/platform-shared';
 import { pluginNameForPath, pluginsHoldingTool } from '../utils/plugin-summary';
-import type { PluginMembership } from '../services/library.api';
+import type { LeftoverPluginGrant, PluginMembership } from '../services/library.api';
 
 /**
  * The plugin a card files under, by IDENTITY — the server's own answer for a
@@ -79,6 +79,8 @@ export interface LibraryItem {
    * its file sits and which roots each plugin links (`pluginsHoldingTool`).
    */
   plugins?: PluginMembership[];
+  /** A skill's grants left by links no longer in a plugin's manifest (see `LeftoverPluginGrant`). */
+  leftoverGrants?: LeftoverPluginGrant[];
   /** Repo-root-relative path — the skill's folder, or the `.tool` file. */
   path: string;
   /**
@@ -203,6 +205,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       plugin: pluginOfItem(s.path, s.plugins, pluginSummaries),
       shared: isSharedPath(s.path),
       plugins: s.plugins ?? [],
+      leftoverGrants: s.leftoverGrants ?? [],
       path: s.path,
       version: s.version,
       status: skillStatus(

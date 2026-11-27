@@ -5,7 +5,7 @@ const log = logger('plugins');
 import { pluginManifestName, skillUnderRoot } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { IAccessControl } from '../access/index.js';
+import { accessMdPathForFolder, type IAccessControl } from '../access/index.js';
 import type { ISkillService } from '../skills/index.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
 import { canonicalRoleName, pluginPrincipalKey } from '../access-model/index.js';
@@ -35,6 +35,14 @@ export interface PluginLinks {
    * links grant nothing, and for a plugin whose links are all healthy.
    */
   ungrantedRoots: UngrantedRoot[];
+  /**
+   * Grants of this plugin's tokens that open released skills the manifest does
+   * NOT link: what a link leaves behind when its entry is edited out of
+   * plugin.json by hand. The page-open repair revokes them where the viewer
+   * may; whatever remains is named on the skill page and the plugin page.
+   * Empty for an unmanaged (dialect) plugin.
+   */
+  leftoverGrants: LeftoverGrant[];
   /** Whether hexis writes these links and checks their grants — see `DiscoveredPlugin`. */
   linksAreManaged: boolean;
 }
@@ -45,6 +53,28 @@ export interface UngrantedRoot {
   root: string;
   /** The released skill folders under it the plugin's members cannot read. */
   skills: string[];
+}
+
+/** Who may edit one folder's access file, in the terms a banner names them. */
+export interface LinkEditors {
+  roles: string[];
+  users: { name: string; email: string }[];
+}
+
+/**
+ * One folder whose access file grants a plugin's link tokens to released
+ * skills the plugin's manifest does not link: the grant a hand-removed
+ * manifest entry leaves behind, still opening `skills` to the plugin.
+ */
+export interface LeftoverGrant {
+  /** The plugin's name. */
+  plugin: string;
+  /** Repo-relative folder whose access.md carries the grant (`''` = the root). */
+  folder: string;
+  /** The released, unlinked skills the grant still opens to the plugin. */
+  skills: string[];
+  /** Who can remove it. */
+  editors: LinkEditors;
 }
 
 /**
@@ -64,6 +94,8 @@ export interface LinkMembership {
    * read from the value's `folder`, never from the key.
    */
   byPlugin: Map<string, PluginLinks>;
+  /** skill path → the leftover grants that still open it (see `PluginLinks.leftoverGrants`). */
+  leftoverBySkill: Map<string, LeftoverGrant[]>;
 }
 
 /**
@@ -139,7 +171,7 @@ export class PluginLinkIndex implements IPluginLinkIndex {
     // A degraded read (no workspace yet) is served but not stored — the same
     // reasoning as the plugin index: caching a failure hides every link for
     // a full TTL after its cause is gone.
-    if (built === null) return { bySkill: new Map(), byPlugin: new Map() };
+    if (built === null) return { bySkill: new Map(), byPlugin: new Map(), leftoverBySkill: new Map() };
     this.cache.set(built, token);
     return built;
   }
@@ -163,6 +195,7 @@ export class PluginLinkIndex implements IPluginLinkIndex {
     const skills = await this.skillService.listSkills(undefined);
     const bySkill = new Map<string, PluginMembership[]>();
     const byPlugin = new Map<string, PluginLinks>();
+    const leftoverBySkill = new Map<string, LeftoverGrant[]>();
     const add = (skillPath: string, m: PluginMembership) => {
       const list = bySkill.get(skillPath) ?? [];
       if (!list.some((x) => x.name === m.name)) list.push(m);
@@ -244,6 +277,11 @@ export class PluginLinkIndex implements IPluginLinkIndex {
         );
         if (without.length > 0) ungrantedRoots.push({ root, skills: without });
       }
+      const unlinked = skills.map((s) => s.path).filter((s) => !inline(s) && !linkedSkills.includes(s));
+      const leftoverGrants = plugin.linksAreManaged ? await this.leftoverGrants(wsId, plugin.name, slug, unlinked) : [];
+      for (const grant of leftoverGrants) {
+        for (const s of grant.skills) leftoverBySkill.set(s, [...(leftoverBySkill.get(s) ?? []), grant]);
+      }
       byPlugin.set(plugin.name, {
         name: plugin.name,
         folder: plugin.folder,
@@ -251,6 +289,7 @@ export class PluginLinkIndex implements IPluginLinkIndex {
         linkedSkills,
         unresolvedRoots,
         ungrantedRoots,
+        leftoverGrants,
         linksAreManaged: plugin.linksAreManaged,
       });
       for (const skillPath of linkedSkills) {
@@ -258,7 +297,46 @@ export class PluginLinkIndex implements IPluginLinkIndex {
         add(skillPath, { name: plugin.name, linked: true, granted: grantedSkills.get(skillPath) === true });
       }
     }
-    return { bySkill, byPlugin };
+    return { bySkill, byPlugin, leftoverBySkill };
+  }
+
+  /**
+   * Every folder whose access file grants one of the plugin's link tokens to
+   * a skill the manifest does not link. `grantSources` names each scope that
+   * grants it, closest first, so a grant on the skill folder and one on a
+   * folder above it are both found. A token a closer `deny` cuts off opens
+   * nothing and is not reported.
+   *
+   * A resolver failure propagates: an index that silently dropped a leftover
+   * would hide exactly the over-share this exists to show.
+   */
+  private async leftoverGrants(
+    wsId: string,
+    plugin: string,
+    slug: string,
+    unlinked: string[],
+  ): Promise<LeftoverGrant[]> {
+    const byFolder = new Map<string, string[]>();
+    for (const skillPath of unlinked) {
+      for (const verb of LINK_GRANT_VERBS) {
+        const principal = { kind: 'role' as const, role: pluginPrincipalKey(slug, verb) };
+        const sources = await this.accessControl.grantSources(wsId, 'folder', skillPath, principal, {
+          tokenMatch: 'exact',
+        });
+        for (const source of sources[verb] ?? []) {
+          const folder = source.kind === 'direct' ? skillPath : folderOfAccessMd(source.path);
+          if (folder === null) continue;
+          const list = byFolder.get(folder) ?? [];
+          if (!list.includes(skillPath)) list.push(skillPath);
+          byFolder.set(folder, list);
+        }
+      }
+    }
+    const out: LeftoverGrant[] = [];
+    for (const [folder, skills] of byFolder) {
+      out.push({ plugin, folder, skills, editors: await linkEditorsOf(this.accessControl, wsId, folder) });
+    }
+    return out;
   }
 
   /**
@@ -320,5 +398,37 @@ export class PluginLinkIndex implements IPluginLinkIndex {
     } catch {
       return true; // fail closed, as above
     }
+  }
+}
+
+/** The folder an access.md path governs, or null for a source that is not one. */
+function folderOfAccessMd(p: string): string | null {
+  if (p === 'access.md') return '';
+  return p.endsWith('/access.md') ? p.slice(0, -'/access.md'.length) : null;
+}
+
+/**
+ * Who may edit a folder's access file: the principals a banner names as the
+ * people who can repair a link, or remove a grant, the viewer cannot.
+ *
+ * Plugin principals are dropped: `plugin/gtm/write` is a real holder of the
+ * verb, and naming it in a sentence addressed to a person says nothing they
+ * could act on. The eligible lists carry emails and no display names, so an
+ * email stands in — every name here has to be something a reader can go and
+ * ask. A lookup that fails names nobody rather than failing the caller — the
+ * banners have a sentence for that.
+ */
+export async function linkEditorsOf(accessControl: IAccessControl, wsId: string, folder: string): Promise<LinkEditors> {
+  try {
+    const writers = await accessControl.eligibleWriters(wsId, accessMdPathForFolder(folder));
+    return {
+      roles: writers.principals
+        ? writers.principals.filter((p) => p.kind !== 'plugin').map((p) => p.name)
+        : writers.roles,
+      users: writers.users.map((u) => ({ name: u.name || u.email, email: u.email })),
+    };
+  } catch (err) {
+    log.warn("couldn't resolve a folder's editors:", { folder, err });
+    return { roles: [], users: [] };
   }
 }

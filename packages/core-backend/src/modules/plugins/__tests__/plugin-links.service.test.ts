@@ -398,6 +398,7 @@ describe('PluginLinksService', () => {
       expect(await svc.repairAll(manager, 'gtm')).toEqual({
         repaired: ['Skills/Eng/deploy', 'Skills/Eng/rollback'],
         skipped: [],
+        revoked: [],
       });
       expect(commits).toEqual([
         `${KB_DIR}/Skills/Eng/deploy/access.md`,
@@ -463,7 +464,7 @@ describe('PluginLinksService', () => {
       await svc.repairAll(manager, 'gtm');
       commits.length = 0;
 
-      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [] });
+      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [], revoked: [] });
       expect(commits).toEqual([]);
       const rules = await read('Skills/Eng/deploy/access.md');
       expect(rules.match(/plugin\/gtm\/read/g)).toHaveLength(1);
@@ -493,8 +494,94 @@ describe('PluginLinksService', () => {
       await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
       commits.length = 0;
 
-      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [] });
+      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [], revoked: [] });
       expect(commits).toEqual([]);
+    });
+  });
+  describe('a link edited out of plugin.json by hand', () => {
+    /** Link through the service, then take the entry out of the manifest the way a hand edit does. */
+    const linkThenRemoveByHand = async (root: string) => {
+      await svc.link(manager, 'gtm', root);
+      await linkByHand();
+      commits.length = 0;
+      subjects.length = 0;
+    };
+    const leftoversOf = async () => (await index.membership()).byPlugin.get('gtm')?.leftoverGrants ?? [];
+
+    it('leaves the grant behind, and the index names it, the skill it opens and who can remove it', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
+      await linkThenRemoveByHand('Skills/Eng/deploy');
+
+      // The bug: the manifest says nothing, the member still reads.
+      expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
+      expect(await index.pluginsOf('Skills/Eng/deploy')).toEqual([]);
+      const leftovers = await leftoversOf();
+      expect(leftovers).toHaveLength(1);
+      expect(leftovers[0]).toMatchObject({ plugin: 'gtm', folder: 'Skills/Eng/deploy', skills: ['Skills/Eng/deploy'] });
+      expect(leftovers[0].editors.users.map((u) => u.email).sort()).toEqual(['eve@x.io', 'mia@x.io']);
+      expect((await index.membership()).leftoverBySkill.get('Skills/Eng/deploy')).toEqual(leftovers);
+      // A skill the grant never opened is not named.
+      expect((await index.membership()).leftoverBySkill.get('Skills/Eng/rollback')).toBeUndefined();
+    });
+
+    it('opening the plugin page revokes it as Unlink would, and the member gets nothing', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+      await linkThenRemoveByHand('Skills/Eng/deploy');
+
+      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [], revoked: ['Skills/Eng/deploy'] });
+      const rules = await read('Skills/Eng/deploy/access.md');
+      expect(rules).not.toContain('plugin/gtm/read');
+      expect(rules).not.toContain('plugin/gtm/write');
+      expect(commits).toEqual([`${KB_DIR}/Skills/Eng/deploy/access.md`]);
+      expect(subjects[0]).toContain('Remove leftover grant: gtm → Skills/Eng/deploy');
+      access.invalidate(wsId);
+      expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(false);
+      expect(await leftoversOf()).toEqual([]);
+      // Nothing left to do the second time.
+      commits.length = 0;
+      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [], revoked: [] });
+      expect(commits).toEqual([]);
+    });
+
+    it('a writer who may not edit the rules revokes nothing, and the grant stays named with its editors', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+      await linkThenRemoveByHand('Skills/Eng/deploy');
+      // Eve takes the scope over, and the skill's rules are down to the read
+      // token (the write token would itself let GTM's managers edit them).
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n');
+      await write('Skills/Eng/deploy/access.md', '---\n---\nread:\n  - plugin/gtm/read\n');
+      access.invalidate(wsId);
+      index.invalidate();
+
+      expect(await svc.repairAll(manager, 'gtm')).toEqual({ repaired: [], skipped: [], revoked: [] });
+      expect(commits).toEqual([]);
+      expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
+      const [leftover] = await leftoversOf();
+      expect(leftover).toMatchObject({ folder: 'Skills/Eng/deploy', skills: ['Skills/Eng/deploy'] });
+      expect(leftover.editors.users.map((u) => u.email)).toEqual(['eve@x.io']);
+      expect(leftover.editors.roles).toEqual(['Admin']);
+    });
+
+    it('a grant re-linked before the revoke runs is kept: the manifest is re-read under the lock', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+      await linkThenRemoveByHand('Skills/Eng/deploy');
+      await index.membership(); // the work list is read now…
+      await write(
+        'Plugins/GTM/plugin.json',
+        `${JSON.stringify(withLinkedSkillRoots({ name: 'gtm' }, ['Skills/Eng']), null, 2)}\n`,
+      ); // …and a link at the folder above lands before the revoke, without dropping the index
+
+      const report = await svc.repairAll(manager, 'gtm');
+      expect(report.revoked).toEqual([]);
+      expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
+    });
+
+    it('a link whose entry is still in the manifest is never a leftover', async () => {
+      await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+      await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
+      expect(await leftoversOf()).toEqual([]);
+      expect((await svc.repairAll(manager, 'gtm')).revoked).toEqual([]);
+      expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
     });
   });
 });

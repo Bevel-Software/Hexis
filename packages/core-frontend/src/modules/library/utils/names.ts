@@ -28,3 +28,18 @@ export function joinNames(names: string[]): string {
 export function firstNames(names: string[]): string[] {
   return names.map((n) => n.trim().split(/\s+/)[0] ?? n).filter((n) => n.length > 0);
 }
+
+/**
+ * The one sentence the skill page and the plugin page say about a grant a
+ * link left behind when its entry was edited out of plugin.json: whose it is,
+ * where it is written, and who can remove it. "Its editors" stands when the
+ * list is empty: an access.md that names nobody is still the admins' to edit.
+ */
+export function leftoverGrantText(
+  grant: { plugin: string; folder: string; editors: { roles: string[]; users: { name: string }[] } },
+  skill: string,
+): string {
+  const who = joinNames([...grant.editors.roles, ...grant.editors.users.map((u) => u.name)]) || 'Its editors';
+  const where = grant.folder ? `${grant.folder}/access.md` : 'the root access.md';
+  return `${grant.plugin} no longer links ${skill}, but ${where} still grants ${grant.plugin}'s members access to it. ${who} can remove the grant.`;
+}

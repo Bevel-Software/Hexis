@@ -141,11 +141,10 @@ export function SkillPage({
   const skillPath = skill?.path ?? '';
   const prefix = `${skillPath}/`;
 
-  /** Every plugin holding this skill, from the catalog's decoration. */
-  const memberships = useMemo(
-    () => data.items.find((i) => i.kind === 'skill' && i.id === name)?.plugins ?? [],
-    [data.items, name],
-  );
+  /** Every plugin holding this skill, and every grant a removed link left on it, from the catalog's decoration. */
+  const catalogItem = useMemo(() => data.items.find((i) => i.kind === 'skill' && i.id === name), [data.items, name]);
+  const memberships = useMemo(() => catalogItem?.plugins ?? [], [catalogItem]);
+  const leftovers = useMemo(() => catalogItem?.leftoverGrants ?? [], [catalogItem]);
   /**
    * Write-access requests on this skill, for its editors. The endpoint answers
    * `[]` to everyone else, so the fetch is unconditional and the banner hides
@@ -766,6 +765,7 @@ export function SkillPage({
           skillName={name}
           skillPath={skillPath}
           memberships={memberships}
+          leftovers={leftovers}
           canWrite={canWrite}
           onChanged={() => {
             data.reload();

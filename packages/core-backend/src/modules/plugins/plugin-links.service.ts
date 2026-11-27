@@ -20,16 +20,12 @@ import { WorkspaceMutex } from '../kb-fs/index.js';
 import type { ISkillService } from '../skills/index.js';
 import { logger } from '../../shared/logging.js';
 import type { ProvisionCommitDriver } from './plugin-provision.service.js';
-import type { PluginLinkIndex } from './plugin-links.js';
+import { linkEditorsOf, type LinkEditors, type PluginLinkIndex } from './plugin-links.js';
 import type { KbContext } from '../../shared/kb-context.js';
 
 const log = logger('plugins');
 
-/** Who may edit one skill root's access file, in the terms the banner names them. */
-export interface LinkEditors {
-  roles: string[];
-  users: { name: string; email: string }[];
-}
+export type { LinkEditors } from './plugin-links.js';
 
 /** One link the automatic repair left alone, and why — see `repairAll`. */
 export interface UnrepairedLink {
@@ -56,6 +52,13 @@ export interface LinkRepairReport {
   repaired: string[];
   /** What is still broken, and who can fix it. */
   skipped: UnrepairedLink[];
+  /**
+   * Folders whose leftover grant of this plugin was revoked: the manifest no
+   * longer links them, so the plugin's members no longer read through them.
+   * A leftover the viewer may not revoke is not listed; the catalog names it,
+   * with its editors, on the skill page and the plugin page.
+   */
+  revoked: string[];
 }
 
 /**
@@ -67,6 +70,12 @@ export interface LinkRepairReport {
  */
 function repairSummary(plugin: string, root: string): string | undefined {
   const subject = `Repair link: ${plugin} → ${root} (automatic, on opening the plugin page)`;
+  return subject.length <= 200 ? subject : undefined;
+}
+
+/** The commit subject for revoking a grant the manifest no longer links: the same reasoning as {@link repairSummary}. */
+function leftoverSummary(plugin: string, folder: string): string | undefined {
+  const subject = `Remove leftover grant: ${plugin} → ${folder || '/'} (no longer in plugin.json; automatic, on opening the plugin page)`;
   return subject.length <= 200 ? subject : undefined;
 }
 
@@ -109,7 +118,9 @@ export class PluginLinkError extends Error {
  * Repair re-grants the tokens for a link that exists but whose grant was
  * hand-removed — the amber dot's one action, run one link at a time from the
  * skill page, or over a whole plugin's links by `repairAll` the moment
- * somebody who may write that plugin opens its page.
+ * somebody who may write that plugin opens its page. The same page open
+ * revokes the grant a link left behind when its entry was edited out of
+ * plugin.json by hand, as Unlink would have.
  *
  * Every operation is serialised on BOTH sides it writes — the plugin's
  * manifest slug (the same key provisioning locks on) and the skill root whose
@@ -206,21 +217,7 @@ export class PluginLinksService {
       // to remove — never a silent no-op that pretends it happened.
       let revoked = false;
       if (await this.accessControl.canWrite(wsId, user.email, accessMdPathForFolder(root))) {
-        let changed = false;
-        for (const principal of this.tokens(folder)) {
-          const r = await this.mutation.revoke(wsId, 'folder', root, principal, user.email, undefined, {
-            tokenMatch: 'exact',
-          });
-          changed ||= r.changed;
-        }
-        if (changed) {
-          await this.commits.runPendingCommit(
-            wsId,
-            this.kb.defaultBranch,
-            `${this.kbDirName}/${accessMdPathForFolder(root)}`,
-            user,
-          );
-        }
+        await this.revokeTokens(wsId, user, folder, root);
         revoked = true;
       }
       await this.workspaceService.writeFile(
@@ -309,8 +306,10 @@ export class PluginLinksService {
     // Read the work list ONCE, before the first write: `repair` invalidates
     // the index, and re-reading it per root would rebuild the whole membership
     // between every commit.
-    const work = (await this.links.membership()).byPlugin.get(folder)?.ungrantedRoots ?? [];
-    if (work.length === 0) return { repaired: [], skipped: [] };
+    const links = (await this.links.membership()).byPlugin.get(folder);
+    const work = links?.ungrantedRoots ?? [];
+    const leftovers = links?.leftoverGrants ?? [];
+    if (work.length === 0 && leftovers.length === 0) return { repaired: [], skipped: [], revoked: [] };
     const named = new Map((await this.skillService.listSkills(undefined)).map((s) => [s.path, s.name]));
     const repaired: string[] = [];
     const skipped: UnrepairedLink[] = [];
@@ -319,7 +318,7 @@ export class PluginLinksService {
         root: item.root,
         reason,
         skills: item.skills.map((path) => ({ path, name: named.get(path) ?? path.split('/').pop() ?? path })),
-        editors: await this.editorsOf(wsId, item.root),
+        editors: await linkEditorsOf(this.accessControl, wsId, item.root),
       });
     };
     for (const item of work) {
@@ -333,36 +332,44 @@ export class PluginLinksService {
         await leftBroken(item, needsWrite ? 'needs-skill-write' : 'failed');
       }
     }
-    return { repaired, skipped };
+    // Leftovers AFTER the repairs: a root re-granted above is declared, so its
+    // grant is never one of these, and revoking can only take away what the
+    // manifest no longer links.
+    const revoked: string[] = [];
+    for (const grant of leftovers) {
+      try {
+        if (await this.revokeLeftover(user, folder, grant.folder)) revoked.push(grant.folder);
+      } catch (err) {
+        // Not swallowed: the grant stays in the index, and the catalog names
+        // it with its editors on the skill page and the plugin page.
+        log.warn('automatic leftover-grant removal failed:', { plugin: folder, folder: grant.folder, err });
+      }
+    }
+    return { repaired, skipped, revoked };
+  }
+
+  /**
+   * Revoke the plugin's two tokens from `grantFolder` when the manifest no
+   * longer links it: what Unlink would have revoked, had the entry been
+   * removed with Unlink rather than by editing plugin.json. Under the same
+   * pair of locks, with the manifest re-read inside them, so a link added
+   * meanwhile at or above the folder keeps its grant. Only where the viewer
+   * may write the folder's access file, as Unlink; otherwise false, and the
+   * grant stays visible for an editor to remove.
+   */
+  private async revokeLeftover(user: AuthUser, folder: string, grantFolder: string): Promise<boolean> {
+    const wsId = this.kb.defaultWorkspaceId();
+    return this.locks.runAll(this.lockKeys(folder, grantFolder), async () => {
+      const { manifest } = await this.readManifest(wsId, folder);
+      if (linkedSkillRoots(manifest).some((root) => skillUnderRoot(grantFolder, root))) return false;
+      if (!(await this.accessControl.canWrite(wsId, user.email, accessMdPathForFolder(grantFolder)))) return false;
+      const changed = await this.revokeTokens(wsId, user, folder, grantFolder, leftoverSummary(folder, grantFolder));
+      this.changed(wsId);
+      return changed;
+    });
   }
 
   // --- internal --------------------------------------------------------------
-
-  /**
-   * Who may edit a root's access file — the principals the banner names as
-   * the people who can repair a link this viewer cannot.
-   *
-   * Plugin principals are dropped: `plugin/gtm/write` is a real holder of the
-   * verb, and naming it in a sentence addressed to a person says nothing they
-   * could act on. The eligible lists carry emails and no display names, so an
-   * email stands in — every name here has to be something a reader can go and
-   * ask. A lookup that fails names nobody rather than failing the whole
-   * repair — the banner has a sentence for that.
-   */
-  private async editorsOf(wsId: string, root: string): Promise<LinkEditors> {
-    try {
-      const writers = await this.accessControl.eligibleWriters(wsId, accessMdPathForFolder(root));
-      return {
-        roles: writers.principals
-          ? writers.principals.filter((p) => p.kind !== 'plugin').map((p) => p.name)
-          : writers.roles,
-        users: writers.users.map((u) => ({ name: u.name || u.email, email: u.email })),
-      };
-    } catch (err) {
-      log.warn("couldn't resolve a skill root's editors:", { root, err });
-      return { roles: [], users: [] };
-    }
-  }
 
   /**
    * ONE reservation for both sides of a link: the plugin's manifest AND the
@@ -411,6 +418,37 @@ export class PluginLinksService {
       summary,
     });
     return true;
+  }
+
+  /**
+   * Take the two lines out of `root`'s access file, exact tokens only, and
+   * commit if anything changed: Unlink's revoke, and the leftover removal's.
+   * Returns whether the file changed.
+   */
+  private async revokeTokens(
+    wsId: string,
+    user: AuthUser,
+    folder: string,
+    root: string,
+    summary?: string,
+  ): Promise<boolean> {
+    let changed = false;
+    for (const principal of this.tokens(folder)) {
+      const r = await this.mutation.revoke(wsId, 'folder', root, principal, user.email, undefined, {
+        tokenMatch: 'exact',
+      });
+      changed ||= r.changed;
+    }
+    if (changed) {
+      await this.commits.runPendingCommit(
+        wsId,
+        this.kb.defaultBranch,
+        `${this.kbDirName}/${accessMdPathForFolder(root)}`,
+        user,
+        { summary },
+      );
+    }
+    return changed;
   }
 
   private rootOrThrow(raw: string): string {

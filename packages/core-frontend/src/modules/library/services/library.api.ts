@@ -41,6 +41,17 @@ export interface PluginMembership {
   granted: boolean;
 }
 
+/**
+ * A plugin's grant on a skill that the plugin's manifest no longer links: the
+ * plugin's members still read it through `folder`'s access rules until one of
+ * `editors` removes the grant. Mirrors the backend contract.
+ */
+export interface LeftoverPluginGrant {
+  plugin: string;
+  folder: string;
+  editors: { roles: string[]; users: { name: string; email: string }[] };
+}
+
 export interface LibrarySkillSummary {
   /** Canonical id = the skill's folder name (e.g. `rfi`). */
   name: string;
@@ -50,6 +61,8 @@ export interface LibrarySkillSummary {
   path: string;
   /** Every plugin holding this skill. Absent from an older server. */
   plugins?: PluginMembership[];
+  /** Grants left by links no longer in a manifest. Absent from an older server. */
+  leftoverGrants?: LeftoverPluginGrant[];
 }
 
 /** The open write-access requests on a skill — `[]` to anyone but its editors. */

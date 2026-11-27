@@ -15,7 +15,7 @@ import {
   urlForLibraryItem,
 } from '../routes/library-paths';
 import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
-import { joinNames } from '../utils/names';
+import { joinNames, leftoverGrantText } from '../utils/names';
 import { repairPluginLinks, type LinkRepairReport, type UnrepairedLink } from '../services/plugins.api';
 import { RenamePluginDialog } from './RenamePluginDialog';
 import { PluginJoinRequests } from './PluginJoinRequests';
@@ -181,7 +181,7 @@ export function PluginPage() {
         setRepairReport(report);
         // Only a write is worth a refetch: the catalog and the summaries carry
         // the link health this just changed.
-        if (report.repaired.length > 0) {
+        if (report.repaired.length > 0 || (report.revoked?.length ?? 0) > 0) {
           reload();
           reloadPlugins();
         }
@@ -213,6 +213,21 @@ export function PluginPage() {
   // plugin's members out of a skill NOW, so it outranks an integration the
   // reader has not connected for themselves.
   const { total: attention, brokenLinks, warnings: warningCount } = attentionOf(data.items, plugin, data.pluginSummaries);
+  /**
+   * Grants this plugin still holds on skills its manifest no longer links: a
+   * link edited out of plugin.json left them. From the catalog, so every
+   * viewer sees them, and a writer sees what the page-open repair could not
+   * revoke once it reloads.
+   */
+  const leftoverGrants = useMemo(
+    () =>
+      data.items.flatMap((i) =>
+        (i.leftoverGrants ?? []).filter((g) => g.plugin === plugin).map((grant) => ({ skill: i.name, grant })),
+      ),
+    [data.items, plugin],
+  );
+  /** The page-open repair is running: what it may revoke is not said until it has answered. */
+  const repairInFlight = canRepairLinks && repairReport === null && !repairFailed;
   /** Links the page-open repair could not put back — the banner's own list. */
   const unrepairedLinks = repairReport?.skipped ?? [];
   /**
@@ -455,6 +470,15 @@ export function PluginPage() {
                 </li>
               )),
             )}
+          </ul>
+        </Banner>
+      )}
+      {leftoverGrants.length > 0 && !repairInFlight && (
+        <Banner role="status" tone="urgent" className="mt-4" data-testid="leftover-grants">
+          <ul className="grid gap-1">
+            {leftoverGrants.map(({ skill, grant }) => (
+              <li key={`${grant.folder}:${skill}`}>{leftoverGrantText(grant, skill)}</li>
+            ))}
           </ul>
         </Banner>
       )}

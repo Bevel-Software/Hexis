@@ -3,7 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { LibraryContext } from '../state/library-context';
 import type { LibraryContextValue, LibraryItem } from '../state/library-data';
-import type { PluginMembership } from '../services/library.api';
+import type { LeftoverPluginGrant, PluginMembership } from '../services/library.api';
 import { SharedViaPlugins } from '../components/skill-page/SharedViaPlugins';
 
 /**
@@ -54,7 +54,7 @@ function lib(items: LibraryItem[]): LibraryContextValue {
   };
 }
 
-function renderSection(items: LibraryItem[], memberships: PluginMembership[] = []) {
+function renderSection(items: LibraryItem[], memberships: PluginMembership[] = [], leftovers: LeftoverPluginGrant[] = []) {
   render(
     <MemoryRouter>
       <LibraryContext.Provider value={lib(items)}>
@@ -62,6 +62,7 @@ function renderSection(items: LibraryItem[], memberships: PluginMembership[] = [
           skillName="legacy"
           skillPath="Skills/Eng/legacy"
           memberships={memberships}
+          leftovers={leftovers}
           canWrite
           onChanged={vi.fn()}
         />
@@ -102,5 +103,41 @@ describe('SharedViaPlugins', () => {
     // membership rather than about the skill's declared lifecycle.
     expect(screen.queryByRole('button', { name: 'Add to plugin…' })).not.toBeInTheDocument();
     expect(screen.getByText('GTM')).toBeInTheDocument();
+  });
+
+  it('names a grant a removed link left behind, where it is written and who can remove it', () => {
+    renderSection([legacy], [], [
+      {
+        plugin: 'Lead Ops',
+        folder: 'Skills/Eng/legacy',
+        editors: { roles: ['Admin'], users: [{ name: 'Eve', email: 'eve@x.io' }] },
+      },
+    ]);
+    const row = screen.getByTestId('leftover-grant');
+    expect(row).toHaveTextContent('Lead Ops');
+    expect(row).toHaveTextContent('Leftover grant');
+    expect(row).toHaveTextContent(
+      "Lead Ops no longer links legacy, but Skills/Eng/legacy/access.md still grants Lead Ops's members access to it. Admin and Eve can remove the grant.",
+    );
+  });
+
+  it('shows the section for a leftover grant even when nothing else would', () => {
+    render(
+      <MemoryRouter>
+        <LibraryContext.Provider value={{ ...lib([legacy]), pluginSummaries: [] }}>
+          <SharedViaPlugins
+            skillName="legacy"
+            skillPath="Skills/Eng/legacy"
+            memberships={[]}
+            leftovers={[{ plugin: 'Lead Ops', folder: '', editors: { roles: [], users: [] } }]}
+            canWrite={false}
+            onChanged={vi.fn()}
+          />
+        </LibraryContext.Provider>
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId('leftover-grant')).toHaveTextContent(
+      "the root access.md still grants Lead Ops's members access to it. Its editors can remove the grant.",
+    );
   });
 });
