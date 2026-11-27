@@ -419,6 +419,7 @@ describe('POST /access/revoke — route classification + modes', () => {
       });
       expect(res.status).toBe(400);
       const { error } = (await res.json()) as { error: string };
+      expect(error).toBe('Choose the folder to remove this access from, then try again.');
       expect(error).not.toMatch(/ancestor|remove-from-parent/);
       expect(h.stubs.acquireLock).not.toHaveBeenCalled();
     });
