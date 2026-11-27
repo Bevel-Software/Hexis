@@ -5,14 +5,13 @@ import path from 'node:path';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pluginDisplayNameOf, pluginIdentityOf, type AuthUser } from '@bevel-software/platform-shared';
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { KbPluginSource } from '../discovery/kb-plugin-source.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { PluginProvisionService } from '../plugin-provision.service.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
 import { CREATE_PLUGIN } from '../plugins.tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
 
 /**
  * Both doors into plugin creation, through the code each one really runs.
@@ -51,7 +50,10 @@ interface Harness {
 const open: (() => Promise<void>)[] = [];
 
 /** The real provisioning service over a real temp tree, behind the real route. */
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(
+  /** Runs before each workspace write: what another process does in between. */
+  beforeWrite?: (abs: string) => Promise<void>,
+): Promise<Harness> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-create-names-'));
   const workspaceService = {
     getOrCreateForBranch: async () => ({ id: 'ws-main' }),
@@ -59,6 +61,7 @@ async function makeHarness(): Promise<Harness> {
     writeFile: async (_id: string, rel: string, content: string, opts?: { failIfExists?: boolean }) => {
       const abs = path.join(dir, rel);
       await fs.mkdir(path.dirname(abs), { recursive: true });
+      await beforeWrite?.(abs);
       try {
         await fs.writeFile(abs, content, { encoding: 'utf-8', flag: opts?.failIfExists ? 'wx' : 'w' });
       } catch (err) {
@@ -75,8 +78,8 @@ async function makeHarness(): Promise<Harness> {
     { invalidate: vi.fn() } as unknown as IAccessControl,
     testKbContext({ kbDirName: KB }),
     undefined,
-    new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB })),
-    new NodeFs(),
+    realPluginSource(realDisk(), testKbContext({ kbDirName: KB })),
+    realDisk(),
   );
 
   const app = express();
@@ -186,7 +189,7 @@ describe('creation derives and stores the display name the same way through ever
     await h.byTool('design');
     // `access.md` is what makes a folder exist to discovery; provisioning
     // wrote it, so the catalog sees both plugins.
-    const { plugins } = await new KbPluginSource(new NodeFs(), testKbContext({ kbDirName: KB })).discover(path.join(h.dir, KB));
+    const { plugins } = await realPluginSource(realDisk(), testKbContext({ kbDirName: KB })).discover(path.join(h.dir, KB));
     // Walk order, which is the folders' — `design` before `Sales Team`.
     expect(plugins.map((p) => [p.name, p.displayName])).toEqual([
       ['design', 'design'],
@@ -230,6 +233,63 @@ describe('creation derives and stores the display name the same way through ever
     });
     // And the ensure wrote nothing: the label is still the one on disk.
     expect(JSON.parse(await fs.readFile(manifestPath, 'utf-8')).displayName).toBe("Alice's space");
+  });
+
+  /** Alice's personal folder made, then its manifest relabelled by hand to `qa-toolkit` / `QA Toolkit`. */
+  async function relabelledPersonal(): Promise<Harness> {
+    const h = await makeHarness();
+    await h.svc.ensurePersonalPlugin(ALICE);
+    await fs.writeFile(
+      path.join(h.dir, KB, 'Plugins/personal-u-alice/plugin.json'),
+      JSON.stringify({ name: 'qa-toolkit', displayName: 'QA Toolkit' }, null, 2),
+    );
+    return h;
+  }
+
+  it('my_plugin answers with the manifest `name` too, as persisted, not one derived from the folder', async () => {
+    const h = await relabelledPersonal();
+    // Through the endpoint the `my_plugin` tool calls.
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      created: false,
+      folder: 'personal-u-alice',
+      name: 'qa-toolkit',
+      displayName: 'QA Toolkit',
+    });
+    // The folder, and so the private access it carries, is still keyed to the owner.
+    expect(await h.manifestOf('personal-u-alice')).toMatchObject({ name: 'qa-toolkit', displayName: 'QA Toolkit' });
+  });
+
+  it('an ensure that loses the creation race answers with the persisted manifest names too', async () => {
+    // Another process makes the folder, with a relabelled manifest, after the
+    // existence check found nothing and just before the exclusive write: the
+    // write is what finds it, and the ensure takes its 409 path.
+    let raced = false;
+    const h = await makeHarness(async (abs) => {
+      if (raced || !abs.endsWith(path.join('personal-u-alice', 'access.md'))) return;
+      raced = true;
+      await fs.writeFile(abs, 'theirs');
+      await fs.writeFile(
+        path.join(path.dirname(abs), 'plugin.json'),
+        JSON.stringify({ name: 'qa-toolkit', displayName: 'QA Toolkit' }),
+      );
+    });
+    const answer = await h.svc.ensurePersonalPlugin(ALICE);
+    expect(raced).toBe(true);
+    expect(answer).toMatchObject({ created: false, name: 'qa-toolkit', displayName: 'QA Toolkit' });
+    // The winner's files are untouched.
+    expect(await h.manifestOf('personal-u-alice')).toEqual({ name: 'qa-toolkit', displayName: 'QA Toolkit' });
+  });
+
+  it('a manifest `name` that is not an identifier is not echoed; the folder identity stands in, as discovery does', async () => {
+    const h = await makeHarness();
+    await h.svc.ensurePersonalPlugin(ALICE);
+    const manifest = { name: 'Not An Identifier', displayName: 'Mine' };
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/personal-u-alice/plugin.json'), JSON.stringify(manifest));
+    const again = await h.svc.ensurePersonalPlugin(ALICE);
+    expect(again).toMatchObject({ name: pluginIdentityOf(manifest, 'personal-u-alice'), displayName: 'Mine' });
+    expect(again.name).toBe('personal-u-alice');
   });
 
   it("the tool's declared output promises the display name it now returns", async () => {
