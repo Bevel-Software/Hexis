@@ -1142,6 +1142,77 @@ describe('ManageAccessDialog: explaining the access words', () => {
     expect(screen.queryByText(/root folder/i)).not.toBeInTheDocument();
   });
 
+  it('confirming "Remove from the whole workspace" sends the root as the ancestor', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(
+      view({
+        eligible: { roles: [], users: [A] },
+        readers: { restricted: true, roles: [], users: [A] },
+        sources: { 'u:alice@x.com': { read: [{ kind: 'ancestor', path: 'access.md' }] } },
+      }),
+    );
+    api.revokeAccess.mockResolvedValue(view());
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.click(
+      await screen.findByRole('button', { name: /People invited to the whole workspace/ }),
+    );
+    await user.click(screen.getByRole('button', { name: /^Remove$/ }));
+    await user.click(
+      await screen.findByRole('button', { name: 'Remove from the whole workspace' }),
+    );
+
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
+    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', {
+      path: ENTRY.relativePath,
+      kind: 'file',
+      principal: { kind: 'user', email: 'alice@x.com', displayName: 'Alice' },
+      mode: 'remove-from-parent',
+      // The root `access.md` with its file name stripped: the workspace root.
+      ancestor: '',
+      verb: undefined,
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'Remove from the whole workspace?' })).toBeNull(),
+    );
+  });
+
+  it("shows the server's admin-root-write refusal when the row is Admin", async () => {
+    const user = userEvent.setup();
+    const ADMIN_ROOT_WRITE =
+      'Admins always keep write access at the root so the deployment cannot lock itself out.';
+    api.fetchFileAccess.mockResolvedValue(
+      view({
+        eligible: { roles: ['Admin'], users: [] },
+        sources: { 'r:admin': { write: [{ kind: 'ancestor', path: 'access.md' }] } },
+      }),
+    );
+    api.revokeAccess.mockRejectedValue(new Error(ADMIN_ROOT_WRITE));
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.click(
+      await screen.findByRole('button', { name: /People invited to the whole workspace/ }),
+    );
+    await user.click(screen.getByRole('button', { name: /^Remove$/ }));
+    await user.click(
+      await screen.findByRole('button', { name: 'Remove from the whole workspace' }),
+    );
+
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
+    expect(api.revokeAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({
+        principal: { kind: 'role', role: 'Admin' },
+        mode: 'remove-from-parent',
+        ancestor: '',
+      }),
+    );
+    // The confirmation and the sheet behind it both carry the refusal as an alert.
+    await waitFor(() =>
+      expect(screen.getAllByRole('alert').some((a) => a.textContent === ADMIN_ROOT_WRITE)).toBe(true),
+    );
+  });
+
   it('opens the four explanations beside the field, and closes on a second press', async () => {
     const user = userEvent.setup();
     api.fetchFileAccess.mockResolvedValue(view());

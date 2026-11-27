@@ -9,6 +9,7 @@ import type { AuthService } from '../../auth/auth.service.js';
 import type { VersionControlService } from '../../version-control/version-control.service.js';
 import type { VersionControlEventBus } from '../../version-control/event-bus.js';
 import { createAccessRoutes } from '../access.routes.js';
+import { ADMIN_ROOT_WRITE_MESSAGE } from '../access-mutation.service.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
@@ -408,7 +409,7 @@ describe('POST /access/revoke — route classification + modes', () => {
       expect(h.stubs.releaseLock).toHaveBeenCalledOnce();
     });
 
-    it('requires an ancestor in the body', async () => {
+    it('requires an ancestor in the body, and says so without naming the field', async () => {
       h = await makeHarness({ files: {} });
       const res = await revoke({
         path: `${KB}/Sales/Deal.md`,
@@ -417,6 +418,63 @@ describe('POST /access/revoke — route classification + modes', () => {
         mode: 'remove-from-parent',
       });
       expect(res.status).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error).not.toMatch(/ancestor|remove-from-parent/);
+      expect(h.stubs.acquireLock).not.toHaveBeenCalled();
+    });
+
+    describe('the workspace root as the ancestor', () => {
+      const ROOT_MD = `${KB}/access.md`;
+      const JUAN = { kind: 'user' as const, email: 'juan@bevel.software', displayName: 'Juan' };
+
+      // The dialog sends the root `access.md` with its file name stripped (`''`);
+      // the kbDir name is the other spelling of the same folder.
+      for (const ancestor of ['', KB]) {
+        it(`ancestor ${JSON.stringify(ancestor)} removes the grant from the root access.md`, async () => {
+          h = await makeHarness({
+            files: {
+              [ROOT_MD]: '---\nwrite:\n  - Admin\n  - Juan <juan@bevel.software>\n---\n',
+            },
+            grantSources: () => ({ write: [{ kind: 'ancestor', path: 'access.md' }] }),
+          });
+          const res = await revoke({
+            path: `${KB}/qa-rora/G`,
+            kind: 'folder',
+            principal: JUAN,
+            mode: 'remove-from-parent',
+            ancestor,
+          });
+          expect(res.status).toBe(200);
+          const root = h.stubs.files.get(ROOT_MD);
+          expect(root).not.toContain('juan@bevel.software');
+          expect(root).toContain('Admin');
+          // Gated on the ROOT's access.md.
+          expect(h.stubs.canWrite).toHaveBeenCalledWith(WS, USER.email, 'access.md');
+          expect(h.stubs.releaseLock).toHaveBeenCalledOnce();
+        });
+      }
+
+      it('refuses the Admin role with the admin-root-write message and leaves the root unchanged', async () => {
+        const rootContent = '---\nwrite:\n  - Admin\n---\n';
+        h = await makeHarness({
+          files: { [ROOT_MD]: rootContent },
+          grantSources: () => ({ write: [{ kind: 'ancestor', path: 'access.md' }] }),
+          roles: ['Admin'],
+        });
+        const res = await revoke({
+          path: `${KB}/qa-rora/G`,
+          kind: 'folder',
+          principal: { kind: 'role', role: 'Admin' },
+          mode: 'remove-from-parent',
+          ancestor: '',
+        });
+        expect(res.status).toBe(403);
+        const body = (await res.json()) as { error: string; kind: string };
+        expect(body.kind).toBe('admin-root-write');
+        expect(body.error).toBe(ADMIN_ROOT_WRITE_MESSAGE);
+        expect(h.stubs.files.get(ROOT_MD)).toBe(rootContent);
+        expect(h.stubs.releaseLock).not.toHaveBeenCalled();
+      });
     });
   });
 
