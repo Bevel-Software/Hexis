@@ -1,5 +1,5 @@
 import type { Server as HttpServer } from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import express from 'express';
@@ -65,7 +65,25 @@ beforeAll(async () => {
   }
   const workspaceService = { getWorkspacePath: async () => root, ensureRemotesFetched: async () => undefined } as unknown as WorkspaceService;
   const access = new AccessControlService(workspaceService, KB, new NodeFs());
-  const fs = new LocalFilesystem({ basePath: root, contained: true });
+  // The disk as a case-insensitive one serves it: a folder named in another
+  // casing opens the folder that is there (`plugins/` opens `Plugins/`), as on
+  // macOS or Windows, so the alternate spelling reaches the listing.
+  const disk = new LocalFilesystem({ basePath: root, contained: true });
+  const opened = async (path: string): Promise<string> => {
+    const out: string[] = [];
+    for (const segment of path.split('/').filter(Boolean)) {
+      const entries = await readdir(join(root, ...out)).catch(() => [] as string[]);
+      out.push(entries.find((n) => n.toLowerCase() === segment.toLowerCase()) ?? segment);
+    }
+    return out.join('/') || '.';
+  };
+  const fs = new Proxy(disk, {
+    get: (target, key) =>
+      key === 'readdir'
+        ? async (path: string, ...rest: unknown[]) =>
+            (target.readdir as (...a: unknown[]) => Promise<unknown>).call(target, await opened(path), ...rest)
+        : Reflect.get(target, key, target),
+  });
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
     user: { id: caller, email: caller, name: caller },
     scope: auth.scope,
@@ -153,6 +171,23 @@ describe("list_files on another person's personal shelf", () => {
         `Plugins/${c.other}/skills/never-written`,
       ]) {
         expect(await list(c.as, path), path).toEqual(missing);
+      }
+    });
+
+    it(`${c.who} does not see the other shelf under an alternate casing of Plugins/ either`, async () => {
+      const listed = await names(c.as, 'plugins');
+      expect(listed).toContain(c.own);
+      expect(listed).not.toContain(c.other);
+    });
+
+    it(`${c.who} cannot reach the other shelf through a dot-segment: refused as any such path is`, async () => {
+      // The refusal comes before any disk read; its suggested path is the
+      // caller's own input with the climb collapsed, so it tells nothing.
+      for (const path of [`Plugins/GTM/../${c.other}`, `Plugins/GTM/../${c.other}/skills`]) {
+        const res = await list(c.as, path);
+        expect(res.status, path).toBe(400);
+        expect(JSON.parse(res.body), path).toMatchObject({ kind: 'path-outside-repo' });
+        expect(res.body, path).not.toContain(c.otherSkill);
       }
     });
 

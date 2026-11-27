@@ -2708,7 +2708,9 @@ export function registerWorkspaceTools(
       const entries = withoutPlaceholder(
         (await orNotFound(dir, () => fs.readdir(dir || '.'), 'Nothing to list')) as DirEntry[],
       );
-      const filtered = await filterReadableEntries(gate, isShelfPath, dir, entries);
+      // Judged on the on-disk spelling too, so an alternate-cased ancestor
+      // (`plugins/`) still sees the shelves under it as shelves.
+      const filtered = await filterReadableEntries(gate, isShelfPath, onDisk, entries);
       // One batch for the listing. A folder is judged at its own path, whose
       // rules (its `access.md` and those above it) are what a file added
       // directly inside it would get.
