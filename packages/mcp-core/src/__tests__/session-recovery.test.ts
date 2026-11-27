@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '@utcp/mcp'; // side effect: registers the 'mcp' UTCP communication protocol
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
+import { CallTemplateSerializer, CommunicationProtocol, type CallTemplate } from '@utcp/sdk';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {
@@ -154,6 +154,10 @@ describe('session recovery', () => {
 
   it('heals a session loss on a server the call carries a credential to, for a call with arguments', async () => {
     // A failure of such a call is withheld whole; a lost session still says so, and is recovered.
+    const stockFactory = CommunicationProtocol.communicationProtocolFactories['mcp'];
+    cleanups.push(async () => {
+      CommunicationProtocol.communicationProtocolFactories['mcp'] = stockFactory;
+    });
     installDownstreamToolErrors();
     const platform = await startServer('platform');
     const template = serializer.validateDict({
