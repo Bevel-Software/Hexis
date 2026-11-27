@@ -4,15 +4,15 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import type { IChangeRequestReviewService } from '../change-request-review/change-request-review.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import { VersionControlEventBus } from '../event-bus.js';
 import { VersionControlService } from '../version-control.service.js';
-import type { Database } from '../../database/connection.js';
-import { AccessDeniedError } from '../../access-model/access-errors.js';
-import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/change-gate.js';
+import type { Database } from '../../database/index.js';
+import { AccessDeniedError } from '../../access-model/index.js';
+import type { ChangeReadVerdict, IChangeReadGate } from '../../access-model/index.js';
 
 /**
  * The read-before-write gate sits in `acquireLock` next to the write gate:
@@ -96,7 +96,10 @@ describe('acquireLock asks the read-before-write gate', () => {
     const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
     const { svc, acquire, accessControl } = makeService({ gate });
 
-    await expect(svc.acquireLock(WS, DRAFT, PATH, USER)).rejects.toBeInstanceOf(AccessDeniedError);
+    await expect(svc.acquireLock(WS, DRAFT, PATH, USER)).rejects.toMatchObject({
+      status: 403,
+      access: { path: PATH, unreadable: 'KnowledgeBase/Sealed/brief.pdf', eligibleRoles: [], eligibleUsers: [] },
+    });
     expect(assertMayChange).toHaveBeenCalledWith(WS, USER.email, PATH, 'file');
     expect(acquire).not.toHaveBeenCalled();
     // The write gate is still protected-branch only.
@@ -116,7 +119,10 @@ describe('acquireLock asks the read-before-write gate', () => {
     const { gate, assertMayChange } = gateThat({ allowed: false, unreadable: 'KnowledgeBase/Sealed/brief.pdf' });
     const { svc, acquire, accessControl } = makeService({ gate, writable: true });
 
-    await expect(svc.acquireLock(WS, PROTECTED, PATH, USER)).rejects.toBeInstanceOf(AccessDeniedError);
+    await expect(svc.acquireLock(WS, PROTECTED, PATH, USER)).rejects.toMatchObject({
+      status: 403,
+      access: { path: PATH, unreadable: 'KnowledgeBase/Sealed/brief.pdf', eligibleRoles: [], eligibleUsers: [] },
+    });
     expect(accessControl.canWriteBatchAtRef).toHaveBeenCalledOnce();
     expect(assertMayChange).toHaveBeenCalledOnce();
     expect(acquire).not.toHaveBeenCalled();

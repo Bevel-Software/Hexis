@@ -151,8 +151,10 @@ export function createInlineManualReader(deps: {
  *   GET /tools/:slug/manual    — an inline `.tool`'s embedded tools as a UTCP
  *                                manual (so inline needs no extra client plugin).
  *
- * `toolManualService` and `agentScope` feed only the readers the routes make
- * when they are handed none; a reader handed in is used as it is.
+ * `toolManualService` feeds only the readers the routes make when they are
+ * handed none; a reader handed in is used as it is. `agentScope` feeds those
+ * readers too, and `GET /agent/plugins/:folder/archive` reads the
+ * connection's scope through it, whatever readers were handed in.
  */
 export function createToolManualsAgentRoutes(
   toolManualService: IToolManualService,
