@@ -46,6 +46,7 @@ describe('createSyncedGroupsCommitter.persist — post-commit push failures', ()
     const hasUnpushedCommits = vi.fn(async () => true);
     const versionControlService = {
       acquireLock: vi.fn(async () => ({ acquired: true, lock: {} })),
+      heartbeatLock: vi.fn(async () => ({})),
       releaseLock,
       releaseLockNoCommit,
       releaseLockUntouched,

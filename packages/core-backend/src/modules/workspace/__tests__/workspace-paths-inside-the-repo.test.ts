@@ -82,6 +82,7 @@ async function makeHarness(): Promise<Harness> {
       locked.push(p);
       return { acquired: true, lock: {} as never };
     }),
+    heartbeatLock: vi.fn(async () => ({}) as never),
     releaseLock: vi.fn(async () => undefined as never),
     releaseLockNoCommit: vi.fn(async () => undefined as never),
     releaseLockUntouched: vi.fn(async () => undefined as never),

@@ -103,6 +103,11 @@ function versionControlOver(repoDir: string) {
       held.set(p, user.name);
       return { acquired: true, lock: { holderName: user.name } };
     },
+    // A batch's ownership check: the lock the acquire granted, while it is held.
+    heartbeatLock: async (_w: string, _b: string, p: string, user: AuthUser) => {
+      if (held.get(p) !== user.name) throw new Error(`not held: ${p}`);
+      return { holderName: user.name };
+    },
     releaseLock: async (_ws: string, _branch: string, p: string) => {
       held.delete(p);
       queued.push(p);

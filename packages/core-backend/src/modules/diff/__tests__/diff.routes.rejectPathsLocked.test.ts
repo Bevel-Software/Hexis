@@ -56,7 +56,9 @@ async function makeHarness(overrides: {
     overrides.commit?.();
     return { sha: 'abc', summary } as never;
   });
-  const versionControl = { acquireLock, releaseLockNoCommit, commitChanges } as unknown as IVersionControlService;
+  // A batch's ownership check answers the lock the acquire granted.
+  const heartbeatLock = vi.fn(async () => ({ holderName: 'Alice' }));
+  const versionControl = { acquireLock, heartbeatLock, releaseLockNoCommit, commitChanges } as unknown as IVersionControlService;
 
   const revertPlan = vi.fn(async (_ws: string, paths: string[]) => ({
     workspaceDir,

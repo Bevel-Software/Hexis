@@ -72,6 +72,8 @@ function harness({
   };
   const versionControl = {
     acquireLock: vi.fn(async () => ({ acquired: true, lock: { holderName: 'x' } })),
+    // A batch's ownership check answers the lock the acquire granted.
+    heartbeatLock: vi.fn(async () => ({ holderName: 'x' })),
     releaseLock: vi.fn(async () => null),
     releaseLockNoCommit: vi.fn(async () => undefined),
     releaseLockUntouched: vi.fn(async () => undefined),

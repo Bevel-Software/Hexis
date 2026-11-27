@@ -180,7 +180,9 @@ export interface ArchiveEntryJudge {
  */
 function extractionHeldRefusal(err: PathHeldError): VersionControlDomainError {
   return new VersionControlDomainError(
-    `"${err.path}" is being edited by ${err.holderName ?? 'another user'}, so nothing was extracted. Try again once they are done.`,
+    err.lapsed
+      ? `The extraction could not confirm it still held the lock on "${err.path}", so nothing was extracted. Try again.`
+      : `"${err.path}" is being edited by ${err.holderName ?? 'another user'}, so nothing was extracted. Try again once they are done.`,
     409,
     { kind: 'path-held', path: err.path },
   );
