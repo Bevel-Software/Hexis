@@ -145,6 +145,12 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('key xab1y refused')).toBe('key x[redacted]y refused');
   });
 
+  it('looks for many short strings of the caller in one walk over a long text', () => {
+    const redactor = new SecretRedactor();
+    const words = 'word '.repeat(4_000);
+    expect(redactor.redact(`${words}? end`, Array.from({ length: 200_000 }, () => '?'))).toBe(`${words}[redacted] end`);
+  });
+
   it('matches a long repetitive secret in a long text without giving up on the text', () => {
     const redactor = new SecretRedactor();
     redactor.remember('ab'.repeat(500));

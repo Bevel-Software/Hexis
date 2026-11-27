@@ -28,6 +28,8 @@ const MIN_CALLER_CHARS = 4;
  */
 const MAX_CALLER_CHARS_READ = 4_000_000;
 const REDACTED = '[redacted]';
+/** A letter or digit of any script: what a short value may not be glued to, to stand alone. */
+const WORD_CHAR = /[\p{L}\p{N}]/u;
 
 /**
  * Every secret a request carried, so that none of them can come back out in
@@ -145,6 +147,7 @@ export class SecretRedactor {
         if (spans) spans.push(span);
         else shortRuns.set(key, [span]);
       }
+      const shortSent = new Set<string>();
       let read = 0;
       for (const sent of callerText) {
         for (const spelling of new Set(spellings(sent))) {
@@ -156,17 +159,25 @@ export class SecretRedactor {
             for (const start of startsOf.get(piece) ?? []) hide(from[start]!, to[start + MIN_CALLER_CHARS - 1]!);
             startsOf.delete(piece);
           }
-          // A short string of theirs, punctuation included, and a short word
-          // inside a longer one: each where it stands alone.
-          if (sentFolded.trim().length > 0 && sentFolded.length < MIN_CALLER_CHARS) {
-            for (const match of folded.matchAll(standingAlone(sentFolded))) {
-              hide(from[match.index]!, to[match.index + sentFolded.length - 1]!);
-            }
-          }
+          // A short string of theirs, punctuation included, looked for once
+          // all are known (below); a short word inside a longer one: each
+          // where it stands alone.
+          if (sentFolded.trim().length > 0 && sentFolded.length < MIN_CALLER_CHARS) shortSent.add(sentFolded);
           for (const word of sentFolded.matchAll(/[\p{L}\p{N}]+/gu)) {
             if (word[0].length >= MIN_CALLER_CHARS) continue;
             for (const [start, end] of shortRuns.get(word[0]) ?? []) hide(start, end);
             shortRuns.delete(word[0]);
+          }
+        }
+      }
+      // Each short string of theirs where it stands alone: one walk over the
+      // text, every start tried against the set, however many they sent.
+      for (let at = 0; at < folded.length && shortSent.size > 0; at++) {
+        if (at > 0 && WORD_CHAR.test(folded[at - 1]!)) continue;
+        for (let length = 1; length < MIN_CALLER_CHARS && at + length <= folded.length; length++) {
+          const end = at + length;
+          if (shortSent.has(folded.slice(at, end)) && (end === folded.length || !WORD_CHAR.test(folded[end]!))) {
+            hide(from[at]!, to[end - 1]!);
           }
         }
       }
