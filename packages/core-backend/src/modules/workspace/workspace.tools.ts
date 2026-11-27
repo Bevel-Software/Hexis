@@ -29,7 +29,7 @@ import {
 } from '../kb-fs/index.js';
 import { GitGuardedFilesystem, MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/index.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { FIXED_NAME_SOURCES, toKbRelative, resolveReadableMap, AccessDeniedError } from '../access-model/index.js';
+import { FIXED_NAME_SOURCES, toKbRelative, resolveReadableMap, AccessDeniedError, unwritableRefusal } from '../access-model/index.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/index.js';
@@ -1101,8 +1101,9 @@ async function writeBlockedAtHead(
 
 /**
  * The refusal the lock gate itself would raise for a path a preflight
- * already found unwritable — same `AccessDeniedError`, same "Eligible: …"
- * reading, from the same `eligibleWritersAtRef`.
+ * already found unwritable: `unwritableRefusal`, the helper the lock calls,
+ * asked about the branch's workspace and about the path relative to the
+ * repository, as `writeBlockedAtHead` asked the write rule.
  *
  * Raised as that error rather than as a finished body on purpose: every
  * proposable tool's handler is wrapped in ONE mapping
@@ -1118,29 +1119,15 @@ async function writeRefusalAtHead(
   branch: string,
   path: string,
   targetKind: 'file' | 'dir',
-  /**
-   * The read-before-write gate and the caller. A caller who may not read
-   * `path` gets the gate's refusal, not its writers: the writers a file's own
-   * entries name would say the file is there. Asked as the lock asks it.
-   */
+  /** The read-before-write gate, when the tools were given one, and the caller. */
   read: { changeGate?: IChangeReadGate; email: string },
 ): Promise<AccessDeniedError> {
-  if (read.changeGate) {
-    const verdict = await read.changeGate.judge(workspaceIdForBranch(branch), read.email, path, targetKind);
-    if (!verdict.allowed) {
-      return new AccessDeniedError({ path, eligibleRoles: [], eligibleUsers: [], unreadable: verdict.unreadable, targetKind });
-    }
-  }
-  const rel = toKbRelative(path, kbDirName);
-  const eligible = rel === null
-    ? null
-    : await accessControl.eligibleWritersAtRef(workspaceIdForBranch(branch), 'HEAD', rel);
-  return new AccessDeniedError({
-    path,
-    eligibleRoles: eligible?.roles ?? [],
-    eligibleUsers: eligible?.users ?? [],
-    targetKind,
-  });
+  return unwritableRefusal(
+    { accessControl, changeGate: read.changeGate },
+    workspaceIdForBranch(branch),
+    read.email,
+    { wsPath: path, repoRelative: toKbRelative(path, kbDirName), kind: targetKind },
+  );
 }
 
 /** Whether `err` is a refusal addressed to the caller (a 4xx), rather than something failing. */

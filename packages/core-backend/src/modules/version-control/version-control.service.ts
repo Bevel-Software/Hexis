@@ -108,7 +108,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { ApprovalCarryPendingError } from './approval-carry-pending-error.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
-import { AccessDeniedError, EVERYONE_CANONICAL, PushAccessRefusedError, listingUnchangedBy, pushAccessRefusalSentence, toKbRelative, type IChangeReadGate } from '../access-model/index.js';
+import { EVERYONE_CANONICAL, PushAccessRefusedError, listingUnchangedBy, pushAccessRefusalSentence, toKbRelative, unwritableRefusal, type IChangeReadGate } from '../access-model/index.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -1535,18 +1535,13 @@ export class VersionControlService implements IVersionControlService {
       return 'restore';
     }
     // A caller who may not read the path is told that, and not who may write
-    // it: the writers a file's own entries name would say the file is there.
-    await this.changeGate.assertMayChange(workspaceId, userEmail, targetPath, 'file');
-    const eligible = await this.accessControl.eligibleWritersAtRef(
+    // it. A lock is always taken on a file, so the path is asked about as one.
+    throw await unwritableRefusal(
+      { accessControl: this.accessControl, changeGate: this.changeGate },
       workspaceId,
-      `HEAD`,
-      repoRelative,
+      userEmail,
+      { wsPath: targetPath, repoRelative, kind: 'file' },
     );
-    throw new AccessDeniedError({
-      path: targetPath,
-      eligibleRoles: eligible?.roles ?? [],
-      eligibleUsers: eligible?.users ?? [],
-    });
   }
 
   // ── File locks ────────────────────────────────────────────────────────────

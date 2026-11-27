@@ -14,6 +14,8 @@
 export * from './access-grammar.js';
 export * from './access-errors.js';
 export type { ChangeReadVerdict, ChangeTargetKind, IChangeReadGate } from './change-gate.js';
+// The refusal of a write the write rule refused, read gate first: the lock's and the write tools' one answer.
+export { unwritableRefusal } from './write-refusal.js';
 export { canReadWorkspacePath } from './kb-read-filter.js';
 // Reached by other modules; exported here so they stop importing the files.
 export { AccessSpliceError, spliceGrant, spliceRevoke, validatePrincipal } from './access-splice.js';

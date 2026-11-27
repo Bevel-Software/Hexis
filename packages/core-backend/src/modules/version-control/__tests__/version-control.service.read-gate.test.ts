@@ -37,7 +37,7 @@ function gateThat(verdict: ChangeReadVerdict) {
     throw new AccessDeniedError({ path: wsPath, eligibleRoles: [], eligibleUsers: [], unreadable: v.unreadable });
   });
   const gate: IChangeReadGate = { judge, assertMayChange };
-  return { gate, assertMayChange };
+  return { gate, assertMayChange, judge };
 }
 
 function makeService(opts: {
@@ -123,14 +123,15 @@ describe('acquireLock asks the read-before-write gate', () => {
   });
 
   it('a path the caller may read but not write is refused by the write gate, naming who may write it', async () => {
-    const { gate, assertMayChange } = gateThat({ allowed: true, via: 'readable' });
+    const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
     const { svc, acquire, accessControl } = makeService({ gate, writable: false });
 
     const err = await svc.acquireLock(WS, PROTECTED, PATH, USER).then(() => null, (e: unknown) => e);
     expect(err).toMatchObject({ status: 403 });
     expect((err as { access: { unreadable?: string } }).access.unreadable).toBeUndefined();
     expect((err as Error).message).toContain('Eligible:');
-    expect(assertMayChange).toHaveBeenCalledOnce();
+    expect(judge).toHaveBeenCalledOnce();
+    expect(judge).toHaveBeenCalledWith(WS, USER.email, PATH, 'file');
     expect(accessControl.eligibleWritersAtRef).toHaveBeenCalledOnce();
     expect(acquire).not.toHaveBeenCalled();
   });
