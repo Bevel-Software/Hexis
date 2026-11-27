@@ -27,3 +27,4 @@ export { GitApiError, handleApiResponse } from './services/git.api';
 export { friendlyGitError, friendlyGitMessage } from './services/error-messages';
 export { createBranch, deleteBranch } from './services/git.api';
 export { getPullRequest } from './services/pr.api';
+export { PullRequestsForMe } from './components/PullRequestsForMe';

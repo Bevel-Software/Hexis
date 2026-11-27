@@ -15,7 +15,7 @@ import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { pluginFolderBelowRoot } from './plugins.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
+import { PluginProvisionError } from './plugin-provision.service.js';
 import { argumentsRefusal } from '../tool-helpers/index.js';
 import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
@@ -29,6 +29,7 @@ import type {
   PluginCatalogEntry,
   PluginSummary,
   IPluginIndexService,
+  IPluginProvisioning,
 } from './plugins.contract.js';
 
 /**
@@ -129,7 +130,7 @@ async function refuseOutsideConnectionScope(
  * gate established.
  */
 export function createPluginCreationRoutes(
-  provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
+  provision: Pick<IPluginProvisioning, 'createPlugin' | 'ensurePersonalPlugin'>,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
   /** Resolves a connection's agent choice to its scope; absent, a narrowed connection loads nothing. */
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
@@ -226,7 +227,7 @@ export function createPluginsRoutes(
    * all, having no file of its own left to write.
    */
   joinRequestJobs: PluginJoinRequestJobs,
-  provision: PluginProvisionService,
+  provision: Pick<IPluginProvisioning, 'personalPluginName' | 'deletePlugin'>,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
   /** The released branch's clone — every verdict here is read from it. */
   kb: Pick<KbContext, 'defaultWorkspaceId'>,

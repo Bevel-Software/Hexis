@@ -4,7 +4,7 @@ import { createTokenVerifier } from '../../tool-auth/tool-auth.middleware.js';
 import type { IExternalApiKeyService } from '../../tool-auth/external-api-key.interface.js';
 import type { BevelOAuthProvider } from '../oauth/bevel-oauth-provider.js';
 import { NOT_AN_AGENT_CHOICE } from '../oauth/oauth-consent.routes.js';
-import { agentFile, agentScopeOver, inMemoryKb } from '../../agent-scope/__tests__/in-memory-kb.js';
+import { agentFile, agentScopeOver, inMemoryKb } from '../../../__tests__/in-memory-agent-scope.js';
 import { closeMountedRoutes, mountMcpRoutes } from './mcp-routes-harness.js';
 
 /**

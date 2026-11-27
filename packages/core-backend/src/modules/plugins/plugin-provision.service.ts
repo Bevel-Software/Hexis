@@ -52,6 +52,7 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
+import type { IPluginProvisioning, ProvisionedPlugin } from './plugins.contract.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from '../access/index.js';
 import { creatorPrincipal, spliceGrant } from '../access-model/index.js';
@@ -129,25 +130,6 @@ function incompleteDiscovery(unreadable: string[]): PluginProvisionError {
   );
 }
 
-export interface ProvisionedPlugin {
-  /** The folder's path below `Plugins/` — `GTM`, or `Teams/GTM` for one made inside a grouping folder. */
-  folder: string;
-  /** The same folder, repo-relative — `Plugins/Teams/GTM` — as the file tools address it. */
-  path: string;
-  /** Where its skills go: `<path>/skills`, each skill a subfolder holding a `SKILL.md`. */
-  skillsDir: string;
-  /** The plugin's identity — the manifest name written for it. */
-  name: string;
-  /**
-   * What a person sees it called — the manifest's `displayName`, which is the
-   * name the creator typed, trimmed. Exactly as persisted: the answer and the
-   * file on disk can never say two different things.
-   */
-  displayName: string;
-  /** False when an ensure found the folder already there. */
-  created: boolean;
-}
-
 /** A refusal the route can pass through: message + HTTP status. */
 export class PluginProvisionError extends Error {
   constructor(
@@ -171,7 +153,7 @@ function provisioned(
   return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created };
 }
 
-export class PluginProvisionService {
+export class PluginProvisionService implements IPluginProvisioning {
   /**
    * Serialises creations and deletions by MANIFEST SLUG
    * (`pluginManifestName(name)`). The wx write arbitrates same-path races,

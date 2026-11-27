@@ -4,7 +4,7 @@ import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOAuthConsentRoutes, NOT_AN_AGENT_CHOICE } from '../oauth/oauth-consent.routes.js';
 import { signAuthRequest } from '../oauth/oauth-state.js';
-import { agentFile, agentScopeOver, inMemoryKb } from '../../agent-scope/__tests__/in-memory-kb.js';
+import { agentFile, agentScopeOver, inMemoryKb } from '../../../__tests__/in-memory-agent-scope.js';
 
 /**
  * The consent step's "Connect as" choice, through the two routes the

@@ -4,11 +4,8 @@ import { act, render, screen, fireEvent, waitFor, within } from '@testing-librar
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { useState, type ReactNode } from 'react';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import { AdminContext } from '../../admin/state/admin.context';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { AdminContext } from '../../admin';
 import type { LibraryData } from '../hooks/useLibraryData';
 import type { PluginSummary } from '../services/plugins.api';
 import type { ToolPageState } from '../hooks/useToolPage';
@@ -46,29 +43,13 @@ vi.mock('../services/teams.api', () => ({ listTeams: teamsMock.listTeams }));
 const personalMock = vi.hoisted(() => ({ getPersonalPluginName: vi.fn() }));
 vi.mock('../services/personal-plugin.api', () => ({ getPersonalPluginName: personalMock.getPersonalPluginName }));
 // The sidebar's change-request dock pulls in git wiring these routes do not exercise.
-vi.mock('../../git/components/PullRequestsForMe', () => ({ PullRequestsForMe: () => null }));
+vi.mock('../../git', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../git')>()),
+  PullRequestsForMe: () => null,
+}));
 
 const toolPageMock = vi.hoisted(() => ({ useToolPage: vi.fn() }));
 vi.mock('../hooks/useToolPage', () => ({ useToolPage: toolPageMock.useToolPage }));
-
-vi.mock('../../access/api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../access/api')>();
-  return {
-    ...actual,
-    fetchFileAccess: vi.fn().mockResolvedValue({
-      canRead: true,
-      canWrite: false,
-      canDownload: false,
-      canOwner: false,
-      eligible: { roles: [], users: [] },
-      readers: { restricted: true, roles: [], users: [] },
-      owners: { roles: [], users: [] },
-      downloaders: { roles: [], users: [] },
-      sources: {},
-    }),
-    fetchAccessOverrides: vi.fn().mockResolvedValue({ overrides: [], truncated: false }),
-  };
-});
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { pathUnderRoot } from '@bevel-software/platform-shared';
-import { ConnectionScope, type IAgentScopeResolver, type AgentChoice } from '../index.js';
+import { ConnectionScope, type IAgentScopeResolver, type AgentChoice } from '../modules/agent-scope/index.js';
 
 /**
  * A distribution's agent configurations, held in memory, resolved the way a
@@ -12,6 +12,11 @@ import { ConnectionScope, type IAgentScopeResolver, type AgentChoice } from '../
  * `platformTools`) at a repo-relative path, read through the reader's read
  * gate, its `plugins:` expanded by a link index. Mutate `files`, `hidden` or
  * `plugins` and the next resolve sees it.
+ *
+ * It lives here, beside the other composition fixtures, because suites of
+ * several modules (agent-scope, mcp, plugins) drive their surfaces through
+ * it, and a suite reaches another module only through its entry or a fixture
+ * under `src/__tests__/` — never another module's own `__tests__` folder.
  */
 export interface InMemoryKb {
   /** Repo-relative path → content. */
