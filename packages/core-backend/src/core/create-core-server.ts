@@ -26,7 +26,7 @@ import { createAccessRequestRoutes } from '../modules/access/access-requests.rou
 import { AccessRequestsService } from '../modules/access/access-requests.service.js';
 import { createMcpRoutes } from '../modules/mcp/mcp.routes.js';
 import { createOAuthConsentRoutes } from '../modules/mcp/oauth/oauth-consent.routes.js';
-import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { createMcpAuthRouter } from '../modules/mcp/oauth/mcp-auth-router.js';
 import { createManualRoutes } from '../modules/tool-registry/manual.routes.js';
 import {
   createToolHintsAgentRoutes,
@@ -421,12 +421,10 @@ export async function createCoreServer(
   // navigations; the user attaches to the flow at the JWT/cookie-authed
   // consent routes below. Must sit before the prod SPA catch-all or the
   // .well-known documents would be swallowed by index.html.
-  app.use(mcpAuthRouter({
+  app.use(createMcpAuthRouter({
     provider: core.mcpOAuthProvider,
     issuerUrl: new URL(core.config.publicBackendUrl),
     resourceServerUrl: mcpResourceUrl,
-    scopesSupported: ['mcp'],
-    resourceName: 'Bevel MCP',
   }));
 
   // Un-authed overlay surfaces (e.g. connector OAuth callbacks hit by a
