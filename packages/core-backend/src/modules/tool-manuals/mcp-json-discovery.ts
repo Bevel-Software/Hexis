@@ -4,6 +4,7 @@ import {
   PLUGIN_MANIFEST_FILE,
   type KbLayout,
 } from '@bevel-software/platform-shared';
+import { excludeListOf } from '@bevel-software/platform-mcp-core';
 import type { ToolManualDescriptor, ToolVariable } from './tool-manuals.contract.js';
 import { logger } from '../../shared/logging.js';
 
@@ -63,13 +64,6 @@ export interface HexisMcpServerExtension {
    * the workspace does not have): listed, each would only ever fail.
    */
   excludeTools?: string[];
-}
-
-/** The tool names a server's extension leaves out, or null when the declaration is malformed. */
-export function validatedExcludeTools(raw: unknown): string[] | null {
-  if (raw === undefined) return [];
-  if (!Array.isArray(raw) || !raw.every((t) => typeof t === 'string' && t.length > 0)) return null;
-  return [...new Set(raw as string[])];
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -382,12 +376,13 @@ export function descriptorsFromMcpJson(
     try {
       manifest = JSON.parse(pluginJsonText);
     } catch {
-      // A broken manifest costs the extension data (auth wiring), not the
-      // servers themselves — they are still listed, as the spec's own
-      // "invalid components are skipped, valid ones load" posture suggests.
+      // A broken manifest costs the extension data (auth wiring, and the
+      // tools a server leaves out), not the servers themselves — they are
+      // still listed, with every tool, as the spec's own "invalid components
+      // are skipped, valid ones load" posture suggests.
       log.warn(
         `${pluginsDir}/${pluginFolder}/${PLUGIN_MANIFEST_FILE} is not valid JSON — ` +
-          'its mcp-server auth/variable declarations are ignored.',
+          'its mcp-server auth/variable declarations and `excludeTools` lists are ignored.',
       );
     }
   }
@@ -434,10 +429,13 @@ export function descriptorsFromMcpJson(
       continue;
     }
     const variables = judged.variables;
-    // A malformed list keeps the server offline rather than offering every
-    // tool: the tools it names were left out on purpose, and a typo must not
-    // put them back in front of every agent.
-    const excludeTools = validatedExcludeTools(ext.excludeTools);
+    // A list of the wrong shape keeps the server offline rather than offering
+    // every tool it was written to leave out. Read by the one rule
+    // registration reads the server entry with (`excludeListOf`); a name the
+    // server does not list is a well-formed entry and removes nothing. Only
+    // a list that was read can be judged: a manifest that does not parse, or
+    // a server entry in it that is no object, reads as no list (above).
+    const excludeTools = excludeListOf(ext.excludeTools);
     if (excludeTools === null) {
       skip(name, 'its plugin.json `excludeTools` must be a list of tool names, as the server lists them.');
       continue;

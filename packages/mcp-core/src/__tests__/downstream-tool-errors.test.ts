@@ -1,24 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import '@utcp/mcp'; // side effect: registers the stock 'mcp' protocol, which the install replaces
+import '@utcp/mcp'; // side effect: registers the stock 'mcp' protocol, which the install wraps
 import { McpCommunicationProtocol } from '@utcp/mcp';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { CallTemplateSerializer, CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
-import { CallToolRequestSchema, McpError, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { isSessionLoss } from '../session-recovery.js';
-import {
-  DownstreamToolError,
-  downstreamErrorText,
-  installDownstreamToolErrors,
-  keepDownstreamToolErrors,
-} from '../downstream-tool-errors.js';
-import { SecretRedactor } from '../secret-redactor.js';
+import { CallTemplateSerializer, CommunicationProtocol, type CallTemplate } from '@utcp/sdk';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { DownstreamToolError, installDownstreamToolErrors } from '../downstream-tool-errors.js';
 import { registerManual, dispatchToolCall } from '../dispatch.js';
 import type { ProxiedTool } from '../proxied-tool.js';
-import { startFakeMcpServer } from './fake-mcp-server.js';
+import { startFakeMcpServer, type FakeMcpServer } from './fake-mcp-server.js';
 
 const serializer = new CallTemplateSerializer();
 const stockFactory = CommunicationProtocol.communicationProtocolFactories['mcp'];
@@ -49,253 +38,39 @@ afterEach(async () => {
   if (failures.length > 0) throw new AggregateError(failures, 'test cleanup failed');
 });
 
-async function clientFor(url: string): Promise<CodeModeUtcpClient> {
+/** A client built now, with the factory registered at this moment, connected to `server`. */
+async function clientFor(server: FakeMcpServer): Promise<CodeModeUtcpClient> {
   const client = await CodeModeUtcpClient.create(process.cwd(), null);
   cleanups.push(() => client.close());
-  expect(await registerManual(client, manualTemplate('notion', url))).toEqual({ ok: true });
+  expect(await registerManual(client, manualTemplate('notion', server.url))).toEqual({ ok: true });
   return client;
 }
 
-/**
- * `result` as an MCP client reads it: answered by an SDK server and parsed by
- * the SDK client, which refuses a reply the spec does not allow.
- */
-async function readBySdkClient(result: CallToolResult): Promise<CallToolResult> {
-  const server = new Server({ name: 'surface', version: '0.0.0' }, { capabilities: { tools: {} } });
-  server.setRequestHandler(CallToolRequestSchema, async () => result);
-  const reader = new Client({ name: 'reader', version: '0.0.0' });
-  const [readerSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await Promise.all([server.connect(serverSide), reader.connect(readerSide)]);
-  cleanups.push(() => reader.close());
-  return (await reader.callTool({ name: 'echo' })) as CallToolResult;
+async function startServer(): Promise<FakeMcpServer> {
+  const server = await startFakeMcpServer('notion');
+  cleanups.push(() => server.stop());
+  return server;
 }
 
-describe('downstreamErrorText', () => {
-  it('reads the text of a result that reports its own failure', () => {
-    expect(
-      downstreamErrorText({ isError: true, content: [{ type: 'text', text: 'Requires a Business plan' }] }),
-    ).toBe('Requires a Business plan');
-  });
-
-  it('is null for a result that does not report a failure', () => {
-    expect(downstreamErrorText({ content: [{ type: 'text', text: '{"error":"looks like one"}' }] })).toBeNull();
-    expect(downstreamErrorText({ isError: false, content: [] })).toBeNull();
-    expect(downstreamErrorText('text')).toBeNull();
-    expect(downstreamErrorText(null)).toBeNull();
-  });
-
-  it('still says it failed when the result carries no text', () => {
-    expect(downstreamErrorText({ isError: true, content: [{ type: 'image', data: '', mimeType: 'image/png' }] })).toMatch(
-      /failed/,
-    );
-  });
-});
-
-describe('DownstreamToolError.redactedWith', () => {
-  it('passes on only the text fields the spec names, the secret out of every string the server wrote', () => {
-    const KEY = 'sk-live-1234567890abcdef';
-    const redactor = new SecretRedactor();
-    redactor.remember(KEY);
-    const failure = new DownstreamToolError(`refused ${KEY}`, [
-      {
-        type: 'text',
-        text: `key ${KEY}`,
-        annotations: { audience: ['user'], priority: 1, [KEY]: 'x' },
-        _meta: { data: KEY, [KEY]: 'x' },
-        [`x-${KEY}`]: 'an extension key',
-      },
-      { type: 'resource_link', uri: `https://x.example/?k=${KEY}`, name: 'link', description: `uses ${KEY}` },
-      { type: 'resource', resource: { uri: `https://x.example/${KEY}`, text: KEY, [KEY]: 'x' } },
-      { type: 'resource', resource: { uri: 'file:///a', mimeType: `application/${KEY}`, blob: `AAAA${KEY}` } },
-      { type: 'image', data: KEY, mimeType: `image/png; key=${KEY}` },
-      { type: 'resource_link', uri: 'file:///b', name: 'b', size: 42 },
-      { type: `kind-${KEY}`, note: KEY },
-    ] as unknown as CallToolResult['content']);
-    const redacted = failure.redactedWith((text) => redactor.redact(text));
-    expect(redacted.message).toBe('refused [redacted]');
-    expect(redacted.content).toEqual([
-      { type: 'text', text: 'key [redacted]', annotations: { audience: ['user'], priority: 1 } },
-      { type: 'resource_link', uri: 'https://x.example/?k=[redacted]', name: 'link', description: 'uses [redacted]' },
-      { type: 'resource', resource: { uri: 'https://x.example/[redacted]', text: '[redacted]' } },
-      // The blob-only resource and the image are left out: a payload is not text.
-      { type: 'resource_link', uri: 'file:///b', name: 'b', size: 42 },
-    ]);
-    // Nowhere: not in a field, a MIME type, a payload, or a key the server chose.
-    expect(JSON.stringify(redacted.content)).not.toContain(KEY);
-  });
-
-  it('leaves out a number in a block whose digits are a secret', () => {
-    const redactor = new SecretRedactor();
-    redactor.remember('4821');
-    const failure = new DownstreamToolError('refused', [
-      { type: 'resource_link', uri: 'file:///b', name: 'b', size: 4821, annotations: { priority: 0.5 } },
-    ] as unknown as CallToolResult['content']);
-    expect(failure.redactedWith((text) => redactor.redact(text)).content).toEqual([
-      { type: 'resource_link', uri: 'file:///b', name: 'b', annotations: { priority: 0.5 } },
-    ]);
-  });
-});
-
-describe('every failure a wrapped protocol lets through', () => {
-  const KEY = 'sk-live-1234567890abcdef';
-  const template = {
-    name: 'stub',
-    call_template_type: 'mcp',
-    config: { mcpServers: { srv: { url: 'https://x.example/mcp', headers: { Authorization: `Bearer ${KEY}`, 'X-Pin': '4821' } } } },
-  } as unknown as CallTemplate;
-  /** A protocol whose call fails with `failure`, wrapped; its `callTool` answers what the wrap throws. */
-  const failingWith = (failure: unknown, through: CallTemplate = template) => {
-    const protocol = keepDownstreamToolErrors({
-      _processMcpToolResult: (result: unknown) => result,
-      callTool: async () => {
-        throw failure;
-      },
-    }) as unknown as { callTool: (caller: unknown, tool: string, args: unknown, template: CallTemplate) => Promise<unknown> };
-    return (args: unknown = {}) => protocol.callTool({}, 'stub.srv.echo', args, through).catch((err: unknown) => err);
-  };
-
-  it('keeps an AbortError the DOMException it was, its message and stack redacted', async () => {
-    const thrown = await failingWith(new DOMException(`aborted while sending ${KEY}`, 'AbortError'))();
-    expect(thrown).toBeInstanceOf(DOMException);
-    expect(thrown).toMatchObject({ name: 'AbortError', message: 'aborted while sending [redacted]' });
-    expect(String((thrown as Error).stack)).not.toContain(KEY);
-  });
-
-  it("puts an Error with a frozen failure's name and code in its place", async () => {
-    const frozen = Object.freeze(Object.assign(new Error(`refused ${KEY}`), { code: 401, name: 'HttpError' }));
-    expect(await failingWith(frozen)()).toMatchObject({ name: 'HttpError', code: 401, message: 'refused [redacted]' });
-  });
-
-  it("redacts a thrown error's data, response and cause, keeping its class and code, however its payload nests", async () => {
-    const data: Record<string, unknown> = { echoed: KEY, nested: [{ [KEY]: `bad ${KEY}` }] };
-    data.self = data;
-    const failure = Object.assign(new McpError(-32603, `rejected ${KEY}`, data), {
-      response: { status: 401, data: { error: `refused ${KEY}` } },
-    });
-    Object.defineProperty(failure, 'cause', { value: new Error(`inner: ${KEY}`), configurable: true });
-    const thrown = (await failingWith(failure)()) as McpError & { response: unknown; cause: Error };
-    expect(thrown).toBeInstanceOf(McpError);
-    expect(thrown.code).toBe(-32603);
-    expect(thrown.message).toContain('rejected [redacted]');
-    const payload = thrown.data as Record<string, unknown>;
-    expect(payload).toMatchObject({ echoed: '[redacted]', nested: [{ '[redacted]': 'bad [redacted]' }] });
-    expect(payload.self).toBe(payload);
-    expect(thrown.response).toEqual({ status: 401, data: { error: 'refused [redacted]' } });
-    expect(thrown.cause.message).toBe('inner: [redacted]');
-    // A frozen error comes back as an Error carrying the same fields, redacted.
-    const frozen = Object.freeze(Object.assign(new Error(`refused ${KEY}`), { code: 401, data: { echoed: KEY } }));
-    expect(await failingWith(frozen)()).toMatchObject({ code: 401, message: 'refused [redacted]', data: { echoed: '[redacted]' } });
-    // One with a single field it will not give up is answered the same way, and left as it was.
-    const stubborn = Object.assign(new Error(`refused ${KEY}`), { data: { echoed: KEY } });
-    Object.defineProperty(stubborn, 'fixed', { value: KEY, enumerable: true });
-    const answered = (await failingWith(stubborn)()) as Error & { data: unknown; fixed: unknown };
-    expect(answered).not.toBe(stubborn);
-    expect(answered).toMatchObject({ message: 'refused [redacted]', data: { echoed: '[redacted]' }, fixed: '[redacted]' });
-    expect(stubborn).toMatchObject({ message: `refused ${KEY}`, data: { echoed: KEY }, fixed: KEY });
-  });
-
-  it("redacts an error's hidden fields, keeps a payload's kinds and a `__proto__` key as a key, and leaves binary out", async () => {
-    class Detail {
-      constructor(readonly note: string) {}
-    }
-    const failure = new McpError(-32603, 'rejected');
-    Object.defineProperty(failure, 'response', { value: { data: { error: `refused ${KEY}` } }, enumerable: false, configurable: true });
-    const payload = JSON.parse(`{"__proto__": "${KEY}"}`) as Record<string, unknown>;
-    Object.assign(payload, {
-      when: new Date(0),
-      map: new Map([[KEY, KEY]]),
-      set: new Set([KEY]),
-      bytes: new TextEncoder().encode(KEY),
-      detail: new Detail(KEY),
-    });
-    Object.defineProperty(failure, 'data', { value: payload, enumerable: true, configurable: true, writable: true });
-    const thrown = (await failingWith(failure)()) as McpError & { response: unknown };
-    expect(thrown.response).toEqual({ data: { error: 'refused [redacted]' } });
-    expect(Object.getOwnPropertyDescriptor(thrown, 'response')?.enumerable).toBe(false);
-    const data = thrown.data as Record<string, unknown>;
-    expect(Object.getOwnPropertyDescriptor(data, '__proto__')?.value).toBe('[redacted]');
-    expect(data.when).toEqual(new Date(0));
-    expect(data.map).toEqual(new Map([['[redacted]', '[redacted]']]));
-    expect(data.set).toEqual(new Set(['[redacted]']));
-    expect(data.bytes).toBeUndefined();
-    expect(data.detail).toBeInstanceOf(Detail);
-    expect((data.detail as Detail).note).toBe('[redacted]');
-  });
-
-  it("redacts the numbers and booleans in a thrown error's payload, an HTTP status it states kept", async () => {
-    // `X-Pin` carries 4821 in the template: echoed as a number, it is a secret all the same.
-    const failure = Object.assign(new McpError(-32603, 'rejected', { pin: 4821, size: 4821, ok: false, count: 3 }), {
-      status: 401,
-      response: { status: 401, statusCode: 4821 },
-    });
-    const thrown = (await failingWith(failure)()) as McpError & { status: unknown; response: unknown };
-    expect(thrown.data).toEqual({ pin: '[redacted]', size: '[redacted]', ok: false, count: 3 });
-    expect(thrown.status).toBe(401);
-    expect(thrown.response).toEqual({ status: 401, statusCode: '[redacted]' });
-    expect(thrown.code).toBe(-32603);
-    // A `status` deeper in the payload is not the error's: one that repeats what the caller sent goes.
-    const nested = Object.assign(new McpError(-32603, 'rejected', { status: 401, detail: { statusCode: 404 } }), { status: 401 });
-    const echoed = (await failingWith(nested)({ want: 401, also: 404 })) as McpError & { status: unknown };
-    expect(echoed.status).toBe(401);
-    // With the caller's arguments about, the payload is withheld whole, its keys too.
-    expect(echoed.data).toEqual({ '[redacted]': { '[redacted]': '[redacted]' } });
-    // A boolean whose text is a credential goes too.
-    const keyed = {
-      name: 'stub',
-      call_template_type: 'mcp',
-      config: { mcpServers: { srv: { url: 'https://x.example/mcp', headers: { 'X-Api-Key': 'false' } } } },
-    } as unknown as CallTemplate;
-    const flagged = (await failingWith(new McpError(-32603, 'rejected', { ok: false }), keyed)()) as McpError;
-    expect(flagged.data).toEqual({ ok: '[redacted]' });
-  });
-
-  it('keeps a lost session readable for recovery when it withholds the rest, and nothing of the server\'s words', async () => {
-    const lost = new StreamableHTTPError(404, `Error POSTing to endpoint: {"error":{"code":-32001,"message":"Session not found for ${KEY}"}}`);
-    const thrown = (await failingWith(lost)({ q: 'x' })) as StreamableHTTPError;
-    expect(thrown).toBeInstanceOf(StreamableHTTPError);
-    expect(thrown.code).toBe(404);
-    expect(thrown.message).toBe('Session not found');
-    expect(isSessionLoss(thrown)).toBe(true);
-    // A 404 that is an ordinary not-found is withheld like any other failure.
-    const missing = (await failingWith(new StreamableHTTPError(404, 'Not Found'))({ q: 'x' })) as Error;
-    expect(missing.message).toBe('[redacted]');
-    expect(isSessionLoss(missing)).toBe(false);
-  });
-
-  it('redacts a thrown string', async () => {
-    expect(await failingWith(`refused ${KEY}`)()).toBe('refused [redacted]');
-  });
-
-  it("withholds a failure of a call with arguments, whatever it quotes of them, while the call carries a secret", async () => {
-    const quoting = (text: string) => new DownstreamToolError(text, [{ type: 'text', text }]);
-    const answer = async (failure: DownstreamToolError, args: unknown) => ((await failingWith(failure)(args)) as DownstreamToolError).message;
-    expect(await answer(quoting("Unrecognized key 'sk-live-1234'"), { 'sk-live-1234': 1 })).toBe('[redacted]');
-    expect(await answer(quoting("Unrecognized key 'zz-none-9999'"), { 'zz-none-9999': 1 })).toBe('[redacted]');
-    // Sent as `sk-live-1234"x`, quoted JSON-escaped.
-    expect(await answer(quoting('{"error":"No project sk-live-1234\\"x"}'), { text: 'sk-live-1234"x' })).toBe('[redacted]');
-    // The server quoting the PIN itself reads the same whichever PIN the caller sent.
-    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 4821 })).toBe('[redacted]');
-    expect(await answer(quoting('PIN 4821 is wrong'), { pin: 1111 })).toBe('[redacted]');
-    // With no secret held there is nothing to keep, and a failure goes as it came.
-    const open = { name: 'stub', call_template_type: 'mcp', config: { mcpServers: { srv: { url: 'https://x.example/mcp' } } } } as unknown as CallTemplate;
-    const plain = new DownstreamToolError('This tool requires a Business plan.', [{ type: 'text', text: 'This tool requires a Business plan.' }]);
-    expect(((await failingWith(plain, open)({ query: 'Quarterly review' })) as DownstreamToolError).message).toBe('This tool requires a Business plan.');
-  });
-
-  it('withholds a failure of a call whose arguments are a boolean or null, so a guess at a key spelled the same reads the same', async () => {
-    const keyed = {
-      name: 'stub',
-      call_template_type: 'mcp',
-      config: { mcpServers: { srv: { url: 'https://x.example/mcp', headers: { 'X-Api-Key': 'true' } } } },
-    } as unknown as CallTemplate;
-    const answer = async (text: string, args: unknown) =>
-      ((await failingWith(new DownstreamToolError(text, [{ type: 'text', text }]), keyed)(args)) as DownstreamToolError).message;
-    expect(await answer('got true', { f: true })).toBe('[redacted]');
-    expect(await answer('got false', { f: false })).toBe('[redacted]');
-    expect(await answer('got null', { f: null })).toBe('[redacted]');
-    expect(await answer('got nothing', { f: false })).toBe('[redacted]');
-  });
-});
+/** Failure answers a server can give, in the shapes `@utcp/mcp`'s unwrap treats differently. */
+const failures: Record<string, CallToolResult> = {
+  'one text block': { isError: true, content: [{ type: 'text', text: 'This tool requires a Business plan or higher.' }] },
+  'text that is JSON': { isError: true, content: [{ type: 'text', text: '{"code":"E42","message":"no calendar is connected"}' }] },
+  'several blocks': {
+    isError: true,
+    content: [
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'second' },
+    ],
+  },
+  'structured content beside its text': {
+    isError: true,
+    content: [{ type: 'text', text: 'only in the content' }],
+    structuredContent: { code: 'E42' },
+  },
+  'no content': { isError: true, content: [] },
+  'an image and no text': { isError: true, content: [{ type: 'image', data: 'aGk=', mimeType: 'image/png' }] },
+};
 
 describe('the unwrap installDownstreamToolErrors wraps', () => {
   it('finds the unwrap it wraps in the installed @utcp/mcp (fails when a release renames it)', () => {
@@ -305,332 +80,75 @@ describe('the unwrap installDownstreamToolErrors wraps', () => {
 });
 
 describe('a downstream isError over a real MCP connection', () => {
-  it('reached the caller as a success before the install (the bug)', async () => {
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const client = await clientFor(server.url);
-    server.reportToolErrors('This tool requires a Business plan or higher.');
+  it.each(Object.entries(failures))(
+    'answers %s as it did when the failure passed for a success, and only adds the flag',
+    async (_shape, failure) => {
+      const server = await startServer();
+      server.reportToolErrors(failure);
+      // Built before the install: the bug, a failure read as a success.
+      const before = await dispatchToolCall(await clientFor(server), echo, { text: 'hi' });
+      installDownstreamToolErrors();
+      const after = await dispatchToolCall(await clientFor(server), echo, { text: 'hi' });
 
-    const result = await dispatchToolCall(client, echo, { text: 'hi' });
+      expect(before.isError).toBeUndefined();
+      expect(after).toEqual({ ...before, isError: true });
+    },
+  );
 
-    expect(result.isError).toBeUndefined();
-    expect(JSON.stringify(result.content)).toContain('Business plan');
-  });
-
-  it("reaches the caller as a failed call, in the server's own words, once installed", async () => {
+  it("is a failed call in the server's own words, run once", async () => {
     installDownstreamToolErrors();
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const client = await clientFor(server.url);
+    const server = await startServer();
+    const client = await clientFor(server);
     server.reportToolErrors('This tool requires a Business plan or higher.');
 
     const result = await dispatchToolCall(client, echo, { text: 'hi' });
 
-    expect(result.isError).toBe(true);
-    expect(result.content).toEqual([{ type: 'text', text: 'This tool requires a Business plan or higher.' }]);
-    // The call ran once: a reported failure is an answer, not a reason to retry.
+    expect(result).toEqual({ isError: true, content: [{ type: 'text', text: 'This tool requires a Business plan or higher.' }] });
+    // A reported failure is an answer, not a reason to retry.
     expect(server.executions('echo')).toBe(1);
   });
 
-  it("takes every credential the call carried out of the server's words", async () => {
+  it('rejects the call a chain makes, with the text of the answer as the message', async () => {
     installDownstreamToolErrors();
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    // One credential substituted from a variable, one spelled out in full.
-    const client = await CodeModeUtcpClient.create(
-      process.cwd(),
-      new UtcpClientConfigSerializer().validateDict({
-        // The manual's name has a `-`: UTCP registers it as `my_notion`, and its variables under `my__notion_`.
-        variables: {
-          my__notion_TOKEN: 'sk-live-1234567890abcdef',
-          my__notion_A: 'a',
-          my__notion_B: 'middle|secret-9876',
-          my__notion_C: 'd',
-        },
-      }),
-    );
-    cleanups.push(() => client.close());
-    const template = serializer.validateDict({
-      name: 'my-notion',
-      call_template_type: 'mcp',
-      config: {
-        mcpServers: {
-          srv: {
-            transport: 'http',
-            url: server.url,
-            timeout: 10,
-            terminate_on_close: true,
-            // `X-Trace` is not credential-named, and its middle value contains the separator.
-            headers: {
-              Authorization: 'Bearer ${TOKEN}',
-              'X-Api-Key': 'literal-key-abcdef123456',
-              'X-Trace': '${A}|${B}|${C}',
-            },
-          },
-        },
-      },
-    });
-    expect(await registerManual(client, template)).toEqual({ ok: true });
-    server.reportToolErrors(
-      'Rejected: token sk-live-1234567890abcdef (or its head sk-live-1234…), key literal-key-abcdef123456, trace middle|secret-9876.',
-    );
+    const server = await startServer();
+    const client = await clientFor(server);
 
-    const tool = { ...echo, utcpName: 'my_notion.srv.echo', mcpName: 'my_notion_srv_echo', manualName: 'my_notion' };
-    const result = await dispatchToolCall(client, tool, {});
+    server.reportToolErrors('This tool requires a Business plan or higher.');
+    await expect(client.callTool('notion.srv.echo', { text: 'hi' })).rejects.toThrow(DownstreamToolError);
+    await expect(client.callTool('notion.srv.echo', { text: 'hi' })).rejects.toThrow('This tool requires a Business plan or higher.');
 
-    expect(result.isError).toBe(true);
-    expect(result.content).toEqual([
-      { type: 'text', text: 'Rejected: token [redacted] (or its head [redacted]…), key [redacted], trace [redacted].' },
-    ]);
-    // With the caller's arguments about, a failure that holds a credential is not quoted at all.
-    expect((await dispatchToolCall(client, tool, { text: 'hi' })).content).toEqual([{ type: 'text', text: '[redacted]' }]);
-  });
-
-  it('answers a failure an MCP client can read, an annotation redaction would change left out', async () => {
-    installDownstreamToolErrors();
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const client = await CodeModeUtcpClient.create(process.cwd(), null);
-    cleanups.push(() => client.close());
-    const KEY = 'literal-key-abcdef123456';
-    const template = serializer.validateDict({
-      name: 'notion',
-      call_template_type: 'mcp',
-      config: {
-        mcpServers: {
-          srv: { transport: 'http', url: server.url, timeout: 10, terminate_on_close: true, headers: { 'X-Api-Key': KEY } },
-        },
-      },
-    });
-    expect(await registerManual(client, template)).toEqual({ ok: true });
-    const annotations = { audience: ['user', 'assistant'] as ('user' | 'assistant')[], priority: 0.5, lastModified: '2026-01-02T03:04:05Z' };
-    server.reportToolErrors(`Rejected key ${KEY}.`, annotations);
-
-    // With the caller's arguments about, nothing of the failure is quoted: a
-    // redacted role or timestamp would not parse, so the annotations go too.
-    expect(await readBySdkClient(await dispatchToolCall(client, echo, { text: 'hi' }))).toEqual({
-      isError: true,
-      content: [{ type: 'text', text: '[redacted]' }],
-    });
-    // Without them, annotations that hold no secret pass as they came.
-    expect(await readBySdkClient(await dispatchToolCall(client, echo, {}))).toEqual({
-      isError: true,
-      content: [{ type: 'text', text: 'Rejected key [redacted].', annotations }],
-    });
-  });
-
-  it('takes a short credential out even glued to other text, and a short value that is not one only where it stands alone', async () => {
-    installDownstreamToolErrors();
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const client = await CodeModeUtcpClient.create(
-      process.cwd(),
-      new UtcpClientConfigSerializer().validateDict({ variables: { short_SESSION_TOKEN: 'a9B2', short_REGION: 'us' } }),
-    );
-    cleanups.push(() => client.close());
-    // Neither header is credential-named: only the variable's name says `a9B2` is a credential.
-    const template = serializer.validateDict({
-      name: 'short',
-      call_template_type: 'mcp',
-      config: {
-        mcpServers: {
-          srv: {
-            transport: 'http',
-            url: server.url,
-            timeout: 10,
-            terminate_on_close: true,
-            headers: { 'X-Trace': '${SESSION_TOKEN}', 'X-Region': '${REGION}' },
-          },
-        },
-      },
-    });
-    expect(await registerManual(client, template)).toEqual({ ok: true });
-    server.reportToolErrors('Session xa9B2y refused for users in region us.');
-
-    const result = await dispatchToolCall(client, { ...echo, utcpName: 'short.srv.echo', mcpName: 'short_srv_echo', manualName: 'short' }, {});
-
-    expect(result.content).toEqual([{ type: 'text', text: 'Session x[redacted]y refused for users in region [redacted].' }]);
-  });
-
-  /** A manual at `url` whose server sends `${TOKEN}` in a header no credential rule would name. */
-  const tracedManual = (name: string, url: string) =>
-    serializer.validateDict({
-      name,
-      call_template_type: 'mcp',
-      config: { mcpServers: { srv: { transport: 'http', url, timeout: 10, terminate_on_close: true, headers: { 'X-Trace': '${TOKEN}' } } } },
-    });
-  const echoOf = (manual: string): ProxiedTool => ({ ...echo, utcpName: `${manual}.srv.echo`, mcpName: `${manual}_srv_echo`, manualName: manual });
-
-  it("keeps each manual's own values when two register on one client at once", async () => {
-    installDownstreamToolErrors();
-    const [alpha, beta] = await Promise.all([startFakeMcpServer('alpha'), startFakeMcpServer('beta')]);
-    cleanups.push(() => alpha.stop(), () => beta.stop());
-    const client = await CodeModeUtcpClient.create(
-      process.cwd(),
-      new UtcpClientConfigSerializer().validateDict({ variables: { alpha_TOKEN: 'alpha-value-1234', beta_TOKEN: 'beta-value-5678' } }),
-    );
-    cleanups.push(() => client.close());
-    expect(
-      await Promise.all([registerManual(client, tracedManual('alpha', alpha.url)), registerManual(client, tracedManual('beta', beta.url))]),
-    ).toEqual([{ ok: true }, { ok: true }]);
-    alpha.reportToolErrors('refused alpha-value-1234');
-    beta.reportToolErrors('refused beta-value-5678');
-
-    expect((await dispatchToolCall(client, echoOf('alpha'), {})).content).toEqual([{ type: 'text', text: 'refused [redacted]' }]);
-    expect((await dispatchToolCall(client, echoOf('beta'), {})).content).toEqual([{ type: 'text', text: 'refused [redacted]' }]);
-  });
-
-  it('redacts the value a later registration filled in, as after a session recovery', async () => {
-    installDownstreamToolErrors();
-    const server = await startFakeMcpServer('alpha');
-    cleanups.push(() => server.stop());
-    const config = new UtcpClientConfigSerializer().validateDict({ variables: { alpha_TOKEN: 'first-value-1234' } });
-    const client = await CodeModeUtcpClient.create(process.cwd(), config);
-    cleanups.push(() => client.close());
-    expect(await registerManual(client, tracedManual('alpha', server.url))).toEqual({ ok: true });
-
-    // The credential changes, and the manual registers again with it.
-    client.config.variables = { alpha_TOKEN: 'second-value-5678' };
-    await client.deregisterManual('alpha');
-    expect(await registerManual(client, tracedManual('alpha', server.url))).toEqual({ ok: true });
-    server.reportToolErrors('refused second-value-5678');
-
-    expect((await dispatchToolCall(client, echoOf('alpha'), {})).content).toEqual([{ type: 'text', text: 'refused [redacted]' }]);
-  });
-
-  /**
-   * A client and the verdict of registering manual `name` at `url`, which
-   * sends `Authorization: Bearer ${TOKEN}`. The token comes from the process
-   * environment, the last tier the substitutor reads: a value in the client's
-   * own `variables` is substituted itself when the client is built.
-   */
-  async function registerWithToken(
-    name: string,
-    url: string,
-    token: string,
-    /** More variables (`${NAME}` to value), each sent in an `X-<NAME>` header; and a client to use. */
-    more: { variables?: Record<string, string>; client?: CodeModeUtcpClient } = {},
-  ) {
-    const variables = { TOKEN: token, ...more.variables };
-    for (const [variable, value] of Object.entries(variables)) process.env[`${name}_${variable}`] = value;
-    cleanups.push(async () => {
-      for (const variable of Object.keys(variables)) delete process.env[`${name}_${variable}`];
-    });
-    const client = more.client ?? (await CodeModeUtcpClient.create(process.cwd(), null));
-    if (!more.client) cleanups.push(() => client.close());
-    const headers: Record<string, string> = { Authorization: 'Bearer ${TOKEN}' };
-    for (const variable of Object.keys(more.variables ?? {})) headers[`X-${variable}`] = `\${${variable}}`;
-    const template = serializer.validateDict({
-      name,
-      call_template_type: 'mcp',
-      config: { mcpServers: { srv: { transport: 'http', url, timeout: 10, terminate_on_close: true, headers } } },
-    });
-    return { client, registration: await registerManual(client, template) };
-  }
-
-  it('takes the credentials out of a failure the server threw, not only one it reported', async () => {
-    installDownstreamToolErrors();
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const { client } = await registerWithToken('thrown', server.url, 'sk-live-1234567890abcdef');
-    server.failToolCalls('rejected sk-live-1234567890abcdef');
-
-    const result = await dispatchToolCall(client, { ...echo, utcpName: 'thrown.srv.echo', mcpName: 'thrown_srv_echo', manualName: 'thrown' }, {});
-
-    expect(result.isError).toBe(true);
-    const text = (result.content[0] as { text: string }).text;
-    expect(text).toContain('rejected [redacted]');
-    expect(text).not.toContain('sk-live-1234567890abcdef');
-    // The same failure, as the token classifier receives it: still the McpError it was, code and all.
-    const thrown = await client.callTool('thrown.srv.echo', { text: 'hi' }).catch((err: unknown) => err);
-    expect(thrown).toBeInstanceOf(McpError);
-    expect(thrown).toMatchObject({ code: -32603 });
-    expect(`${(thrown as Error).message} ${(thrown as Error).stack}`).not.toContain('sk-live-1234567890abcdef');
-  });
-
-  it('withholds a failure that quotes what the caller sent, so a guess at the key comes back the same right or wrong', async () => {
-    installDownstreamToolErrors();
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const { client } = await registerWithToken('quoted', server.url, 'sk-live-Q7xZ2abcdefgh');
-    server.reportToolErrors("Project '{text}' not found");
-    const call = (text: string) =>
-      dispatchToolCall(client, { ...echo, utcpName: 'quoted.srv.echo', mcpName: 'quoted_srv_echo', manualName: 'quoted' }, { text });
-
-    // `sk-live-Q7xZ` is a head of the key, `sk-live-Q7xA` is not: both come back the same.
-    expect((await call('sk-live-Q7xZ')).content).toEqual([{ type: 'text', text: '[redacted]' }]);
-    expect((await call('sk-live-Q7xA')).content).toEqual([{ type: 'text', text: '[redacted]' }]);
-  });
-
-  it("withholds a failure that quotes the caller's keys, a field the tool's schema declares included", async () => {
-    installDownstreamToolErrors();
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const { client } = await registerWithToken('schema', server.url, 'sk-live-1234567890abcdef');
-    server.reportToolErrors('text: {text} is not a page');
-
-    const result = await dispatchToolCall(
-      client,
-      { ...echo, utcpName: 'schema.srv.echo', mcpName: 'schema_srv_echo', manualName: 'schema' },
-      { text: 'Quarterly plan' },
-    );
-
-    // `text` is the caller's key as much as the tool's field: a guess sent as a key reads the same either way.
-    expect(result.content).toEqual([{ type: 'text', text: '[redacted]' }]);
-  });
-
-  it('refuses a value every call would read as another variable, naming the variable and not the value', async () => {
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-
-    const { client, registration } = await registerWithToken('dollar', server.url, 'Pa$$w0rdSecretTail9');
-
-    expect(registration.ok).toBe(false);
-    const error = (registration as { error: string }).error;
-    expect(error).toContain('${TOKEN}');
-    expect(error).not.toContain('w0rdSecretTail9');
-    expect(await client.getTools()).toEqual([]);
-  });
-
-  it("takes a refused manual's tools off even when closing its connection fails", async () => {
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const client = await CodeModeUtcpClient.create(process.cwd(), null);
-    cleanups.push(() => client.close());
-    client.deregisterManual = async () => {
-      throw new Error('the connection would not close');
-    };
-
-    const { registration } = await registerWithToken('stuck', server.url, 'Pa$$w0rdSecretTail9', { client });
-
-    expect(registration.ok).toBe(false);
-    expect(await client.getTools()).toEqual([]);
-  });
-
-  it('takes the credentials out of what a server quoted back when registration failed', async () => {
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    server.failWithAuthError(true, 'Unauthorized for users in us: {authorization}');
-
-    const { registration } = await registerWithToken('refused', server.url, 'a9B2', { variables: { REGION: 'us' } });
-
-    expect(registration.ok).toBe(false);
-    const error = (registration as { error: string }).error;
-    // The server's words arrive; the token is out of them even glued, since it went in a credential-named
-    // header; the region, which did not, is out only where it stands alone.
-    expect(error).toContain('Unauthorized for users in [redacted]: Bearer [redacted]');
-    expect(error).not.toContain('a9B2');
+    // An answer with no text at all still rejects with words a person can read.
+    server.reportToolErrors({ isError: true, content: [{ type: 'image', data: 'aGk=', mimeType: 'image/png' }] });
+    await expect(client.callTool('notion.srv.echo', { text: 'hi' })).rejects.toThrow(/failed and gave no details/);
   });
 
   it('leaves a successful call untouched once installed', async () => {
     installDownstreamToolErrors();
-    const server = await startFakeMcpServer('notion');
-    cleanups.push(() => server.stop());
-    const client = await clientFor(server.url);
+    const server = await startServer();
+    const client = await clientFor(server);
 
     const result = await dispatchToolCall(client, echo, { text: 'hi' });
 
     expect(result.isError).toBeUndefined();
     expect(result.content).toEqual([{ type: 'text', text: JSON.stringify({ echoed: 'hi' }) }]);
+  });
+});
+
+describe('installDownstreamToolErrors', () => {
+  it('wraps the factory that is registered, once, and a client still gets an instance of its own', () => {
+    let built = 0;
+    const registered = () => {
+      built += 1;
+      return new McpCommunicationProtocol();
+    };
+    CommunicationProtocol.communicationProtocolFactories['mcp'] = registered;
+
+    installDownstreamToolErrors();
+    const installed = CommunicationProtocol.communicationProtocolFactories['mcp']!;
+    installDownstreamToolErrors();
+
+    expect(CommunicationProtocol.communicationProtocolFactories['mcp']).toBe(installed);
+    expect(installed()).not.toBe(installed());
+    expect(built).toBe(2);
   });
 });

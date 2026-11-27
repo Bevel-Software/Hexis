@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '@utcp/mcp'; // side effect: registers the 'mcp' UTCP communication protocol
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { CallTemplateSerializer, CommunicationProtocol, type CallTemplate } from '@utcp/sdk';
+import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {
@@ -9,7 +9,6 @@ import {
   isSessionLoss,
   noteManualReregistered,
 } from '../session-recovery.js';
-import { installDownstreamToolErrors } from '../downstream-tool-errors.js';
 import { registerManual, dispatchToolCall } from '../dispatch.js';
 import { dispatchMetaTool } from '../meta-tools.js';
 import type { ProxiedTool } from '../proxied-tool.js';
@@ -150,41 +149,6 @@ describe('session recovery', () => {
     expect(log).toEqual([`[mcp] session lost on 'platform' — re-registered and retried.`]);
     // The retry is what executed; the lost-session attempt never reached the tool.
     expect(platform.executions('echo')).toBe(2);
-  }, 20_000);
-
-  it('heals a session loss on a server the call carries a credential to, for a call with arguments', async () => {
-    // A failure of such a call is withheld whole; a lost session still says so, and is recovered.
-    const stockFactory = CommunicationProtocol.communicationProtocolFactories['mcp'];
-    cleanups.push(async () => {
-      CommunicationProtocol.communicationProtocolFactories['mcp'] = stockFactory;
-    });
-    installDownstreamToolErrors();
-    const platform = await startServer('platform');
-    const template = serializer.validateDict({
-      name: 'keyed',
-      call_template_type: 'mcp',
-      config: {
-        mcpServers: {
-          srv: { transport: 'http', url: platform.url, timeout: 10, terminate_on_close: true, headers: { Authorization: 'Bearer sk-live-1234567890abcdef' } },
-        },
-      },
-    });
-    const client = await CodeModeUtcpClient.create(process.cwd(), null);
-    cleanups.push(() => client.close());
-    expect(await registerManual(client, template)).toEqual({ ok: true });
-    const reregistrations: string[] = [];
-    installSessionRecovery(client, {
-      manualTemplate: (name) => (name === 'keyed' ? template : undefined),
-      afterReregister: (name) => {
-        reregistrations.push(name);
-      },
-      log: () => {},
-    });
-
-    await platform.restart();
-
-    expect(await callOverMcpSurface(client, 'keyed', 'echo', { text: 'after' })).toContain('after');
-    expect(reregistrations).toEqual(['keyed']);
   }, 20_000);
 
   it('heals a proxied third-party server independently of the platform manual', async () => {

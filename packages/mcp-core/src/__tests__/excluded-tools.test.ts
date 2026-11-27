@@ -3,7 +3,8 @@ import '@utcp/mcp'; // side effect: registers the 'mcp' UTCP communication proto
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { EXCLUDE_TOOLS_KEY, excludedToolNames } from '../excluded-tools.js';
-import { registerManual } from '../dispatch.js';
+import { registerManual, dispatchToolCall } from '../dispatch.js';
+import { installSessionRecovery } from '../session-recovery.js';
 import { startFakeMcpServer } from './fake-mcp-server.js';
 
 const serializer = new CallTemplateSerializer();
@@ -48,9 +49,13 @@ describe('excludedToolNames', () => {
     expect(excludedToolNames(http as unknown as CallTemplate)).toEqual([]);
   });
 
-  it('ignores a malformed entry rather than throwing', () => {
-    const odd = { name: 'n', call_template_type: 'mcp', config: { mcpServers: { srv: { [EXCLUDE_TOOLS_KEY]: 'bump' }, two: null } } };
-    expect(excludedToolNames(odd as unknown as CallTemplate)).toEqual([]);
+  it('is null for a list of the wrong shape, and reads a server entry that is no object as leaving nothing out', () => {
+    const entries = (srv: unknown) =>
+      ({ name: 'n', call_template_type: 'mcp', config: { mcpServers: { srv, two: null } } }) as unknown as CallTemplate;
+    expect(excludedToolNames(entries({ [EXCLUDE_TOOLS_KEY]: 'bump' }))).toBeNull();
+    expect(excludedToolNames(entries({ [EXCLUDE_TOOLS_KEY]: ['bump', 7] }))).toBeNull();
+    expect(excludedToolNames(entries({ [EXCLUDE_TOOLS_KEY]: [''] }))).toBeNull();
+    expect(excludedToolNames(entries({}))).toEqual([]);
   });
 });
 
@@ -61,9 +66,11 @@ describe('registerManual over a real MCP connection', () => {
     const client = await CodeModeUtcpClient.create(process.cwd(), null);
     cleanups.push(() => client.close());
     // The key rides in the server entry; the MCP client must still accept it.
-    expect(await registerManual(client, manualTemplate('notion', server.url, ['bump']))).toEqual({ ok: true });
+    // A name UTCP rewrites when it registers (`my-notion` to `my_notion`), as
+    // an mcp.json server's usually is: the left-out tool is named the same way.
+    expect(await registerManual(client, manualTemplate('my-notion', server.url, ['bump']))).toEqual({ ok: true });
 
-    expect((await client.getTools()).map((t) => t.name)).toEqual(['notion.srv.echo']);
+    expect((await client.getTools()).map((t) => t.name)).toEqual(['my_notion.srv.echo']);
   });
 
   it('keeps it off when the manual registers again, as a session recovery or a refresh does', async () => {
@@ -77,5 +84,46 @@ describe('registerManual over a real MCP connection', () => {
     expect(await registerManual(client, manualTemplate('notion', server.url, ['bump']))).toEqual({ ok: true });
 
     expect((await client.getTools()).map((t) => t.name)).toEqual(['notion.srv.echo']);
+  });
+
+  it('keeps it off through a real session recovery: the server forgets the session, the call heals, the tool stays gone', async () => {
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    cleanups.push(() => client.close());
+    const template = manualTemplate('notion', server.url, ['bump']);
+    expect(await registerManual(client, template)).toEqual({ ok: true });
+    const reregistered: string[] = [];
+    installSessionRecovery(client, {
+      manualTemplate: (name) => (name === 'notion' ? template : undefined),
+      afterReregister: (name) => {
+        reregistered.push(name);
+      },
+      log: () => {},
+    });
+
+    await server.restart();
+    const echo = { utcpName: 'notion.srv.echo', mcpName: 'echo', description: 'echo', inputSchema: { type: 'object' as const, properties: {} }, manualName: 'notion' };
+    const result = await dispatchToolCall(client, echo, { text: 'after' });
+
+    expect(result.isError).toBeUndefined();
+    expect(reregistered).toEqual(['notion']);
+    expect((await client.getTools()).map((t) => t.name)).toEqual(['notion.srv.echo']);
+  }, 20_000);
+
+  it('registers nothing for a list of the wrong shape, rather than every tool it was written to leave out', async () => {
+    const server = await startFakeMcpServer('notion');
+    cleanups.push(() => server.stop());
+    const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    cleanups.push(() => client.close());
+    const template = manualTemplate('notion', server.url);
+    const entry = (template as unknown as { config: { mcpServers: { srv: Record<string, unknown> } } }).config.mcpServers.srv;
+    entry[EXCLUDE_TOOLS_KEY] = 'bump';
+
+    const result = await registerManual(client, template);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain(EXCLUDE_TOOLS_KEY);
+    expect(await client.getTools()).toEqual([]);
   });
 });

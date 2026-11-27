@@ -246,14 +246,19 @@ export function createVersionControlRoutes(
   });
 
   router.post('/workspace/:id/workflow/branches', async (req, res) => {
-    if (!(await requireUser(req, res))) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
     const { name, fromBase } = req.body as { name?: string; fromBase?: string };
     if (!name) {
       res.status(400).json({ error: 'name is required' });
       return;
     }
     try {
-      res.json(await versionControl.createBranch(req.params.id, name, fromBase));
+      // The same naming as the `create_branch` tool: a bare name its maker
+      // could not delete is created under their own prefix, and the answer
+      // names the branch as created.
+      const draft = await versionControl.draftNameFor(req.params.id, name, user);
+      res.json(await versionControl.createBranch(req.params.id, draft, fromBase));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

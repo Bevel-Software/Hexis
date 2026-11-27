@@ -20,7 +20,7 @@ import type {
   ShareChangesRequest,
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
-import { isFolderPlaceholder } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder, isOwnBranch } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
@@ -35,8 +35,6 @@ import { linkedAncestor } from '../../../shared/no-link-below.js';
 import {
   assertValidBranchName,
   assertValidRelativePath,
-  isBranchAuthoredBy,
-  isOwnSuggestionsBranch,
 } from '../../kb-fs/index.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import {
@@ -997,10 +995,7 @@ export class GitService implements IGitService {
    * own branch.
    */
   async mayDeleteBranch(workspaceId: string, name: string, user: AuthUser): Promise<boolean> {
-    const isAuthor =
-      isBranchAuthoredBy(name, user.email) ||
-      isOwnSuggestionsBranch(name, { email: user.email, id: user.id });
-    if (isAuthor) return true;
+    if (isOwnBranch(name, { email: user.email, id: user.id })) return true;
     return this.accessControl
       ? await this.accessControl.canWrite(workspaceId, user.email, 'roles.yaml')
       : false;

@@ -5,17 +5,8 @@ import type { ProxiedTool } from './proxied-tool.js';
 import { toCallToolResult, toolError, describeToolFailure, renderProgress } from './results.js';
 import { installCallGuards } from './call-guards.js';
 import { installGetHasNoBody } from './get-has-no-body.js';
-import {
-  callRedactor,
-  credentialVariables,
-  installSubstitutionCapture,
-  recordingSubstitutions,
-  rememberManualSecrets,
-  valuesReadOnEveryCall,
-} from './call-secrets.js';
-import { utcpManualName } from './utcp-namespace.js';
 import { DownstreamToolError } from './downstream-tool-errors.js';
-import { removeExcludedTools } from './excluded-tools.js';
+import { EXCLUDE_TOOLS_KEY, excludedToolNames, removeExcludedTools } from './excluded-tools.js';
 
 /**
  * Register one manual on a client, reduced to a verdict.
@@ -28,7 +19,9 @@ import { removeExcludedTools } from './excluded-tools.js';
  *
  * Never throws: a registration failure is a runtime problem (network, dead
  * credential), not a schema one — the templates were validated before they got
- * here — so it comes back as `{ ok: false }` for the caller to police.
+ * here — so it comes back as `{ ok: false }` for the caller to police. The one
+ * thing read from the template here is its `exclude_tools`, because here is
+ * where it is applied; a list of the wrong shape comes back the same way.
  */
 export async function registerManual(
   client: CodeModeUtcpClient,
@@ -47,56 +40,29 @@ export async function registerManual(
   // (`call-guards.ts`).
   installGetHasNoBody();
   installCallGuards(client);
-  // The values this registration fills into the manual are what its calls
-  // carry, so they are kept for the manual (`call-secrets.ts`): a downstream
-  // error quoted back is redacted against them.
-  installSubstitutionCapture(client);
-  const manualName = utcpManualName(String(manual.name ?? ''));
-  const resolved = new Map<string, Set<string>>();
-  // A failure is the server's or the transport's words, which can quote what
-  // the registration sent: redacted before anyone logs or shows it.
-  const failed = (err: unknown) => ({
-    ok: false as const,
-    error: callRedactor(resolved, manual, credentialVariables(client, manual)).redact(
-      err instanceof Error ? err.message : String(err),
-    ),
-  });
-  try {
-    const result = await recordingSubstitutions(resolved, () => client.registerManual(manual));
-    if (result && result.success === false) {
-      return failed(Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error');
-    }
-  } catch (err) {
-    return failed(err);
+  // The same one point is where the tools a manual leaves out (`excludeTools`)
+  // come off the client: a session recovery or a catalog refresh registers
+  // through here too, so none of them can bring one back. The list is read
+  // before anything registers: one that is not a list of tool names registers
+  // nothing, rather than every tool it was written to leave out.
+  const excluded = excludedToolNames(manual);
+  if (excluded === null) {
+    return {
+      ok: false,
+      error: `The \`${EXCLUDE_TOOLS_KEY}\` of a server of "${String(manual.name ?? '')}" must be a list of tool names, so the server is not registered.`,
+    };
   }
-  // Registered. Whatever fails from here takes the manual back off the client,
-  // so nothing half-checked stays callable.
   try {
-    rememberManualSecrets(client, manualName, resolved);
-    // The same one point is where the tools a manual leaves out
-    // (`excludeTools`) come off the client: a session recovery or a catalog
-    // refresh registers through here too, so none of them can bring one back.
-    await removeExcludedTools(client, manual);
-    const readAgain = await valuesReadOnEveryCall(client, manualName, resolved);
-    if (readAgain.length > 0) {
-      await withdraw(client, manualName);
-      // Our own words, naming variables only: nothing in them to redact.
-      return {
-        ok: false,
-        error: `The value of ${readAgain.map((name) => `\${${name}}`).join(', ')} contains \`$\` followed by a name, which every call would read as another variable, so this server cannot be called with that value.`,
-      };
+    const result = await client.registerManual(manual);
+    if (result && result.success === false) {
+      const errors = Array.isArray(result.errors) ? result.errors.join('; ') : 'unknown error';
+      return { ok: false, error: errors };
     }
+    await removeExcludedTools(client, excluded);
     return { ok: true };
   } catch (err) {
-    await withdraw(client, manualName).catch(() => {});
-    return failed(err);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-}
-
-/** Take a registered manual back off `client`: its connection closed where that works, its tools gone regardless. */
-async function withdraw(client: CodeModeUtcpClient, manualName: string): Promise<void> {
-  await client.deregisterManual(manualName).catch(() => false);
-  await client.config.tool_repository.removeManual(manualName);
 }
 
 /**
@@ -143,8 +109,8 @@ export async function dispatchToolCall(
     }
   } catch (err) {
     // The downstream server answered and said the call failed: pass its own
-    // answer on, marked as the failure it is.
-    if (err instanceof DownstreamToolError) return err.toCallToolResult();
+    // answer on as the success path below would, marked as the failure it is.
+    if (err instanceof DownstreamToolError) return err.toCallToolResult(options);
     return toolError(`The "${tool.mcpName}" tool failed: ${describeToolFailure(err)}`);
   }
 

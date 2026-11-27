@@ -787,8 +787,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
     const { client } = await connectSdkClient(baseUrl);
 
-    // Called without arguments: with them, the server's words would be withheld whole, as the call carries a token.
-    const res = await client.callTool({ name: 'notion_srv_echo', arguments: {} });
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
 
     // The server's own words, marked as the failure they are.
     expect(res.isError).toBe(true);
@@ -798,7 +797,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(state.token).toBe('token-1');
 
     // A chain sees the same failure as a rejected call, not as a value.
-    const chain = await client.callTool({ name: 'call_tool_chain', arguments: { code: 'return notion.srv_echo({});' } });
+    const chain = await client.callTool({ name: 'call_tool_chain', arguments: { code: "return notion.srv_echo({ text: 'two' });" } });
     expect(chain.isError).toBe(true);
     expect(toolText(chain)).toContain('this page is not shared with the integration');
     expect(downstream.executions()).toBe(2);
@@ -914,8 +913,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
 
     valid = 'token-2';
 
-    // Without arguments, so the downstream's own words are quoted (with them, they would be withheld whole).
-    const failed = await client.callTool({ name: 'notion_srv_echo', arguments: {} });
+    const failed = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
     expect(failed.isError).toBe(true);
     expect(toolText(failed)).toContain('invalid_token'); // the downstream's own refusal, unchanged
     expect(toolText(failed)).not.toContain('Re-authorize');

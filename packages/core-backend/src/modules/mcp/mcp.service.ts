@@ -92,7 +92,8 @@ import {
 
 // A downstream MCP server's `isError` must reach our caller as a failed call,
 // not as a success whose text is the error: `@utcp/mcp` drops the flag when it
-// unwraps a result. Installed once, before any client is built.
+// unwraps a result. Here, because it wraps the `mcp` protocol the import of
+// `@utcp/mcp` above registers, and before any client is built.
 installDownstreamToolErrors();
 
 // Still offered from here, as this module's tests and callers learnt it.
@@ -2214,8 +2215,9 @@ function templateFingerprint(template: CallTemplate): string {
  *
  * No guard is re-installed over this wrapper, and none is needed: a routed call
  * is made on the POOLED client, which had the guards installed on it when its
- * own manual was registered (`registerManual`). Nothing in this module checks a
- * call or shapes its failure — it forwards the call and returns the answer.
+ * own manual was registered (`registerManual`). This wrapper decides one thing,
+ * whether a call is routed (see `routeOf`), and shapes no failure: it forwards
+ * the call and returns the answer.
  *
  * A call the downstream refuses for its token (401 / `invalid_token`) goes to
  * the route's `afterFailure`, which may refresh the token and ask for ONE retry
@@ -2226,23 +2228,22 @@ function templateFingerprint(template: CallTemplate): string {
 function routeToDownstream(client: CodeModeUtcpClient, routes: ReadonlyMap<string, DownstreamRoute>): void {
   const callTool = client.callTool.bind(client);
   const callToolStreaming = client.callToolStreaming.bind(client);
-  const routeOf = (toolName: string) => routes.get(toolName.split('.')[0] ?? '');
-  // A routed call reaches only a tool this request's client still holds, as an
-  // unrouted one does. The pooled client holds every tool its server
-  // registered; this client holds the surface, which can hold fewer (a tool
-  // hidden for an invalid schema is taken off this client only). Without the
-  // check, a chain's tool bridge could still call such a tool by name. The
-  // refusal is the one UTCP's own `callTool` gives a tool missing from the repository.
-  const assertOnSurface = async (toolName: string) => {
-    if (!(await client.config.tool_repository.getTool(toolName))) {
-      throw new Error(`Tool '${toolName}' not found in the repository.`);
-    }
+  // A call is routed only for a tool this request's client still holds. The
+  // pooled client holds every tool its server registered; this client holds
+  // the surface, which can hold fewer: a tool hidden for an invalid schema is
+  // taken off this client only, and so is one the pooled connection found
+  // after this surface was built. Routed regardless, a chain's tool bridge
+  // could call such a tool by name. Not routed, the call goes to this client's
+  // own call, which refuses it as it refuses any tool it does not have: the
+  // refusal is UTCP's own, the same for a hidden tool and one that never existed.
+  const routeOf = async (toolName: string) => {
+    const route = routes.get(toolName.split('.')[0] ?? '');
+    return route && (await client.config.tool_repository.getTool(toolName)) ? route : undefined;
   };
 
   client.callTool = async function routedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
-    const route = routeOf(toolName);
+    const route = await routeOf(toolName);
     if (!route) return callTool(toolName, toolArgs);
-    await assertOnSurface(toolName);
     const once = async () => {
       const lease = await route.acquire();
       try {
@@ -2264,12 +2265,14 @@ function routeToDownstream(client: CodeModeUtcpClient, routes: ReadonlyMap<strin
     toolName: string,
     toolArgs: Record<string, unknown>,
   ): AsyncGenerator<unknown, void, unknown> {
-    const route = routeOf(toolName);
+    // The same rule on the streaming entry. A direct call of a tool off the
+    // surface is refused by the handler's own lookup before it gets here, so
+    // on this entry the rule is a second line, not the first.
+    const route = await routeOf(toolName);
     if (!route) {
       yield* callToolStreaming(toolName, toolArgs);
       return;
     }
-    await assertOnSurface(toolName);
     const once = async function* () {
       const lease = await route.acquire();
       try {

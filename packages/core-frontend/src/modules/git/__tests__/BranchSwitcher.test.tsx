@@ -26,7 +26,6 @@ import { BranchSwitcher } from '../components/BranchSwitcher';
 import { ConfirmProvider } from '../../../shared/components';
 import { askBeforeBranchDelete } from '../state/branch-delete-confirm';
 import { GitContext, type GitContextValue } from '../state/git.context';
-import { ReviewContext, type ReviewContextValue } from '../../review';
 import { AuthContext, type AuthContextValue } from '../../auth';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
 
@@ -60,27 +59,8 @@ function makeGit(overrides: Partial<GitContextValue> = {}): GitContextValue {
   };
 }
 
-function makeReview(overrides: Partial<ReviewContextValue> = {}): ReviewContextValue {
-  return {
-    session: null,
-    selectedPath: null,
-    fileDiff: null,
-    isLoadingDiff: false,
-    lastError: null,
-    isLoading: false,
-    refresh: async () => {},
-    selectPath: async () => {},
-    acceptOne: async () => {},
-    rejectOne: async () => {},
-    acceptAll: async () => {},
-    rejectAll: async () => {},
-    clearError: () => {},
-    ...overrides,
-  };
-}
-
 // BranchSwitcher mounts DirtySwitchDialog + ShareChangesDialog (both closed),
-// whose hook bodies still reach into Auth / Chat / Workspace / Review on mount.
+// whose hook bodies still reach into Auth / Chat / Workspace on mount.
 const auth = {
   user: { id: 'u1', email: 'alice@example.com', name: 'Alice' },
   token: 't',
@@ -101,9 +81,7 @@ function renderSwitcher(git: GitContextValue = makeGit(), authValue: AuthContext
       <AuthContext.Provider value={authValue}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
-            <ReviewContext.Provider value={makeReview()}>
-              <BranchSwitcher />
-            </ReviewContext.Provider>
+            <BranchSwitcher />
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>

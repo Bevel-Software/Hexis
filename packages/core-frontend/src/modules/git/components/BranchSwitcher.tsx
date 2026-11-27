@@ -5,8 +5,7 @@ import { ChevronDown, GitBranch, Plus, Lock, Check, GitPullRequest, Trash2, Load
 import {
   protectedBranchDisplayName,
   currentBranchModel,
-  isBranchAuthoredBy,
-  isOwnSuggestionsBranch,
+  isOwnBranch,
   ownDraftPrefixFor,
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
@@ -529,9 +528,7 @@ export function BranchSwitcher() {
               //      `GitService.deleteBranch` is the authoritative check.
               // The current branch and protected branches are never
               // deletable (regression-guarded server-side too).
-              const isAuthoredByMe =
-                isBranchAuthoredBy(b.name, user?.email) ||
-                isOwnSuggestionsBranch(b.name, { email: user?.email, id: user?.id });
+              const isAuthoredByMe = isOwnBranch(b.name, { email: user?.email, id: user?.id });
               const isOrphan = b.hasRemote === false;
               const canDelete =
                 !b.isProtected && !current && (isOrphan || isAuthoredByMe || isAdmin);

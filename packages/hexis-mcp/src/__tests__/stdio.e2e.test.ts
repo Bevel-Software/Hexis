@@ -37,7 +37,7 @@ import type { HexisMcpConfig } from '../config.js';
  * from, and needing none is what keeps the fixture honest.
  */
 
-/** A minimal MCP stdio server: initialize, tools/list, tools/call(probe). */
+/** A minimal MCP stdio server: initialize, tools/list, tools/call (`refuse` reports its own failure, any other tool answers as probe). */
 const FIXTURE_SERVER = `'use strict';
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
@@ -60,7 +60,13 @@ rl.on('line', (line) => {
       name: 'extra',
       description: 'A second tool, for a server that leaves one out.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    }, {
+      name: 'refuse',
+      description: 'A tool that reports its own failure.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     }] } });
+  } else if (req.method === 'tools/call' && req.params && req.params.name === 'refuse') {
+    send({ jsonrpc: '2.0', id: req.id, result: { isError: true, content: [{ type: 'text', text: 'This tool requires a Business plan or higher.' }] } });
   } else if (req.method === 'tools/call') {
     send({ jsonrpc: '2.0', id: req.id, result: { content: [{ type: 'text', text: JSON.stringify({
       pluginRoot: process.env.PLUGIN_ROOT ?? null,
@@ -134,9 +140,16 @@ beforeAll(async () => {
         void (async () => {
           const mcp = new Server({ name: 'stub-deployment', version: '0.0.0' }, { capabilities: { tools: {} } });
           mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-            tools: [{ name: 'ping', description: 'the ping tool', inputSchema: { type: 'object' as const, properties: {} } }],
+            tools: [
+              { name: 'ping', description: 'the ping tool', inputSchema: { type: 'object' as const, properties: {} } },
+              { name: 'refuse', description: 'a tool that reports its own failure', inputSchema: { type: 'object' as const, properties: {} } },
+            ],
           }));
-          mcp.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
+          mcp.setRequestHandler(CallToolRequestSchema, async (request) =>
+            request.params.name === 'refuse'
+              ? { isError: true, content: [{ type: 'text' as const, text: 'You may not write here.' }] }
+              : { content: [{ type: 'text' as const, text: 'ok' }] },
+          );
           const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
           res.on('close', () => {
             void transport.close();
@@ -326,6 +339,33 @@ describe('stdio end-to-end', () => {
       expect(names).toContain('ping');
       expect(names).toContain('gtmprobe_probe_probe');
       expect(names).not.toContain('gtmprobe_probe_extra');
+    } finally {
+      await probe.close().catch(() => {});
+      await handle.shutdown();
+    }
+  });
+
+  it("answers a local stdio server's own failure, and the deployment's, as a failed call in the server's words", { timeout: 60_000 }, async () => {
+    const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck: false });
+    const probe = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
+    try {
+      await handle.ready;
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await handle.server.connect(serverTransport);
+      await probe.connect(clientTransport);
+
+      const refused = await probe.callTool({ name: 'gtmprobe_probe_refuse', arguments: {} });
+      expect(refused.isError).toBe(true);
+      expect(refused.content).toEqual([{ type: 'text', text: 'This tool requires a Business plan or higher.' }]);
+
+      const answered = await probe.callTool({ name: 'gtmprobe_probe_probe', arguments: {} });
+      expect(answered.isError).toBeFalsy();
+
+      // The deployment is an MCP server to this one too, so its own tools'
+      // failures come through the same way.
+      const platform = await probe.callTool({ name: 'refuse', arguments: {} });
+      expect(platform.isError).toBe(true);
+      expect(platform.content).toEqual([{ type: 'text', text: 'You may not write here.' }]);
     } finally {
       await probe.close().catch(() => {});
       await handle.shutdown();

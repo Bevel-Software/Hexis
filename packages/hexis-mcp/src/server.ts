@@ -34,6 +34,7 @@ import {
   toListedTool,
   toolError,
   installDownstreamToolErrors,
+  EXCLUDE_TOOLS_KEY,
   seedBevelHostedManualVars,
   printable,
   skillPromptText,
@@ -75,7 +76,8 @@ import { closeRenewal } from './renewal.js';
 
 // A downstream MCP server's `isError` must reach our caller as a failed call,
 // not as a success whose text is the error: `@utcp/mcp` drops the flag when it
-// unwraps a result. Installed once, before any client is built.
+// unwraps a result. Here, because it wraps the `mcp` protocol the import of
+// `@utcp/mcp` above registers, and before any client is built.
 installDownstreamToolErrors();
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
@@ -363,9 +365,14 @@ async function prepareLocalManuals(
       for (const name of stdioNames) {
         const entry = servers[name]!;
         const prepared = await prepareStdioSpec(entry, plugin);
-        // The prepared spec replaces what spawns; every other key of the
-        // entry stays, so registration still reads the tools it leaves out.
-        servers[name] = { ...entry, ...prepared, transport: 'stdio' };
+        // The prepared spec is all that reaches the protocol, plus the one
+        // key registration reads: the tools the server leaves out.
+        const leftOut = (entry as unknown as Record<string, unknown>)[EXCLUDE_TOOLS_KEY];
+        servers[name] = {
+          ...prepared,
+          transport: 'stdio',
+          ...(leftOut !== undefined ? { [EXCLUDE_TOOLS_KEY]: leftOut } : {}),
+        };
       }
       out.push(template);
     } catch (err) {
