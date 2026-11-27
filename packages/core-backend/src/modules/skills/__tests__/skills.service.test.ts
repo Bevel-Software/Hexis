@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { mkdtemp, rm, mkdir, writeFile, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,16 +7,14 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { SkillService, unmergedSkillNotice } from '../skills.service.js';
 import { BranchNotFoundError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import { readFile as fsReadFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
-import { GitService } from '../../version-control/git/git.service.js';
+import { realGitService, realVersionControlHooks } from '../../../__tests__/real-version-control.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-// The resolver has no module-index entry: only the composition root builds it.
-import { AccessControlService } from '../../access/access-control.service.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
 import { personalAccessMd } from '../../plugins/index.js';
 
 const execFileAsync = promisify(execFile);
@@ -67,7 +65,7 @@ describe('SkillService', () => {
   } as unknown as IAccessControl;
 
   const svc = (access: IAccessControl = allowAll) =>
-    new SkillService(workspaceService, access, testKbContext({ kbDirName: KB_DIR }), new NodeFs());
+    new SkillService(workspaceService, access, testKbContext({ kbDirName: KB_DIR }), realDisk());
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'skills-'));
@@ -426,7 +424,7 @@ describe('SkillService', () => {
 
     const versioned = (access: IAccessControl = allowAll) => {
       const service = svc(access);
-      service.setHistory(new GitService(workspaceService, new VersionControlHooks(), testKbContext({ kbDirName: KB_DIR })));
+      service.setHistory(realGitService(workspaceService, realVersionControlHooks(), testKbContext({ kbDirName: KB_DIR })));
       return service;
     };
 
@@ -754,10 +752,10 @@ describe('SkillService', () => {
     const BIZ = { name: 'Bea Business', email: 'biz@x.io' };
 
     const realAccess = (): IAccessControl =>
-      new AccessControlService(
+      realAccessControl(
         { ...workspaceService, ensureRemotesFetched: async () => undefined } as unknown as WorkspaceService,
         KB_DIR,
-        new NodeFs(),
+        realDisk(),
       );
 
     beforeEach(async () => {

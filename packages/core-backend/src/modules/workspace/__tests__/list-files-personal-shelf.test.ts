@@ -6,23 +6,23 @@ import express from 'express';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
-import type { ToolContext } from '../../tool-helpers/tool.contract.js';
-import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import { registerWorkspaceTools } from '../workspace.tools.js';
-import { RoutineWritePolicyService } from '../routine-write-policy.js';
-import { VersionControlHooks } from '../../version-control/version-control-hooks.js';
-import { ToolDescriptionNotes } from '../../workspace/agent-access.gate.js';
+import { ToolRegistry } from '../../tool-registry/index.js';
+import type { ToolContext } from '../../tool-helpers/index.js';
+import type { ToolAuth } from '../../tool-auth/index.js';
+import {
+  createToolHandlerFactory,
+  registerWorkspaceTools,
+  RoutineWritePolicyService,
+  VersionControlHooks,
+} from '../../../__tests__/tool-wiring.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { ToolDescriptionNotes } from '../agent-access.gate.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
-// The resolver has no module-index entry: only the composition root builds
-// it, and this suite builds it the same way, over an on-disk tree.
-import { AccessControlService } from '../../access/access-control.service.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import { personalAccessMd } from '../../plugins/index.js';
-import type { WorkspaceService } from '../workspace.service.js';
+import type { WorkspaceService } from '../index.js';
 
 /**
  * `list_files` on someone else's personal shelf, over the REAL resolver and
@@ -64,7 +64,7 @@ beforeAll(async () => {
     await writeFile(abs, text);
   }
   const workspaceService = { getWorkspacePath: async () => root, ensureRemotesFetched: async () => undefined } as unknown as WorkspaceService;
-  const access = new AccessControlService(workspaceService, KB, new NodeFs());
+  const access = realAccessControl(workspaceService, KB, realDisk());
   // The disk as a case-insensitive one serves it: a folder named in another
   // casing opens the folder that is there (`plugins/` opens `Plugins/`), as on
   // macOS or Windows, so the alternate spelling reaches the listing.
