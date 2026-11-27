@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { isBlankSecret } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('vault');
@@ -290,14 +291,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
   async putStatic(input: PutStaticSecretInput): Promise<SecretSummary> {
     const userId = this.requireUserId(input.userId);
     const key = this.requireKey(input.key);
-    if (typeof input.value !== 'string' || input.value.length === 0) {
-      throw new InvalidSecretError('value is required');
-    }
-    if (input.value.length > MAX_VALUE_LEN) {
+    const value = this.requireSecretValue(input.value, 'value');
+    if (value.length > MAX_VALUE_LEN) {
       throw new InvalidSecretError(`value exceeds ${MAX_VALUE_LEN} characters`);
     }
     const label = this.normaliseLabel(input.label);
-    const valueEncrypted = this.crypto().encrypt(input.value);
+    const valueEncrypted = this.crypto().encrypt(value);
 
     // The caller's row may hold a managed sign-in: its tokens are told to the
     // provider before this value replaces them, as on every replacement.
@@ -354,14 +353,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
 
   async putSharedStatic(input: PutSharedStaticSecretInput): Promise<SecretSummary> {
     const key = this.requireKey(input.key);
-    if (typeof input.value !== 'string' || input.value.length === 0) {
-      throw new InvalidSecretError('value is required');
-    }
-    if (input.value.length > MAX_VALUE_LEN) {
+    const value = this.requireSecretValue(input.value, 'value');
+    if (value.length > MAX_VALUE_LEN) {
       throw new InvalidSecretError(`value exceeds ${MAX_VALUE_LEN} characters`);
     }
     const label = this.normaliseLabel(input.label);
-    const valueEncrypted = this.crypto().encrypt(input.value);
+    const valueEncrypted = this.crypto().encrypt(value);
 
     // A shared row that held a managed workspace connection is told to its
     // provider before this value replaces it; the tokens would otherwise go
@@ -939,14 +936,12 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     provider: OAuthProviderConfig;
   }): Promise<void> {
     const key = this.requireKey(input.key);
-    if (typeof input.clientSecret !== 'string' || !input.clientSecret) {
-      throw new InvalidSecretError('clientSecret is required');
-    }
+    const clientSecret = this.requireSecretValue(input.clientSecret, 'clientSecret');
     // Validate the provider config the same way createOAuth does (SSRF-safe https
     // URLs) and store it beside the secret as a record of what was saved — what
     // `statusFor` and the setup surfaces read. A declared sign-in does not run
     // from it: `beginToolOAuthByKey` is handed the declaration as it reads now.
-    const provider = this.requireProvider({ ...input.provider, clientSecret: input.clientSecret });
+    const provider = this.requireProvider({ ...input.provider, clientSecret });
     const blob: OAuthBlob = { clientSecret: provider.clientSecret };
     const valueEncrypted = this.crypto().encrypt(JSON.stringify(blob));
     const oauthMeta = this.publicProviderMeta(provider);
@@ -1630,6 +1625,17 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       throw new InvalidSecretError('key may only contain letters, digits, and underscores');
     }
     return trimmed;
+  }
+
+  /**
+   * A secret a person sets for a variable (a key, or a sign-in's client
+   * secret), returned exactly as sent. A blank one (`isBlankSecret`, the rule
+   * the web app's forms ask too) is refused: stored, it would count the
+   * variable as set while holding nothing to send.
+   */
+  private requireSecretValue(value: unknown, field: string): string {
+    if (typeof value !== 'string' || isBlankSecret(value)) throw new InvalidSecretError(`${field} is required`);
+    return value;
   }
 
   private normaliseLabel(value: unknown): string | null {

@@ -127,6 +127,19 @@ describe('ToolVarRow: admin scope', () => {
     await waitFor(() => expect(screen.queryByLabelText('Value for API_KEY')).toBeNull());
   });
 
+  it('keeps Save disabled while the value is only whitespace', () => {
+    renderRow(variable({}), { canWrite: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Set key' }));
+    for (const blank of ['   ', '\t ', '\u00A0\u2003']) {
+      fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: blank } });
+      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    }
+    expect(secretsMock.setAdminVar).not.toHaveBeenCalled();
+    // A real value is still offered: the button is held by the whitespace, not always.
+    fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: 'k' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
   it('closes the editor on Cancel without saving', () => {
     renderRow(variable({}), { canWrite: true });
     fireEvent.click(screen.getByRole('button', { name: 'Set key' }));
@@ -237,6 +250,15 @@ describe('ToolVarRow: oauth', () => {
       expect(secretsMock.setOAuthClientSecret).toHaveBeenCalledWith('github', 'SIGNIN', 'cs_live'),
     );
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it('keeps the client secret\'s Save disabled while it is only whitespace', () => {
+    renderRow(signin({ adminConfigured: false }), { canWrite: true, setupKind: 'oauth-manual' });
+    fireEvent.click(screen.getByRole('button', { name: 'Set client secret' }));
+    fireEvent.change(screen.getByLabelText('Client secret for SIGNIN'), { target: { value: '   ' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Client secret for SIGNIN'), { target: { value: 'cs' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
   });
 
   it('offers a writer Replace client secret alongside Signed in', () => {

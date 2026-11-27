@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { isBlankSecret } from '@bevel-software/platform-shared';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { pathForTool, readOAuthFragment } from '../../library';
@@ -1004,7 +1005,7 @@ function KeyRow({
   const [busy, setBusy] = useState(false);
 
   const save = async () => {
-    if (!value.trim()) return;
+    if (isBlankSecret(value)) return;
     setBusy(true);
     try {
       await persist(value.trim());
@@ -1062,7 +1063,7 @@ function KeyRow({
         <Button
           variant="primary"
           size="sm"
-          disabled={busy || !value.trim()}
+          disabled={busy || isBlankSecret(value)}
           onClick={() => void save()}
         >
           Save

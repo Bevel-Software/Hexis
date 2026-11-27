@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { isBlankSecret } from '@bevel-software/platform-shared';
 import { Badge, Banner, Button, TextField } from '../../../shared/components';
 import {
   type ToolSecrets,
@@ -306,7 +307,7 @@ function VarRow({
           <Button
             variant="primary"
             size="sm"
-            disabled={busy || !value}
+            disabled={busy || isBlankSecret(value)}
             onClick={() => void run(() => onSave(value), true)}
           >
             Save
@@ -450,7 +451,7 @@ function OAuthVarRow({
             <Button
               variant="primary"
               size="sm"
-              disabled={busy || !secret}
+              disabled={busy || isBlankSecret(secret)}
               onClick={() => void saveSecret()}
             >
               Save

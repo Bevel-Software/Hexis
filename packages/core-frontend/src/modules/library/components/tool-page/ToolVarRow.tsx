@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { isBlankSecret } from '@bevel-software/platform-shared';
 import { Badge, Button, ListRow, TextField } from '../../../../shared/components';
 import { canStartSignIn, startToolOAuth } from '../../../secrets-vault';
 import {
@@ -382,7 +383,7 @@ export function ToolVarRow({
             value={value}
             onChange={(e) => setValue(e.target.value)}
           />
-          <Button variant="primary" size="sm" disabled={busy || !value} onClick={() => void save()}>
+          <Button variant="primary" size="sm" disabled={busy || isBlankSecret(value)} onClick={() => void save()}>
             Save
           </Button>
           <Button variant="quiet" size="sm" disabled={busy} onClick={close}>

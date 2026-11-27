@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { isBlankSecret } from '@bevel-software/platform-shared';
 import { Badge, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { pathForTool } from '../../library';
@@ -168,7 +169,7 @@ function OwnAppForm({
         <Button
           variant="primary"
           size="sm"
-          disabled={busy || !clientId.trim() || !secret.trim()}
+          disabled={busy || !clientId.trim() || isBlankSecret(secret)}
           onClick={() => {
             setBusy(true);
             setError(null);
