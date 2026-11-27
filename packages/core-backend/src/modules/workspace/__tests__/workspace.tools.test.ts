@@ -4955,6 +4955,64 @@ describe('a path with nothing at it answers 404 not_found on every file tool', (
       readFileSpy.mockRestore();
     }
   });
+
+  // list_files lists a FOLDER, so its absent paths are a folder nobody made
+  // (ENOENT), a file named as a folder and a folder under a file (ENOTDIR).
+  // All three used to escape as a 500 with the filesystem's own wording.
+  it('list_files on a missing folder, a file, or a folder under a file', async () => {
+    const base = await start();
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Note.md`, 'a real file\n');
+    for (const path of [`${FOLDER}/NoSuchFolder`, `${FOLDER}/Note.md`, `${FOLDER}/Note.md/deeper`]) {
+      await expectNotFound(base, 'list_files', { path }, path);
+      const res = await post(`${base}/api/agent/tools/list_files`, { branch: 'main', path });
+      const json = (await res.json()) as { error?: string };
+      expect(json.error).toContain('Nothing to list');
+      expect(json.error).not.toMatch(/Directory not found|not a directory|ENOENT|ENOTDIR/);
+    }
+  });
+
+  // The old 500s told the two apart ("Path is not a directory" against
+  // "Directory not found"), which confirmed a file the caller may not read
+  // exists. Listing a denied file and a missing path is now ONE answer.
+  it('list_files on a file the caller may not read answers exactly as on a missing path', async () => {
+    const base = await start('write', denyReads(new Set(['Knowledge/Secret.md'])));
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Secret.md`, 'real content\n');
+    const ask = async (name: string): Promise<{ status: number; body: string }> => {
+      const res = await post(`${base}/api/agent/tools/list_files`, { branch: 'main', path: `${FOLDER}/${name}` });
+      return { status: res.status, body: (await res.text()).replaceAll(name, '<name>') };
+    };
+    const present = await ask('Secret.md');
+    expect(present.status).toBe(404);
+    expect(await ask('Ghost.md')).toEqual(present);
+  });
+
+  // Folders are never gated in a listing, so a folder whose files the caller
+  // may not read still lists — empty — and its denial is never turned into
+  // a not_found.
+  it('list_files on a folder whose files are all denied lists it empty, not 404', async () => {
+    const base = await start('write', denyReads(new Set(['Knowledge/Secret.md'])));
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Secret.md`, 'real content\n');
+    const res = await post(`${base}/api/agent/tools/list_files`, { branch: 'main', path: FOLDER });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { entries: unknown[] }).entries).toEqual([]);
+  });
+
+  it('list_files: a listing failure that is not absence stays a 500', async () => {
+    const base = await start();
+    await fs.mkdir(FOLDER, { recursive: true });
+    const boom = Object.assign(new Error('EACCES: permission denied, scandir'), { code: 'EACCES' });
+    const readdirSpy = vi.spyOn(fs, 'readdir').mockRejectedValue(boom);
+    try {
+      const res = await post(`${base}/api/agent/tools/list_files`, { branch: 'main', path: FOLDER });
+      expect(res.status).toBe(500);
+      expect(((await res.json()) as { kind?: string }).kind).toBeUndefined();
+    } finally {
+      readdirSpy.mockRestore();
+    }
+  });
 });
 
 /**

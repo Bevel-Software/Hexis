@@ -2684,7 +2684,14 @@ export function registerWorkspaceTools(
       const dir = (a.path as string) || '';
       await notifyAgentRead(agentAccessGate, ctx, a.branch as string, dir);
       const fs = await ctx.getFilesystem(a.branch as string);
-      const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
+      // A missing folder (ENOENT) and a file named as one (ENOTDIR) are both
+      // the caller's path to correct: the one not_found answer, not a 500.
+      // No read gate stands in front: folders are never gated (a listing
+      // shows every subfolder), so the 404 tells nothing the parent's
+      // listing does not; only files are filtered, below.
+      const entries = withoutPlaceholder(
+        (await orNotFound(dir, () => fs.readdir(dir || '.'), 'Nothing to list')) as DirEntry[],
+      );
       const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
       // One batch for the listing. A folder is judged at its own path, whose
       // rules (its `access.md` and those above it) are what a file added
