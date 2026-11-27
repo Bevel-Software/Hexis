@@ -132,6 +132,10 @@ export { installCallGuards, argumentRefusal, ArgumentsDoNotMatchError } from './
 
 export { installGetHasNoBody, withoutBodyOnGet, NO_BODY_FIELD } from './get-has-no-body.js';
 
+export { EXCLUDE_TOOLS_KEY, excludeListOf } from './excluded-tools.js';
+
+export { DownstreamToolError, installDownstreamToolErrors } from './downstream-tool-errors.js';
+
 export {
   isSessionLoss,
   installSessionRecovery,
@@ -150,6 +154,7 @@ export {
 } from './skills.js';
 
 export {
+  utcpManualName,
   utcpNamespacePrefix,
   utcpNamespacedKey,
   seedBevelHostedManualVars,

@@ -1,15 +1,15 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_BRANCH, type AuthUser } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
 import type { IToolManualService, ToolManualSummary } from '../tool-manuals.contract.js';
 import { McpServerEditService } from '../mcp-server-edit.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 const KB = 'knowledge-base';
 const USER: AuthUser = { id: 'u-1', email: 'ali@example.com', name: 'Ali' } as AuthUser;
@@ -78,7 +78,7 @@ beforeEach(async () => {
     }),
   } as unknown as IToolManualService;
 
-  svc = new McpServerEditService(workspaceService, commits, accessControl, toolManuals, testKbContext({ kbDirName: KB }), new NodeFs());
+  svc = new McpServerEditService(workspaceService, commits, accessControl, toolManuals, testKbContext({ kbDirName: KB }), realDisk());
 });
 
 afterEach(async () => {
@@ -235,6 +235,24 @@ describe('putServer', () => {
     )['software.bevel.hexis'].mcpServers;
     // An emptied extension entry is REMOVED, not left as `{}`.
     expect(servers.vendor).toBeUndefined();
+  });
+
+  it("keeps the server's excludeTools, which the form does not show, through a save and a rename", async () => {
+    const manifestWith = (excludeTools: unknown) => ({
+      name: 'gtm',
+      extensions: { 'software.bevel.hexis': { mcpServers: { vendor: { excludeTools } } } },
+    });
+    const extEntry = async (key: string) =>
+      (
+        (await readJson('Plugins/GTM/plugin.json')).extensions as Record<string, { mcpServers: Record<string, unknown> }>
+      )['software.bevel.hexis'].mcpServers[key];
+
+    await write('Plugins/GTM/plugin.json', manifestWith(['paid-a', 'paid-b']));
+    await svc.putServer(USER, 'vendor', { transport: 'streamable-http', description: 'Vendor tools' });
+    expect(await extEntry('vendor')).toEqual({ excludeTools: ['paid-a', 'paid-b'], description: 'Vendor tools' });
+
+    await svc.putServer(USER, 'vendor', { newName: 'vendor_eu', transport: 'streamable-http' });
+    expect(await extEntry('vendor_eu')).toEqual({ excludeTools: ['paid-a', 'paid-b'], description: 'Vendor tools' });
   });
 
   it('refuses a rename onto a taken key with 409, committing nothing', async () => {
