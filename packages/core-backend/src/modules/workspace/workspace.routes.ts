@@ -63,6 +63,17 @@ function requestPath(value: unknown): string | null {
 }
 
 /**
+ * The save-time plugin manifest check `PUT /file` consults, satisfied by the
+ * plugins module's `SkillLinkCheck`: for a plugin.json, one
+ * `{ entry, message }` per kind of `skills` entry that links nothing for the
+ * saver, naming its entries, else `[]`. Never throws, and never refuses a
+ * save.
+ */
+export interface ManifestSaveCheck {
+  checkSave(userEmail: string, path: string, content: string): Promise<{ entry: string; message: string }[]>;
+}
+
+/**
  * Workspaces are per-branch (PLAN §3). Any authenticated user can access
  * any branch's workspace; coordination of concurrent edits lives in the
  * file-lock service, not in giving each user their own clone. We therefore
@@ -96,6 +107,8 @@ export function createWorkspaceRoutes(
    * exercise other behaviour need not wire it.
    */
   changeGate?: IChangeReadGate,
+  /** Save-time plugin manifest check: `PUT /file` on a plugin.json answers with `warnings` (advisory, never a refusal). */
+  manifestSaveCheck?: ManifestSaveCheck,
 ): express.Router {
   const router = express.Router();
   const { kbDirName } = kb;
@@ -1449,9 +1462,12 @@ export function createWorkspaceRoutes(
           }),
         );
       });
-      // After the write, and only ever advisory: the check reports what the
-      // saved skill names, it has no say in whether it saved.
-      const warnings = skillSaveCheck ? await skillSaveCheck.checkSave(user.email, filePath, content) : [];
+      // After the write, and only ever advisory: the checks report what the
+      // saved skill or plugin manifest names, they have no say in whether it saved.
+      const warnings = [
+        ...(skillSaveCheck ? await skillSaveCheck.checkSave(user.email, filePath, content) : []),
+        ...(manifestSaveCheck ? await manifestSaveCheck.checkSave(user.email, filePath, content) : []),
+      ];
       res.json({ status: 'written', ...(warnings.length > 0 ? { warnings } : {}) });
     } catch (err) {
       sendError(res, err);

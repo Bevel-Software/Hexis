@@ -90,6 +90,13 @@ export interface PluginSummary {
    */
   warnings?: string[];
   /**
+   * Which of the plugin's skill links link nothing for the caller: one
+   * sentence per kind of fault, naming its entries. Shown on the plugin's
+   * page under its own outcome title, counted as attention on its row.
+   * Absent from an older server.
+   */
+  linkWarnings?: string[];
+  /**
    * The caller has asked to join this plugin — true from the moment the
    * server records the ask, which is before the change request that carries
    * it exists. That is what keeps the "Requested" card on the page through a

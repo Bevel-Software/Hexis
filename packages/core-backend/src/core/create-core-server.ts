@@ -55,6 +55,7 @@ import {
   createTeamsRoutes,
   registerPluginsTools,
 } from '../modules/plugins/index.js';
+import { SkillLinkCheck } from '../modules/plugins/skill-link-warnings.js';
 import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
 import { ToolDescriptionNotes, type AgentAccessGate } from '../modules/workspace/agent-access.gate.js';
 import {
@@ -494,6 +495,9 @@ export async function createCoreServer(
   // every save surface (agent write tools, the app's PUT /file) and on
   // `get_skill`. Warnings only; it never refuses a save.
   const allowedToolsChecker = new AllowedToolsChecker(core.toolRegistry, core.toolManualService, core.kb);
+  // A plugin.json's `skills` entries that link nothing, said to one reader:
+  // on the app's save of the manifest and in the plugin listing.
+  const skillLinkCheck = new SkillLinkCheck(core.skillService, core.kb);
   // `delete_branch` sees change requests as `get_change_request` does.
   // The history tools take the per-file read the file itself takes (`accessControl`).
   registerVersionControlTools(core.toolRegistry, toolsRouter, ta, th, core.kb, changeRequestScope(core.accessControl, core.kb).maySee, core.accessControl, agentAccessGate);
@@ -704,6 +708,9 @@ export async function createCoreServer(
     core.disk,
     allowedToolsChecker,
     core.changeGate,
+    // The agent write tools keep the skill check alone: their `warnings`
+    // output is described to agents as a SKILL.md's.
+    skillLinkCheck,
   ));
   // Version control is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
@@ -810,6 +817,7 @@ export async function createCoreServer(
     core.kb,
     core.pluginLinksService,
     core.pluginRenameService,
+    skillLinkCheck,
   ));
   // The Library's "Your teams" lens: what each group can use, sliced from
   // the catalogs the caller already sees. Same JWT gate, same fail-closed

@@ -487,19 +487,46 @@ export function normalizeSkillRoot(raw: string): string | null {
  * block links nothing.
  */
 export function linkedSkillRoots(manifest: unknown): string[] {
-  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return [];
+  return linkedSkillEntries(manifest).roots;
+}
+
+/** An entry of a list of skill roots that is no root at all: where it stands (from 1) and what it holds. */
+export interface DroppedSkillEntry {
+  position: number;
+  /** As the file holds it: a string, or any other JSON value. */
+  entry: unknown;
+}
+
+/**
+ * {@link linkedSkillRoots}, plus the entries it DROPS: each list entry that
+ * {@link normalizeSkillRoot} refuses, exactly as the manifest holds it (a
+ * non-string entry included), with its position, in order. Read the same
+ * way, so the two can never disagree about which entries count.
+ */
+export function linkedSkillEntries(manifest: unknown): { roots: string[]; dropped: DroppedSkillEntry[] } {
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return readSkillRoots(undefined);
   const ext = (manifest as Record<string, unknown>).extensions;
-  if (typeof ext !== 'object' || ext === null) return [];
+  if (typeof ext !== 'object' || ext === null) return readSkillRoots(undefined);
   const ns = (ext as Record<string, unknown>)[HEXIS_EXTENSION_NS];
-  if (typeof ns !== 'object' || ns === null) return [];
-  const raw = (ns as Record<string, unknown>)[HEXIS_LINKED_SKILLS_KEY];
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
-  for (const entry of raw) {
+  if (typeof ns !== 'object' || ns === null) return readSkillRoots(undefined);
+  return readSkillRoots((ns as Record<string, unknown>)[HEXIS_LINKED_SKILLS_KEY]);
+}
+
+/**
+ * A list of skill roots as a file holds it (a plugin.json's `skills`, a
+ * bundle's `sourceSkillRoots`): the roots, normalised, deduplicated, in
+ * order, and the entries that are no root. Anything but a list holds none.
+ */
+export function readSkillRoots(raw: unknown): { roots: string[]; dropped: DroppedSkillEntry[] } {
+  const roots: string[] = [];
+  const dropped: DroppedSkillEntry[] = [];
+  if (!Array.isArray(raw)) return { roots, dropped };
+  raw.forEach((entry: unknown, i) => {
     const root = normalizeSkillRoot(typeof entry === 'string' ? entry : '');
-    if (root !== null && !out.includes(root)) out.push(root);
-  }
-  return out;
+    if (root === null) dropped.push({ position: i + 1, entry });
+    else if (!roots.includes(root)) roots.push(root);
+  });
+  return { roots, dropped };
 }
 
 /**

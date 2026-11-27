@@ -21,7 +21,8 @@ import type { JoinRequestsService } from '../join-requests.service.js';
 import { PluginJoinRequestJobs } from '../join-request-jobs.service.js';
 import { pluginFolderBelowRoot } from '../plugins.service.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
-import type { PluginSummary, IPluginIndexService } from '../plugins.contract.js';
+import type { PluginSummary, IPluginIndexService, ISkillLinkCheck } from '../plugins.contract.js';
+import { SkillLinkCheck } from '../skill-link-warnings.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 
 /**
@@ -61,6 +62,8 @@ interface HarnessOpts {
   tools?: ToolManualSummary[];
   /** More plugins: folder path below `Plugins/` → manifest name. */
   extraPlugins?: Record<string, string>;
+  /** What says, per caller, which linked roots hold no skill they can read. */
+  skillLinks?: ISkillLinkCheck;
 }
 
 function cr(over: Partial<ChangeRequest>): ChangeRequest {
@@ -230,6 +233,9 @@ async function makeHarness(opts: HarnessOpts = {}) {
       provision as never,
       async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
       testKbContext({ kbDirName: KB }),
+      undefined,
+      undefined,
+      opts.skillLinks,
     ),
   );
 
@@ -385,6 +391,75 @@ describe('/api/plugins routes', () => {
       linkedRoots: ['Skills/Testing'],
       // What discovery left out reaches the summary as the index said it.
       warnings: ['mcpProfile "global" named but no registry could be read'],
+    });
+  });
+
+  describe("a plugin's definition and link warnings", () => {
+    const leftOut = 'mcpProfile "global" named but no registry could be read';
+    const entry = (over: Record<string, unknown> = {}) => ({
+      name: 'gtm',
+      displayName: 'GTM',
+      folders: ['Plugins/GTM'],
+      linkedRoots: ['Skills/QALink', 'Skills/NoSuch/thing', 'Skills/Secret', 'knowledge-base/Skills/QALink/beta'],
+      droppedRoots: [{ position: 2, entry: './Skills/x' }],
+      linksAreManaged: true,
+      skillCount: 3,
+      toolCount: 0,
+      brokenLinks: 0,
+      owners: { roles: [], users: [] },
+      writers: { roles: [], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+      isPrivate: false,
+      warnings: [leftOut],
+      ...over,
+    });
+    // The catalog's rule: each caller gets the released skills they may read.
+    // Ali reads the QALink ones; the Secret one is someone else's.
+    const skillLinks = new SkillLinkCheck(
+      {
+        listSkills: async (email?: string) =>
+          ['Skills/QALink/alpha', 'Skills/QALink/beta', 'Skills/Secret/plan']
+            .filter((p) => email === undefined || !p.startsWith('Skills/Secret/'))
+            .map((p) => ({ name: p.split('/').pop()!, description: '', path: p })),
+      },
+      testKbContext({ kbDirName: KB }),
+    );
+    const indexOf = (...entries: ReturnType<typeof entry>[]) =>
+      ({ catalog: async () => entries, invalidate: () => {} }) as unknown as IPluginIndexService;
+    const LINK_WARNINGS = [
+      '"./Skills/x" is not a folder path, so it is ignored. Write it like "Skills/Engineering/deploy".',
+      '"knowledge-base/Skills/QALink/beta" starts with "knowledge-base/", so it links nothing. Remove "knowledge-base/".',
+      // Per reader: a folder whose only skill Ali may not read is, to him,
+      // a folder with nothing in it. Nothing says the skill is there.
+      '"Skills/NoSuch/thing" and "Skills/Secret" have no skill in them that you can open.',
+    ];
+
+    it('says to a member, per kind of fault, which entries link nothing for them, apart from the other warnings', async () => {
+      const h = await makeHarness({ readable: MEMBER_OF_BOTH, index: indexOf(entry()), skillLinks });
+      server = h.server;
+      const { plugins } = await listPlugins(h.baseUrl);
+      expect(plugins[0]!.linkWarnings).toEqual(LINK_WARNINGS);
+      expect(plugins[0]!.warnings).toEqual([leftOut]);
+      // Advisory: the summary's links and counts are the index's, untouched.
+      expect(plugins[0]).toMatchObject({ linkedRoots: entry().linkedRoots, skillCount: 3 });
+    });
+
+    it('words a bundle-format plugin the same way', async () => {
+      const h = await makeHarness({
+        readable: MEMBER_OF_BOTH,
+        index: indexOf(entry({ linksAreManaged: false, warnings: [] })),
+        skillLinks,
+      });
+      server = h.server;
+      const { plugins } = await listPlugins(h.baseUrl);
+      expect(plugins[0]!.linkWarnings).toEqual(LINK_WARNINGS);
+    });
+
+    it('says none of it to a caller who may only discover the plugin, not read its folder', async () => {
+      const h = await makeHarness({ readable: { [ALI]: ['Plugins/GTM/access.md'] }, index: indexOf(entry()), skillLinks });
+      server = h.server;
+      const { plugins } = await listPlugins(h.baseUrl);
+      expect(plugins[0]).toMatchObject({ name: 'gtm', canRead: false, warnings: [], linkWarnings: [] });
     });
   });
 

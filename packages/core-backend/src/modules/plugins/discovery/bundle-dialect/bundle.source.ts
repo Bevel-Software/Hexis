@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   isPersonalPluginDir,
-  normalizeSkillRoot,
+  readSkillRoots,
   pluginManifestName,
   type KbLayout,
 } from '@bevel-software/platform-shared';
@@ -100,15 +100,10 @@ export async function readBundlePlugin(
   const leaf = path.posix.basename(relFolder);
   const name = typeof bundle.name === 'string' && bundle.name.trim() ? bundle.name.trim() : leaf;
 
-  const linkedRoots: string[] = [];
-  for (const raw of Array.isArray(bundle.sourceSkillRoots) ? bundle.sourceSkillRoots : []) {
-    const normalised = normalizeSkillRoot(typeof raw === 'string' ? raw : '');
-    if (normalised === null) {
-      warnings.push(`${folder}: sourceSkillRoots entry ${JSON.stringify(raw)} is not a folder path — ignored`);
-    } else if (!linkedRoots.includes(normalised)) {
-      linkedRoots.push(normalised);
-    }
-  }
+  // Read as a plugin.json's `skills` is: an entry that is no folder path is
+  // reported with the plugin's other link faults (`droppedRoots`), in the
+  // same words for both formats.
+  const { roots: linkedRoots, dropped: droppedRoots } = readSkillRoots(bundle.sourceSkillRoots);
 
   let mcpServers: Record<string, unknown> | null = null;
   if (typeof bundle.mcpProfile === 'string' && bundle.mcpProfile.trim()) {
@@ -161,6 +156,7 @@ export async function readBundlePlugin(
     manifest,
     manifestText: null,
     linkedRoots,
+    droppedRoots,
     mcpServers,
     mcpJsonText: mcpServers ? JSON.stringify({ mcpServers }) : null,
     linksAreManaged: false,

@@ -33,6 +33,8 @@
  * change requests; only the UI dresses them up.
  */
 
+import type { DroppedSkillEntry } from '@bevel-software/platform-shared';
+
 export type { PluginMembership } from '../skills/index.js';
 
 /** Access-rule principals as the resolver hands them back. */
@@ -108,6 +110,14 @@ export interface PluginSummary {
   /** What discovery left out of this plugin and why — see `PluginCatalogEntry.warnings`. */
   warnings: string[];
   /**
+   * Which of the plugin's skill links link nothing for THIS caller, one
+   * sentence per kind of fault, each naming its entries in the file's order:
+   * entries that are no folder path, and folders holding no skill the caller
+   * can read. Like `warnings`, served only to a caller who may read the
+   * plugin's folder. Absent on a server that does not check links.
+   */
+  linkWarnings?: string[];
+  /**
    * The caller has asked to join this plugin and the ask still stands: a
    * recorded request that is pending, one whose change request is still
    * open, or an open join change request on their deterministic join branch.
@@ -141,6 +151,8 @@ export interface PluginCatalogEntry {
   folders: string[];
   /** The roots it links skills from — see `PluginSummary.linkedRoots`. */
   linkedRoots: string[];
+  /** The entries of the same list that are no folder path — see `DiscoveredPlugin.droppedRoots`. */
+  droppedRoots: DroppedSkillEntry[];
   /**
    * Whether this platform writes the plugin's links (a native `plugin.json`)
    * — false for a plugin read from an external format, whose links are
@@ -179,4 +191,41 @@ export interface IPluginIndexService {
   catalog(): Promise<PluginCatalogEntry[]>;
   /** Drop the cached catalog (call after a default-branch change under a plugin root). */
   invalidate(): void;
+}
+
+/**
+ * One sentence about entries of a plugin's skill list that link nothing for
+ * its reader: what is wrong with them and what to do, the entries named in
+ * the file's order.
+ */
+export interface SkillLinkWarning {
+  /** The entries the sentence names, as the file holds them, comma-separated. */
+  entry: string;
+  message: string;
+}
+
+/** One plugin's skill list, as read: its roots and the entries that are no folder path. */
+export interface PluginSkillLinks {
+  roots: readonly string[];
+  dropped: readonly DroppedSkillEntry[];
+}
+
+/**
+ * Which `skills` entries of a plugin.json link nothing, said to ONE reader:
+ * the app's save of a manifest and the plugin listing both ask it, and one
+ * sentence covers each kind of fault. An entry that is no folder path is
+ * always reported. A root is reported when no skill that reader may read on
+ * the default branch sits under it, and no root is reported when that
+ * reader's catalog is empty or cannot be read (an empty catalog proves no
+ * absence). Advisory; neither method throws.
+ */
+export interface ISkillLinkCheck {
+  /**
+   * The saved file's warnings: `[]` unless it is a plugin.json under the
+   * plugins root that parses as JSON; else what `linkWarnings` says of its
+   * `skills` list.
+   */
+  checkSave(userEmail: string, workspacePath: string, content: string): Promise<SkillLinkWarning[]>;
+  /** For each plugin's skill list, its warnings for `userEmail`, from one catalog read for all. */
+  linkWarnings(userEmail: string, plugins: readonly PluginSkillLinks[]): Promise<SkillLinkWarning[][]>;
 }

@@ -5,7 +5,7 @@ import {
   PLUGIN_MCP_FILE,
   isPersonalPluginDir,
   isPluginIdentifier,
-  linkedSkillRoots,
+  linkedSkillEntries,
   pluginDisplayNameOf,
   pluginIdentityOf,
   type KbLayout,
@@ -77,6 +77,7 @@ export async function readNativePlugin(
       `${folder}/${PLUGIN_MANIFEST_FILE} names ${spelled}, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "${name}"`,
     );
   }
+  const { roots: linkedRoots, dropped: droppedRoots } = linkedSkillEntries(manifest);
   const mcp = parseObject(mcpJsonText);
   const mcpServers =
     mcp && typeof mcp.mcpServers === 'object' && mcp.mcpServers !== null && !Array.isArray(mcp.mcpServers)
@@ -104,7 +105,8 @@ export async function readNativePlugin(
     exists,
     manifest,
     manifestText,
-    linkedRoots: linkedSkillRoots(manifest),
+    linkedRoots,
+    droppedRoots,
     mcpServers,
     mcpJsonText,
     linksAreManaged: true,

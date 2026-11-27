@@ -3,13 +3,10 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
-import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
+import { AdminContext, type AdminContextValue } from '../../admin';
 import type { LibraryData } from '../hooks/useLibraryData';
-import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import type { ToolSecrets } from '../../secrets-vault';
 import type { PluginSummary } from '../services/plugins.api';
 import { withAuth } from './auth-harness';
 import { expectMenuAtTheEndOfTheTitleRow } from './title-row-actions';
@@ -745,6 +742,33 @@ describe('PluginPage', () => {
     expect(
       await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).toBeInTheDocument();
+  });
+
+  describe('skill links that link nothing', () => {
+    const LINES = [
+      '"./Skills/x" is not a folder path, so it is ignored. Write it like "Skills/Engineering/deploy".',
+      '"knowledge-base/Skills/QALink/beta" starts with "knowledge-base/", so it links nothing. Remove "knowledge-base/".',
+    ];
+
+    it('says the outcome once, over the server\'s sentences, apart from what the definition left out', async () => {
+      pluginsMock.listPlugins.mockResolvedValue([
+        gtm({ canWrite: true, linkWarnings: LINES, warnings: ['mcpProfile "global" named but no registry could be read'] }),
+      ]);
+      renderPlugin('GTM');
+      const banner = (await screen.findByText("Some skill links don't work")).closest('[role="status"]') as HTMLElement;
+      expect(within(banner).getAllByRole('listitem').map((li) => li.textContent)).toEqual(LINES);
+      // The other warnings keep their own banner and title.
+      expect(screen.getByText("Something in this plugin's definition was left out:")).toBeInTheDocument();
+      expect(within(banner).queryByText(/mcpProfile/)).not.toBeInTheDocument();
+    });
+
+    it('lets the banner explain an empty Skills band instead of offering to add the first skill', async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, skills: [], tools: [] });
+      pluginsMock.listPlugins.mockResolvedValue([gtm({ skillCount: 0, toolCount: 0, linkWarnings: [LINES[1]!] })]);
+      renderPlugin('GTM', undefined, asAdmin);
+      expect(await screen.findByText('No skills linked. Fix the entries above.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add the first skill' })).not.toBeInTheDocument();
+    });
   });
 
   it('drops the nudge once a skill exists — the arrow belongs to the empty band only', async () => {
