@@ -1,14 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_BRANCH, personalPluginFolderName } from '@bevel-software/platform-shared';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import { isPrivateAccessMd } from '../../access-model/access-grammar.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import { isPrivateAccessMd } from '../../access-model/index.js';
 import {
   PluginProvisionError,
   PluginProvisionService,
@@ -16,6 +14,13 @@ import {
   personalAccessMd,
 } from '../plugin-provision.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
+import { realGitService, realVersionControlHooks } from '../../../__tests__/real-version-control.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const exec = promisify(execFile);
 
 const KB = 'knowledge-base';
 const USER: AuthUser = { id: 'u1-abcd', email: 'ali@example.com', name: 'Ali Vega' } as AuthUser;
@@ -46,13 +51,25 @@ async function makeHarness() {
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-main' })),
     getWorkspacePath: vi.fn(async () => dir),
+    ensureRemotesFetched: vi.fn(async () => undefined),
     writeFile,
   } as unknown as WorkspaceService;
-  const commits = { runPendingCommit: vi.fn(async () => undefined) };
-  const accessControl = { invalidate: vi.fn() } as unknown as IAccessControl;
+  const commits = {
+    runPendingCommit: vi.fn<(ws: string, branch: string, rel: string, user: AuthUser, opts?: { summary?: string }) => Promise<void>>(
+      async () => undefined,
+    ),
+    discardPath: vi.fn<(ws: string, rel: string) => Promise<void>>(async () => undefined),
+  };
+  // The real resolver over the temp tree: whether a personal folder is its
+  // owner's alone is what the rules resolve to, inherited ones included.
+  await fs.mkdir(path.join(dir, KB), { recursive: true });
+  await fs.writeFile(path.join(dir, KB, 'roles.yaml'), 'roles:\n  Admin:\n    - admin@example.com\n');
+  const disk = realDisk();
+  const accessControl = realAccessControl(workspaceService, KB, disk);
+  vi.spyOn(accessControl, 'invalidate');
   const events = { emit: vi.fn() };
   const kb = testKbContext({ kbDirName: KB });
-  const svc = new PluginProvisionService(workspaceService, commits, accessControl, kb, events, new KbPluginSource(new NodeFs(), kb), new NodeFs());
+  const svc = new PluginProvisionService(workspaceService, commits, accessControl, kb, events, new KbPluginSource(disk, kb), disk);
   return { svc, dir, commits, accessControl, events, writeFile };
 }
 
@@ -89,6 +106,7 @@ describe('PluginProvisionService.createPlugin', () => {
       // exactly as persisted.
       displayName: 'GTM',
       created: true,
+      repaired: false,
     });
 
     const accessMd = await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/access.md'), 'utf-8');
@@ -135,6 +153,7 @@ describe('PluginProvisionService.createPlugin', () => {
       name: 'sales',
       displayName: 'Sales',
       created: true,
+      repaired: false,
     });
     const manifest = JSON.parse(await fs.readFile(path.join(h.dir, KB, 'Plugins/Teams/EU/Sales/plugin.json'), 'utf-8'));
     expect(manifest.name).toBe('sales');
@@ -288,7 +307,7 @@ describe('PluginProvisionService.deletePlugin', () => {
     await fs.mkdir(path.join(h.dir, KB, 'Plugins/GTM/outreach'), { recursive: true });
     await fs.writeFile(path.join(h.dir, KB, 'Plugins/GTM/outreach/SKILL.md'), '# outreach\n');
     h.commits.runPendingCommit.mockClear();
-    (h.accessControl.invalidate as ReturnType<typeof vi.fn>).mockClear();
+    vi.mocked(h.accessControl.invalidate).mockClear();
 
     await h.svc.deletePlugin(USER, 'GTM');
 
@@ -313,7 +332,7 @@ describe('PluginProvisionService.deletePlugin', () => {
   });
 
   it('refuses a folder path the filesystem cannot carry with 422 — control characters, a reserved name, a dot-prefix', async () => {
-    for (const bad of ['teams/De ep', 'a\tb', 'teams/NUL', '.deleting-x', 'teams/.hidden']) {
+    for (const bad of ['teams/De\u0000ep', 'a\tb', 'teams/NUL', '.deleting-x', 'teams/.hidden']) {
       await expect(h.svc.deletePlugin(USER, bad)).rejects.toMatchObject({ status: 422 });
     }
   });
@@ -540,6 +559,7 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
       name: folder,
       displayName: folder,
       created: true,
+      repaired: false,
     });
     const accessMd = await fs.readFile(
       path.join(h.dir, KB, 'Plugins', folder, 'access.md'),
@@ -573,6 +593,37 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
     expect(manifest.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
   });
 
+  it('a folder holding no file at any depth is no plugin: it is cleared and made as new, with no repair claimed', async () => {
+    const folder = personalPluginFolderName(USER.id);
+    // What a refused write could leave behind: empty directories — one in
+    // the folder's own spelling, one in another casing — that git never saw.
+    for (const leftover of [`${folder}/sub/deeper`, `Personal-${USER.id}/x`]) {
+      const h = await makeHarness();
+      await fs.mkdir(path.join(h.dir, KB, 'Plugins', leftover), { recursive: true });
+
+      const result = await h.svc.ensurePersonalPlugin(USER);
+      expect(result, leftover).toMatchObject({ folder, created: true, repaired: false });
+      const entries = await fs.readdir(path.join(h.dir, KB, 'Plugins'));
+      expect(entries, leftover).toEqual([folder]);
+      expect((await fs.readdir(path.join(h.dir, KB, 'Plugins', folder))).sort()).toEqual(['access.md', 'plugin.json']);
+      expect(await fs.readFile(path.join(h.dir, KB, 'Plugins', folder, 'access.md'), 'utf-8')).toBe(personalAccessMd(USER));
+      expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('a file anywhere in the folder makes it already there — never cleared', async () => {
+    const h = await makeHarness();
+    const folder = personalPluginFolderName(USER.id);
+    const deep = path.join(h.dir, KB, 'Plugins', folder, 'skills', 'diary', 'SKILL.md');
+    await fs.mkdir(path.dirname(deep), { recursive: true });
+    await fs.writeFile(deep, '# Diary\n', 'utf-8');
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins', folder, 'empty'), { recursive: true });
+
+    const result = await h.svc.ensurePersonalPlugin(USER);
+    expect(result).toMatchObject({ created: false, repaired: true });
+    expect(await fs.readFile(deep, 'utf-8')).toBe('# Diary\n');
+  });
+
   it('two concurrent ensures both succeed — one creates, the other reports existing', async () => {
     const h = await makeHarness();
     const folder = personalPluginFolderName(USER.id);
@@ -584,6 +635,175 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
     expect(a.folder).toBe(folder);
     expect(b.folder).toBe(folder);
     expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PluginProvisionService.ensurePersonalPlugin on a folder somebody else set up', () => {
+  const folder = personalPluginFolderName(USER.id);
+  const rulesPath = (dir: string) => path.join(dir, KB, 'Plugins', folder, 'access.md');
+  /** The pre-seed QA reproduced: rules an Admin wrote before the owner's first call, naming the Admin as reader. */
+  const PRE_SEEDED = '---\nread:\n  - Boss <boss@example.com>\n---\nread:\n  - Boss <boss@example.com>\nowner:\n  - Ali Vega <ali@example.com>\n';
+
+  async function seed(dir: string, files: Record<string, string>): Promise<void> {
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = path.join(dir, KB, 'Plugins', folder, rel);
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, content, 'utf-8');
+    }
+  }
+
+  it('makes it the owner\'s alone, commits that as the owner, and says so; the next call finds nothing to repair', async () => {
+    const h = await makeHarness();
+    await seed(h.dir, { 'access.md': PRE_SEEDED, 'skills/diary/SKILL.md': '# Diary\n' });
+
+    const first = await h.svc.ensurePersonalPlugin(USER);
+    expect(first).toMatchObject({ folder, path: `Plugins/${folder}`, created: false, repaired: true });
+    expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+    expect(isPrivateAccessMd(await fs.readFile(rulesPath(h.dir), 'utf-8'))).toBe(true);
+    // The content stays: only the rules are replaced.
+    expect(await fs.readFile(path.join(h.dir, KB, 'Plugins', folder, 'skills/diary/SKILL.md'), 'utf-8')).toBe('# Diary\n');
+    // Inline and system-authorized: the rules being replaced do not let the
+    // owner write them, and the push gate would read those.
+    expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+    expect(h.commits.runPendingCommit).toHaveBeenCalledWith('ws-main', DEFAULT_BRANCH, `${KB}/Plugins/${folder}/access.md`, USER, {
+      systemAuthorized: true,
+      summary: expect.stringContaining(`Plugins/${folder}`),
+    });
+    expect(h.accessControl.invalidate).toHaveBeenCalledWith('ws-main');
+
+    const second = await h.svc.ensurePersonalPlugin(USER);
+    expect(second).toMatchObject({ created: false, repaired: false });
+    expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs rules that open it to everyone, that leave the owner out, that do not parse, or that are missing', async () => {
+    const owned = 'owner:\n  - Ali Vega <ali@example.com>\n';
+    for (const rules of [
+      `---\nread:\n  - deny everyone\n---\nread:\n  - everyone\n${owned}`,
+      `---\nread:\n  - deny everyone\n---\nwrite:\n  - Admin\n${owned}`,
+      '---\nread:\n  - deny everyone\n---\nread:\n  - deny everyone\n',
+      '---\nread: [\n',
+      null,
+    ]) {
+      const h = await makeHarness();
+      await seed(h.dir, rules === null ? { 'skills/.gitkeep': '' } : { 'access.md': rules });
+      const result = await h.svc.ensurePersonalPlugin(USER);
+      expect(result.repaired, String(rules)).toBe(true);
+      expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+    }
+  });
+
+  it('repairs rules that name only the owner but deny nobody, when the root opens the repository to everyone — inherited access counts', async () => {
+    const h = await makeHarness();
+    await fs.mkdir(path.join(h.dir, KB), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'access.md'), '---\nowner:\n  - Admin\n---\nread:\n  - everyone\n');
+    const ownerNamedOnly =
+      '---\nread:\n  - Ali Vega <ali@example.com>\n---\nread:\n  - Ali Vega <ali@example.com>\nwrite:\n  - Ali Vega <ali@example.com>\nowner:\n  - Ali Vega <ali@example.com>\n';
+    await seed(h.dir, { 'access.md': ownerNamedOnly });
+    const result = await h.svc.ensurePersonalPlugin(USER);
+    expect(result.repaired).toBe(true);
+    expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+    // The template's `deny everyone` closes it under that same root: nothing more to repair.
+    expect((await h.svc.ensurePersonalPlugin(USER)).repaired).toBe(false);
+    expect(await h.accessControl.canRead('ws-main', 'bob@example.com', `Plugins/${folder}`)).toBe(false);
+  });
+
+  it('repairs a missing or unparsable access.md even when the rules above happen to leave the folder the owner\'s alone — its own file is the boundary', async () => {
+    // Rules at the plugins root that, inherited, give the folder to Ali alone.
+    const ownerOnlyAbove = personalAccessMd(USER);
+    for (const rules of [null, '---\nread: [\n']) {
+      const h = await makeHarness();
+      await fs.mkdir(path.join(h.dir, KB, 'Plugins'), { recursive: true });
+      await fs.writeFile(path.join(h.dir, KB, 'Plugins', 'access.md'), ownerOnlyAbove);
+      await seed(h.dir, rules === null ? { 'skills/diary/SKILL.md': '# Diary\n' } : { 'access.md': rules, 'skills/diary/SKILL.md': '# Diary\n' });
+      const result = await h.svc.ensurePersonalPlugin(USER);
+      expect(result.repaired, String(rules)).toBe(true);
+      expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+      expect((await h.svc.ensurePersonalPlugin(USER)).repaired).toBe(false);
+    }
+  });
+
+  it('leaves rules that name only the owner as they are, wording and all', async () => {
+    const h = await makeHarness();
+    // The owner's own words in a comment, and a denial: neither names anyone in.
+    const ownerOnly = `${personalAccessMd(USER)}\n# my notes\n`;
+    await seed(h.dir, { 'access.md': ownerOnly });
+    const result = await h.svc.ensurePersonalPlugin(USER);
+    expect(result.repaired).toBe(false);
+    expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(ownerOnly);
+    expect(h.writeFile).not.toHaveBeenCalled();
+    expect(h.commits.runPendingCommit).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Back the harness's commits with a REAL repository at the knowledge base:
+   * the seeded tree is committed, the rollback is the git layer's own
+   * `discardPath`, and the commit driver lands a real commit (`landsCommit`)
+   * or not before it fails as a refused push does.
+   */
+  async function overRealGit(h: Awaited<ReturnType<typeof makeHarness>>, landsCommit: boolean) {
+    const repo = path.join(h.dir, KB);
+    const git = async (...args: string[]) => (await exec('git', args, { cwd: repo })).stdout;
+    await git('init', '-q', '-b', DEFAULT_BRANCH);
+    await git('config', 'user.email', 'test@bevel.local');
+    await git('config', 'user.name', 'Test Runner');
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'seed');
+    const hooks = realVersionControlHooks();
+    hooks.onCommitValidation(vi.fn(async () => ({ ok: true, mustFix: [], warnings: [], rawOutput: '' })));
+    const service = realGitService(
+      { getWorkspacePath: async () => h.dir } as unknown as WorkspaceService,
+      hooks,
+      testKbContext({ kbDirName: KB }),
+    );
+    h.commits.runPendingCommit.mockImplementationOnce(async (ws, _branch, rel, user, opts) => {
+      if (landsCommit) await service.commitFile(ws, user, rel, opts?.summary);
+      throw new Error('push refused');
+    });
+    h.commits.discardPath.mockImplementation((ws, rel) => service.discardPath(ws, rel));
+    return { atHead: (rel: string) => git('show', `HEAD:Plugins/${folder}/${rel}`).catch(() => null), status: () => git('status', '--porcelain') };
+  }
+
+  it('a repair whose commit does not land puts the old rules back and fails, so nothing claims a repair that did not happen', async () => {
+    const h = await makeHarness();
+    await seed(h.dir, { 'access.md': PRE_SEEDED });
+    const repo = await overRealGit(h, false);
+    await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
+    expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(PRE_SEEDED);
+    expect(await repo.status()).toBe('');
+    expect(h.accessControl.invalidate).not.toHaveBeenCalled();
+  });
+
+  it('a repair of missing rules whose commit does not land leaves no rules behind', async () => {
+    const h = await makeHarness();
+    await seed(h.dir, { 'skills/.gitkeep': '' });
+    const repo = await overRealGit(h, false);
+    await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
+    await expect(fs.stat(rulesPath(h.dir))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await repo.status()).toBe('');
+  });
+
+  it('a repair whose rollback fails too still fails with the commit error, and nothing claims a repair', async () => {
+    const h = await makeHarness();
+    await seed(h.dir, { 'access.md': PRE_SEEDED });
+    h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
+    h.commits.discardPath.mockRejectedValueOnce(new Error('index.lock held'));
+    await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
+    expect(h.commits.discardPath).toHaveBeenCalledTimes(1);
+    expect(h.accessControl.invalidate).not.toHaveBeenCalled();
+  });
+
+  it('a repair committed before its push failed stays: the rules on disk are the ones at HEAD, never the old ones back', async () => {
+    for (const seeded of [{ 'access.md': PRE_SEEDED }, { 'skills/.gitkeep': '' }]) {
+      const h = await makeHarness();
+      await seed(h.dir, seeded);
+      const repo = await overRealGit(h, true);
+      await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
+      expect(await repo.atHead('access.md')).toBe(personalAccessMd(USER));
+      expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+      // Nothing uncommitted for a later commit of the path to carry back.
+      expect(await repo.status()).toBe('');
+    }
   });
 });
 

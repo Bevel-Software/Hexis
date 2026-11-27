@@ -33,6 +33,7 @@ import {
   DEFAULT_KB_LAYOUT,
   PLUGIN_MANIFEST_FILE,
   isPersonalPluginDir,
+  isPersonalPluginFolder,
   pluginIdentityOf,
   platformRestoreDestination,
 } from '@bevel-software/platform-shared';
@@ -164,6 +165,47 @@ export interface AccessModel {
    * admits everywhere and the read gate admits nowhere.
    */
   deploymentOwners: ReadonlySet<string>;
+  /** The personal folders that exist — see {@link PersonalSpaces}. */
+  personalSpaces: PersonalSpaces;
+}
+
+/**
+ * The personal folders a tree carries: each `<plugins root>/personal-*`
+ * folder holding an `access.md`, whether or not it parses — the file the
+ * owner's `my_plugin` writes first, and so the mark that the folder was
+ * provisioned. Spelled exactly as in the tree. See
+ * {@link writesUnprovisionedPersonalSpace}.
+ */
+interface PersonalSpaces {
+  pluginsDir: string;
+  provisioned: ReadonlySet<string>;
+}
+
+/**
+ * Whether `relativePath` is a write into a personal folder that has not been
+ * provisioned. Only its owner's `my_plugin` brings one into being
+ * (`PluginProvisionService`, whose write and commit do not pass this gate),
+ * so a write that would create one is nobody's to make: not Admin's, and not
+ * through the `access.md` rescue. A folder set up before its owner is one the
+ * owner would adopt with somebody else's rules already in it. The name is
+ * matched case-insensitively and the folder must exist spelled exactly as
+ * written, so another casing of it is not a second way in.
+ */
+function writesUnprovisionedPersonalSpace(model: AccessModel, verb: Verb, relativePath: string): boolean {
+  if (verb !== 'write') return false;
+  const space = personalSpaceOf(relativePath, model.personalSpaces.pluginsDir);
+  return space !== null && !model.personalSpaces.provisioned.has(space);
+}
+
+/**
+ * The personal folder `relativePath` is or lies in, as `<root>/<folder>`
+ * spelled as given; null when it is in none. ONE reading for the gate and
+ * for both model builders, so what the gate asks about is what they record.
+ */
+function personalSpaceOf(relativePath: string, pluginsDir: string): string | null {
+  const [root, folder] = relativePath.split('/');
+  if (folder === undefined || root!.toLowerCase() !== pluginsDir.toLowerCase()) return null;
+  return isPersonalPluginFolder(folder.toLowerCase()) ? `${root}/${folder}` : null;
 }
 
 function isBuiltInRole(canonicalRole: string): boolean {
@@ -327,6 +369,7 @@ function accessFileListener(
   pluginsDir: string,
   out: Map<string, AccessFile>,
   pluginDirs: Map<string, string>,
+  personalSpaces: Set<string>,
 ): WalkListener {
   return {
     async onFile(dir, name) {
@@ -339,6 +382,9 @@ function accessFileListener(
       }
       // The fixed-name sources are read by name (`loadCheckoutModel`).
       if (source !== 'rules') return;
+      // Before the parse: a personal folder whose rules do not parse is still
+      // provisioned, and its access.md still the admin's to repair.
+      if (personalSpaceOf(dir, pluginsDir) === dir) personalSpaces.add(dir);
       const text = await fs.readFile(path.join(repoDir, rel), 'utf-8');
       const parsed = parseAccessFile(text, rel);
       if (!parsed.ok) {
@@ -599,6 +645,7 @@ function hasPermissionForKeys(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
+  if (writesUnprovisionedPersonalSpace(model, verb, relativePath)) return false;
   const adminFloor = holdsAdminFloor(verb) && keys.has(ADMIN_ROLE_KEY);
   for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
     if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
@@ -718,6 +765,9 @@ function decidePermissionResolved(
 ): PermissionDecision {
   const email = canonicalEmail(userEmail);
 
+  if (writesUnprovisionedPersonalSpace(model, verb, relativePath)) {
+    return { allowed: false, scope: null, via: 'default-deny' };
+  }
   if (verb === 'write') {
     if (relativePath === 'roles.yaml') {
       return { allowed: isAdminEmail(model, email), scope: null, via: 'admin-rescue' };
@@ -1251,7 +1301,8 @@ function eligibleHoldersResolved(
   // access.md (it'd say "restricted to no one" when Admin is the answer).
   if (
     verb === 'write' &&
-    (relativePath === 'roles.yaml' || isAccessMdPath(relativePath))
+    (relativePath === 'roles.yaml' || isAccessMdPath(relativePath)) &&
+    !writesUnprovisionedPersonalSpace(model, verb, relativePath)
   ) {
     // Look the Admin ROLE up via its explicit alias, the key that is always
     // the role's. The override is the ROLE's capability, so the row's kind is
@@ -2654,6 +2705,19 @@ export class AccessControlService implements IAccessControl {
     return result;
   }
 
+  async personalSpaceCreationsAtRef(
+    workspaceId: string,
+    ref: string,
+    relativePaths: string[],
+  ): Promise<string[] | null> {
+    const pluginsDir = this.kb.layout.pluginsDir;
+    const candidates = relativePaths.filter((p) => personalSpaceOf(p, pluginsDir) !== null);
+    if (candidates.length === 0) return [];
+    const loaded = await this.loadModelAtRef(workspaceId, ref);
+    if (!loaded) return null;
+    return candidates.filter((p) => writesUnprovisionedPersonalSpace(loaded.model, 'write', p));
+  }
+
   async canReadBatchAtRef(
     workspaceId: string,
     ref: string,
@@ -2726,19 +2790,30 @@ export class AccessControlService implements IAccessControl {
     const target = platformRestoreDestination(destinationRelativePath, this.kb.layout);
     if (target === null) return false;
     const email = canonicalEmail(userEmail);
+    const destination =
+      target.kind === 'root' ? target.name : path.posix.join(target.dir, 'access.md');
 
-    let admin: boolean;
+    let model: AccessModel | null;
     try {
-      admin = isAdminEmail(await this.loadModel(workspaceId), email);
+      model = await this.loadModel(workspaceId);
     } catch {
       // The repository this rescue exists for is exactly the one whose
       // `roles.yaml` may be the file that went missing, and `loadModel`
       // throws when it cannot be read. With no model to ask, the deployment
       // owner is the only admin left — and they are the person who sets
       // `ADMIN_EMAIL`, so admitting them concedes nothing they did not have.
-      admin = this.deploymentOwners.has(email);
+      model = null;
     }
-    if (!admin) return false;
+    if (!(model ? isAdminEmail(model, email) : this.deploymentOwners.has(email))) return false;
+
+    // The restore is a way past the write gate, never past the rule that only
+    // the owner's `my_plugin` brings a personal folder into being: a
+    // destination the gate refuses as an unprovisioned personal folder is
+    // refused here too. With no model to say which folders are provisioned,
+    // every personal folder is refused.
+    if (model ? writesUnprovisionedPersonalSpace(model, 'write', destination) : personalSpaceOf(destination, this.kb.layout.pluginsDir) !== null) {
+      return false;
+    }
 
     // A restore puts back what is MISSING, so the place it lands must be
     // empty. An `access.md` goes back only into a folder that has none —
@@ -2748,8 +2823,6 @@ export class AccessControlService implements IAccessControl {
     // the root: a move is a rename on disk, so landing `.bevelignore` on a
     // root that already has one would silently replace it, and the repository
     // was never missing that file to begin with.
-    const destination =
-      target.kind === 'root' ? target.name : path.join(target.dir, 'access.md');
     const repoDir = await this.repoDir(workspaceId);
     try {
       await fs.stat(path.join(repoDir, destination));
@@ -2894,7 +2967,10 @@ export class AccessControlService implements IAccessControl {
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
     const pluginDirs = new Map<string, string>();
-    await this.disk.walkKb(repoDir, [accessFileListener(repoDir, this.kb.layout.pluginsDir, accessFiles, pluginDirs)]);
+    const personalSpaces = new Set<string>();
+    await this.disk.walkKb(repoDir, [
+      accessFileListener(repoDir, this.kb.layout.pluginsDir, accessFiles, pluginDirs, personalSpaces),
+    ]);
 
     // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
     // folder's own access.md — a plugin being a folder with a manifest, at
@@ -2924,6 +3000,7 @@ export class AccessControlService implements IAccessControl {
       accessFilesByDir: accessFiles,
       groupsHealth: activeGroups.health,
       deploymentOwners: this.deploymentOwners,
+      personalSpaces: { pluginsDir: this.kb.layout.pluginsDir, provisioned: personalSpaces },
     };
     // An invalidation landed mid-load: this model describes a tree that is
     // already gone, so it is returned to this caller but never stored.
@@ -3534,7 +3611,11 @@ export class AccessControlService implements IAccessControl {
     for (const w of mergeWarnings) logger(`access@${tag}`).warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
+    const personalSpaces = new Set<string>();
     for (const p of listed.accessFiles) {
+      // Mirror `loadModel`: a listed personal access.md is provisioned, parsed or not.
+      const dir = parentDirOf(p);
+      if (personalSpaceOf(dir, this.kb.layout.pluginsDir) === dir) personalSpaces.add(dir);
       const text = await read(p);
       if (text === null) continue;
       const parsed = parseAccessFile(text, p);
@@ -3576,6 +3657,7 @@ export class AccessControlService implements IAccessControl {
         // a roles.yaml repair locally and then be refused when it tries to
         // land — the lockout moved one step later, not removed.
         deploymentOwners: this.deploymentOwners,
+        personalSpaces: { pluginsDir: this.kb.layout.pluginsDir, provisioned: personalSpaces },
       },
       resolvedRef: commit,
       // The listing already named every path; held so an own-entries read

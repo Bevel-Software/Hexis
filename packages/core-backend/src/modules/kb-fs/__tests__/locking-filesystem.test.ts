@@ -6,7 +6,7 @@ import type { AuthUser, IVersionControlService } from '@bevel-software/platform-
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { LockingFilesystem, PathHeldError } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
-import { makeAgentRolesYamlWriteValidator } from '../../access-model/index.js';
+import { AccessDeniedError, makeAgentRolesYamlWriteValidator } from '../../access-model/index.js';
 
 /** The clone folder at the workspace root: every path the filesystem mutates lives under it. */
 const KB = 'knowledge-base';
@@ -147,6 +147,68 @@ describe('LockingFilesystem — every mutating op runs acquire → super → rel
     expect(versionControl.releaseLock).not.toHaveBeenCalled();
     // The existing file is untouched.
     expect(await fs.readFile(path.join(root, 'knowledge-base/has-content/real.md'), 'utf-8')).toBe('hi');
+  });
+
+  it('a mkdir whose .gitkeep write is refused takes back every directory it made, and only those', async () => {
+    await fs.mkdir(path.join(root, 'knowledge-base/Plugins'), { recursive: true });
+    const versionControl = makeVersionControl();
+    const denied = new AccessDeniedError({
+      path: 'knowledge-base/Plugins/personal-u1/sub/.gitkeep',
+      eligibleRoles: [],
+      eligibleUsers: [],
+    });
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockRejectedValue(denied);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    await expect(fsLayer.mkdir('knowledge-base/Plugins/personal-u1/sub', { recursive: true })).rejects.toBe(denied);
+    // Nothing for a listing — or the personal-plugin ensure — to find.
+    await expect(fs.lstat(path.join(root, 'knowledge-base/Plugins/personal-u1'))).rejects.toMatchObject({ code: 'ENOENT' });
+    // The ancestor that was already there stays.
+    expect((await fs.stat(path.join(root, 'knowledge-base/Plugins'))).isDirectory()).toBe(true);
+  });
+
+  it('a refused mkdir leaves a directory something else wrote into meanwhile, bytes and all', async () => {
+    const versionControl = makeVersionControl();
+    const late = path.join(root, 'knowledge-base/shared/late.md');
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await fs.writeFile(late, 'kept', 'utf-8');
+      throw new AccessDeniedError({ path: 'knowledge-base/shared/x/.gitkeep', eligibleRoles: [], eligibleUsers: [] });
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    await expect(fsLayer.mkdir('knowledge-base/shared/x', { recursive: true })).rejects.toBeInstanceOf(AccessDeniedError);
+    await expect(fs.lstat(path.join(root, 'knowledge-base/shared/x'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await fs.readFile(late, 'utf-8')).toBe('kept');
+  });
+
+  it('a refused mkdir never takes back a directory another writer created while it ran', async () => {
+    const versionControl = makeVersionControl();
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new AccessDeniedError({ path: 'knowledge-base/race/sub/.gitkeep', eligibleRoles: [], eligibleUsers: [] }),
+    );
+    await fs.mkdir(path.join(root, 'knowledge-base'), { recursive: true });
+    const theirs = path.join(root, 'knowledge-base/race');
+    const realMkdir = fs.mkdir.bind(fs);
+    // The other writer lands `race` just before this call's own mkdir of it.
+    const spy = vi.spyOn(fs, 'mkdir').mockImplementation(async (p, o) => {
+      if (p === theirs) await realMkdir(theirs);
+      return realMkdir(p, o);
+    });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    try {
+      await expect(fsLayer.mkdir('knowledge-base/race/sub', { recursive: true })).rejects.toBeInstanceOf(AccessDeniedError);
+    } finally {
+      spy.mockRestore();
+    }
+    await expect(fs.lstat(path.join(theirs, 'sub'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await fs.stat(theirs)).isDirectory()).toBe(true);
   });
 
   it('rmdir is refused with a clear error — one-change-per-file invariant', async () => {

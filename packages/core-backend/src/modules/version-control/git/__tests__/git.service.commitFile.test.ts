@@ -195,8 +195,8 @@ describe('GitService.commitFile — skipValidator', () => {
     expect(change?.subject.length).toBeLessThanOrEqual(200);
   });
 
-  // Regression: pathspec literal handling. `git checkout HEAD -- '[Approved] x.md'`
-  // and `git ls-files --error-unmatch -- '[Approved] x.md'` would interpret the
+  // Regression: pathspec literal handling. `git restore --source=HEAD -- '[Approved] x.md'`
+  // and `git ls-files -- '[Approved] x.md'` would interpret the
   // brackets as a character-class glob, so discardPath would either silently
   // no-op or fail to revert the on-disk content. Belongs alongside the
   // commitFile regression because no dedicated discardPath test file exists
@@ -221,5 +221,53 @@ describe('GitService.commitFile — skipValidator', () => {
 
     const restored = await fs.readFile(path.join(repo, relPath), 'utf-8');
     expect(restored).toBe(committed);
+  });
+
+  it('discardPath throws when the path could not be put back, so no caller takes a dirty path for a clean one', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const { hooks } = makeValidator();
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), hooks, testKbContext());
+
+    const relPath = 'rules.md';
+    await fs.writeFile(path.join(repo, relPath), 'committed\n');
+    await svc.commitFile(workspaceId, USER, relPath, 'add rules');
+    await fs.writeFile(path.join(repo, relPath), 'dirty\n');
+    // Another git process holds the index: the checkout cannot run.
+    await fs.writeFile(path.join(repo, '.git', 'index.lock'), '');
+
+    await expect(svc.discardPath(workspaceId, relPath)).rejects.toThrow();
+    expect(await fs.readFile(path.join(repo, relPath), 'utf-8')).toBe('dirty\n');
+  });
+
+  it('discardPath throws when the index cannot be read, and never deletes a tracked file for an untracked one', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const { hooks } = makeValidator();
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), hooks, testKbContext());
+
+    const relPath = 'rules.md';
+    await fs.writeFile(path.join(repo, relPath), 'committed\n');
+    await svc.commitFile(workspaceId, USER, relPath, 'add rules');
+    await fs.writeFile(path.join(repo, relPath), 'dirty\n');
+    // A corrupt index: the probe asking whether git knows the path fails.
+    await fs.writeFile(path.join(repo, '.git', 'index'), 'not an index');
+
+    await expect(svc.discardPath(workspaceId, relPath)).rejects.toThrow();
+    expect(await fs.readFile(path.join(repo, relPath), 'utf-8')).toBe('dirty\n');
+  });
+
+  it('discardPath drops a new file a failed commit left staged, from the index and the disk', async () => {
+    const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+    const { hooks } = makeValidator();
+    const svc = new GitService(stubWorkspaceService(workspaceId, workspaceDir), hooks, testKbContext());
+
+    const relPath = 'access.md';
+    await fs.writeFile(path.join(repo, relPath), 'staged, never committed\n');
+    await runGit(repo, ['add', '--', relPath]);
+
+    await svc.discardPath(workspaceId, relPath);
+
+    await expect(fs.stat(path.join(repo, relPath))).rejects.toThrow();
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { cwd: repo });
+    expect(stdout).toBe('');
   });
 });

@@ -60,6 +60,15 @@ const NOTHING_TO_APPROVE = 'This pull request has no file changes to approve.';
 const REQUEST_CHANGED_SINCE_GATE =
   'This request changed after its approvals were checked, so it was not applied. ' +
   'Open it again to see what changed, then apply it once more.';
+/**
+ * The refusals of `refusePersonalSpaceCreation`: no approval and no bypass
+ * changes them, and they name no file.
+ */
+const PERSONAL_SPACE_CREATION =
+  "This request would create a person's personal plugin folder, which only that person's my_plugin creates. " +
+  'Remove those files from the request and apply it again.';
+const PERSONAL_SPACE_UNREADABLE =
+  "The target's access rules could not be read to check this request, so it was not applied. Try again shortly.";
 const EVERYONE_CANONICAL = 'everyone';
 
 /**
@@ -640,9 +649,23 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
         // and pinned to the head the gate above judged: the approvals are for
         // that commit, so a push that lands after the caller read the request
         // is refused here, never merged on their strength.
-        { appliedChangeNumber: prNumber, appliedChangeTitle: cr.title, expectedSourceHead: headSha },
+        {
+          appliedChangeNumber: prNumber,
+          appliedChangeTitle: cr.title,
+          expectedSourceHead: headSha,
+          authorize: ({ sha, changedPaths }) => this.refusePersonalSpaceCreation(baseWorkspace.id, sha, changedPaths),
+        },
       );
     } catch (err) {
+      // A refusal, or target rules that could not be read (retryable, 503),
+      // keeps its own status rather than becoming a failed merge.
+      if (err instanceof MergeBlockedError || err instanceof AccessUnreadableError) {
+        await this.db
+          .update(prMergeLog)
+          .set({ succeeded: false, completedAt: new Date(), error: err.message })
+          .where(eq(prMergeLog.id, logRow.id));
+        throw err;
+      }
       if (err instanceof SourceHeadMovedError) {
         await this.db
           .update(prMergeLog)
@@ -723,6 +746,24 @@ export class ChangeRequestReviewService implements IChangeRequestReviewService {
       sha: mergeResult.sha,
       mergedAt: completedAt.toISOString(),
     };
+  }
+
+  /**
+   * Refuse a merge that would bring a personal plugin folder into being. Only
+   * the owner's `my_plugin` creates one, and no write verdict admits any other
+   * write into it; a request's files are decided by approvals instead, and a
+   * file nobody may write has nobody to approve it, so the approval gate lets
+   * it through. Asked inside the merge, against the target commit it is built
+   * on and every path it writes, so it holds for an admin's bypass too, and a
+   * tree that cannot be read refuses rather than admits. Its own refusals name
+   * no path; when git fails reading the target's rules, the retryable
+   * `AccessUnreadableError` passes through as it does for this file's other
+   * reads at a ref.
+   */
+  private async refusePersonalSpaceCreation(workspaceId: string, sha: string, changedPaths: string[]): Promise<void> {
+    const creations = await this.accessControl.personalSpaceCreationsAtRef(workspaceId, sha, changedPaths);
+    if (creations === null) throw new MergeBlockedError([PERSONAL_SPACE_UNREADABLE]);
+    if (creations.length > 0) throw new MergeBlockedError([PERSONAL_SPACE_CREATION]);
   }
 
   /**

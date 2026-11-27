@@ -366,7 +366,7 @@ describe('what the guide tells an agent', () => {
       // The four places that introduce it: the `my_plugin` bullet, the sentence
       // on moving a skill, the placement rule, and the `everyone` note.
       const prose = guide.replace(/\s+/g, ' ');
-      expect(prose).toContain(`\`my_plugin\`: the user's personal plugin, \`${plugins}/personal-<id>/\`, created on first use.`);
+      expect(prose).toContain(`\`my_plugin\`: the user's personal plugin, \`${plugins}/personal-<id>/\`, created on first use; no other write can create it.`);
       expect(prose).toContain('A skill moves from a personal plugin to a shared one by moving its folder.');
       expect(prose).toContain("A person's private skill goes in their personal plugin");
       expect(prose).toContain(

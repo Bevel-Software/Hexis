@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
-import { personalAccessMd, pluginAccessMd } from '../../plugins/plugin-provision.service.js';
-import { closePersonalSpaceRules } from '../../workspace/startup/steps/personal-spaces.step.js';
+import { personalAccessMd, pluginAccessMd } from '../../plugins/index.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * What the seeded access templates actually resolve to, through the public
@@ -20,6 +21,7 @@ import { closePersonalSpaceRules } from '../../workspace/startup/steps/personal-
  */
 
 const KB_DIR = 'knowledge-base';
+const execFileAsync = promisify(execFile);
 
 function stubWorkspaceService(workspaceId: string, workspaceDir: string): WorkspaceService {
   return {
@@ -53,7 +55,7 @@ describe('the seeded access templates, resolved', () => {
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, contents);
     }
-    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
+    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, realDisk());
   }
 
   const PERSONAL = {
@@ -110,27 +112,88 @@ describe('the seeded access templates, resolved', () => {
     expect(await svc.canWrite(workspaceId, 'bob@x.io', skill)).toBe(false);
   });
 
-  it('a personal space seeded by the previous template, once the boot step has closed it, resolves like a new one', async () => {
-    // The old seed: the owner's grants in the legacy single-block shape.
-    const legacy =
-      '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\nread: []\n';
-    const closed = closePersonalSpaceRules(legacy, 'Plugins/personal-ali/access.md');
-    expect(closed).not.toBeNull();
-    // Closing it again changes nothing: the step is idempotent by parse, not by text.
-    expect(closePersonalSpaceRules(closed!, 'Plugins/personal-ali/access.md')).toBeNull();
+  describe('a personal folder nobody has provisioned', () => {
+    // Write for everyone at the root, so the owner's refusals below come from
+    // the personal-folder rule and from nothing else.
+    const ROOT_RULES = '---\nowner:\n  - Admin\n---\nwrite:\n  - everyone\n';
+    /** Every spelling of a write that would bring `personal-ali` into being before its owner. */
+    const PRE_SEEDS = [
+      'Plugins/personal-ali/access.md',
+      'Plugins/personal-ali/skills/diary/SKILL.md',
+      'Plugins/personal-ali',
+      'Plugins/Personal-Ali/access.md',
+      'plugins/personal-ali/access.md',
+    ];
+    /** Writes under the plugins root the rule must leave to the ordinary rules. */
+    const ORDINARY = ['Plugins/GTM2/access.md', 'Plugins/personalities/access.md'];
 
-    const svc = await makeService({
-      'roles.yaml': ROLES_YAML,
-      'access.md': '---\nowner:\n  - Admin\n---\nread:\n  - everyone\nwrite:\n  - Admin\n',
-      'Plugins/personal-ali/plugin.json': '{"name":"personal-ali"}',
-      'Plugins/personal-ali/access.md': closed!,
-      'Plugins/personal-ali/skills/weekly/SKILL.md': '# Weekly\n',
+    async function commitAll(): Promise<void> {
+      const repo = path.join(root, workspaceId, KB_DIR);
+      const git = (...args: string[]) => execFileAsync('git', args, { cwd: repo });
+      await git('init', '-q');
+      await git('add', '-A');
+      await git('-c', 'user.email=t@x.io', '-c', 'user.name=t', 'commit', '-q', '-m', 'seed');
+    }
+
+    it('nobody may write one into being — not Admin, not through the access.md rescue, in no spelling', async () => {
+      const svc = await makeService({ 'roles.yaml': ROLES_YAML, 'access.md': ROOT_RULES });
+      for (const who of ['admin@x.io', OWNER.email]) {
+        for (const p of PRE_SEEDS) expect(await svc.canWrite(workspaceId, who, p), `${who} ${p}`).toBe(false);
+        const batch = await svc.canWriteBatch(workspaceId, who, PRE_SEEDS);
+        expect([...batch.values()]).toEqual(PRE_SEEDS.map(() => false));
+      }
+      for (const p of ORDINARY) expect(await svc.canWrite(workspaceId, 'admin@x.io', p), p).toBe(true);
     });
-    const skill = 'Plugins/personal-ali/skills/weekly/SKILL.md';
-    expect(await svc.canRead(workspaceId, 'bob@x.io', skill)).toBe(false);
-    expect(await svc.canRead(workspaceId, OWNER.email, skill)).toBe(true);
-    expect(await svc.canWrite(workspaceId, OWNER.email, skill)).toBe(true);
-    expect(await svc.canRead(workspaceId, 'admin@x.io', skill)).toBe(false);
-  });
 
+    it('the platform-file restore is no way in either: a misplaced access.md is not put back into one', async () => {
+      const svc = await makeService({ 'roles.yaml': ROLES_YAML, 'access.md': ROOT_RULES, 'Plugins/personal-ali/skills/.gitkeep': '' });
+      for (const p of ['Plugins/personal-ali/access.md', 'Plugins/Personal-Ali/access.md', 'Plugins/personal-bo/access.md']) {
+        expect(await svc.canRestorePlatformFile(workspaceId, 'admin@x.io', p), p).toBe(false);
+      }
+      // The rescue itself is unchanged elsewhere.
+      expect(await svc.canRestorePlatformFile(workspaceId, 'admin@x.io', 'Plugins/GTM2/access.md')).toBe(true);
+    });
+
+    it('with no model to ask, the deployment owner restores into no personal folder at all', async () => {
+      // No roles.yaml: the model cannot load, and the deployment owner is the only admin left.
+      await makeService({ 'Plugins/personal-ali/skills/.gitkeep': '' });
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, path.join(root, workspaceId)), KB_DIR, realDisk(), ['boss@x.io']);
+      expect(await svc.canRestorePlatformFile(workspaceId, 'boss@x.io', 'Plugins/personal-ali/access.md')).toBe(false);
+      expect(await svc.canRestorePlatformFile(workspaceId, 'boss@x.io', 'roles.yaml')).toBe(true);
+    });
+
+    it('the lock refuses it too: the verdict at HEAD, which every file write asks before it lands', async () => {
+      await makeService({ 'roles.yaml': ROLES_YAML, 'access.md': ROOT_RULES });
+      await commitAll();
+      const svc = await makeService({});
+      const atHead = await svc.canWriteBatchAtRef(workspaceId, 'HEAD', 'admin@x.io', [...PRE_SEEDS, ...ORDINARY]);
+      expect(Object.fromEntries(atHead!)).toEqual(
+        Object.fromEntries([...PRE_SEEDS.map((p) => [p, false]), ...ORDINARY.map((p) => [p, true])]),
+      );
+    });
+
+    it('once provisioned, its own rules decide again — at HEAD as in the checkout', async () => {
+      await makeService({ ...PERSONAL, 'access.md': ROOT_RULES });
+      await commitAll();
+      const svc = await makeService({});
+      const skill = 'Plugins/personal-ali/skills/diary/SKILL.md';
+      expect(await svc.canWrite(workspaceId, OWNER.email, skill)).toBe(true);
+      expect((await svc.canWriteBatchAtRef(workspaceId, 'HEAD', OWNER.email, [skill]))!.get(skill)).toBe(true);
+      expect(await svc.canWrite(workspaceId, 'admin@x.io', skill)).toBe(false);
+    });
+
+    it('a provisioned folder whose rules do not parse is still provisioned: an admin can still repair its access.md', async () => {
+      const svc = await makeService({
+        'roles.yaml': ROLES_YAML,
+        'access.md': ROOT_RULES,
+        'Plugins/personal-ali/access.md': '---\nread: [\n',
+      });
+      expect(await svc.canWrite(workspaceId, 'admin@x.io', 'Plugins/personal-ali/access.md')).toBe(true);
+    });
+
+    it('once provisioned, a restore into one of its subfolders is the write gate\'s ordinary admin rescue', async () => {
+      const svc = await makeService({ ...PERSONAL, 'access.md': ROOT_RULES });
+      expect(await svc.canRestorePlatformFile(workspaceId, 'admin@x.io', 'Plugins/personal-ali/skills/access.md')).toBe(true);
+    });
+  });
 });

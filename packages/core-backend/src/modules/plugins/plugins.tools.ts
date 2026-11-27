@@ -55,6 +55,7 @@ const PROVISIONED_OUTPUT = {
     name: { type: 'string', description: 'The plugin identity (its manifest name), as grants and the marketplace spell it.' },
     displayName: { type: 'string', description: 'What people see it called — the manifest `displayName`, exactly as persisted: for `create_plugin`, the name that was asked for, trimmed; for `my_plugin`, the personal folder\'s own label.' },
     created: { type: 'boolean', description: 'False when the folder already existed.' },
+    repaired: { type: 'boolean', description: 'For `my_plugin`: true when someone besides its owner had access to the folder (through its own rules or rules inherited from above) or the folder had no readable access.md of its own, and its rules have been rewritten so only its owner has access. Tell the person.' },
   },
 } as const;
 
@@ -101,8 +102,8 @@ export function myPluginDescription(layout: KbLayout): string {
 
 /**
  * The `my_plugin` definition for `layout`. Everything but the description is
- * the same on every deployment and byte-identical to what it has always been:
- * the same endpoint, the same (empty) inputs, the same outputs, the same tags.
+ * the same on every deployment: the same endpoint, the same (empty) inputs,
+ * the same outputs, the same tags.
  */
 export function myPluginDef(layout: KbLayout): UtcpTool {
   return toolDef({

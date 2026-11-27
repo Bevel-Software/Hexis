@@ -52,10 +52,13 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
+import { logger } from '../../shared/logging.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from '../access/index.js';
-import { creatorPrincipal, spliceGrant } from '../access-model/index.js';
+import { canonicalEmail, creatorPrincipal, spliceGrant } from '../access-model/index.js';
 import { WorkspaceMutex } from '../kb-fs/index.js';
+
+const log = logger('plugins');
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
 export interface ProvisionCommitDriver {
@@ -67,6 +70,11 @@ export interface ProvisionCommitDriver {
     /** `summary` overrides the path-derived commit subject — see `GitService.commitFile`. */
     opts?: { systemAuthorized?: boolean; summary?: string },
   ): Promise<void>;
+}
+
+/** How a failed inline commit is rolled back: the path put back to HEAD (`VersionControlService.discardPath`), throwing when it could not be. */
+export interface ProvisionRollback {
+  discardPath(workspaceId: string, targetPath: string): Promise<void>;
 }
 
 /**
@@ -115,6 +123,13 @@ export interface ProvisionedPlugin {
   displayName: string;
   /** False when an ensure found the folder already there. */
   created: boolean;
+  /**
+   * True when the personal-folder ensure found the folder open to someone
+   * besides its owner, as the access resolver answers it (rules inherited
+   * from above included), or without a readable `access.md` of its own, and
+   * rewrote its `access.md` to owner-only. Always false for a named plugin.
+   */
+  repaired: boolean;
 }
 
 /** A refusal the route can pass through: message + HTTP status. */
@@ -135,9 +150,10 @@ function provisioned(
   name: string,
   displayName: string,
   created: boolean,
+  repaired = false,
 ): ProvisionedPlugin {
   const path = `${pluginsDir}/${folder}`;
-  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created };
+  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created, repaired };
 }
 
 export class PluginProvisionService {
@@ -167,7 +183,7 @@ export class PluginProvisionService {
 
   constructor(
     private readonly workspaceService: WorkspaceService,
-    private readonly commits: ProvisionCommitDriver,
+    private readonly commits: ProvisionCommitDriver & ProvisionRollback,
     private readonly accessControl: IAccessControl,
     private readonly kb: KbContext,
     private readonly events: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void } | undefined,
@@ -311,16 +327,25 @@ export class PluginProvisionService {
    * {@link persistedNames}): the answer is what the file says when the call
    * reads it, so a repeated call with no edit in between answers as the call
    * that made the folder did.
+   *
+   * A folder already there is the owner's alone or is made so: when the
+   * access resolver gives anyone else access to it (its own rules or rules
+   * inherited from above), its `access.md` is rewritten to the template a new
+   * folder gets, committed, and the answer says `repaired: true` (see
+   * {@link repairPersonalRules}).
+   * A folder holding no file at all is not already there: it is cleared and
+   * made as new (see {@link removedIfHollow}).
    */
   async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
     const alreadyThere = async (onDisk: string): Promise<ProvisionedPlugin> => {
+      const repaired = await this.repairPersonalRules(user, onDisk);
       const { name, displayName } = await this.persistedNames(onDisk, folder);
-      return provisioned(this.pluginsRoot, folder, name, displayName, false);
+      return provisioned(this.pluginsRoot, folder, name, displayName, false, repaired);
     };
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       const existing = await this.existingFolder(folder);
-      if (existing !== null) return alreadyThere(existing);
+      if (existing !== null && !(await this.removedIfHollow(existing))) return alreadyThere(existing);
       try {
         await this.provision(user, folder, folder, personalAccessMd(user));
       } catch (err) {
@@ -478,6 +503,36 @@ export class PluginProvisionService {
   }
 
   /**
+   * Remove the folder `folder` (its on-disk spelling, below the plugins root)
+   * when it holds no file at any depth — only empty directories, which git
+   * cannot carry, so no commit ever made it — and say whether it did. Such a
+   * folder is no plugin and nobody's rules: what a refused write would have
+   * left behind, never something to adopt as already there. Bottom-up and
+   * never recursive, so a file that appeared meanwhile fails the removal
+   * instead of going with it. A listing that cannot be read refuses, as every
+   * other hole does.
+   */
+  private async removedIfHollow(folder: string): Promise<boolean> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const dirs: string[] = [];
+    const walk = async (abs: string, rel: string): Promise<boolean> => {
+      const entries = (await listDirOrIncomplete(this.disk, abs, rel)) ?? [];
+      for (const e of entries) {
+        if (!e.isDirectory()) return false;
+        if (!(await walk(path.join(abs, e.name), `${rel}/${e.name}`))) return false;
+      }
+      dirs.push(abs);
+      return true;
+    };
+    const root = path.join(wsDir, this.kbDirName, this.pluginsRoot, ...folder.split('/'));
+    if (!(await this.disk.isDirectory(root))) return false;
+    if (!(await walk(root, `${this.pluginsRoot}/${folder}`))) return false;
+    for (const dir of dirs) await fs.rmdir(dir);
+    return true;
+  }
+
+  /**
    * What the plugin at `folder` is ALREADY called, its `name` and its
    * `displayName`, read from its manifest by the shared rules discovery uses
    * (`pluginIdentityOf`, `pluginDisplayNameOf`). `fallback` (the folder's
@@ -497,6 +552,79 @@ export class PluginProvisionService {
       path.join(wsDir, this.kbDirName, this.pluginsRoot, ...folder.split('/'), PLUGIN_MANIFEST_FILE),
     );
     return { name: pluginIdentityOf(manifest, fallback), displayName: pluginDisplayNameOf(manifest) || fallback };
+  }
+
+  /**
+   * Make the personal folder `folder` (its on-disk spelling) its owner's
+   * alone again when it is not; true when it did. Whether it is, is the
+   * access resolver's answer (see {@link isOwnersAlone}), so rules inherited
+   * from above count as every gate counts them. Runs under the ensure's
+   * creation lock. The new rules are the template a new
+   * folder gets, written and committed as a provision's are — inline and
+   * `systemAuthorized`, because the rules being replaced may not let the
+   * owner write them, and the caller is the owner by the folder's very name.
+   * A failure puts the file back to HEAD and throws: a repair committed
+   * before its push failed is HEAD, so it stays, and goes out with the
+   * branch's next push; a repair that never committed leaves HEAD's rules,
+   * which the next `my_plugin` repairs again. When putting the file back
+   * fails as well, that is logged and the commit's error still thrown; the
+   * repaired rules then stay on disk, uncommitted.
+   */
+  private async repairPersonalRules(user: AuthUser, folder: string): Promise<boolean> {
+    const wsId = await this.readyWorkspaceId();
+    if (await this.isOwnersAlone(wsId, `${this.pluginsRoot}/${folder}`, user.email)) return false;
+    const wsRel = `${this.kbDirName}/${this.pluginsRoot}/${folder}/access.md`;
+    await this.workspaceService.writeFile(wsId, wsRel, personalAccessMd(user));
+    try {
+      await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, wsRel, user, {
+        systemAuthorized: true,
+        summary: `Make ${this.pluginsRoot}/${folder} private to its owner again`,
+      });
+    } catch (err) {
+      // The commit's own error is the one the caller gets; a rollback that
+      // fails too is said, because the repaired rules then stay on disk
+      // uncommitted until a later commit of the path carries them.
+      await this.commits.discardPath(wsId, wsRel).catch((rollbackErr: unknown) => {
+        log.error(`could not put ${wsRel} back to HEAD after its repair failed; the repaired rules are on disk, uncommitted:`, {
+          err: rollbackErr,
+        });
+      });
+      throw err;
+    }
+    this.accessControl.invalidate(wsId);
+    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+    return true;
+  }
+
+  /**
+   * Whether the folder `folderRel` (repo-relative) is `ownerEmail`'s alone,
+   * as the access resolver answers it, rules inherited from above included:
+   * nobody else holds read, write, download or owner on the folder, the owner
+   * holds owner, and holds it by the folder's OWN `access.md` (so a missing
+   * or unparsable file, which the resolver leaves out of the model, never
+   * counts, however private the rules above happen to be), and nobody else
+   * may read that file. Writing it is not asked: the resolver's `access.md`
+   * rescue lets Admin write it, whatever it says.
+   */
+  private async isOwnersAlone(wsId: string, folderRel: string, ownerEmail: string): Promise<boolean> {
+    const owner = canonicalEmail(ownerEmail);
+    const onlyOwner = (h: { roles: string[]; principals?: unknown[]; users: { email: string }[] }) =>
+      h.roles.length === 0 && (h.principals ?? []).length === 0 && h.users.every((u) => canonicalEmail(u.email) === owner);
+    const [readers, writers, owners, downloaders, fileReaders, ownerSources] = await Promise.all([
+      this.accessControl.eligibleReaders(wsId, folderRel),
+      this.accessControl.eligibleWriters(wsId, folderRel),
+      this.accessControl.eligibleOwners(wsId, folderRel),
+      this.accessControl.eligibleDownloaders(wsId, folderRel),
+      this.accessControl.eligibleReaders(wsId, `${folderRel}/access.md`),
+      this.accessControl.grantSources(wsId, 'folder', folderRel, { kind: 'user', email: ownerEmail }),
+    ]);
+    return (
+      ownerSources.owner?.[0]?.kind === 'direct' &&
+      readers.restricted &&
+      fileReaders.restricted &&
+      [readers, writers, owners, downloaders, fileReaders].every(onlyOwner) &&
+      owners.users.length > 0
+    );
   }
 
   /**
@@ -669,9 +797,11 @@ export function pluginAccessMd(creator: { name: string; email: string }): string
  * mark, see `isPrivateAccessMd`) looks for it, rather than leaving it to
  * what an empty block happens to inherit. Nobody else is named — not even
  * Admin: a private space is private from the people who run the deployment
- * too. (An administrator can still write this file, through the resolver's
- * access.md rescue, and so grant themselves in; that is a visible act in
- * the history, not a default.)
+ * too. (An administrator can still write this file once it exists, through
+ * the resolver's access.md rescue; that is a visible act in the history, and
+ * the owner's next ensure takes it back out — see `repairPersonalRules`. No
+ * one can write it BEFORE the owner: the resolver refuses every write into a
+ * personal folder that has not been provisioned.)
  *
  * The frontmatter is also what marks the file as body-governed. Without it
  * the splicer (and the resolver) read the older single-block format, where
@@ -689,7 +819,7 @@ export function personalAccessMd(creator: { name: string; email: string }): stri
       '# THIS BLOCK (the body) governs the FOLDER — one person\'s private space.',
       '# `deny everyone` keeps it closed even when the repository root grants',
       '# `read: everyone`; only the owner is named — not even Admin reads it.',
-      '# To share it, add a person as `Name <email>` or a role under `read:`.',
+      '# Name nobody else here: the owner\'s next `my_plugin` makes it theirs alone again.',
       'read:',
       '  - deny everyone',
       '',

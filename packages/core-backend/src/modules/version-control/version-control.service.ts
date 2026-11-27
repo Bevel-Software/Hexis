@@ -2216,6 +2216,18 @@ export class VersionControlService implements IVersionControlService {
   }
 
   /**
+   * Put `targetPath` back to what HEAD holds: a file in HEAD gets HEAD's
+   * bytes, one HEAD lacks (untracked, or new and left staged) is removed.
+   * The rollback of an inline commit that failed: a commit that landed
+   * before its push failed IS HEAD, so its bytes stay; one that never
+   * landed leaves HEAD's. Throws when the path
+   * could not be put back.
+   */
+  async discardPath(workspaceId: string, targetPath: string): Promise<void> {
+    await this.git.discardPath(workspaceId, targetPath);
+  }
+
+  /**
    * Failure-path counterpart to `releaseLock`. Skips `commitFile` + push
    * entirely so a half-finished write doesn't accidentally persist its
    * partial state as a committed change. The lock row goes away (so the

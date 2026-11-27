@@ -28,6 +28,15 @@ import {
  * their text is the other server's.
  */
 
+/**
+ * How much of a description a client is handed, and where the shorter client
+ * cuts it: the registry's own measure, for a module's suite that checks its
+ * tool's text against them. The measure is no contract (no module calls it),
+ * so it is reached here, beside the catalog it measures, not on the
+ * registry's entry.
+ */
+export { CLIENT_SHORT_CUT, clientVisibleLength } from '../modules/tool-registry/description-length.js';
+
 /** Dependencies the registrars take but never touch while they are only building defs. */
 export const unused = <T,>(): T => ({}) as T;
 
