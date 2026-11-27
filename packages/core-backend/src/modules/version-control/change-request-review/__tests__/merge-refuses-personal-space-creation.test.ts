@@ -175,4 +175,24 @@ describe('mergePr: a change request cannot create a personal plugin folder', () 
     );
     expect(logWrites.at(-1)).toMatchObject({ succeeded: true });
   });
+
+  it('on a target whose access rules cannot be read, refuses a request into a personal folder and still lands one that touches none', async () => {
+    await runGit(seedDir, ['rm', '-q', 'roles.yaml']);
+    await runGit(seedDir, ['commit', '-q', '-m', 'drop roles']);
+    await runGit(seedDir, ['push', 'origin', BASE]);
+    await propose({ 'Plugins/personal-ali/access.md': PRE_SEED });
+
+    const refusal = await apply([approvalOf('Plugins/personal-ali/access.md', false)]).catch((err: unknown) => err);
+    expect(refusal).toMatchObject({
+      status: 422,
+      payload: { mergeBlockedReasons: [expect.stringContaining('could not be read')] },
+    });
+    expect(await filesOn(BASE)).not.toContain('Plugins/personal-ali/access.md');
+
+    await fs.rm(featureDir, { recursive: true, force: true });
+    await runGit(upstream, ['branch', '-D', FEATURE]);
+    await propose({ 'note.md': 'note\n' });
+    await apply([approvalOf('note.md', true)]);
+    expect(await filesOn(BASE)).toContain('note.md');
+  });
 });
