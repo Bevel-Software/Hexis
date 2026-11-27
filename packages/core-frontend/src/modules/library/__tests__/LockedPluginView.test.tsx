@@ -87,13 +87,37 @@ describe('LockedPluginView', () => {
     expect(screen.queryByText('finance')).toBeNull();
   });
 
-  it('never leaks an address, even when the summary carries one', () => {
-    // The backend nulls emails for non-readers; this asserts the view would not
-    // print one if a future wire change ever handed it one anyway.
+  it('prints a named person by name, never by address, though the summary carries one', () => {
+    // A summary carries each person's email beside their name. A person with
+    // a name is named by it; only one with no name reads as their email (next
+    // test), as the plugin row and the agent name them.
     const { container } = renderLocked(
       finance({ owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] } }),
     );
     expect(container.textContent).not.toContain('@');
+  });
+
+  it('names an owner the listing sends by email alone by that email, not the inherited Admin role', async () => {
+    // The listing's shape for a plugin one person owns: the person by email
+    // with an empty name, and the Admin role among the writers.
+    const person = { name: '', email: 'qa-user@example.com' };
+    renderLocked(
+      finance({
+        owners: { roles: [], users: [person] },
+        writers: { roles: ['Admin'], users: [person] },
+      }),
+    );
+    expect(screen.getByText('Run by qa-user@example.com.')).toBeInTheDocument();
+
+    fireEvent.click(askButton());
+    expect(
+      await screen.findByText(
+        'Asked qa-user@example.com. You get its skills and tools once they grant access.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Requested: qa-user@example.com decides who gets access.'),
+    ).toBeInTheDocument();
   });
 
   it('pluralises the counts line honestly', () => {

@@ -111,9 +111,13 @@ export function pluginLabel(name: string, summaries: readonly Pick<PluginSummary
  * Consequence, accepted and permanent: no "{n} people" anywhere in the Library.
  */
 
-/** Names as written, users before roles — the order the run-by line reads in. */
+/**
+ * Names as written, users before roles — the order the run-by line reads in.
+ * The plugin listing can name a person by email alone, with an empty
+ * `name`, so a person reads as their name, else their email.
+ */
 function usersThenRoles(p: PluginPrincipals): string[] {
-  return [...p.users.map((u) => u.name), ...p.roles].filter((s) => s.length > 0);
+  return [...p.users.map((u) => u.name || u.email), ...p.roles].filter((s) => s.length > 0);
 }
 
 /** Roles before people — the order a share list reads in. */
