@@ -1102,10 +1102,29 @@ describe('WorkspaceService — symbolic links', () => {
     zip.addFile('linked/escaped.md', Buffer.from('out'));
     zip.addFile('kept.md', Buffer.from('in'));
     await fs.writeFile(path.join(workspaceDir, 'knowledge-base', 'a.zip'), zip.toBuffer());
-    const res = await svc.unzipFile(workspaceId, 'knowledge-base/a.zip', 'knowledge-base', undefined, diskLanding(workspaceDir));
+    const res = await svc.unzipFile(workspaceId, 'knowledge-base/a.zip', 'knowledge-base', judgeOf(), diskLanding(workspaceDir));
     expect(res.extracted).toEqual(['knowledge-base/kept.md']);
     expect(res.skipped).toContainEqual({ path: 'linked/escaped.md', reason: 'Path traversal detected' });
     expect(await fs.readdir(elsewhere)).toEqual([]);
+  });
+
+  it('refuses an extraction whole when the checkout folder itself is a link', async () => {
+    // Each entry's own landing check starts below the checkout folder, which
+    // is the operator's to set up (the rule an upload follows). An extraction
+    // still never writes through a linked checkout folder: its archive lies
+    // inside that folder, and the archive's own link check refuses it first.
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip();
+    zip.addFile('note.md', Buffer.from('in'));
+    await fs.writeFile(path.join(workspaceDir, 'knowledge-base', 'a.zip'), zip.toBuffer());
+    const elsewhere = path.join(root, 'checkout-elsewhere');
+    await fs.rename(path.join(workspaceDir, 'knowledge-base'), elsewhere);
+    await fs.symlink(elsewhere, path.join(workspaceDir, 'knowledge-base'), linkType);
+
+    await expect(
+      svc.unzipFile(workspaceId, 'knowledge-base/a.zip', 'knowledge-base', judgeOf(), diskLanding(workspaceDir)),
+    ).rejects.toThrow('Path traversal detected');
+    expect(await fs.readdir(elsewhere)).not.toContain('note.md');
   });
 
   it('reads and writes as before when nothing on the path is a link, the workspace root behind one included', async () => {
@@ -1307,7 +1326,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     bomb.writeUInt32LE(0, bomb.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 24);
     await fs.writeFile(path.join(repoDir, 'bomb.zip'), bomb);
 
-    const res = await svc.unzipFile(workspaceId, 'bomb.zip', 'out', undefined, diskLanding(workspaceDir));
+    const res = await svc.unzipFile(workspaceId, 'bomb.zip', 'out', judgeOf(), diskLanding(workspaceDir));
 
     expect(res.extracted).toEqual([]);
     expect(res.skipped).toHaveLength(1);
@@ -1331,7 +1350,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     archive.writeUInt32LE((archive.readUInt32LE(firstCentral + 16) ^ 0xffffffff) >>> 0, firstCentral + 16);
     await fs.writeFile(path.join(repoDir, 'crc.zip'), archive);
 
-    const res = await svc.unzipFile(workspaceId, 'crc.zip', 'out', undefined, diskLanding(workspaceDir));
+    const res = await svc.unzipFile(workspaceId, 'crc.zip', 'out', judgeOf(), diskLanding(workspaceDir));
 
     expect(res.extracted).toEqual(['knowledge-base/out/fine.md']);
     expect(res.skipped).toHaveLength(1);
@@ -1341,7 +1360,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
 
   it('still extracts a file that really is empty', async () => {
     await writeZip('empty.zip', { 'empty.md': '', 'full.md': 'x' });
-    const res = await svc.unzipFile(workspaceId, 'empty.zip', 'out', undefined, diskLanding(workspaceDir));
+    const res = await svc.unzipFile(workspaceId, 'empty.zip', 'out', judgeOf(), diskLanding(workspaceDir));
     expect(res.extracted.sort()).toEqual(['knowledge-base/out/empty.md', 'knowledge-base/out/full.md']);
     expect((await fs.readFile(path.join(repoDir, 'out', 'empty.md'))).byteLength).toBe(0);
   });
@@ -1361,7 +1380,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
   // 422 unreadable archive — blaming bytes that were never there. Absence is
   // asked first, so the tool can give it the one 404 every file tool gives.
   it('a .zip that is not there is a 404 not_found, not an unreadable archive', async () => {
-    await expect(svc.unzipFile(workspaceId, 'nope.zip', undefined, undefined, diskLanding(workspaceDir))).rejects.toMatchObject({
+    await expect(svc.unzipFile(workspaceId, 'nope.zip', undefined, judgeOf(), diskLanding(workspaceDir))).rejects.toMatchObject({
       name: 'PathNotFoundError',
       status: 404,
       payload: { kind: 'not_found', path: 'knowledge-base/nope.zip' },
@@ -1373,7 +1392,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
   // hands this straight to `domainErrorBody`, so whatever is missing here is
   // missing from the HTTP 404 that the tools' 404 is supposed to match.
   it('the missing-archive 404 carries the next step and a one-line path, on any surface', async () => {
-    await expect(svc.unzipFile(workspaceId, 'nope.zip', undefined, undefined, diskLanding(workspaceDir))).rejects.toMatchObject({
+    await expect(svc.unzipFile(workspaceId, 'nope.zip', undefined, judgeOf(), diskLanding(workspaceDir))).rejects.toMatchObject({
       message:
         'There is no file or directory at "knowledge-base/nope.zip" in this workspace. Check the path with list_files.',
     });
@@ -1385,13 +1404,13 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     // carries U+2028, which is a line break to a renderer and nothing to git:
     // still accepted as a file name, still escaped on the way out.
     const forged = 'a\u2028c.zip';
-    await expect(svc.unzipFile(workspaceId, forged, undefined, undefined, diskLanding(workspaceDir))).rejects.toMatchObject({
+    await expect(svc.unzipFile(workspaceId, forged, undefined, judgeOf(), diskLanding(workspaceDir))).rejects.toMatchObject({
       status: 404,
       payload: { kind: 'not_found', path: 'knowledge-base/a\\u2028c.zip' },
     });
     // And the same invariant at the gate that now owns the line break: the
     // refusal names the path with the break escaped, never raw.
-    await expect(svc.unzipFile(workspaceId, 'a\nb.zip', undefined, undefined, diskLanding(workspaceDir))).rejects.toMatchObject({
+    await expect(svc.unzipFile(workspaceId, 'a\nb.zip', undefined, judgeOf(), diskLanding(workspaceDir))).rejects.toMatchObject({
       status: 400,
       payload: { kind: 'path-control-character', path: 'a\\nb.zip' },
     });
@@ -1406,7 +1425,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     const gone = Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
     const readSpy = vi.spyOn(fs, 'readFile').mockRejectedValueOnce(gone);
     try {
-      await expect(svc.unzipFile(workspaceId, 'racy.zip', undefined, undefined, diskLanding(workspaceDir))).rejects.toMatchObject({
+      await expect(svc.unzipFile(workspaceId, 'racy.zip', undefined, judgeOf(), diskLanding(workspaceDir))).rejects.toMatchObject({
         name: 'PathNotFoundError',
         status: 404,
         payload: { kind: 'not_found', path: 'knowledge-base/racy.zip' },
@@ -1420,7 +1439,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
   // are still the archive's problem, not the path's.
   it('a file that is not a zip is still the 422, read from its bytes', async () => {
     await fs.writeFile(path.join(repoDir, 'junk.zip'), 'not really a zip');
-    await expect(svc.unzipFile(workspaceId, 'junk.zip', undefined, undefined, diskLanding(workspaceDir))).rejects.toMatchObject({
+    await expect(svc.unzipFile(workspaceId, 'junk.zip', undefined, judgeOf(), diskLanding(workspaceDir))).rejects.toMatchObject({
       status: 422,
       payload: { kind: 'unreadable-archive' },
     });
@@ -1428,7 +1447,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
 
   it('extracts everything when no guard is supplied', async () => {
     await writeZip('b.zip', { 'x.md': '1', 'y.md': '2' });
-    const res = await svc.unzipFile(workspaceId, 'b.zip', 'out', undefined, diskLanding(workspaceDir));
+    const res = await svc.unzipFile(workspaceId, 'b.zip', 'out', judgeOf(), diskLanding(workspaceDir));
     expect(res.extracted.sort()).toEqual(['knowledge-base/out/x.md', 'knowledge-base/out/y.md']);
     expect(res.skipped).toEqual([]);
   });
@@ -1464,7 +1483,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     await fs.writeFile(path.join(repoDir, 'fails.zip'), zip.toBuffer());
     const failure = new Error('the commit failed');
     await expect(
-      svc.unzipFile(workspaceId, 'fails.zip', 'out', undefined, {
+      svc.unzipFile(workspaceId, 'fails.zip', 'out', judgeOf(), {
         writeFiles: async () => {
           throw failure;
         },
@@ -1570,7 +1589,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
       },
     };
 
-    await expect(svc.unzipFile(workspaceId, 'shared-later.zip', 'out', undefined, landing)).rejects.toBe(pending);
+    await expect(svc.unzipFile(workspaceId, 'shared-later.zip', 'out', judgeOf(), landing)).rejects.toBe(pending);
 
     expect((await fs.stat(path.join(repoDir, 'out', 'folder'))).isDirectory()).toBe(true);
     expect(synced).toEqual(['knowledge-base/out/page.md']);
@@ -1584,7 +1603,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
       },
     };
 
-    await expect(svc.unzipFile(workspaceId, 'held.zip', 'out', undefined, landing)).rejects.toMatchObject({
+    await expect(svc.unzipFile(workspaceId, 'held.zip', 'out', judgeOf(), landing)).rejects.toMatchObject({
       status: 409,
       message: '"knowledge-base/out/page.md" is being edited by J. Smith, so nothing was extracted. Try again once they are done.',
     });
@@ -1601,7 +1620,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
       },
     };
 
-    await expect(svc.unzipFile(workspaceId, 'worded.zip', 'out', undefined, landing)).rejects.toBe(worded);
+    await expect(svc.unzipFile(workspaceId, 'worded.zip', 'out', judgeOf(), landing)).rejects.toBe(worded);
   });
 });
 

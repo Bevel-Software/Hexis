@@ -86,6 +86,9 @@ function versionControlOver(repoDir: string) {
     if (creatableRootDirNames(kb.layout).has(root) && rest.length > 0 && isNew) return true;
     return access.canRead(ws, email, rel);
   };
+  /** When each held path's lock was granted, which is what tells one grant from the next. */
+  const grantedAt = new Map<string, string>();
+  let grants = 0;
   const vcs = {
     acquireLock: async (ws: string, onBranch: string, p: string, user: AuthUser) => {
       if (kb.isProtectedBranch(onBranch)) {
@@ -101,12 +104,16 @@ function versionControlOver(repoDir: string) {
       const holder = held.get(p);
       if (holder !== undefined) return { acquired: false, lock: { holderName: holder } };
       held.set(p, user.name);
-      return { acquired: true, lock: { holderName: user.name } };
+      // Each grant is its own: a path taken again is granted a later moment.
+      const acquiredAt = new Date(Date.UTC(2026, 0, 1, 0, 0, (grants += 1))).toISOString();
+      grantedAt.set(p, acquiredAt);
+      return { acquired: true, lock: { holderName: user.name, acquiredAt } };
     },
-    // A batch's ownership check: the lock the acquire granted, while it is held.
+    // A batch's ownership check: the lock the acquire granted, while it is
+    // held, with the moment it was granted.
     heartbeatLock: async (_w: string, _b: string, p: string, user: AuthUser) => {
       if (held.get(p) !== user.name) throw new Error(`not held: ${p}`);
-      return { holderName: user.name };
+      return { holderName: user.name, acquiredAt: grantedAt.get(p) };
     },
     releaseLock: async (_ws: string, _branch: string, p: string) => {
       held.delete(p);

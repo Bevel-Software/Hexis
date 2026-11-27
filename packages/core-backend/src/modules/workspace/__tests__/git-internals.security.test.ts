@@ -28,6 +28,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { WorkerDocumentExtractor } from '../file-readers/extract-in-worker.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
+import type { ArchiveEntryJudge } from '../workspace.service.js';
 import { createGitInternalsRouteGuard } from '../git-internals.middleware.js';
 import { hasGitInternalsSegment } from '../../../shared/git-internals.js';
 import { WorkspaceService, type ArchiveLanding } from '../workspace.service.js';
@@ -523,6 +524,17 @@ describe('workspace routes refuse the git folder', () => {
 describe('WorkspaceService refuses the git folder on its own', () => {
   let service: WorkspaceService;
   /** What `LockingFilesystem.writeFiles` does on disk once it holds every lock: the caller's `check` asked, then each file it kept written, in order. */
+  /**
+   * A judge that lets every archive, destination and entry through: these
+   * cases are about the git rule `unzipFile` applies itself, whoever asks.
+   */
+  const anyEntry: ArchiveEntryJudge = {
+    archive: async () => undefined,
+    destination: async () => undefined,
+    entry: async () => undefined,
+    refusedAtLock: () => undefined,
+    skipped: () => null,
+  };
   const diskLanding: ArchiveLanding = {
     writeFiles: async (handed, _summary, _deletes, check) => {
       const writes = check ? await check(handed) : handed;
@@ -554,8 +566,8 @@ describe('WorkspaceService refuses the git folder on its own', () => {
     ['moveEntry (destination)', (p) => service.moveEntry(WS, `${KB}/Notes/a.md`, p)],
     ['createDirectory', (p) => service.createDirectory(WS, `${p}/new`)],
     ['createFolderZip', (p) => service.createFolderZip(WS, p.replace(/\/config$/, ''), async (paths) => new Set(paths))],
-    ['unzipFile (archive)', (p) => service.unzipFile(WS, `${p}.zip`, undefined, undefined, diskLanding)],
-    ['unzipFile (destination)', (p) => service.unzipFile(WS, `${KB}/archive.zip`, p, undefined, diskLanding)],
+    ['unzipFile (archive)', (p) => service.unzipFile(WS, `${p}.zip`, undefined, anyEntry, diskLanding)],
+    ['unzipFile (destination)', (p) => service.unzipFile(WS, `${KB}/archive.zip`, p, anyEntry, diskLanding)],
   ];
 
   for (const [name, run] of ops) {
@@ -632,7 +644,7 @@ describe('WorkspaceService refuses the git folder on its own', () => {
     zip.addFile('fine.md', Buffer.from('# fine\n'));
     zip.writeZip(join(workspaceDir, KB, 'evil.zip'));
 
-    const result = await service.unzipFile(WS, `${KB}/evil.zip`, undefined, undefined, diskLanding);
+    const result = await service.unzipFile(WS, `${KB}/evil.zip`, undefined, anyEntry, diskLanding);
     expect(result.extracted).toEqual([`${KB}/fine.md`]);
     expect(result.skipped.map((s) => s.reason)).toEqual([GIT_INTERNALS_MESSAGE, GIT_INTERNALS_MESSAGE, GIT_INTERNALS_MESSAGE]);
   });

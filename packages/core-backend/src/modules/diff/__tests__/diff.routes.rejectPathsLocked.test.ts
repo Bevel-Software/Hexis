@@ -41,12 +41,14 @@ async function makeHarness(overrides: {
   await fs.writeFile(path.join(workspaceDir, 'knowledge-base/a.md'), 'agent version\n');
   await fs.writeFile(path.join(workspaceDir, 'knowledge-base/added.md'), 'agent-added\n');
 
+  const GRANTED_AT = '2026-01-01T00:00:00.000Z';
   const acquireLock = vi.fn(async (_ws: string, _branch: string, relPath: string) => {
     const result = overrides.acquire
       ? overrides.acquire(relPath)
       : { acquired: true, lock: { holderName: 'Alice' } };
     calls.push(`acquire:${relPath}:${result.acquired}`);
-    return result;
+    // A granted lock carries when it was granted, as the lock service's does.
+    return result.acquired ? { ...result, lock: { ...result.lock, acquiredAt: GRANTED_AT } } : result;
   });
   const releaseLockNoCommit = vi.fn(async (_ws: string, _branch: string, relPath: string) => {
     calls.push(`releaseNoCommit:${relPath}`);
@@ -56,8 +58,9 @@ async function makeHarness(overrides: {
     overrides.commit?.();
     return { sha: 'abc', summary } as never;
   });
-  // A batch's ownership check answers the lock the acquire granted.
-  const heartbeatLock = vi.fn(async () => ({ holderName: 'Alice' }));
+  // A batch's ownership check answers the lock the acquire granted: the same
+  // `acquiredAt`, which is what makes it that lock and not a later one.
+  const heartbeatLock = vi.fn(async () => ({ holderName: 'Alice', acquiredAt: GRANTED_AT }));
   const versionControl = { acquireLock, heartbeatLock, releaseLockNoCommit, commitChanges } as unknown as IVersionControlService;
 
   const revertPlan = vi.fn(async (_ws: string, paths: string[]) => ({

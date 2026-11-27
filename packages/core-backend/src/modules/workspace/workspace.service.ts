@@ -2481,10 +2481,13 @@ export class WorkspaceService implements IWorkspaceService {
     zipWsPath: string,
     destDirWsPath: string | undefined,
     /**
-     * How the archive's read and each entry are judged (see {@link ArchiveEntryJudge}); without one, the
-     * archive's read is not checked and every entry the guards below pass lands. Both unzip doors pass one.
+     * How the archive's read, its destination and each entry are judged (see
+     * {@link ArchiveEntryJudge}). Required: the rules an entry's path must meet
+     * beyond its name (inside the repository, never the checkout's own name at
+     * the repository root) are the judge's to ask, so an extraction with no
+     * judge would land what they refuse. Both unzip doors pass `archiveEntryJudge`.
      */
-    judge: ArchiveEntryJudge | undefined,
+    judge: ArchiveEntryJudge,
     /** Where the files land: one call, for every file that passed. */
     landing: ArchiveLanding,
   ): Promise<UnzipResult> {
@@ -2503,7 +2506,7 @@ export class WorkspaceService implements IWorkspaceService {
     }
     // Extracting an archive reads it: one the caller may not read is refused
     // before its bytes, or the disk at its resolved path, are looked at.
-    await judge?.archive(zipRelativePath);
+    await judge.archive(zipRelativePath);
     await assertNotGitInternals(workspaceDir, zipRelativePath, zipAbsolute);
     // Inferred from the NORMALISED archive path, so an archive named without
     // the prefix extracts beside itself inside the repository rather than at
@@ -2512,7 +2515,7 @@ export class WorkspaceService implements IWorkspaceService {
       await this.resolveInsideRepo(workspaceId, destDirWsPath ?? path.posix.dirname(zipRelativePath));
     assertValidPath(destRel);
     assertNoGitInternalsSegment(destRel);
-    await judge?.destination(destRel);
+    await judge.destination(destRel);
     await assertNotGitInternals(workspaceDir, destRel, destAbsolute);
     // Neither the archive nor the destination may sit behind a link; each
     // entry's own target is checked under its lock, below.
@@ -2569,7 +2572,7 @@ export class WorkspaceService implements IWorkspaceService {
      * where the entry would have landed, or null when its name gives it none.
      */
     const skip = (name: string, wsPath: string | null, why: unknown): void => {
-      const whole = judge?.skipped(wsPath, name, why);
+      const whole = judge.skipped(wsPath, name, why);
       if (whole) throw whole;
       skipped.push({ path: name, reason: why instanceof Error ? why.message : String(why) });
     };
@@ -2588,7 +2591,6 @@ export class WorkspaceService implements IWorkspaceService {
       // judged before anything is written, so a refused entry leaves nothing
       // behind on disk.
       const allowEntry = async (kind: 'file' | 'dir'): Promise<boolean> => {
-        if (!judge) return true;
         try {
           await judge.entry(step.target, kind);
           return true;
@@ -2624,13 +2626,11 @@ export class WorkspaceService implements IWorkspaceService {
     // A file the lock's gates refuse is the judge's to answer for: skipped,
     // or the whole extraction refused (the landing then gives back every lock
     // with nothing written).
-    const refused = judge
-      ? (wsPath: string, err: unknown): void => {
-          judge.refusedAtLock(wsPath, err);
-          skip(entryNameAt.get(wsPath) ?? wsPath, wsPath, err);
-          refusedAtLock.add(wsPath);
-        }
-      : undefined;
+    const refused = (wsPath: string, err: unknown): void => {
+      judge.refusedAtLock(wsPath, err);
+      skip(entryNameAt.get(wsPath) ?? wsPath, wsPath, err);
+      refusedAtLock.add(wsPath);
+    };
     // Each file's landing target, asked with every lock held and after the
     // lock's gates (see the directory entries above): a file that meets a
     // link or the git folder is skipped, or refuses the extraction when the
