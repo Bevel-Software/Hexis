@@ -6,7 +6,7 @@ import type { AuthUser, IVersionControlService } from '@bevel-software/platform-
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { LockingFilesystem } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError, VersionControlValidationError } from '../../../shared/domain-errors.js';
-import { makeAgentRolesYamlWriteValidator } from '../../access-model/index.js';
+import { makeAgentAccessYamlWriteValidator } from '../../access-model/index.js';
 
 /** The clone folder at the workspace root: every path the filesystem mutates lives under it. */
 const KB = 'knowledge-base';
@@ -1177,7 +1177,7 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
   });
 
   function layer(versionControl: IVersionControlService) {
-    const validateWrite = makeAgentRolesYamlWriteValidator(KB, () =>
+    const validateWrite = makeAgentAccessYamlWriteValidator(KB, () =>
       fs.readFile(path.join(root, ROLES), 'utf-8').catch(() => null),
     );
     return new LockingFilesystem(
@@ -1186,9 +1186,15 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
     );
   }
 
+  /** Refused under the lock (the gate is asked only there), every lock released untouched. */
   async function expectRefused(op: Promise<unknown>, versionControl: IVersionControlService): Promise<void> {
     await expect(op).rejects.toMatchObject({ status: 422, payload: { kind: 'roles-yaml-new-role' } });
-    expect(versionControl.acquireLock).not.toHaveBeenCalled();
+    const locks = (versionControl.acquireLock as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(locks).toBeGreaterThan(0);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(locks);
+    expect(versionControl.releaseLock).not.toHaveBeenCalled();
+    expect(versionControl.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(versionControl.commitChanges).not.toHaveBeenCalled();
     expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(CURRENT);
   }
 
@@ -1310,12 +1316,11 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
       expect(versionControl.releaseLock).toHaveBeenCalledTimes(1);
     });
 
-    /** A validator that passes before the lock and refuses under it by throwing a bare string. */
+    /** A validator that refuses (it is asked under the lock only) by throwing a bare string. */
     function refusesUnderLockWith(reason: string) {
-      let calls = 0;
       return Object.assign(
         async () => {
-          if (++calls > 1) throw reason;
+          throw reason;
         },
         { appliesTo: (p: string) => p === ROLES },
       );
@@ -1356,6 +1361,130 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
     await fsLayer.copyFile(DRAFT, `${KB}/KnowledgeBase/copy.yaml`);
     expect(validateWrite.appliesTo).toHaveBeenCalledWith(`${KB}/KnowledgeBase/copy.yaml`);
     expect(validateWrite).not.toHaveBeenCalled();
+  });
+});
+
+describe('LockingFilesystem — the agent gate refuses a case-duplicate group in groups.yaml', () => {
+  const GROUPS = `${KB}/groups.yaml`;
+  const CURRENT = 'groups:\n  Product:\n    - f@x.eu\n    - g@x.eu\n    - h@x.eu\n';
+  const ABOVE = 'groups:\n  PRODUCT:\n    - qa.dup@x.eu\n  Product:\n    - f@x.eu\n    - g@x.eu\n    - h@x.eu\n';
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    await fs.mkdir(path.join(root, KB), { recursive: true });
+    await fs.writeFile(path.join(root, GROUPS), CURRENT);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const layer = (versionControl: IVersionControlService) =>
+    new LockingFilesystem(
+      { basePath: root, contained: true },
+      {
+        versionControl,
+        workspaceId: 'ws-feat',
+        branch: 'feat',
+        user: USER,
+        kbDirName: KB,
+        validateWrite: makeAgentAccessYamlWriteValidator(KB, (file) =>
+          fs.readFile(path.join(root, KB, file), 'utf-8').catch(() => null),
+        ),
+      },
+    );
+
+  it('writeFile with PRODUCT above Product is refused with a 422 under the lock, and the file and its members stay', async () => {
+    const versionControl = makeVersionControl();
+    await expect(layer(versionControl).writeFile(GROUPS, ABOVE)).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'groups-yaml-duplicate-group', duplicates: [{ group: 'PRODUCT', existing: 'Product' }] },
+    });
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(1);
+    expect(versionControl.releaseLock).not.toHaveBeenCalled();
+    expect(await fs.readFile(path.join(root, GROUPS), 'utf-8')).toBe(CURRENT);
+  });
+
+  describe('a caller the lock refuses never hears the gate (A Guard\'s Answer Is a Disclosure)', () => {
+    /** The lock's read gate refusing, as `acquireLock` does for a path its caller may not read. */
+    const denied = Object.assign(new Error('You cannot read this file.'), { status: 403 });
+    const DRAFT = `${KB}/KnowledgeBase/draft.yaml`;
+
+    function deniedLayer() {
+      const versionControl = makeVersionControl();
+      (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockRejectedValue(denied);
+      const readCurrent = vi.fn((file: string) => fs.readFile(path.join(root, KB, file), 'utf-8').catch(() => null));
+      const fsLayer = new LockingFilesystem(
+        { basePath: root, contained: true },
+        {
+          versionControl,
+          workspaceId: 'ws-feat',
+          branch: 'feat',
+          user: USER,
+          kbDirName: KB,
+          validateWrite: makeAgentAccessYamlWriteValidator(KB, readCurrent),
+        },
+      );
+      return { fsLayer, readCurrent };
+    }
+
+    beforeEach(async () => {
+      await fs.mkdir(path.join(root, KB, 'KnowledgeBase'), { recursive: true });
+      await fs.writeFile(path.join(root, DRAFT), ABOVE);
+    });
+
+    const ops: [string, (l: LockingFilesystem) => Promise<unknown>][] = [
+      ['writeFile', (l) => l.writeFile(GROUPS, ABOVE)],
+      ['writeFiles', (l) => l.writeFiles([{ path: GROUPS, content: ABOVE }], 'batch')],
+      ['appendFile', (l) => l.appendFile(GROUPS, '  PRODUCT:\n    - qa.dup@x.eu\n')],
+      ['copyFile', (l) => l.copyFile(DRAFT, GROUPS, { overwrite: true })],
+      ['moveFile', (l) => l.moveFile(DRAFT, GROUPS, { overwrite: true })],
+      ['rewriteFile', (l) => l.rewriteFile(GROUPS, () => ABOVE)],
+    ];
+    for (const [name, op] of ops) {
+      it(`${name}: the lock's refusal, not a 422, and the stored file is never read for a verdict`, async () => {
+        const { fsLayer, readCurrent } = deniedLayer();
+        await expect(op(fsLayer)).rejects.toBe(denied);
+        expect(readCurrent).not.toHaveBeenCalled();
+        expect(await fs.readFile(path.join(root, GROUPS), 'utf-8')).toBe(CURRENT);
+      });
+    }
+  });
+
+  it('appendFile is judged by the file it would leave', async () => {
+    const versionControl = makeVersionControl();
+    await expect(layer(versionControl).appendFile(GROUPS, '  product:\n    - qa.dup@x.eu\n')).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'groups-yaml-duplicate-group' },
+    });
+    expect(await fs.readFile(path.join(root, GROUPS), 'utf-8')).toBe(CURRENT);
+  });
+
+  it('an append is judged again under the lock, against a Product a concurrent writer added meanwhile', async () => {
+    await fs.writeFile(path.join(root, GROUPS), 'groups:\n  GTM:\n    - s@x.eu\n');
+    const versionControl = makeVersionControl();
+    const acquired = (versionControl.acquireLock as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (versionControl.acquireLock as ReturnType<typeof vi.fn>).mockImplementationOnce(async (...args: unknown[]) => {
+      await fs.writeFile(path.join(root, GROUPS), CURRENT);
+      return acquired(...args);
+    });
+    // Against the file before the lock the append adds a distinct group; under it, the file it lands on already holds Product.
+    await expect(layer(versionControl).appendFile(GROUPS, '  PRODUCT:\n    - qa.dup@x.eu\n')).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'groups-yaml-duplicate-group', duplicates: [{ group: 'PRODUCT', existing: 'Product' }] },
+    });
+    expect(versionControl.acquireLock).toHaveBeenCalledTimes(1);
+    expect(versionControl.releaseLockUntouched).toHaveBeenCalledTimes(1);
+    expect(versionControl.releaseLock).not.toHaveBeenCalled();
+    expect(await fs.readFile(path.join(root, GROUPS), 'utf-8')).toBe(CURRENT);
+  });
+
+  it('a members-only write lands as before', async () => {
+    const versionControl = makeVersionControl();
+    await layer(versionControl).writeFile(GROUPS, `${CURRENT}    - i@x.eu\n`);
+    expect(await fs.readFile(path.join(root, GROUPS), 'utf-8')).toBe(`${CURRENT}    - i@x.eu\n`);
+    expect(versionControl.releaseLock).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -3,12 +3,13 @@ import {
   isRolesYamlPath,
   assertRolesYamlParsable,
   makeRolesYamlWriteValidator,
-  makeAgentRolesYamlWriteValidator,
+  makeAgentAccessYamlWriteValidator,
   NEW_ROLE_GUIDANCE,
   RolesYamlInvalidError,
   RolesYamlNewRoleError,
   RolesYamlUnknownGroupError,
   assertKnownGroups,
+  GroupsYamlDuplicateGroupError,
 } from '../roles-yaml-guard.js';
 
 const KB = 'knowledge-base';
@@ -82,7 +83,7 @@ describe('roles-yaml-guard', () => {
     });
   });
 
-  describe('makeAgentRolesYamlWriteValidator', () => {
+  describe('makeAgentAccessYamlWriteValidator', () => {
     const CURRENT = `roles:
   Admin:
     - a@x.eu
@@ -93,7 +94,7 @@ describe('roles-yaml-guard', () => {
 
     /** Run the agent validator against `current` (null = no file), as a promise either way. */
     const run = (content: string | Uint8Array, current: string | null = CURRENT, path = `${KB}/roles.yaml`) =>
-      Promise.resolve().then(() => makeAgentRolesYamlWriteValidator(KB, async () => current)(path, content));
+      Promise.resolve().then(() => makeAgentAccessYamlWriteValidator(KB, async () => current)(path, content));
 
     it('refuses a role absent from the current file, naming it and redirecting to a group', async () => {
       const err = await run(`${CURRENT}  Project Phoenix:\n    - p@x.eu\n`).then(
@@ -151,7 +152,7 @@ describe('roles-yaml-guard', () => {
       const active = { groups: GROUPS, sourceFile: 'groups.yaml' };
       const runWithGroups = (content: string, groups: typeof active | null = active, current: string | null = CURRENT) =>
         Promise.resolve().then(() =>
-          makeAgentRolesYamlWriteValidator(KB, async () => current, async () => groups)(`${KB}/roles.yaml`, content),
+          makeAgentAccessYamlWriteValidator(KB, async () => current, async () => groups)(`${KB}/roles.yaml`, content),
         );
 
       it('passes an entry naming a known group, in any case or spacing', async () => {
@@ -196,6 +197,102 @@ describe('roles-yaml-guard', () => {
 
     it('leaves every other path alone', async () => {
       await expect(run(`${CURRENT}  Phoenix:\n    - p@x.eu\n`, CURRENT, `${KB}/KnowledgeBase/roles.yaml`)).resolves.toBeUndefined();
+    });
+  });
+  describe('makeAgentAccessYamlWriteValidator on groups.yaml', () => {
+    const GROUPS = 'groups:\n  Product:\n    - f@x.eu\n    - g@x.eu\n  GTM Team:\n    - s@x.eu\n';
+    const ROLES = 'roles:\n  Admin:\n    - a@x.eu\n';
+    const DUP = '  PRODUCT:\n    - qa.dup@x.eu\n';
+    const ABOVE = GROUPS.replace('groups:\n', `groups:\n${DUP}`);
+
+    /** Run the agent validator on `path` against root files `files` (absent = null), recording which it read. */
+    const runOn = (content: string | Uint8Array, current: string | null = GROUPS, path = `${KB}/groups.yaml`) => {
+      const read: string[] = [];
+      const files: Record<string, string | null> = { 'groups.yaml': current, 'roles.yaml': ROLES };
+      const result = Promise.resolve().then(() =>
+        makeAgentAccessYamlWriteValidator(KB, async (file) => {
+          read.push(file);
+          return files[file] ?? null;
+        })(path, content),
+      );
+      return { result, read };
+    };
+
+    it('refuses PRODUCT added above Product with a 422 naming both, judged against groups.yaml', async () => {
+      const { result, read } = runOn(ABOVE);
+      const err = await result.then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(GroupsYamlDuplicateGroupError);
+      const refusal = err as GroupsYamlDuplicateGroupError;
+      expect(refusal.status).toBe(422);
+      expect(refusal.payload).toEqual({
+        kind: 'groups-yaml-duplicate-group',
+        duplicates: [{ group: 'PRODUCT', existing: 'Product' }],
+      });
+      expect(refusal.message).toContain("'PRODUCT' (a group named 'Product' already exists)");
+      expect(read).toEqual(['groups.yaml']);
+    });
+
+    it('refuses the reverse order, a whitespace respelling, and bytes, all the same way', async () => {
+      const refused = { name: 'GroupsYamlDuplicateGroupError', duplicates: [{ group: 'PRODUCT', existing: 'Product' }] };
+      await expect(runOn(`${GROUPS}${DUP}`).result).rejects.toMatchObject(refused);
+      await expect(runOn(new TextEncoder().encode(ABOVE)).result).rejects.toMatchObject(refused);
+      await expect(runOn(`${GROUPS}  gtm   TEAM:\n    - t@x.eu\n`).result).rejects.toMatchObject({
+        duplicates: [{ group: 'gtm   TEAM', existing: 'GTM Team' }],
+      });
+    });
+
+    it('refuses two spellings of one new group in the same write, and in a file that does not exist yet', async () => {
+      const both = `${GROUPS}  Phoenix:\n    - p@x.eu\n  phoenix:\n    - q@x.eu\n`;
+      await expect(runOn(both).result).rejects.toMatchObject({ duplicates: [{ group: 'phoenix', existing: 'Phoenix' }] });
+      await expect(runOn(ABOVE, null).result).rejects.toMatchObject({ duplicates: [{ group: 'Product', existing: 'PRODUCT' }] });
+    });
+
+    it('refuses a candidate the resolver cannot parse — an exact repeat included — before reading the current file', async () => {
+      const exact = runOn(`${GROUPS}  Product:\n    - z@x.eu\n`);
+      await expect(exact.result).rejects.toMatchObject({
+        status: 422,
+        payload: { kind: 'groups-yaml-invalid', groupsYamlErrors: [expect.stringContaining("duplicate key 'Product'")] },
+      });
+      expect(exact.read).toEqual([]);
+      await expect(runOn('groups:\n  - Product\n').result).rejects.toMatchObject({
+        status: 422,
+        payload: { kind: 'groups-yaml-invalid' },
+      });
+      // Even when the current file is already broken the same way: the write must mend it, not keep it.
+      const broken = `${GROUPS}  Product: []\n`;
+      await expect(runOn(`${broken}  Phoenix: []\n`, broken).result).rejects.toMatchObject({
+        payload: { kind: 'groups-yaml-invalid' },
+      });
+      await expect(runOn('', broken).result).resolves.toBeUndefined();
+    });
+
+    it('passes membership edits, a new distinct group and a respelling that replaces the old block', async () => {
+      await expect(runOn(GROUPS.replace('    - g@x.eu\n', '    - g@x.eu\n    - h@x.eu\n')).result).resolves.toBeUndefined();
+      await expect(runOn(`${GROUPS}  Phoenix:\n    - p@x.eu\n`).result).resolves.toBeUndefined();
+      await expect(runOn(GROUPS.replace('  Product:', '  PRODUCT:')).result).resolves.toBeUndefined();
+    });
+
+    it('leaves a case-duplicate the file already holds alone, so it cannot block an unrelated edit', async () => {
+      await expect(runOn(`${ABOVE}  Phoenix: []\n`, ABOVE).result).resolves.toBeUndefined();
+      // A third spelling of that name is new, and is refused.
+      await expect(runOn(`${ABOVE}  product:\n    - z@x.eu\n`, ABOVE).result).rejects.toBeInstanceOf(
+        GroupsYamlDuplicateGroupError,
+      );
+    });
+
+    it('claims the root groups.yaml only, and still judges roles.yaml against roles.yaml', async () => {
+      const validate = makeAgentAccessYamlWriteValidator(KB, async () => null);
+      expect(validate.appliesTo?.(`${KB}/groups.yaml`)).toBe(true);
+      expect(validate.appliesTo?.(`${KB}/roles.yaml`)).toBe(true);
+      expect(validate.appliesTo?.(`${KB}/KnowledgeBase/groups.yaml`)).toBe(false);
+      expect(validate.appliesTo?.(`${KB}/synced-groups.yaml`)).toBe(false);
+      await expect(runOn(ABOVE, GROUPS, `${KB}/KnowledgeBase/groups.yaml`).result).resolves.toBeUndefined();
+      const roles = runOn(`${ROLES}    - b@x.eu\n`, GROUPS, `${KB}/roles.yaml`);
+      await expect(roles.result).resolves.toBeUndefined();
+      expect(roles.read).toEqual(['roles.yaml']);
     });
   });
 });

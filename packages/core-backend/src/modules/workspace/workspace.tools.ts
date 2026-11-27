@@ -30,7 +30,7 @@ import {
 } from '../kb-fs/index.js';
 import { GitGuardedFilesystem, MoveLockedError, MoveRacedError, type LockingFilesystem } from '../kb-fs/index.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { isRolesYamlPath, toKbRelative, resolveReadableMap, AccessDeniedError } from '../access-model/index.js';
+import { toKbRelative, resolveReadableMap, AccessDeniedError } from '../access-model/index.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/index.js';
@@ -4109,11 +4109,12 @@ export function registerWorkspaceTools(
                 // An entry that would land beside the repository is skipped with the
                 // corrected-path reason, like any other refused entry.
                 assertInsideRepo(wsRelPath, kbDirName);
-                // Extraction writes straight to disk, past the filesystem's roles.yaml
-                // gate — so an archive may not carry one at all.
-                if (isRolesYamlPath(wsRelPath, kbDirName)) {
+                // Extraction writes straight to disk, past the filesystem's write
+                // gate (roles.yaml, groups.yaml) — so an archive may not carry a
+                // file that gate checks at all.
+                if ((await ctx.getWriteValidator(branch)).appliesTo?.(wsRelPath)) {
                   throw new ToolError(
-                    'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
+                    `${wsRelPath.slice(wsRelPath.lastIndexOf('/') + 1)} is never extracted from an archive — change it with edit_file or write_file, where the change is checked.`,
                     422,
                   );
                 }

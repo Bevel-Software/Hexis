@@ -12,7 +12,7 @@ import { AccessControlService } from '../access-control.service.js';
 import { GroupsAdminService, GroupsAdminError } from '../groups-admin.service.js';
 import { createGroup, addGroupMember, GroupsEditError } from '../groups-edit.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { AccessDeniedError } from '../../access-model/index.js';
+import { AccessDeniedError, makeAgentAccessYamlWriteValidator } from '../../access-model/index.js';
 import { UNSHOWN_REFERENCE_REFUSAL } from '../reference-scan.js';
 
 const KB = 'knowledge-base';
@@ -208,6 +208,33 @@ describe('GroupsAdminService', () => {
     const roster = await service.deleteGroup(ADMIN, 'contractors');
     expect(roster.groups.some((g) => g.canonical === 'contractors')).toBe(false);
     expect(await groupsYaml()).not.toContain('Contractors');
+  });
+
+  describe('after an agent write adding a case-duplicate group is refused', () => {
+    const PRODUCT = 'groups:\n  Product:\n    - felix@x.io\n    - ana@x.io\n    - bo@x.io\n  GTM Team:\n    - sara@x.io\n';
+    const agentGate = makeAgentAccessYamlWriteValidator(KB, async (file) =>
+      fs.readFile(path.join(repo, file), 'utf-8').catch(() => null),
+    );
+
+    for (const [order, candidate] of [
+      ['PRODUCT above Product', PRODUCT.replace('groups:\n', 'groups:\n  PRODUCT:\n    - qa.dup@x.io\n')],
+      ['PRODUCT below Product', `${PRODUCT}  PRODUCT:\n    - qa.dup@x.io\n`],
+    ] as const) {
+      it(`${order}: the members stay, in the roster and through the next app add`, async () => {
+        await write(repo, 'groups.yaml', PRODUCT);
+        await expect(agentGate(`${KB}/groups.yaml`, candidate)).rejects.toMatchObject({
+          status: 422,
+          payload: { kind: 'groups-yaml-duplicate-group', duplicates: [{ group: 'PRODUCT', existing: 'Product' }] },
+        });
+        expect(await groupsYaml()).toBe(PRODUCT);
+
+        const roster = await service.getRoster('admin@x.io');
+        expect(roster.groups.find((g) => g.canonical === 'product')?.members).toEqual(['felix@x.io', 'ana@x.io', 'bo@x.io']);
+        await service.addMember(ADMIN, 'product', 'new@x.io');
+        expect(await groupsYaml()).toContain('Product:\n    - felix@x.io\n    - ana@x.io\n    - bo@x.io\n    - new@x.io\n');
+        expect(await groupsYaml()).not.toContain('qa.dup@x.io');
+      });
+    }
   });
 
   it('refuses a group name that shadows a role (deliberate friction — IdP collisions resolve by precedence instead)', async () => {

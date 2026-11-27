@@ -4,10 +4,7 @@ import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { IVersionControlService } from '@bevel-software/platform-shared';
 import { LockingFilesystem, ReadOnlyFilesystem } from '../kb-fs/index.js';
 import type { WriteValidator } from '../kb-fs/index.js';
-import {
-  makeAgentRolesYamlWriteValidator,
-  ROLES_YAML_BASENAME,
-} from '../access-model/index.js';
+import { makeAgentAccessYamlWriteValidator } from '../access-model/index.js';
 import type { ICreatorAccess, GroupsIndex } from '../access-model/index.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import { isAbsence } from '../../shared/fs.contract.js';
@@ -84,13 +81,15 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
     const { loadActiveGroups } = deps;
     const validatorCache = new Map<string, WriteValidator>();
     /**
-     * The agent's pre-disk `roles.yaml` gate for `branch`'s workspace
-     * (cached): refuses a write that would leave the file unparseable (an
-     * app-wide admin lockout), that creates a role, or that adds a
-     * `- group:` entry naming no group — agents manage membership; roles are
-     * pre-set. ONE gate for every agent write to the workspace: the file
-     * tools take it before a byte lands, and `update_branch` takes it for a
-     * resolution's content before the merge.
+     * The agent's pre-disk `roles.yaml` / `groups.yaml` gate for `branch`'s
+     * workspace (cached): refuses a write that would leave `roles.yaml` or
+     * `groups.yaml` unparseable (an app-wide admin lockout; every group
+     * retired), that creates a role, that adds a `- group:` entry naming no
+     * group, or that declares a group in `groups.yaml` more times than the
+     * current file does — agents manage membership; roles are pre-set. ONE
+     * gate for every agent write to the workspace: the file tools take it
+     * before a byte lands, and `update_branch` takes it for a resolution's
+     * content before the merge.
      */
     const getWriteValidator = async (branch: string): Promise<WriteValidator> => {
       assertBranchProvided(branch);
@@ -98,14 +97,15 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
       if (cached) return cached;
       const ws = await deps.workspaceService.getOrCreateForUser(user, branch);
       const basePath = await deps.workspaceService.getWorkspacePath(ws.id);
-      const validator = makeAgentRolesYamlWriteValidator(
+      const readRootFile = (file: string) => readTextIfExists(path.join(basePath, deps.kbDirName, file));
+      const validator = makeAgentAccessYamlWriteValidator(
         deps.kbDirName,
-        () => readTextIfExists(path.join(basePath, deps.kbDirName, ROLES_YAML_BASENAME)),
+        readRootFile,
         loadActiveGroups &&
           (async () => {
             // A source that exists but cannot be read leaves group entries
             // unchecked rather than refusing every one.
-            const active = await loadActiveGroups((file) => readTextIfExists(path.join(basePath, deps.kbDirName, file)));
+            const active = await loadActiveGroups(readRootFile);
             return active.health.ok ? active : null;
           }),
       );
@@ -144,7 +144,7 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
                 branch: branchForWorkspaceId(workspaceId),
                 user,
                 kbDirName: deps.kbDirName,
-                // The agent's pre-disk roles.yaml gate (`getWriteValidator`):
+                // The agent's pre-disk roles/groups gate (`getWriteValidator`):
                 // the file tools and `update_branch`'s resolutions take the
                 // same one.
                 validateWrite: await getWriteValidator(branch),

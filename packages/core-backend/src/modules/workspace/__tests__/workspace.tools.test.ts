@@ -415,6 +415,8 @@ async function start(
     } as never,
     events: {} as never,
     getFilesystem: async () => fs,
+    // A write gate that claims no path, as the filesystem above runs none.
+    getWriteValidator: async () => () => undefined,
   });
   const toolHandler = createToolHandlerFactory(resolve);
   const fakeAuth = (req: express.Request, _res: express.Response, next: express.NextFunction) => {
