@@ -16,7 +16,7 @@ import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
-import { PullRequestsForMe } from '../../git';
+import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { IntegrationsSetupReminder } from './IntegrationsSetupReminder';
 import { PluginsSidebar, type SidebarContextTarget } from './PluginsSidebar';
 import { PluginsTree, SkillsTree } from './SkillsTree';

@@ -43,10 +43,7 @@ vi.mock('../services/teams.api', () => ({ listTeams: teamsMock.listTeams }));
 const personalMock = vi.hoisted(() => ({ getPersonalPluginName: vi.fn() }));
 vi.mock('../services/personal-plugin.api', () => ({ getPersonalPluginName: personalMock.getPersonalPluginName }));
 // The sidebar's change-request dock pulls in git wiring these routes do not exercise.
-vi.mock('../../git', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../git')>()),
-  PullRequestsForMe: () => null,
-}));
+vi.mock('../../git/components/PullRequestsForMe', () => ({ PullRequestsForMe: () => null }));
 
 const toolPageMock = vi.hoisted(() => ({ useToolPage: vi.fn() }));
 vi.mock('../hooks/useToolPage', () => ({ useToolPage: toolPageMock.useToolPage }));

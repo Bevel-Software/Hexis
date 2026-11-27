@@ -15,8 +15,9 @@ import { ConnectionScope, type IAgentScopeResolver, type AgentChoice } from '../
  *
  * It lives here, beside the other composition fixtures, because suites of
  * several modules (agent-scope, mcp, plugins) drive their surfaces through
- * it, and a suite reaches another module only through its entry or a fixture
- * under `src/__tests__/` — never another module's own `__tests__` folder.
+ * it, and the test rule is that a suite reaches another module through its
+ * entry or a fixture under `src/__tests__/`, not through another module's
+ * own `__tests__` folder.
  */
 export interface InMemoryKb {
   /** Repo-relative path → content. */

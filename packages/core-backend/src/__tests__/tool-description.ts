@@ -5,6 +5,7 @@
  *
  * No product code outside the registry reads these measurements, so they are
  * not on its entry: an entry export used only by tests is a member exported
- * for testing. A suite outside the registry reaches them here, never the file.
+ * for testing. A suite outside the registry can import them from here instead
+ * of from the registry's file.
  */
 export { CLIENT_SHORT_CUT, clientVisibleLength } from '../modules/tool-registry/description-length.js';
