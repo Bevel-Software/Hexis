@@ -195,8 +195,8 @@ function redactedInPlace(err: Error, redact: (text: string) => string): Error {
 /**
  * `value` with `redact` applied to every string in it, keys included, however
  * deeply nested, and to every number and boolean (one whose text `redact`
- * changes comes back as that redacted text; an HTTP status where one is
- * stated stays). An error is redacted in place, every own field (enumerable
+ * changes comes back as that redacted text; an HTTP status an error or its
+ * response states stays). An error is redacted in place, every own field (enumerable
  * or not) and its cause, its class, name and code kept; an array, a `Map`, a
  * `Set` or any other object is copied with its own fields redacted and its
  * prototype kept, each key defined as an own property (so a `__proto__` key
@@ -208,14 +208,18 @@ function redactedInPlace(err: Error, redact: (text: string) => string): Error {
 function redactedCopy(value: unknown, redact: (text: string) => string): unknown {
   const copies = new Map<object, unknown>();
   const pending: Array<() => void> = [];
-  /** Define `key` on `target` as an own data property holding `child` redacted, once the walk reaches it. */
-  const put = (target: object, key: string, child: unknown, enumerable = true) =>
-    Object.defineProperty(target, key, { value: copy(child, key), writable: true, configurable: true, enumerable });
-  const copy = (item: unknown, key?: string): unknown => {
+  /** Errors and their responses: where a `status` or `statusCode` states an HTTP status the classifier reads. */
+  const statusHolders = new Set<object>();
+  /** Define `key` on `target` (copied from `source`) as an own data property holding `child` redacted. */
+  const put = (target: object, source: object, key: string, child: unknown, enumerable = true) => {
+    const keep = statusHolders.has(source) && HTTP_STATUS_FIELDS.has(key) && isHttpStatus(child);
+    Object.defineProperty(target, key, { value: keep ? child : copy(child), writable: true, configurable: true, enumerable });
+  };
+  const copy = (item: unknown): unknown => {
     if (typeof item === 'string') return redact(item);
     if (typeof item === 'number' || typeof item === 'bigint' || typeof item === 'boolean') {
-      if (key !== undefined && HTTP_STATUS_FIELDS.has(key) && isHttpStatus(item)) return item;
-      return redact(String(item)) === String(item) ? item : redact(String(item));
+      const redacted = redact(String(item));
+      return redacted === String(item) ? item : redacted;
     }
     if (!item || typeof item !== 'object') return item;
     if (copies.has(item)) return copies.get(item);
@@ -227,6 +231,9 @@ function redactedCopy(value: unknown, redact: (text: string) => string): unknown
         .map((key) => [key, Object.getOwnPropertyDescriptor(item, key)?.enumerable ?? true, readField(item, key)] as const);
       const hasCause = Object.prototype.hasOwnProperty.call(item, 'cause');
       const cause = hasCause ? readField(item, 'cause') : undefined;
+      statusHolders.add(item);
+      const response = fields.find(([key]) => key === 'response')?.[2];
+      if (response && typeof response === 'object') statusHolders.add(response);
       const message = redact(item.message);
       // Replaced in place only when every field can be, so a frozen error, or
       // one with a field it will not give up, is left as it was and answered
@@ -247,8 +254,8 @@ function redactedCopy(value: unknown, redact: (text: string) => string): unknown
       }
       copies.set(item, target);
       pending.push(() => {
-        for (const [key, enumerable, child] of fields) put(target, key, child, enumerable);
-        if (hasCause) put(target, 'cause', cause, false);
+        for (const [key, enumerable, child] of fields) put(target, item, key, child, enumerable);
+        if (hasCause) put(target, item, 'cause', cause, false);
       });
       return target;
     }
@@ -271,7 +278,7 @@ function redactedCopy(value: unknown, redact: (text: string) => string): unknown
     const out: object = Array.isArray(item) ? [] : Object.create(Object.getPrototypeOf(item) as object | null);
     copies.set(item, out);
     pending.push(() => {
-      for (const [key, child] of Object.entries(item)) put(out, Array.isArray(item) ? key : redact(key), child);
+      for (const [key, child] of Object.entries(item)) put(out, item, Array.isArray(item) ? key : redact(key), child);
     });
     return out;
   };
@@ -281,10 +288,11 @@ function redactedCopy(value: unknown, redact: (text: string) => string): unknown
 }
 
 /**
- * Where an error or its response states an HTTP status, which the token
- * classifier reads: kept when it is one (an integer from 100 to 599), so a
- * rejected token is still told from a refused call. An error's `code` is kept
- * whatever it holds, as it was.
+ * Where an error, or the `response` it carries, states an HTTP status, which
+ * the token classifier reads: kept there when it is one (an integer from 100
+ * to 599), so a rejected token is still told from a refused call; the same
+ * names deeper in a payload are redacted like anything else. An error's
+ * `code` is kept whatever it holds, as it was.
  */
 const HTTP_STATUS_FIELDS = new Set(['status', 'statusCode']);
 function isHttpStatus(value: unknown): boolean {

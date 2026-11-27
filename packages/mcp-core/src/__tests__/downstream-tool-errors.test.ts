@@ -214,6 +214,19 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(thrown.status).toBe(401);
     expect(thrown.response).toEqual({ status: 401, statusCode: '[redacted]' });
     expect(thrown.code).toBe(-32603);
+    // A `status` deeper in the payload is not the error's: one that repeats what the caller sent goes.
+    const nested = Object.assign(new McpError(-32603, 'rejected', { status: 401, detail: { statusCode: 404 } }), { status: 401 });
+    const echoed = (await failingWith(nested)({ want: 401, also: 404 })) as McpError & { status: unknown };
+    expect(echoed.status).toBe(401);
+    expect(echoed.data).toEqual({ status: '[redacted]', detail: { statusCode: '[redacted]' } });
+    // A boolean whose text is a credential goes too.
+    const keyed = {
+      name: 'stub',
+      call_template_type: 'mcp',
+      config: { mcpServers: { srv: { url: 'https://x.example/mcp', headers: { 'X-Api-Key': 'false' } } } },
+    } as unknown as CallTemplate;
+    const flagged = (await failingWith(new McpError(-32603, 'rejected', { ok: false }), keyed)()) as McpError;
+    expect(flagged.data).toEqual({ ok: '[redacted]' });
   });
 
   it('redacts a thrown string', async () => {
