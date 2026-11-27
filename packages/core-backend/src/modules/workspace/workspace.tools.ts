@@ -2695,8 +2695,11 @@ export function registerWorkspaceTools(
       const gate = readGateFor(a.branch as string, ctx);
       // Inside a personal shelf, a folder the caller may not read is not
       // there: the same not_found a missing path gets, decided before the
-      // disk is asked, so nothing about the shelf's content shapes the answer.
-      if (isShelfPath(dir) && !(await readableFiles(gate, [dir])).has(dir)) throw notFound(dir, 'Nothing to list');
+      // folder is read, so nothing about the shelf's content shapes the
+      // answer. Judged on the on-disk spelling: on a case-insensitive disk
+      // `plugins/Personal-x` opens the shelf and must be judged as it.
+      const onDisk = dir ? await onDiskSpelling(await workspaceRoot(a.branch as string, ctx), dir) : dir;
+      if (isShelfPath(onDisk) && !(await readableFiles(gate, [onDisk])).has(onDisk)) throw notFound(dir, 'Nothing to list');
       // A missing folder (ENOENT) and a file named as one (ENOTDIR) are both
       // the caller's path to correct: the one not_found answer, not a 500.
       // Outside personal shelves no read gate stands in front: such folders
