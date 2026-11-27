@@ -21,6 +21,7 @@ import { startFakeDownstreamMcpServer, type FakeDownstreamMcpServer } from './fa
 import { registerBevelSecretsVariableLoader } from '../../secrets-vault/index.js';
 import type { ForcedRefreshOutcome, ISecretsVaultService } from '../../secrets-vault/index.js';
 import type { IToolManualService } from '../../tool-manuals/index.js';
+import type { AgentEventInput, IAgentEventRecorder } from '../../audit/index.js';
 import { setLogger } from '../../../shared/logging.js';
 import type { ILogger } from '../../../shared/logger.contract.js';
 import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
@@ -130,6 +131,8 @@ interface PlatformOptions {
    * adds `start_session` so it can call the tool the ticket is about.
    */
   extraTools?: string[];
+  /** The Audit log's recorder; absent, nothing is recorded, as in a deployment without one. */
+  auditRecorder?: IAgentEventRecorder;
 }
 
 const platforms: Platform[] = [];
@@ -188,7 +191,7 @@ async function startPlatform(opts: PlatformOptions = {}): Promise<Platform> {
     readAgentPreamble: opts.readAgentPreamble,
     defaultBranch: opts.defaultBranch,
     downstreamPool: opts.poolNow ? { now: opts.poolNow } : undefined,
-  }, opts.secretsVault, opts.toolManuals);
+  }, opts.secretsVault, opts.toolManuals, undefined, undefined, opts.auditRecorder);
   const stub = {} as never;
   app.use('/api', createMcpRoutes(service, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
   // The loopback catalog is served per caller, from the bearer it carries.
@@ -622,6 +625,50 @@ describe('proxied third-party MCP servers: the downstream pool', () => {
     expect(res.isError).toBeFalsy();
     expect(downstream.initializations()).toBe(2);
   });
+
+  it('a tool the manual leaves out is neither listed nor reached, even by name through the chain bridge', async () => {
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [
+        { name: 'echo', description: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+        { name: 'paid', description: 'paid', inputSchema: { type: 'object', properties: {} } },
+      ],
+    });
+    const url = downstream.url;
+    const { baseUrl } = await startPlatform({
+      manualsFor: () => [
+        {
+          name: 'notion',
+          call_template_type: 'mcp',
+          config: { mcpServers: { srv: { transport: 'http', url, exclude_tools: ['paid'] } } },
+        },
+      ],
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain('notion_srv_echo');
+    expect(names).not.toContain('notion_srv_paid');
+
+    expect(toolText(await client.callTool({ name: 'list_tools', arguments: {} }))).not.toContain('paid');
+
+    // The chain's bridge takes any name, past the bindings it generates.
+    // Neither this request's client nor the pooled connection behind the route
+    // registered the tool, so it never reaches the server.
+    const bridged = (name: string, args: unknown) =>
+      client.callTool({
+        name: 'call_tool_chain',
+        arguments: {
+          code: `return __callToolRef.applySyncPromise(undefined, [${JSON.stringify(name)}, ${JSON.stringify(JSON.stringify(args))}]);`,
+        },
+      });
+    const refused = JSON.parse(JSON.parse(toolText(await bridged('notion.srv.paid', {}))).result as string);
+    expect(refused).toEqual({ success: false, error: "Tool 'notion.srv.paid' not found in the repository." });
+    expect(downstream.executions()).toBe(0);
+
+    // The sibling, through the same bridge and route, is reached.
+    const reached = JSON.parse(JSON.parse(toolText(await bridged('notion.srv.echo', { text: 'hi' }))).result as string);
+    expect(reached.success).toBe(true);
+    expect(downstream.executions()).toBe(1);
+  });
 });
 
 describe('proxied third-party MCP servers: a rejected token gets one refresh and a retry', () => {
@@ -728,6 +775,68 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(refreshLines(logs)).toHaveLength(1);
     expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=refreshed');
     valid = 'unused';
+  });
+
+  it("a tool's own failure that reads like a rejected token runs once, refreshes nothing and keeps the sign-in", async () => {
+    quiet();
+    downstream = await startFakeDownstreamMcpServer({
+      acceptsToken: (t) => t === 'token-1',
+      failsWith: 'Upstream API answered 401 Unauthorized: this page is not shared with the integration.',
+    });
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null;
+      return 'rejected';
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    const { client } = await connectSdkClient(baseUrl);
+
+    const res = await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+
+    // The server's own words, marked as the failure they are.
+    expect(res.isError).toBe(true);
+    expect(toolText(res)).toBe('Upstream API answered 401 Unauthorized: this page is not shared with the integration.');
+    expect(downstream.executions()).toBe(1);
+    expect(state.refreshes).toBe(0);
+    expect(state.token).toBe('token-1');
+
+    // A chain sees the same failure as a rejected call, not as a value.
+    const chain = await client.callTool({ name: 'call_tool_chain', arguments: { code: "return notion.srv_echo({ text: 'two' });" } });
+    expect(chain.isError).toBe(true);
+    expect(toolText(chain)).toContain('this page is not shared with the integration');
+    expect(downstream.executions()).toBe(2);
+    expect(state.refreshes).toBe(0);
+  });
+
+  it("records a connected server's own failure as an error in the audit log, for a direct call and for the call a chain makes", async () => {
+    quiet();
+    downstream = await startFakeDownstreamMcpServer({
+      acceptsToken: (t) => t === 'token-1',
+      failsWith: 'This tool requires a Business plan or higher.',
+    });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = null;
+      return 'rejected';
+    });
+    const events: AgentEventInput[] = [];
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      auditRecorder: { record: (event) => void events.push(event) },
+    });
+    const { client } = await connectSdkClient(baseUrl);
+
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    await client.callTool({ name: 'call_tool_chain', arguments: { code: "return notion.srv_echo({ text: 'two' });" } });
+
+    // Each call is recorded before its answer goes back, so the events are all here.
+    expect(events.map((e) => `${e.kind}|${e.manual}|${e.name}|${e.outcome}`)).toEqual([
+      // The direct call.
+      'tool|notion|srv.echo|error',
+      // The call the chain made, then the chain it failed.
+      'tool|notion|srv.echo|error',
+      'capability|null|call_tool_chain|error',
+    ]);
   });
 
   it('401 → refresh → retry: a token revoked mid-life is refreshed and the call succeeds; the caller sees only that', async () => {
@@ -1351,6 +1460,62 @@ describe('a connected tool whose schema is invalid is not offered to agents', ()
       arguments: { code: 'return notion.srv_fine({});' },
     });
     expect(sibling.isError).toBeFalsy();
+  });
+
+  it('does not reach the hidden tool by name through the chain bridge either', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    downstream = await startFakeDownstreamMcpServer({
+      tools: () => [goodTool('fine'), { name: 'broken', description: 'broken', inputSchema: INVALID_SCHEMA }],
+    });
+    const { baseUrl } = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    // The bindings leave the hidden tool out, but the bridge takes any name,
+    // and the pooled connection behind the route still holds the tool: the
+    // route is what refuses it.
+    const chain = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: "return __callToolRef.applySyncPromise(undefined, ['notion.srv.broken', '{}']);" },
+    });
+    expect(JSON.parse(JSON.parse(toolText(chain)).result as string)).toEqual({
+      success: false,
+      error: "Tool 'notion.srv.broken' not found in the repository.",
+    });
+    expect(downstream.executions()).toBe(0);
+  });
+
+  it('does not reach, through the chain bridge, a tool the pooled connection found after the surface was built', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let listed = [goodTool('fine')];
+    downstream = await startFakeDownstreamMcpServer({ tools: () => listed });
+    const { baseUrl } = await startPlatform({ manualsFor: manualAt(downstream) });
+    const { client } = await connectSdkClient(baseUrl);
+    const notionTools = async () => (await client.listTools()).tools.map((t) => t.name).filter((n) => n.startsWith('notion'));
+    expect(await notionTools()).toEqual(['notion_srv_fine']);
+
+    // The server gains a tool and forgets its sessions. Nothing has called it
+    // since, so the pooled connection still holds what it first discovered,
+    // and the chain's request is built with that surface: `fine` alone. The
+    // chain's first call then heals the pooled connection, which registers
+    // again and discovers `late` there, mid-request. The bridge takes any
+    // name; the route is what refuses the one this request's surface lacks.
+    listed = [goodTool('fine'), goodTool('late')];
+    await downstream.restart();
+    const ranBefore = downstream.executions();
+    const chain = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: {
+        code: "notion.srv_fine({}); return __callToolRef.applySyncPromise(undefined, ['notion.srv.late', '{}']);",
+      },
+    });
+    expect(JSON.parse(JSON.parse(toolText(chain)).result as string)).toEqual({
+      success: false,
+      error: "Tool 'notion.srv.late' not found in the repository.",
+    });
+    // `fine` ran, healed; `late` did not run.
+    expect(downstream.executions()).toBe(ranBefore + 1);
+
+    // The pooled connection does hold it by now: the next request's surface is built with it.
+    expect(await notionTools()).toEqual(['notion_srv_fine', 'notion_srv_late']);
   });
 
   it('answers an agent that calls the hidden tool by name, without quoting the schema to it', async () => {

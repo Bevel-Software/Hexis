@@ -12,8 +12,9 @@
  * If the helper returned a fallback, any user without a valid localpart
  * would be granted ownership of every `user/...` branch on origin, which is
  * the opposite of the safety property `isBranchAuthoredBy` is meant to
- * provide. The frontend's `slugifyDraftName` can keep its UI-side `user`
- * fallback at the call site because draft creation is not access-gated.
+ * provide. A person with no usable localpart gets their own `suggestions/`
+ * prefix instead ({@link ownDraftPrefixFor}), which the branch switcher and
+ * the server both use.
  */
 export function branchAuthorLocalpart(
   email: string | null | undefined,
@@ -67,6 +68,31 @@ export function suggestionsBranchPrefixFor(user: { email: string; id: string }):
   const who = branchSegment(user.email.split('@')[0]);
   const id = branchSegment(user.id).slice(0, 8) || 'user';
   return `suggestions/${who}-${id}/`;
+}
+
+/**
+ * The prefix that makes a draft `user`'s own, to manage and delete later:
+ * `<email-localpart>/`, or, for an address with no usable localpart, their
+ * {@link suggestionsBranchPrefixFor} prefix, which exists for every signed-in
+ * user. {@link isBranchAuthoredBy} or {@link isOwnSuggestionsBranch}
+ * recognises either as theirs.
+ */
+export function ownDraftPrefixFor(user: { email: string; id: string }): string {
+  const local = branchAuthorLocalpart(user.email);
+  return local !== null ? `${local}/` : suggestionsBranchPrefixFor(user);
+}
+
+/**
+ * True when `branchName` carries one of the two prefixes that make a branch
+ * `user`'s own ({@link ownDraftPrefixFor} gives a new draft one of them): the
+ * authorship half of "may this person delete it", read by the server's rule
+ * and by the branch switcher's delete button alike.
+ */
+export function isOwnBranch(
+  branchName: string,
+  user: { email: string | null | undefined; id: string | null | undefined },
+): boolean {
+  return isBranchAuthoredBy(branchName, user.email) || isOwnSuggestionsBranch(branchName, user);
 }
 
 /**

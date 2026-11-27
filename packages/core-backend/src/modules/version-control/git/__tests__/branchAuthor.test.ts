@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   branchAuthorLocalpart,
   isBranchAuthoredBy,
+  isOwnSuggestionsBranch,
+  ownDraftPrefixFor,
 } from '@bevel-software/platform-shared';
 
 describe('branchAuthorLocalpart', () => {
@@ -76,5 +78,19 @@ describe('isBranchAuthoredBy', () => {
     // could delete other people's branches whose prefix happens to start
     // with their own localpart.
     expect(isBranchAuthoredBy('alice-extra/foo', 'alice@example.com')).toBe(false);
+  });
+});
+
+describe('ownDraftPrefixFor', () => {
+  it('is the localpart prefix authorship recognises', () => {
+    const user = { id: 'u-1', email: 'John.Doe@example.com' };
+    expect(ownDraftPrefixFor(user)).toBe('john-doe/');
+    expect(isBranchAuthoredBy(`${ownDraftPrefixFor(user)}fix`, user.email)).toBe(true);
+  });
+
+  it('falls back to the suggestions prefix for an address with no usable localpart, still theirs', () => {
+    const user = { id: 'abcdef123456', email: '---@example.com' };
+    expect(ownDraftPrefixFor(user)).toBe('suggestions/user-abcdef12/');
+    expect(isOwnSuggestionsBranch(`${ownDraftPrefixFor(user)}fix`, user)).toBe(true);
   });
 });

@@ -10,7 +10,17 @@
  * so plain tool names are unaffected.
  */
 export function utcpNamespacePrefix(manualName: string): string {
-  return `${manualName.replace(/[^\w]/g, '_').replace(/_/g, '__')}_`;
+  return `${utcpManualName(manualName).replace(/_/g, '__')}_`;
+}
+
+/**
+ * The name `@utcp/sdk` registers a manual under: every non-word character
+ * rewritten to `_` (`manualCallTemplate.name.replace(/[^\w]/g, "_")`). Its
+ * tools are named `<this>.<server>.<tool>`, so anything that keys on a
+ * registered manual or its tools uses this same rewrite.
+ */
+export function utcpManualName(manualName: string): string {
+  return manualName.replace(/[^\w]/g, '_');
 }
 
 export function utcpNamespacedKey(manualName: string, varName: string): string {

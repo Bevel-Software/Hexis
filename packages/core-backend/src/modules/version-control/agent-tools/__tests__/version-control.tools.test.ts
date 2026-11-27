@@ -85,6 +85,8 @@ function detailOf(files: Record<string, unknown>[]): Record<string, unknown> {
 const BIG = () => detailOf(Array.from({ length: 27 }, (_, i) => addedFile(i)));
 
 let calls: unknown[][] = [];
+/** The name the stub service answers for an asked draft name; a test sets the one it needs. */
+const draftNames = new Map<string, string>();
 /** What the service answers `openChangeRequest` with; a test replaces it. */
 let opened: Record<string, unknown> = BIG();
 /** Set to make `openChangeRequest` throw instead. */
@@ -130,6 +132,10 @@ const versionControlService = {
     calls.push(['createBranch', ws, name]);
     return { name, isProtected: false, hasRemote: true };
   },
+  // The service's own rule is tested with the service
+  // (`version-control.service.draft-name.test.ts`); here it answers the name
+  // a test set for the asked one, and otherwise the name as asked.
+  draftNameFor: async (_ws: string, name: string) => draftNames.get(name) ?? name,
   acquireLock: async (ws: string, branch: string, path: string) => {
     calls.push(['acquireLock', ws, branch, path]);
     return { acquired: true, lock: { branch, path, holderUserId: 'user-A', holderName: 'N' } };
@@ -388,6 +394,7 @@ const post = (url: string, bearer: string, body: unknown = {}) =>
 
 beforeEach(() => {
   calls = [];
+  draftNames.clear();
   opened = BIG();
   openFails = undefined;
   mergeApprovals = [];
@@ -976,6 +983,18 @@ describe('registerVersionControlTools', () => {
     // and 500s with "Remote branch not found in upstream origin". No fromBase:
     // the base is the workspace's own checked-out branch (HEAD).
     expect(calls).toContainEqual(['createBranch', WS, 'me/new-draft']);
+  });
+
+  it('create_branch creates the draft under the name the service gives it, and answers the name it made', async () => {
+    draftNames.set('copilot-check', 'named/by-the-service');
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/create_branch`, writeTok(), {
+      name: 'copilot-check',
+      branch: WS,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ branch: { name: 'named/by-the-service' } });
+    expect(calls).toContainEqual(['createBranch', WS, 'named/by-the-service']);
   });
 
   it('create_branch rejects `branch` naming the draft being created with a 400, not a clone 500', async () => {

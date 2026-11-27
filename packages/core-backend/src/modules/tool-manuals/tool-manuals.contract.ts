@@ -238,6 +238,11 @@ export interface ToolManualDescriptorBase {
   tools?: unknown[];
   /** Declared `${VAR}` scopes (see {@link ToolVariable}); empty when none declared. */
   variables?: ToolVariable[];
+  /**
+   * For `type: mcp`: tools of the server agents are not offered, by the name
+   * the server lists them under (`plugin.json`'s `excludeTools`).
+   */
+  excludeTools?: string[];
   /** For `type: mcp`: the admin-facing setup requirement from auto-discovery. */
   setup?: ToolManualSetup;
   /**
