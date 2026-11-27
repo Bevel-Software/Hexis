@@ -137,6 +137,8 @@ describe('SecretRedactor', () => {
     for (const guess of ['.!', '?!']) expect(redactor.redact(`sep ${guess} refused`, [guess])).toBe('sep [redacted] refused');
     // A text that is nothing but the caller's punctuation.
     expect(redactor.redact('?', ['?'])).toBe('[redacted]');
+    // A letter outside the basic plane is a letter: `a` glued to one does not stand alone.
+    expect(redactor.redact('𐐀a and a𐐀, then a', ['a'])).toBe('𐐀a and a𐐀, then [redacted]');
   });
 
   it('takes out a credential shorter than four characters inside other words too', () => {

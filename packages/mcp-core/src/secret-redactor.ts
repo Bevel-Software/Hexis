@@ -28,8 +28,16 @@ const MIN_CALLER_CHARS = 4;
  */
 const MAX_CALLER_CHARS_READ = 4_000_000;
 const REDACTED = '[redacted]';
-/** A letter or digit of any script: what a short value may not be glued to, to stand alone. */
-const WORD_CHAR = /[\p{L}\p{N}]/u;
+/** No letter or digit of any script (astral ones too) just before, or just after, a position. */
+const NO_WORD_BEFORE = /(?<![\p{L}\p{N}])/uy;
+const NO_WORD_AFTER = /(?![\p{L}\p{N}])/uy;
+
+/** Whether `text` from `start` to `end` stands alone: no letter or digit glued to either side, read by code point. */
+function standsAlone(text: string, start: number, end: number): boolean {
+  NO_WORD_BEFORE.lastIndex = start;
+  NO_WORD_AFTER.lastIndex = end;
+  return NO_WORD_BEFORE.test(text) && NO_WORD_AFTER.test(text);
+}
 
 /**
  * Every secret a request carried, so that none of them can come back out in
@@ -173,12 +181,9 @@ export class SecretRedactor {
       // Each short string of theirs where it stands alone: one walk over the
       // text, every start tried against the set, however many they sent.
       for (let at = 0; at < folded.length && shortSent.size > 0; at++) {
-        if (at > 0 && WORD_CHAR.test(folded[at - 1]!)) continue;
         for (let length = 1; length < MIN_CALLER_CHARS && at + length <= folded.length; length++) {
           const end = at + length;
-          if (shortSent.has(folded.slice(at, end)) && (end === folded.length || !WORD_CHAR.test(folded[end]!))) {
-            hide(from[at]!, to[end - 1]!);
-          }
+          if (shortSent.has(folded.slice(at, end)) && standsAlone(folded, at, end)) hide(from[at]!, to[end - 1]!);
         }
       }
     }
