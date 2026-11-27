@@ -582,6 +582,106 @@ describe.each(doors)('an archive extracted through %s whose access.md cannot be 
   });
 });
 
+/** An archive whose entries keep the names given VERBATIM, two of one name included (`addFile` replaces a name it already has). */
+function zipWithRawNames(entries: [name: string, content: string][]): Buffer {
+  const zip = new AdmZip();
+  entries.forEach(([name, content], i) => {
+    zip.addFile(`__raw_${i}`, Buffer.from(content)).entryName = name;
+  });
+  return zip.toBuffer();
+}
+
+/** The unix mode a zip records for a symbolic link (`S_IFLNK | 0777`), in the high half of the external attributes. */
+const LINK_ATTR = ((0o120000 | 0o777) << 16) >>> 0;
+
+/** The skip reasons and the extracted paths of an unzip that answered 200. */
+const answerOf = async (res: Response) => {
+  expect(res.status).toBe(200);
+  return (await res.json()) as { extracted: string[]; skipped: { path: string; reason: string }[] };
+};
+
+describe.each(doors)('an archive extracted through %s, by the plan apply_file_upload lands it by', (_door, start) => {
+  beforeEach(() => seed(BRANCH, DRAFT_TREE));
+
+  // The archive `agent-uploads.test.ts` applies too. Three files, so that
+  // landing them through the real lock table stays quick; 5,000 metadata
+  // entries, which the archive's order puts before them, so a cap that
+  // counted the metadata would skip every file.
+  it('lands 3 files beside 5,000 macOS metadata entries whole: the metadata counts toward no cap', async () => {
+    const unzip = await start();
+    const zip = new AdmZip();
+    for (let i = 0; i < 5_000; i++) zip.addFile(`__MACOSX/Mac/._f${String(i).padStart(4, '0')}.md`, Buffer.from('junk'));
+    for (let i = 0; i < 3; i++) zip.addFile(`Mac/f${i}.md`, Buffer.from(`${i}\n`));
+    await fs.writeFile(path.join(repoDir, 'Finance/mac.zip'), zip.toBuffer());
+    const before = await commitCount();
+
+    const body = await answerOf(await unzip({ path: `${KB}/Finance/mac.zip` }));
+
+    expect(body.skipped).toEqual([]);
+    expect(body.extracted).toEqual([0, 1, 2].map((i) => `${KB}/Finance/Mac/f${i}.md`));
+    expect(await commitCount()).toBe(before + 1);
+    expect(await filesOfHead()).toEqual(['Finance/Mac/f0.md', 'Finance/Mac/f1.md', 'Finance/Mac/f2.md']);
+    expect(await exists('Finance/__MACOSX')).toBe(false);
+  });
+
+  it('skips a symbolic link entry and lands the rest, and lands nothing when the link is one of its access rules', async () => {
+    const unzip = await start();
+    const zip = new AdmZip();
+    zip.addFile('note.md', Buffer.from('../plan.md')).header.attr = LINK_ATTR;
+    zip.addFile('open.md', Buffer.from('# Open\n'));
+    await fs.writeFile(path.join(repoDir, 'Finance/links.zip'), zip.toBuffer());
+
+    const body = await answerOf(await unzip({ path: `${KB}/Finance/links.zip` }));
+
+    expect(body.extracted).toEqual([`${KB}/Finance/open.md`]);
+    expect(body.skipped).toEqual([{ path: 'note.md', reason: 'Entry is a symbolic link, not a file' }]);
+    expect(await exists('Finance/note.md')).toBe(false);
+
+    const rule = new AdmZip();
+    rule.addFile('Secret/access.md', Buffer.from('../access.md')).header.attr = LINK_ATTR;
+    rule.addFile('Secret/Budget.md', Buffer.from('numbers\n'));
+    await fs.writeFile(path.join(repoDir, 'Finance/rule-link.zip'), rule.toBuffer());
+    const before = await commitCount();
+
+    const refused = await unzip({ path: `${KB}/Finance/rule-link.zip` });
+
+    expect(refused.status).toBe(422);
+    expect(((await refused.json()) as { error: string }).error).toContain(
+      `"${KB}/Finance/Secret/access.md" could not land: Entry is a symbolic link, not a file.`,
+    );
+    expect(await commitCount()).toBe(before);
+    expect(await exists('Finance/Secret')).toBe(false);
+  });
+
+  it('lands both entries of a path the archive carries twice in its one commit, the later bytes on disk, and lists the path twice', async () => {
+    const unzip = await start();
+    await fs.writeFile(path.join(repoDir, 'Finance/twice.zip'), zipWithRawNames([['dup.md', 'first\n'], ['dup.md', 'second\n']]));
+    const before = await commitCount();
+
+    const body = await answerOf(await unzip({ path: `${KB}/Finance/twice.zip` }));
+
+    expect(body.extracted).toEqual([`${KB}/Finance/dup.md`, `${KB}/Finance/dup.md`]);
+    expect(body.skipped).toEqual([]);
+    expect(await commitCount()).toBe(before + 1);
+    expect(await filesOfHead()).toEqual(['Finance/dup.md']);
+    expect(await fs.readFile(path.join(repoDir, 'Finance/dup.md'), 'utf8')).toBe('second\n');
+  });
+
+  it('skips a directory entry at the path of a file entry, and lands the file', async () => {
+    const unzip = await start();
+    const zip = new AdmZip();
+    zip.addFile('Doc', Buffer.from('a file\n'));
+    zip.addFile('Doc/', Buffer.alloc(0));
+    await fs.writeFile(path.join(repoDir, 'Finance/doc.zip'), zip.toBuffer());
+
+    const body = await answerOf(await unzip({ path: `${KB}/Finance/doc.zip` }));
+
+    expect(body.extracted).toEqual([`${KB}/Finance/Doc`]);
+    expect(body.skipped).toEqual([{ path: 'Doc/', reason: 'Directory entry is at the path of a file in the same archive' }]);
+    expect(await fs.readFile(path.join(repoDir, 'Finance/Doc'), 'utf8')).toBe('a file\n');
+  });
+});
+
 /** A protected branch, where every path the extraction writes meets the write rule at HEAD. */
 const PROTECTED = 'target-company-state';
 const PROTECTED_TREE: Record<string, string | Buffer> = {

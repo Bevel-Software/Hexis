@@ -1262,7 +1262,8 @@ describe('apply_file_upload', () => {
   it('refuses an entry that CLAIMS more than one commit lands, without inflating it', async () => {
     const base = await start();
     const { token } = await request(base);
-    // 200 MB declared against a 128 MB apply budget. Judged on the header,
+    // 200 MB declared, past the 100 MB one file may hold and the 128 MB one
+    // commit lands. Judged on the header,
     // before `getData`, because a deflate stream expands by three orders of
     // magnitude and an entry inflated to be measured is an entry already held
     // in memory. The bytes behind this header are a handful.
@@ -1271,6 +1272,18 @@ describe('apply_file_upload', () => {
     const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Bomb` });
     expect(outcomeAt(answer, 'bomb.md')).toMatchObject({ outcome: 'refused', error: 'too_large' });
     expect(outcomeAt(answer, 'bomb.md')?.message).toContain('one commit');
+    expect(batches).toEqual([]);
+  });
+
+  it('refuses an entry that CLAIMS more than one file may hold, without inflating it, though the archive is under the total', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    // 100 MB and one byte declared: under the 128 MB the apply lands in one
+    // commit, past the 100 MB one file may hold. A handful of bytes behind it.
+    await send(base, token, 'big.zip', zipWithDeclaredSize('big.md', 'tiny', 100 * 1024 * 1024 + 1));
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Big` });
+    expect(outcomeAt(answer, 'big.md')).toMatchObject({ outcome: 'refused', error: 'too_large' });
+    expect(outcomeAt(answer, 'big.md')?.message).toContain(`${100 * 1024 * 1024} bytes one file may hold`);
     expect(batches).toEqual([]);
   });
 
@@ -1376,6 +1389,64 @@ describe('apply_file_upload', () => {
     const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Drop` });
     expect(answer.total).toBe(1);
     expect(answer.files).toEqual([{ path: `${KB_DIR}/Drop/SKILL.md`, outcome: 'created' }]);
+  });
+
+  // The archive `unzip-lands-as-one-commit.test.ts` extracts too: 5,000
+  // metadata entries, which the archive's order puts before three files, so a
+  // cap that counted the metadata would refuse every file.
+  it('lands 3 files beside 5,000 macOS metadata entries whole: the metadata counts toward no cap', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    const zip = new AdmZip();
+    for (let i = 0; i < 5_000; i++) zip.addFile(`__MACOSX/Mac/._f${String(i).padStart(4, '0')}.md`, Buffer.from('junk'));
+    for (let i = 0; i < 3; i++) zip.addFile(`Mac/f${i}.md`, Buffer.from(`${i}\n`));
+    await send(base, token, 'mac.zip', zip.toBuffer());
+    const answer = await apply(base, { branch: DRAFT, token, destination: KB_DIR });
+    const landed = [0, 1, 2].map((i) => `${KB_DIR}/Mac/f${i}.md`);
+    expect(answer.files).toEqual(landed.map((path) => ({ path, outcome: 'created' })));
+    expect(answer.total).toBe(3);
+    expect(batches).toEqual([landed]);
+  });
+
+  // Today's outcome, kept: an earlier entry of the same upload counts as
+  // existing, as in `write_files`, so `create` refuses the second and
+  // `overwrite` lands both in the one batch, the later bytes on disk.
+  it('judges the second entry of a path the archive carries twice as a path that exists', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    /** Two entries of one name (`addFile` replaces a name it already has, so each is renamed after). */
+    const twice = (): Buffer => {
+      const zip = new AdmZip();
+      zip.addFile('one', Buffer.from('first')).entryName = 'dup.md';
+      zip.addFile('two', Buffer.from('second')).entryName = 'dup.md';
+      return zip.toBuffer();
+    };
+    await send(base, token, 'twice.zip', twice());
+    const created = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Drop` });
+    expect(created.files).toEqual([
+      { path: `${KB_DIR}/Drop/dup.md`, outcome: 'created' },
+      { path: `${KB_DIR}/Drop/dup.md`, outcome: 'refused', error: 'exists', message: expect.any(String) },
+    ]);
+    expect(await readFile(join(tempDir, KB_DIR, 'Drop/dup.md'), 'utf8')).toBe('first');
+
+    const { token: again } = await request(base);
+    await send(base, again, 'twice.zip', twice());
+    const overwritten = await apply(base, { branch: DRAFT, token: again, destination: `${KB_DIR}/Drop`, mode: 'overwrite' });
+    expect(overwritten.files).toEqual([
+      { path: `${KB_DIR}/Drop/dup.md`, outcome: 'replaced' },
+      { path: `${KB_DIR}/Drop/dup.md`, outcome: 'replaced' },
+    ]);
+    expect(batches.at(-1)).toEqual([`${KB_DIR}/Drop/dup.md`, `${KB_DIR}/Drop/dup.md`]);
+    expect(await readFile(join(tempDir, KB_DIR, 'Drop/dup.md'), 'utf8')).toBe('second');
+  });
+
+  it('ignores a directory entry at the path of a file entry, as it ignores every directory entry, and lands the file', async () => {
+    const base = await start();
+    const { token } = await request(base);
+    await send(base, token, 'doc.zip', zipOf({ Doc: 'a file', 'Doc/': '' }));
+    const answer = await apply(base, { branch: DRAFT, token, destination: `${KB_DIR}/Drop` });
+    expect(answer.files).toEqual([{ path: `${KB_DIR}/Drop/Doc`, outcome: 'created' }]);
+    expect(answer.total).toBe(1);
   });
 
   it('refuses a destination that is a file, not a folder', async () => {

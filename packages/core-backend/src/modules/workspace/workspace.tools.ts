@@ -23,7 +23,6 @@ import {
   assertRepoRootNameFree,
   assertRepoRootNameFreeArgs,
   hasControlCharacter,
-  isInsideRepo,
   isTmpRef,
   normalizePathArgs,
   normalizeWorkspacePath,
@@ -89,19 +88,11 @@ import { buildDownload } from './agent-download.builder.js';
 import {
   ArchiveRefusedError,
   DOWNLOAD_MAX_FILES,
-  ONE_COMMIT_MAX_ENTRIES,
-  ONE_COMMIT_MAX_TOTAL_BYTES,
+  ONE_COMMIT_LIMITS,
   ZIP_DOWNLOAD_MAX_BYTES,
   type ArchiveEntryJudge,
 } from './workspace.service.js';
-import {
-  isSymlinkZipEntry,
-  isZipNoiseEntry,
-  readZipEntry,
-  zipEntryName,
-  zipEntryNameRefusal,
-  zipEntrySegments,
-} from './zip-entry-rules.js';
+import { planZipEntries, type ZipPlanSkip } from './zip-entry-rules.js';
 
 const log = logger('workspace-tools');
 
@@ -554,16 +545,6 @@ function decideWrite(mode: WriteMode, path: string, exists: boolean): WriteOutco
 const APPLY_ANSWER_CAP = 25;
 
 /**
- * How many entries of one uploaded archive are landed, and how many bytes of
- * uncompressed content in total: what one archive may land as one commit,
- * the caps `unzip` lands under too (see `ONE_COMMIT_MAX_TOTAL_BYTES`). The
- * upload itself is already bounded by the deployment's upload limit; these
- * bound what that upload is allowed to expand into.
- */
-const APPLY_MAX_ENTRIES = ONE_COMMIT_MAX_ENTRIES;
-const APPLY_MAX_TOTAL_BYTES = ONE_COMMIT_MAX_TOTAL_BYTES;
-
-/**
  * One path of an upload, as `apply_file_upload` plans it: the bytes to write,
  * or the reason this path is refused before any gate is asked. A refused path
  * carries the name the archive held rather than a workspace path, because for
@@ -583,27 +564,53 @@ interface PlannedUploadPath {
 }
 
 /**
+ * The `error` and `message` an upload's path gets for an entry the archive's
+ * plan skipped, or null for a directory entry skipped because a file of the
+ * archive lands at its path: `apply_file_upload` lands no folder of its own (a
+ * folder comes into being with the files under it, the write path mkdirs each
+ * parent), so it ignores that entry as it ignores each directory entry the
+ * plan keeps.
+ */
+function applySkipRefusal(step: ZipPlanSkip): { error: string; message: string } | null {
+  switch (step.reason) {
+    case 'too_many_entries':
+      return {
+        error: 'too_many_entries',
+        message: `This archive holds more than ${ONE_COMMIT_LIMITS.entries} entries; the rest were not applied.`,
+      };
+    case 'invalid_name':
+      return { error: 'invalid_entry', message: step.detail };
+    case 'escapes_destination':
+      return { error: 'invalid_entry', message: 'Path escapes destination' };
+    case 'link':
+      return { error: 'link', message: `"${step.name}" is a symbolic link, not a file; an upload lands files, never links.` };
+    case 'directory_is_a_file':
+      return null;
+    case 'entry_too_large':
+      return {
+        error: 'too_large',
+        message: `This entry expands past the ${ONE_COMMIT_LIMITS.entryBytes} bytes one file may hold in one commit; this entry was not applied.`,
+      };
+    case 'total_too_large':
+      return {
+        error: 'too_large',
+        message: `This archive expands past the ${ONE_COMMIT_LIMITS.totalBytes} byte total the apply lands in one commit; this entry was not applied.`,
+      };
+    case 'unreadable':
+      return { error: 'unreadable_entry', message: `"${step.name}" could not be read: ${step.detail}.` };
+  }
+}
+
+/**
  * Turn a stored upload into one planned path per file.
  *
  * A single file is one path: the destination plus the name it was sent with.
- * A zip is one path per member, with the member's folder structure kept under
- * the destination — judged by the same entry rules `unzip` applies
- * (`zip-entry-rules.ts`), plus one `unzip` does not have: an entry that is a
- * symbolic LINK is refused outright. A zip stores a link as a member whose
- * bytes are its target text, so a reader that ignored the mode bits would
- * write that text out as a file — content nobody sent, under a name that was
- * meant to point elsewhere.
+ * A zip is one path per entry of the archive plan `unzip` lands too
+ * (`planZipEntries`), with the entry's folder structure kept under the
+ * destination. A directory entry is ignored, unless the plan skips it for a
+ * reason a file can be skipped for too (see `applySkipRefusal`).
  */
-/** The refusal an entry gets when the archive would expand past what one commit lands. */
-function tooLargeToApply(): string {
-  return `This archive expands past the ${APPLY_MAX_TOTAL_BYTES} byte total the apply lands in one commit; this entry was not applied.`;
-}
-
-async function planUpload(
-  upload: ClaimedUpload,
-  destination: string,
-  kbDirName: string,
-): Promise<PlannedUploadPath[]> {
+async function planUpload(upload: ClaimedUpload, destination: string): Promise<PlannedUploadPath[]> {
   const bytes = await nodeFs.readFile(upload.absolutePath);
   if (upload.kind !== 'zip') {
     return [{ path: `${destination}/${upload.filename}`, content: bytes }];
@@ -619,72 +626,14 @@ async function planUpload(
     );
   }
   const planned: PlannedUploadPath[] = [];
-  let seen = 0;
-  let totalBytes = 0;
-  /**
-   * Where the entry named `rawName` lands under the destination, or undefined
-   * when its name gives it no place there. Belt and braces:
-   * `zipEntryNameRefusal` already refuses a `..` segment and a root-anchored
-   * name, so nothing should reach the containment check that climbs out. The
-   * check stays because the cost of being wrong about that is bytes landing
-   * outside the folder the caller named.
-   */
-  const landingOf = (rawName: string): string | undefined => {
-    if (zipEntryNameRefusal(rawName) !== null) return undefined;
-    const target = [destination, ...zipEntrySegments(rawName)].join('/');
-    return target.startsWith(`${destination}/`) && isInsideRepo(target, kbDirName) ? target : undefined;
-  };
-  for (const entry of zip.getEntries()) {
-    const rawName = zipEntryName(entry.entryName);
-    if (isZipNoiseEntry(rawName)) continue;
-    if (seen >= APPLY_MAX_ENTRIES) {
-      planned.push({
-        path: rawName || '(empty)',
-        error: 'too_many_entries',
-        message: `This archive holds more than ${APPLY_MAX_ENTRIES} entries; the rest were not applied.`,
-        at: landingOf(rawName),
-      });
+  for (const step of planZipEntries(zip, destination, ONE_COMMIT_LIMITS)) {
+    if (step.kind === 'file') {
+      planned.push({ path: step.target, content: step.data });
       continue;
     }
-    seen++;
-    const nameRefusal = zipEntryNameRefusal(rawName);
-    if (nameRefusal !== null) {
-      planned.push({ path: rawName || '(empty)', error: 'invalid_entry', message: nameRefusal });
-      continue;
-    }
-    if (isSymlinkZipEntry(entry)) {
-      planned.push({
-        path: rawName,
-        error: 'link',
-        message: `"${rawName}" is a symbolic link, not a file; an upload lands files, never links.`,
-        at: landingOf(rawName),
-      });
-      continue;
-    }
-    // A folder comes into being with the files under it (the write path mkdirs
-    // each parent), so a directory member has nothing of its own to land.
-    if (entry.isDirectory) continue;
-    const target = landingOf(rawName);
-    if (target === undefined) {
-      planned.push({ path: rawName, error: 'invalid_entry', message: 'Path escapes destination' });
-      continue;
-    }
-    // Through the one bounded reader `unzip` uses too, capped at what is left
-    // of the budget: a deflate stream can expand a thousandfold, and the
-    // header's declared size is the archive's claim, not a fact — an entry
-    // declaring ZERO would otherwise be inflated with no cap at all (see
-    // `readZipEntry`). A read that fails is this entry's outcome and no more.
-    const read = readZipEntry(entry, APPLY_MAX_TOTAL_BYTES - totalBytes);
-    if (!read.ok) {
-      planned.push(
-        read.reason === 'too_large'
-          ? { path: rawName, error: 'too_large', message: tooLargeToApply(), at: target }
-          : { path: rawName, error: 'unreadable_entry', message: `"${rawName}" could not be read: ${read.detail}.`, at: target },
-      );
-      continue;
-    }
-    totalBytes += read.data.byteLength;
-    planned.push({ path: target, content: read.data });
+    // A directory entry the plan keeps is nothing the apply lands (see `applySkipRefusal`).
+    const refusal = step.kind === 'skip' ? applySkipRefusal(step) : null;
+    if (refusal !== null) planned.push({ path: step.name, ...refusal, at: step.target ?? undefined });
   }
   return planned;
 }
@@ -4295,7 +4244,7 @@ export function registerWorkspaceTools(
         );
       }
 
-      const planned = await planUpload(upload, destination, kbDirName);
+      const planned = await planUpload(upload, destination);
       const judge = agentArchiveJudge(ctx, branch);
 
       const writes: { path: string; content: Buffer }[] = [];

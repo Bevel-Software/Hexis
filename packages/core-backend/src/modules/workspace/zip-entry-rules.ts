@@ -11,11 +11,12 @@ import { hasGitInternalsSegment } from '../../shared/git-internals.js';
  * the same names the same way — and they did not, for as long as the rules
  * lived inside `WorkspaceService.unzipFile` as three inline blocks.
  *
- * NAMES, and how an entry's BYTES are read ({@link readZipEntry}) — the two
- * things decidable from the archive alone. Whether a target sits behind a
- * symbolic link already on disk, whether the caller may write there, and what
- * is already at the path are facts about a workspace, so each surface asks
- * those where its own writes land.
+ * NAMES, how an entry's BYTES are read ({@link readZipEntry}), and the one
+ * plan both surfaces land ({@link planZipEntries}): the things decidable from
+ * the archive alone. Whether a target sits behind a symbolic link already on
+ * disk, whether the caller may write there, and what is already at the path
+ * are facts about a workspace, so each surface asks those where its own writes
+ * land.
  */
 
 /**
@@ -79,8 +80,8 @@ export function zipEntryNameRefusal(rawName: string): string | null {
  * text and whose unix mode (the high half of the external attributes) carries
  * `S_IFLNK`. A reader that ignores the mode writes the target text out as a
  * regular file — content nobody sent, under a name that was meant to point
- * somewhere. `apply_file_upload` refuses such an entry outright; the entry is
- * not a file, so there are no bytes of the caller's to land.
+ * somewhere. {@link planZipEntries} skips such an entry, for both surfaces;
+ * the entry is not a file, so there are no bytes of the caller's to land.
  */
 export function isSymlinkZipEntry(entry: {
   header?: { attr?: number };
@@ -170,4 +171,161 @@ function declaresEmptyButIsNot(err?: unknown): string {
   return err === undefined || outputLimit
     ? 'its header declares an empty file, but it holds content'
     : `its header declares an empty file, and its content could not be read (${err instanceof Error ? err.message : String(err)})`;
+}
+
+/** What one archive may expand into: how many entries, and how many uncompressed bytes in all and in one file. */
+export interface ZipPlanLimits {
+  /** Entries past this many are skipped. macOS metadata is not counted. */
+  entries: number;
+  /** What the planned files may hold in all. */
+  totalBytes: number;
+  /** What one planned file may hold. */
+  entryBytes: number;
+}
+
+/** What {@link planZipEntries} needs of an entry: the part of adm-zip's it reads. */
+export interface PlannableZipEntry extends ReadableZipEntry {
+  entryName: string;
+  isDirectory: boolean;
+  header: ReadableZipEntry['header'] & { attr?: number };
+}
+
+/** Why {@link planZipEntries} skipped an entry. Each surface words it in its own answer. */
+export type ZipSkipReason =
+  /** Past {@link ZipPlanLimits.entries}. */
+  | 'too_many_entries'
+  /** A name {@link zipEntryNameRefusal} refuses; `detail` is its reason. */
+  | 'invalid_name'
+  /** A name that would land outside the destination. */
+  | 'escapes_destination'
+  /** A symbolic link ({@link isSymlinkZipEntry}). */
+  | 'link'
+  /** A directory entry at the path a planned file lands at. */
+  | 'directory_is_a_file'
+  /** A file past {@link ZipPlanLimits.entryBytes}. */
+  | 'entry_too_large'
+  /** A file past what is left of {@link ZipPlanLimits.totalBytes}. */
+  | 'total_too_large'
+  /** A file whose bytes cannot be read as its header says ({@link readZipEntry}); `detail` says how. */
+  | 'unreadable';
+
+/**
+ * One entry of an archive, as {@link planZipEntries} plans it. `name` is the
+ * entry's name with `/` separators (`(empty)` when it has none); `target` is
+ * the workspace path it lands at, or, for a skipped entry, would have landed
+ * at (null when its name gives it no place).
+ */
+export type ZipPlanStep =
+  /** A file to land. `duplicate` when an earlier planned file lands at the same path. */
+  | { kind: 'file'; name: string; target: string; data: Buffer; duplicate: boolean }
+  | { kind: 'dir'; name: string; target: string }
+  | { kind: 'skip'; name: string; target: string | null; reason: 'invalid_name' | 'unreadable'; detail: string }
+  | { kind: 'skip'; name: string; target: string | null; reason: Exclude<ZipSkipReason, 'invalid_name' | 'unreadable'> };
+
+/** A step {@link planZipEntries} skipped. */
+export type ZipPlanSkip = Extract<ZipPlanStep, { kind: 'skip' }>;
+
+/**
+ * The ONE plan of an archive that both surfaces land: `unzip`
+ * (`WorkspaceService.unzipFile`) and `apply_file_upload`. One step per entry,
+ * in the archive's order: a file to land under `destination` (a workspace
+ * path) with its bytes, a directory entry, or a skipped entry with the reason.
+ *
+ * It reads the archive and builds path strings, and never touches the
+ * filesystem: what is on disk at a target, and whether the caller may write
+ * there, are each surface's to ask.
+ *
+ * Per entry, in this order:
+ *
+ *  - macOS metadata ({@link isZipNoiseEntry}) is dropped: no step, and not
+ *    counted toward `limits.entries`;
+ *  - an entry past `limits.entries` is skipped;
+ *  - a name {@link zipEntryNameRefusal} refuses is skipped, and so is one that
+ *    would land outside `destination`;
+ *  - a symbolic link is skipped;
+ *  - a directory entry is a `dir` step;
+ *  - a file is read through {@link readZipEntry}, never past
+ *    `limits.entryBytes` nor past what is left of `limits.totalBytes`, and is
+ *    skipped when it is past either or cannot be read.
+ *
+ * And two facts about the plan as a whole: a directory entry at the path a
+ * planned file lands at is skipped, and a planned file whose path an earlier
+ * planned file has is marked `duplicate`.
+ *
+ * `unzip` creates each directory entry its own checks let through;
+ * `apply_file_upload` ignores them, since a folder comes into being with the
+ * files under it. Neither acts on `duplicate`: `unzip` lands both files in one
+ * batch, and `apply_file_upload` counts an earlier entry it kept as existing
+ * when it judges `mode`, as `write_files` does.
+ */
+export function planZipEntries(
+  zip: { getEntries(): PlannableZipEntry[] },
+  destination: string,
+  limits: ZipPlanLimits,
+): ZipPlanStep[] {
+  const steps: ZipPlanStep[] = [];
+  const planned = new Set<string>();
+  let counted = 0;
+  let totalBytes = 0;
+  /**
+   * Where the entry named `rawName` lands under `destination`, or null when
+   * its name gives it no place there. `zipEntryNameRefusal` already refuses a
+   * `..` segment and a root-anchored name, so nothing should fail the
+   * containment check; it stays because the cost of being wrong about that is
+   * bytes landing outside the folder the caller named.
+   */
+  const landingOf = (rawName: string): string | null => {
+    if (zipEntryNameRefusal(rawName) !== null) return null;
+    const target = [destination, ...zipEntrySegments(rawName)].join('/');
+    return target.startsWith(`${destination}/`) ? target : null;
+  };
+  for (const entry of zip.getEntries()) {
+    const rawName = zipEntryName(entry.entryName);
+    if (isZipNoiseEntry(rawName)) continue;
+    const name = rawName || '(empty)';
+    if (counted >= limits.entries) {
+      steps.push({ kind: 'skip', name, target: landingOf(rawName), reason: 'too_many_entries' });
+      continue;
+    }
+    counted++;
+    const nameRefusal = zipEntryNameRefusal(rawName);
+    if (nameRefusal !== null) {
+      steps.push({ kind: 'skip', name, target: null, reason: 'invalid_name', detail: nameRefusal });
+      continue;
+    }
+    const target = landingOf(rawName);
+    if (target === null) {
+      steps.push({ kind: 'skip', name, target: null, reason: 'escapes_destination' });
+      continue;
+    }
+    if (isSymlinkZipEntry(entry)) {
+      steps.push({ kind: 'skip', name, target, reason: 'link' });
+      continue;
+    }
+    if (entry.isDirectory) {
+      steps.push({ kind: 'dir', name, target });
+      continue;
+    }
+    const left = limits.totalBytes - totalBytes;
+    const read = readZipEntry(entry, Math.min(limits.entryBytes, left));
+    if (!read.ok && read.reason === 'unreadable') {
+      steps.push({ kind: 'skip', name, target, reason: 'unreadable', detail: read.detail });
+      continue;
+    }
+    if (!read.ok) {
+      // Past the per-file cap when the entry declares more than that cap, or
+      // when that cap was the tighter of the two; past the total otherwise.
+      const pastEntryCap = entry.header.size > limits.entryBytes || left >= limits.entryBytes;
+      steps.push({ kind: 'skip', name, target, reason: pastEntryCap ? 'entry_too_large' : 'total_too_large' });
+      continue;
+    }
+    totalBytes += read.data.byteLength;
+    steps.push({ kind: 'file', name, target, data: read.data, duplicate: planned.has(target) });
+    planned.add(target);
+  }
+  return steps.map((step) =>
+    step.kind === 'dir' && planned.has(step.target)
+      ? { kind: 'skip', name: step.name, target: step.target, reason: 'directory_is_a_file' }
+      : step,
+  );
 }

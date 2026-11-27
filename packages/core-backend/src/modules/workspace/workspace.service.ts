@@ -26,7 +26,7 @@ import type { KbContext } from '../../shared/kb-context.js';
 import { NodeGitRunner } from '../version-control/index.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
-import { isZipNoiseEntry, readZipEntry, zipEntryName, zipEntryNameRefusal, zipEntrySegments } from './zip-entry-rules.js';
+import { planZipEntries, type ZipPlanLimits, type ZipPlanSkip } from './zip-entry-rules.js';
 import {
   GitInternalsError,
   PathNotFoundError,
@@ -92,7 +92,7 @@ export interface UnzipResult {
   destination: string;
   /** Workspace-relative paths of files that were written. */
   extracted: string[];
-  /** Workspace-relative entry paths from the archive that were intentionally skipped (e.g. macOS metadata, invalid names). */
+  /** Entry names from the archive that were not extracted, with the reason (e.g. an invalid name, a size cap). macOS metadata is dropped without a report. */
   skipped: { path: string; reason: string }[];
 }
 
@@ -195,7 +195,34 @@ function extractionHeldRefusal(err: PathHeldError): VersionControlDomainError {
 // an entry past them is skipped with the reason, and nothing else changes.
 export const ONE_COMMIT_MAX_ENTRIES = 5_000;
 export const ONE_COMMIT_MAX_TOTAL_BYTES = 128 * 1024 * 1024; // 128 MB uncompressed
-const UNZIP_MAX_ENTRY_BYTES = 100 * 1024 * 1024; // 100 MB per file
+/** The caps above and the one on a single file, as both surfaces hand them to `planZipEntries`. */
+export const ONE_COMMIT_LIMITS: ZipPlanLimits = {
+  entries: ONE_COMMIT_MAX_ENTRIES,
+  totalBytes: ONE_COMMIT_MAX_TOTAL_BYTES,
+  entryBytes: 100 * 1024 * 1024, // 100 MB per file
+};
+
+/** What `unzipFile` reports, as `skipped[].reason`, for an entry the planner skipped. */
+function unzipSkipReason(step: ZipPlanSkip): string {
+  switch (step.reason) {
+    case 'too_many_entries':
+      return `Archive exceeds ${ONE_COMMIT_LIMITS.entries} entries`;
+    case 'invalid_name':
+      return step.detail;
+    case 'escapes_destination':
+      return 'Path escapes destination';
+    case 'link':
+      return 'Entry is a symbolic link, not a file';
+    case 'directory_is_a_file':
+      return 'Directory entry is at the path of a file in the same archive';
+    case 'entry_too_large':
+      return `Entry exceeds ${ONE_COMMIT_LIMITS.entryBytes} byte per-file limit`;
+    case 'total_too_large':
+      return `Archive exceeds ${ONE_COMMIT_LIMITS.totalBytes} byte total uncompressed limit`;
+    case 'unreadable':
+      return `Entry could not be read: ${step.detail}`;
+  }
+}
 
 // Folder-download cap. The whole zip is built in memory by adm-zip (no
 // streaming) so the cap also bounds peak heap usage for one download.
@@ -2414,17 +2441,19 @@ export class WorkspaceService implements IWorkspaceService {
    * is written and no entry is named.
    *
    * Every entry is judged first and nothing is written while it is: the
-   * guards below, the zip-bomb caps and the `judge`'s `entry`. The files that
-   * pass are then handed to `landing` in ONE call, and the directory entries
-   * that pass are created after it returns. With `LockingFilesystem` as the
-   * landing, the files that pass land as one commit: an archive's own
-   * `access.md` and the files beside it arrive together. A file whose lock the
-   * lock's own gates refuse is skipped through the judge's `refusedAtLock`.
+   * archive's plan (`planZipEntries`: the entry rules and the zip-bomb caps,
+   * `ONE_COMMIT_LIMITS`), the guards below on what is on disk at each target,
+   * and the `judge`'s `entry`. The files that pass are then handed to
+   * `landing` in ONE call, and the directory entries that pass are created
+   * after it returns. With `LockingFilesystem` as the landing, the files that
+   * pass land as one commit: an archive's own `access.md` and the files beside
+   * it arrive together. A file whose lock the lock's own gates refuse is
+   * skipped through the judge's `refusedAtLock`.
    *
    * Every entry that will not land, whatever the reason, is put to the
-   * judge's `skipped` (macOS metadata aside, which is never put to it, and
-   * under the entry cap is not reported either), and one that decides the
-   * archive refuses it whole (`ArchiveRefusedError`) with nothing written. A
+   * judge's `skipped` (macOS metadata aside, which the plan drops without
+   * counting or reporting it), and one that decides the archive refuses it
+   * whole (`ArchiveRefusedError`) with nothing written. A
    * landing refused because
    * another holds one of its paths' locks is answered as a 409 naming that
    * path, and no directory entry is created. A landing whose commit landed
@@ -2513,9 +2542,7 @@ export class WorkspaceService implements IWorkspaceService {
     /** Files the landing dropped because the lock's gates refused their lock. */
     const refusedAtLock = new Set<string>();
     const directories: string[] = [];
-    let processedCount = 0;
-    let totalUncompressed = 0;
-    const destRoot = path.resolve(destAbsolute);
+    const destination = path.relative(workspaceDir, destAbsolute).replace(/\\/g, '/');
 
     /**
      * Record that the entry named `name` in the archive will not land, and
@@ -2529,50 +2556,17 @@ export class WorkspaceService implements IWorkspaceService {
       skipped.push({ path: name, reason: why instanceof Error ? why.message : String(why) });
     };
 
-    /** Where an entry named `rawName` lands, workspace-relative, or null when its name gives it no place. */
-    const landingOf = (rawName: string): string | null => {
-      if (zipEntryNameRefusal(rawName) !== null) return null;
-      const target = path.resolve(destAbsolute, ...zipEntrySegments(rawName));
-      if (target !== destRoot && !target.startsWith(destRoot + path.sep)) return null;
-      return path.relative(workspaceDir, target).replace(/\\/g, '/');
-    };
-
-    for (const entry of zip.getEntries()) {
-      if (processedCount >= ONE_COMMIT_MAX_ENTRIES) {
-        const reason = `Archive exceeds ${ONE_COMMIT_MAX_ENTRIES} entries`;
-        const rawName = zipEntryName(entry.entryName);
-        // Noise is never landed, under the cap or past it, so it decides nothing.
-        if (isZipNoiseEntry(rawName)) skipped.push({ path: entry.entryName, reason });
-        else skip(entry.entryName, landingOf(rawName), reason);
+    // The archive's plan is `zip-entry-rules`' (`planZipEntries`), so
+    // `apply_file_upload` lands the same archive by the same plan rather than
+    // by a second copy of it. A directory entry is created below; a file
+    // marked `duplicate` lands like any other, in the same batch.
+    for (const step of planZipEntries(zip, destination, ONE_COMMIT_LIMITS)) {
+      if (step.kind === 'skip') {
+        skip(step.name, step.target, unzipSkipReason(step));
         continue;
       }
-      processedCount++;
-      const rawName = zipEntryName(entry.entryName);
-
-      if (isZipNoiseEntry(rawName)) continue;
-
-      // What an entry's NAME may be — invalid path, the git folder in any
-      // spelling, a segment no filesystem keeps intact — is `zip-entry-rules`,
-      // so `apply_file_upload` judges the same names by the same rules rather
-      // than by a second copy of them.
-      const nameRefusal = zipEntryNameRefusal(rawName);
-      if (nameRefusal !== null) {
-        skip(rawName || '(empty)', null, nameRefusal);
-        continue;
-      }
-
-      const trimmed = rawName.replace(/\/+$/, '');
-      const segments = zipEntrySegments(rawName);
-
-      const targetAbsolute = path.resolve(destAbsolute, ...segments);
-      if (targetAbsolute !== destRoot && !targetAbsolute.startsWith(destRoot + path.sep)) {
-        skip(rawName, null, 'Path escapes destination');
-        continue;
-      }
-
-      const relForReport = path
-        .relative(workspaceDir, targetAbsolute)
-        .replace(/\\/g, '/');
+      // The plan's target is the destination plus the entry's own path.
+      const targetAbsolute = path.resolve(destAbsolute, step.target.slice(destination.length + 1));
       // An entry the judge refuses is skipped, not extracted, so an archive
       // can't be a way around whatever the judge enforces. Every entry is
       // judged before anything is written, so a refused entry leaves nothing
@@ -2580,11 +2574,11 @@ export class WorkspaceService implements IWorkspaceService {
       const allowEntry = async (kind: 'file' | 'dir'): Promise<boolean> => {
         if (!judge) return true;
         try {
-          await judge.entry(relForReport, kind);
+          await judge.entry(step.target, kind);
           return true;
         } catch (err) {
           if (err instanceof ArchiveRefusedError) throw err;
-          skip(rawName, relForReport, err instanceof Error ? err : 'Refused before it was written');
+          skip(step.name, step.target, err instanceof Error ? err : 'Refused before it was written');
           return false;
         }
       };
@@ -2592,85 +2586,27 @@ export class WorkspaceService implements IWorkspaceService {
       // The symbolic-link rule, per entry: a link already on disk under the
       // destination must not redirect this entry's bytes. Reported like the
       // other per-entry refusals, so one such entry does not fail the rest.
-      // The checkout's own name is reserved at the repository root here too: an
-      // archive carrying it would otherwise create the one folder no workspace
-      // path can name. Reported like the other per-entry refusals — one such
-      // entry does not fail the rest — and asked on its own rather than inside
-      // the catch below, which stays the closed list of types it was.
-      const reservedName = (() => {
-        try {
-          assertRepoRootNameFree(relForReport, this.kbDirName);
-          return null;
-        } catch (err) {
-          return err instanceof Error ? err.message : String(err);
-        }
-      })();
-      if (reservedName !== null) {
-        skip(rawName, relForReport, reservedName);
-        continue;
-      }
-
       try {
-        await assertNotGitInternals(workspaceDir, trimmed, targetAbsolute);
+        await assertNotGitInternals(workspaceDir, step.name.replace(/\/+$/, ''), targetAbsolute);
         await this.assertNotThroughLink(targetAbsolute, workspaceDir);
       } catch (err) {
         if (err instanceof PathTraversalError || err instanceof GitInternalsError) {
-          skip(rawName, relForReport, err);
+          skip(step.name, step.target, err);
           continue;
         }
         throw err;
       }
 
-      if (entry.isDirectory) {
+      if (step.kind === 'dir') {
         if (!(await allowEntry('dir'))) continue;
         directories.push(targetAbsolute);
         continue;
       }
 
-      const declaredSize = entry.header?.size ?? 0;
-      if (declaredSize > UNZIP_MAX_ENTRY_BYTES) {
-        skip(rawName, relForReport, `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`);
-        continue;
-      }
-      if (totalUncompressed + declaredSize > ONE_COMMIT_MAX_TOTAL_BYTES) {
-        skip(rawName, relForReport, `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`);
-        continue;
-      }
-
-      // Read through the one bounded reader (`readZipEntry`), never with the
-      // declared size above as the only bound: an entry that declares ZERO is
-      // inflated with no cap at all by the archive reader, so a few kilobytes
-      // could expand to whatever memory there is before the checks below ran.
-      // Capped at what is left of both limits, and a read that fails is this
-      // entry's refusal rather than the whole archive's.
-      const read = readZipEntry(
-        entry,
-        Math.min(UNZIP_MAX_ENTRY_BYTES, ONE_COMMIT_MAX_TOTAL_BYTES - totalUncompressed),
-      );
-      if (!read.ok && read.reason === 'unreadable') {
-        skip(rawName, relForReport, `Entry could not be read: ${read.detail}`);
-        continue;
-      }
-      if (!read.ok) {
-        skip(
-          rawName,
-          relForReport,
-          totalUncompressed + UNZIP_MAX_ENTRY_BYTES > ONE_COMMIT_MAX_TOTAL_BYTES
-            ? `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`
-            : `Entry exceeds ${UNZIP_MAX_ENTRY_BYTES} byte per-file limit`,
-        );
-        continue;
-      }
-      const data = read.data;
-      if (totalUncompressed + data.byteLength > ONE_COMMIT_MAX_TOTAL_BYTES) {
-        skip(rawName, relForReport, `Archive exceeds ${ONE_COMMIT_MAX_TOTAL_BYTES} byte total uncompressed limit`);
-        continue;
-      }
       if (!(await allowEntry('file'))) continue;
-      writes.push({ path: relForReport, content: data });
-      entryNameAt.set(relForReport, rawName);
-      totalUncompressed += data.byteLength;
-      extracted.push(relForReport);
+      writes.push({ path: step.target, content: step.data });
+      entryNameAt.set(step.target, step.name);
+      extracted.push(step.target);
     }
 
     // A file the lock's gates refuse is the judge's to answer for: skipped,
@@ -2713,7 +2649,7 @@ export class WorkspaceService implements IWorkspaceService {
     if (sharingPending) throw sharingPending;
 
     return {
-      destination: path.relative(workspaceDir, destAbsolute).replace(/\\/g, '/') || '.',
+      destination: destination || '.',
       extracted: landed,
       skipped,
     };
