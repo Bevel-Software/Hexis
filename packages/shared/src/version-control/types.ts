@@ -154,7 +154,9 @@ export type AcquireLockResult =
  * (`open`/`merged`/`closed`).
  *
  * `openChangeRequest` on `IVersionControlService` auto-merges target →
- * source first, so the request shows the post-merge diff.
+ * source first, so the request shows the post-merge diff — except while a
+ * request from the target into the source is open; that merge belongs to the
+ * open request, so it is skipped.
  */
 export type ChangeRequest = PullRequestSummary;
 export type ChangeRequestDetail = PullRequestDetail;

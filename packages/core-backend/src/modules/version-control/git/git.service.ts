@@ -1637,55 +1637,89 @@ export class GitService implements IGitService {
   // automatic-recovery path.
 
   /**
-   * Attempt a local merge of `origin/<targetBranch>` into the currently-
-   * checked-out branch. Used by the version-control module to auto-merge target →
-   * source when a change request is opened or refreshed (PLAN §1).
+   * The change-request refresh: a local merge of `origin/<targetBranch>`
+   * into the checked-out source branch, then the caller's `publish`, all in
+   * ONE reservation of the workspace, so no save or sync lands between the
+   * merge, what the publish reads of the clone and its push. Used by the
+   * version-control module when a change request is opened or brought up to
+   * date (PLAN §1).
    *
-   * Two outcomes:
+   * `merge: false` merges nothing: the target is only fetched (its tracking
+   * ref is what the caller reads next) and the publish runs over the branch
+   * as it is.
+   *
+   * Outcomes:
    *   - `{ kind: 'clean', alreadyUpToDate }` — merge succeeded, possibly as a
    *     no-op (`alreadyUpToDate: true`) or with a new merge commit attributed
    *     to `user` with a descriptive subject + body so reviewers can see why
    *     the merge landed without inspecting the diff.
+   *   - `{ kind: 'not-merged' }` — asked with `merge: false`.
    *   - `{ kind: 'conflicts', paths }` — `git merge` reported conflicts. The
    *     merge is aborted to leave the working tree clean before returning
    *     the conflicting paths so the caller can route to the agent for
-   *     resolution.
+   *     resolution. Nothing is published.
    *
-   * Requires the source branch to already be checked out and the working
-   * tree clean — both refused with structured errors before any git op runs.
+   * A publish that throws leaves a merge commit on the branch locally, for
+   * the branch's next push to carry.
    */
   async mergeFromOrigin(
     workspaceId: string,
     sourceBranch: string,
     targetBranch: string,
     user: AuthUser,
+    opts: {
+      merge?: boolean;
+      publish?: (
+        merged: { kind: 'clean'; alreadyUpToDate: boolean } | { kind: 'not-merged' },
+        ops: ReservedPushOps & { hasUnpushedCommits(): Promise<boolean> },
+      ) => Promise<void>;
+    } = {},
   ): Promise<
     | { kind: 'clean'; alreadyUpToDate: boolean }
+    | { kind: 'not-merged' }
     | { kind: 'conflicts'; paths: string[] }
   > {
     assertValidBranchName(sourceBranch);
     assertValidBranchName(targetBranch);
     assertValidAuthor(user);
-    // The one merge protocol (`mergeRefIntoCheckout`), asked for what the
-    // auto-merge needs: no resolutions, the conflicted paths alone, no
-    // publish. Under the per-branch workspace model the workspace IS the
-    // source branch, so the checked-out guard is not asked for; nor is the
-    // dirty-tree one — save=share keeps the tree clean before an auto-merge,
-    // and a dirty one is an upstream bug `statusInternal` already logs.
     return this.mutex.run(workspaceId, async () => {
-      const outcome = await this.mergeRefIntoCheckout(workspaceId, await this.repoDir(workspaceId), sourceBranch, targetBranch, user, {
-        subject: `Refresh ${sourceBranch} from ${targetBranch}`,
-        body:
-          `Workflow auto-merge: incorporates the latest ${targetBranch} into ${sourceBranch} ` +
-          `as part of opening or refreshing a change request. ` +
-          `Conflicts (if any) would have been surfaced to the caller before this commit landed; ` +
-          `none were detected, so the merge applied cleanly.`,
-        resolutions: new Map(),
-        guardCheckout: false,
-        describeConflicts: false,
-      });
-      if (outcome.kind === 'conflicts') return { kind: 'conflicts' as const, paths: outcome.unresolved };
-      return { kind: 'clean' as const, alreadyUpToDate: outcome.kind === 'nothing-to-merge' };
+      const cwd = await this.repoDir(workspaceId);
+      let result: { kind: 'clean'; alreadyUpToDate: boolean } | { kind: 'not-merged' };
+      if (opts.merge === false) {
+        await this.git(cwd, [
+          'fetch', '--no-write-fetch-head', 'origin', `+refs/heads/${targetBranch}:refs/remotes/origin/${targetBranch}`,
+        ]);
+        result = { kind: 'not-merged' };
+      } else {
+        // The one merge protocol (`mergeRefIntoCheckout`), asked for what the
+        // auto-merge needs: no resolutions, the conflicted paths alone, no
+        // publish of its own. Under the per-branch workspace model the
+        // workspace IS the source branch, so the checked-out guard is not
+        // asked for; nor is the dirty-tree one — save=share keeps the tree
+        // clean before an auto-merge, and a dirty one is an upstream bug
+        // `statusInternal` already logs.
+        const outcome = await this.mergeRefIntoCheckout(workspaceId, cwd, sourceBranch, targetBranch, user, {
+          subject: `Refresh ${sourceBranch} from ${targetBranch}`,
+          body:
+            `Workflow auto-merge: incorporates the latest ${targetBranch} into ${sourceBranch} ` +
+            `as part of opening or refreshing a change request. ` +
+            `Conflicts (if any) would have been surfaced to the caller before this commit landed; ` +
+            `none were detected, so the merge applied cleanly.`,
+          resolutions: new Map(),
+          guardCheckout: false,
+          describeConflicts: false,
+        });
+        if (outcome.kind === 'conflicts') return { kind: 'conflicts' as const, paths: outcome.unresolved };
+        result = { kind: 'clean', alreadyUpToDate: outcome.kind === 'nothing-to-merge' };
+      }
+      if (opts.publish) {
+        await opts.publish(result, {
+          push: () => this.pushUnlocked(workspaceId, cwd, user),
+          pullRebase: () => this.pullUnlocked(workspaceId, cwd, { preserveMerges: true }),
+          hasUnpushedCommits: () => this.hasUnpushedCommitsAt(cwd),
+        });
+      }
+      return result;
     });
   }
 

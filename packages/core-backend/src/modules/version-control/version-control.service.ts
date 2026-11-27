@@ -2463,8 +2463,11 @@ export class VersionControlService implements IVersionControlService {
    *      so the resulting CR shows the post-merge diff. Conflicts surface
    *      as `ChangeRequestConflictsError` (409 with the conflicting paths)
    *      so the caller (agent or UI) can route into the resolution flow.
-   *   4. Push the source branch so the remote carries every commit the CR
-   *      will reference, including the auto-merge commit if any.
+   *      Skipped while a request from the target into the source is open:
+   *      that merge is the open request's own, and only applying it makes it.
+   *   4. Push the source branch, in the auto-merge's own reservation of the
+   *      workspace, so the remote carries every commit the CR will
+   *      reference, including the auto-merge commit if any.
    *   5. Insert the `change_requests` row (author stored directly — no service
    *      account, so no hidden body marker). The DB-assigned number is the CR id.
    *   6. Re-fetch the full detail via the PR service so the response shape
@@ -2532,42 +2535,31 @@ export class VersionControlService implements IVersionControlService {
       );
     }
 
-    // Auto-merge target → source. `mergeFromOrigin` enforces "current
-    // branch == source" and "clean working tree" before attempting; both
-    // failures surface as structured version-control errors that pass straight
-    // through to the caller.
-    const mergeOutcome = await this.git.mergeFromOrigin(
+    // Auto-merge target → source (`refreshFromTarget`), then push the source
+    // in the same reservation, so the remote sees the merge commit too. While
+    // a request from the target into the source is open the merge is skipped
+    // (the target is still fetched: the touched paths and approvers below are
+    // read from it) and the request opens without it: the open one keeps its
+    // files. A push the host refuses does not undo the open: the merge is
+    // committed locally, the request is a DB row, and the next push of the
+    // branch carries the commits — so the row is still created below and the
+    // refusal (409, the saved-locally sentence, the sync banner) is answered
+    // once it exists.
+    const pushRefused = await this.refreshFromTarget(
       workspaceId,
       input.sourceBranch,
       input.targetBranch,
       user,
+      async (_refresh, ops): Promise<PushNeedsAgentResolutionError | null> => {
+        try {
+          await this.pushWithRecoveryVia(ops, workspaceId, branchForWorkspaceId(workspaceId), '(opening a change request)', user);
+          return null;
+        } catch (err) {
+          if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
+          return err;
+        }
+      },
     );
-    if (mergeOutcome.kind === 'conflicts') {
-      throw new ChangeRequestConflictsError(
-        input.sourceBranch,
-        input.targetBranch,
-        mergeOutcome.paths,
-      );
-    }
-
-    // Push the source *after* the auto-merge so the remote sees the merge
-    // commit too. A push the host refuses does not undo the open: the merge
-    // is committed locally, the request is a DB row, and the next push of
-    // the branch carries the commits — so the row is still created below and
-    // the refusal (409, the saved-locally sentence, the sync banner) is
-    // answered once it exists.
-    let pushRefused: PushNeedsAgentResolutionError | null = null;
-    try {
-      await this.pushWithRecovery(
-        workspaceId,
-        branchForWorkspaceId(workspaceId),
-        '(opening a change request)',
-        user,
-      );
-    } catch (err) {
-      if (!(err instanceof PushNeedsAgentResolutionError)) throw err;
-      pushRefused = err;
-    }
 
     const workspacePath = await this.workspaceService.getWorkspacePath(workspaceId);
     const cwd = path.join(workspacePath, this.kbDirName);
@@ -2579,7 +2571,9 @@ export class VersionControlService implements IVersionControlService {
     // is a DB row whose author is a column, whose body is the description and
     // nothing else, and whose access-request level and note are columns of
     // their own. Who must approve each file is resolved live, per file,
-    // whenever the request is read.
+    // whenever the request is read. Read outside the workspace's reservation,
+    // deliberately: an `origin/<target>` that moved meanwhile is staleness
+    // this read tolerates, for that reason.
     const touchedPaths = await this.listChangedPathsBetweenBranches(
       cwd,
       input.targetBranch,
@@ -2797,7 +2791,9 @@ export class VersionControlService implements IVersionControlService {
    * detail's `viewerCanUpdate`, computed for THIS caller, so the button and
    * the enforcement read one predicate. A conflicting merge is aborted
    * inside `mergeFromOrigin`: nothing is committed or pushed, and the branch
-   * is exactly what it was.
+   * is exactly what it was. While a request from the target into this branch
+   * is open, `refreshFromTarget` merges nothing and the update is refused
+   * (`OpenChangeRequestBlocksMergeError`).
    *
    * ONE detail read after the merge. The read before it exists only to
    * decide authority and to name the two branches, so it asks for no patches
@@ -2885,47 +2881,49 @@ export class VersionControlService implements IVersionControlService {
         { err },
       );
     }
-    const outcome = await this.git.mergeFromOrigin(
-      workspaceId,
-      detail.branch,
-      detail.base,
-      user,
+    // The merge and its push run under both branches' lifecycle keys, as
+    // `openChangeRequest` runs them: `refreshFromTarget` refuses while a
+    // request from the target into this branch is open, and that answer holds
+    // only while nobody can open one before the push lands. The merge, the
+    // probe and the push share one reservation of the workspace
+    // (`refreshFromTarget`), so no save lands between them.
+    const hasUnpushed = await this.runOnBranchPair(detail.branch, detail.base, () =>
+      this.refreshFromTarget(workspaceId, detail.branch, detail.base, user, async (refresh, ops) => {
+        if (refresh.blockedBy !== null) {
+          // Names the open request (its number and two branches): every
+          // signed-in caller of the app may already read those, from the
+          // change-request list (`GET /workflow/change-requests`), which
+          // withholds only an apply failure's reason. Update has no agent tool.
+          throw new OpenChangeRequestBlocksMergeError(detail.base, detail.branch, refresh.blockedBy);
+        }
+        // Push whenever the CLONE holds a commit origin has not seen — not when
+        // THIS merge authored one. The two differ in exactly the case that keeps
+        // a request behind for good: an earlier update merged, its push failed,
+        // and the merge is sitting in the workspace. That merge already contains
+        // the target, so this call's `mergeFromOrigin` reports
+        // `alreadyUpToDate` and the old gate skipped the push — leaving the
+        // request behind on the remote, and the next open with the same work to
+        // do. Asking git what is unpushed retries it instead.
+        //
+        // A failed probe falls back to the old gate rather than to "push
+        // anyway": a push on a clone with nothing to push is a wasted
+        // round trip on every single update.
+        const unpushed = await ops.hasUnpushedCommits().catch((err: unknown) => {
+          log.warn(
+            `could not tell whether change request #${number} has unpushed commits; falling back to whether this merge authored one`,
+            { err },
+          );
+          return !refresh.alreadyUpToDate;
+        });
+        if (unpushed) {
+          // A refusal answers 409 with the saved-locally sentence and leaves the
+          // merge applied in the clone; the probe above makes the next update
+          // (or any save on the branch) push it.
+          await this.pushWithRecoveryVia(ops, workspaceId, branchForWorkspaceId(workspaceId), `(update from ${detail.base})`, user);
+        }
+        return unpushed;
+      }),
     );
-    if (outcome.kind === 'conflicts') {
-      throw new ChangeRequestConflictsError(detail.branch, detail.base, outcome.paths);
-    }
-    // Push whenever the CLONE holds a commit origin has not seen — not when
-    // THIS merge authored one. The two differ in exactly the case that keeps
-    // a request behind for good: an earlier update merged, its push failed,
-    // and the merge is sitting in the workspace. That merge already contains
-    // the target, so this call's `mergeFromOrigin` reports
-    // `alreadyUpToDate` and the old gate skipped the push — leaving the
-    // request behind on the remote, and the next open with the same work to
-    // do. Asking git what is unpushed retries it instead.
-    //
-    // A failed probe falls back to the old gate rather than to "push
-    // anyway": a push on a clone with nothing to push is a wasted
-    // round trip on every single update.
-    const hasUnpushed = await this.git
-      .hasUnpushedCommits(workspaceId)
-      .catch((err: unknown) => {
-        log.warn(
-          `could not tell whether change request #${number} has unpushed commits; falling back to whether this merge authored one`,
-          { err },
-        );
-        return !outcome.alreadyUpToDate;
-      });
-    if (hasUnpushed) {
-      // A refusal answers 409 with the saved-locally sentence and leaves the
-      // merge applied in the clone; the probe above makes the next update
-      // (or any save on the branch) push it.
-      await this.pushWithRecovery(
-        workspaceId,
-        branchForWorkspaceId(workspaceId),
-        `(update from ${detail.base})`,
-        user,
-      );
-    }
     // Where the branch ended up, as PUBLISHED — two rev-parses, not a second
     // detail read. Everything below needs only the sha, and the detail that
     // goes back to the caller is read once, at the end, after the approvals
@@ -4657,6 +4655,61 @@ export class VersionControlService implements IVersionControlService {
       if (Date.now() >= deadline) return { ok: false, pending: queued };
       await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
     }
+  }
+
+  /**
+   * The one target → source refresh: `origin/<target>` merged into the
+   * source's checkout, then `publish` (the caller's push), as opening a
+   * request and Update both run it. The only caller of `git.mergeFromOrigin`
+   * (a source-level test pins that), which runs the merge and the publish in
+   * one reservation of the workspace: nothing lands in the clone between
+   * them.
+   *
+   * Not while a request from the target into the source is open
+   * (`blockedBy` names it to `publish`, and nothing is merged, the target
+   * only fetched): that merge IS the one `mergeBranch` refuses, landing the
+   * open request's unreviewed commits on its own target and emptying it.
+   * Only applying the request makes it. The caller holds both branches'
+   * lifecycle keys (`runOnBranchPair`), which every open of that request
+   * also takes, so none can land between this answer and the merge.
+   *
+   * A conflict aborts the merge, publishes nothing and surfaces as
+   * `ChangeRequestConflictsError`.
+   */
+  private async refreshFromTarget<T>(
+    workspaceId: string,
+    sourceBranch: string,
+    targetBranch: string,
+    user: AuthUser,
+    publish: (
+      refresh: { blockedBy: number; alreadyUpToDate?: undefined } | { blockedBy: null; alreadyUpToDate: boolean },
+      ops: { push: () => Promise<void>; pull: () => Promise<unknown>; hasUnpushedCommits: () => Promise<boolean> },
+    ) => Promise<T>,
+  ): Promise<T> {
+    const blockedBy = await this.openRequestBlockingMerge(targetBranch, sourceBranch);
+    const published: T[] = [];
+    const outcome = await this.git.mergeFromOrigin(workspaceId, sourceBranch, targetBranch, user, {
+      merge: blockedBy === null,
+      publish: async (merged, ops) => {
+        published.push(
+          await publish(
+            blockedBy !== null
+              ? { blockedBy }
+              : { blockedBy: null, alreadyUpToDate: merged.kind === 'clean' && merged.alreadyUpToDate },
+            {
+              push: ops.push,
+              pull: () => this.pullWorkspaceVia(ops.pullRebase, workspaceId),
+              hasUnpushedCommits: ops.hasUnpushedCommits,
+            },
+          ),
+        );
+      },
+    });
+    if (outcome.kind === 'conflicts') {
+      throw new ChangeRequestConflictsError(sourceBranch, targetBranch, outcome.paths);
+    }
+    if (published.length !== 1) throw new Error('refreshFromTarget: the refresh returned without publishing');
+    return published[0];
   }
 
   /** The one question `mergeBranch` refuses on: is a request from `source` into `target` open? */

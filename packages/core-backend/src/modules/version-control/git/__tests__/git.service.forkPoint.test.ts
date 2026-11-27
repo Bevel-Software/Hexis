@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { GitService } from '../git.service.js';
+import { WorkspaceIdMutex } from '../../../kb-fs/index.js';
 import { gitOut, runGit, stubVersionControlHooks, stubWorkspaceService } from './git-test-helpers.js';
 
 /**
@@ -242,5 +243,87 @@ describe('GitService — fork point, behind, and Update', () => {
     expect(await gitOut(repo, ['rev-parse', `origin/${SOURCE}`])).toBe(originBefore);
     // Still behind — the notice stays until someone resolves it.
     expect((await forkPoint()).behind).toBe(true);
+  });
+
+  it('the publish runs over the merge inside its one reservation: a git operation asked meanwhile waits for the push', async () => {
+    await propose(['price: 100', 'price: 120']);
+    await editTargetDirectly(['status: draft', 'status: signed']);
+    // The service's own mutex, injected through its constructor, recording
+    // which workspaces are reserved right now and when each queued operation
+    // starts. No sleep: whether the publish runs under the reservation is read
+    // from the mutex itself, at the moment the publish runs.
+    const held = new Map<string, number>();
+    const started: boolean[] = [];
+    class RecordingMutex extends WorkspaceIdMutex {
+      override async runAll<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+        const i = started.push(false) - 1;
+        return super.runAll(keys, async () => {
+          started[i] = true;
+          for (const k of keys) held.set(k, (held.get(k) ?? 0) + 1);
+          try {
+            return await fn();
+          } finally {
+            for (const k of keys) held.set(k, held.get(k)! - 1);
+          }
+        });
+      }
+    }
+    git = new GitService(
+      stubWorkspaceService({ [WS]: path.dirname(repo) }),
+      stubVersionControlHooks(),
+      testKbContext(),
+      new RecordingMutex(),
+    );
+    let probe: Promise<boolean> | null = null;
+    const outcome = await git.mergeFromOrigin(WS, SOURCE, TARGET, USER, {
+      publish: async (merged, ops) => {
+        expect(merged).toEqual({ kind: 'clean', alreadyUpToDate: false });
+        // The publish runs while the workspace is reserved.
+        expect(held.get(WS)).toBe(1);
+        expect(await ops.hasUnpushedCommits()).toBe(true);
+        // Queues on the workspace's reservation, which this publish holds.
+        probe = git.hasUnpushedCommits(WS);
+        const queued = started.length - 1;
+        await ops.push();
+        expect(started[queued]).toBe(false);
+      },
+    });
+    expect(outcome).toEqual({ kind: 'clean', alreadyUpToDate: false });
+    // It ran after the push, so it saw nothing left to push.
+    expect(await probe).toBe(false);
+    await runGit(repo, ['fetch', 'origin']);
+    expect(await gitOut(repo, ['rev-parse', `origin/${SOURCE}`])).toBe(await gitOut(repo, ['rev-parse', 'HEAD']));
+  });
+
+  it('merge: false merges nothing, fetches the target, and still publishes the branch as it is', async () => {
+    await propose(['price: 100', 'price: 120']);
+    await editTargetDirectly(['status: draft', 'status: signed']);
+    const headBefore = await gitOut(repo, ['rev-parse', 'HEAD']);
+    const published: unknown[] = [];
+    const outcome = await git.mergeFromOrigin(WS, SOURCE, TARGET, USER, {
+      merge: false,
+      publish: async (merged) => {
+        published.push(merged);
+      },
+    });
+    expect(outcome).toEqual({ kind: 'not-merged' });
+    expect(published).toEqual([{ kind: 'not-merged' }]);
+    expect(await gitOut(repo, ['rev-parse', 'HEAD'])).toBe(headBefore);
+    expect(await fs.readFile(path.join(repo, DEAL), 'utf8')).not.toContain('status: signed');
+    // The target's tracking ref is the published tip, for what the caller reads next.
+    expect(await gitOut(repo, ['rev-parse', `origin/${TARGET}`])).toBe(await gitOut(other, ['rev-parse', 'HEAD']));
+  });
+
+  it('a conflicting refresh publishes nothing', async () => {
+    await propose(['price: 100', 'price: 120']);
+    await editTargetDirectly(['price: 100', 'price: 90']);
+    let published = false;
+    const outcome = await git.mergeFromOrigin(WS, SOURCE, TARGET, USER, {
+      publish: async () => {
+        published = true;
+      },
+    });
+    expect(outcome).toEqual({ kind: 'conflicts', paths: [DEAL] });
+    expect(published).toBe(false);
   });
 });

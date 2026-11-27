@@ -21,8 +21,7 @@ approval.
   not commit.
 - **Propose** with `open_change_request`
   (`sourceBranch` = the draft, `targetBranch` = the protected branch, a
-  `title`), then give the person the request's `url`. It first brings the
-  latest target into the draft. The answer lists `approvals` (who must approve
+  `title`), then give the person the request's `url`. The answer lists `approvals` (who must approve
   each file) and `mergeBlockedReasons`.
 - **Apply** with `merge_change_request`. It records the person's approval on
   each file they may approve, then merges, as Apply does in the app; someone
