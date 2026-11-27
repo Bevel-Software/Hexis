@@ -501,6 +501,7 @@ describe.each(doors)('an archive extracted through %s into a folder the person c
 
 describe.each(doors)('an archive extracted through %s: under a folder the person cannot read, the disk is never what answers', (_door, start) => {
   let elsewhere = '';
+  afterEach(() => fs.rm(elsewhere, { recursive: true, force: true }));
   beforeEach(async () => {
     await seed(BRANCH, DRAFT_TREE);
     elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), 'unzip-elsewhere-'));

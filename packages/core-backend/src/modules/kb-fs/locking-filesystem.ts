@@ -858,12 +858,15 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       modeOf: (p: string) => 'discard' | 'enqueue' | 'untouched' | 'keep',
     ): Promise<void> => {
       // The locks not yet given back are renewed while the loop runs: with
-      // thousands of paths it can outlast a lease. Each path leaves the
-      // renewals as its turn comes, so none is renewed after its release.
+      // thousands of paths it can outlast a lease. A path leaves the
+      // renewals once its release has returned, so even a slow release
+      // gives back a lock that is still its own.
       for (const p of acquired) {
         const mode = leases.lost(p) ? 'keep' : modeOf(p);
-        leases.released(p);
-        if (mode === 'keep') continue;
+        if (mode === 'keep') {
+          leases.released(p);
+          continue;
+        }
         try {
           if (mode === 'discard') {
             await versionControl.releaseLockNoCommit(workspaceId, branch, p, user);
@@ -874,6 +877,8 @@ export class LockingFilesystem extends GitGuardedFilesystem {
           }
         } catch (releaseErr) {
           log.warn(`lock release failed for "${p}" during writeFiles:`, { err: releaseErr });
+        } finally {
+          leases.released(p);
         }
       }
       await leases.stop();

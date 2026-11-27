@@ -289,6 +289,8 @@ describe('POST /unzip hands the extraction the archive judge, which asks the rea
     // The question is the extraction's to ask, before it looks at the folder
     // (unzip-lands-as-one-commit.test.ts lands nothing when it refuses).
     expect(res.status).toBe(200);
+    // The requested destination reaches the extraction, which asks the judge about it.
+    expect(h.unzipFileMock.mock.calls[0]![2]).toBe(`${KB}/KnowledgeBase/Sealed`);
     const archiveJudge = h.unzipFileMock.mock.calls[0]![3] as ArchiveEntryJudge;
     const err = await archiveJudge.destination(`${KB}/KnowledgeBase/Sealed`).then(() => null, (e: unknown) => e);
     expect(err).toMatchObject({ status: 403 });

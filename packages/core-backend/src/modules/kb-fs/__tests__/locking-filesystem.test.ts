@@ -937,6 +937,20 @@ describe('LockingFilesystem.writeFiles — a batch longer than a lease', () => {
     expect(versionControl.releaseLockUntouched).toHaveBeenCalledWith('ws-feat', 'feat', B, USER);
   });
 
+  it('keeps renewing a lock until its own release has returned, so a release slower than a lease still gives back a lock that is its own', async () => {
+    const { versionControl, liveAtRelease, committing } = leasingVersionControl(0, 1.5 * LEASE_MS);
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { versionControl, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    const landing = fsLayer.writeFiles([{ path: A, content: 'A' }], 'batch');
+    await committing;
+    await vi.advanceTimersByTimeAsync(2 * LEASE_MS);
+    await landing;
+
+    expect(liveAtRelease).toEqual([[A, true]]);
+  });
+
   it('keeps renewing the locks it has not given back yet, so a release loop longer than a lease still holds each lock it releases', async () => {
     const paths = ['knowledge-base/r1.md', 'knowledge-base/r2.md', 'knowledge-base/r3.md', 'knowledge-base/r4.md'];
     const { versionControl, liveAtRelease, committing } = leasingVersionControl(0, 0.4 * LEASE_MS);

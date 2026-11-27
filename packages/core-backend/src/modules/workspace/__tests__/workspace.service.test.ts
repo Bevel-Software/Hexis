@@ -1244,7 +1244,7 @@ describe('WorkspaceService.unzipFile — per-entry write guard', () => {
     await fs.writeFile(path.join(repoDir, rel), zip.toBuffer());
   }
 
-  it('asks the judge about the folder it extracts into, the archive\'s own when no destination is named, before anything else of it', async () => {
+  it('asks the judge about the folder it extracts into, the archive\'s own when no destination is named, and lands nothing when it refuses', async () => {
     await fs.mkdir(path.join(repoDir, 'Team'), { recursive: true });
     await writeZip('Team/a.zip', { 'keep.md': 'ok' });
     const asked: string[] = [];
