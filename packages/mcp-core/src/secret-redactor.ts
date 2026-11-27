@@ -19,7 +19,7 @@ const MIN_ECHOED_PIECE_CHARS = 8;
 /**
  * The length of a piece of the caller's text that counts as repeated
  * wherever it appears; a shorter string of theirs counts whole, wherever it
- * appears. A credential shorter than this withholds every quote made with the
+ * appears. A secret shorter than this withholds every quote made with the
  * caller's text about. See {@link SecretRedactor}.
  */
 const MIN_CALLER_CHARS = 4;
@@ -29,17 +29,6 @@ const MIN_CALLER_CHARS = 4;
  */
 const MAX_CALLER_CHARS_READ = 4_000_000;
 const REDACTED = '[redacted]';
-/** No letter or digit of any script (astral ones too) just before, or just after, a position. */
-const NO_WORD_BEFORE = /(?<![\p{L}\p{N}])/uy;
-const NO_WORD_AFTER = /(?![\p{L}\p{N}])/uy;
-
-/** Whether `text` from `start` to `end` stands alone: no letter or digit glued to either side, read by code point. */
-function standsAlone(text: string, start: number, end: number): boolean {
-  NO_WORD_BEFORE.lastIndex = start;
-  NO_WORD_AFTER.lastIndex = end;
-  return NO_WORD_BEFORE.test(text) && NO_WORD_AFTER.test(text);
-}
-
 /**
  * Every secret a request carried, so that none of them can come back out in
  * something we quote.
@@ -60,11 +49,12 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * A KNOWN credential ({@link remember}) is taken out wherever it appears,
  * whatever its length: a four-character key is still the key, and one echoed
  * glued to other text (`xa9B2y`) is still echoed. The price is paid in the
- * message: a short credential blanks its characters wherever they fall. One
- * shorter than four characters cannot also be kept from answering a guess the
- * caller glues to other text, so while one is held, a quote made with the
- * caller's text about ({@link redact}'s `callerText`) is not quoted at all:
- * the same `[redacted]` whatever was sent.
+ * message: a short credential blanks its characters wherever they fall. A
+ * secret shorter than four characters, a credential or a substituted value
+ * (below), cannot also be kept from answering a guess the server shortened or
+ * glued to other text, so while one is held, a quote made with the caller's
+ * text about ({@link redact}'s `callerText`) is not quoted at all: the same
+ * `[redacted]` whatever was sent.
  *
  * A value that is only known to have been SUBSTITUTED ({@link rememberSubstituted})
  * is one too when its variable's name says so. Otherwise it may be anything:
@@ -80,9 +70,7 @@ function standsAlone(text: string, start: number, end: number): boolean {
  * repeats any of that text, case aside, or holds any secret. It repeats it
  * when it has any four characters of a string the caller sent (as sent or in
  * one of the spellings above), or any of their shorter strings anywhere, glued
- * to other text or not; and, while a substituted value shorter than four
- * characters is held (see above), when a word of one to three letters or
- * digits inside a longer string of theirs stands alone in it. Anything finer answers guesses. Taking out only what repeats the
+ * to other text or not. Anything finer answers guesses. Taking out only what repeats the
  * caller's text leaves the rest of a key whose head a right guess covered,
  * where a wrong guess leaves the key taken out whole; taking out the rest of a
  * key from the secrets answers whether a stretch next to the caller's text
@@ -134,11 +122,10 @@ export class SecretRedactor {
     const hidden = hiddenIn(text, secrets, this.credentials);
     if (callerText.length > 0) {
       if (secrets.size === 0) return text;
-      // A credential this short cannot be both taken out wherever it is and
-      // kept from answering a guess glued to other text (see the class comment).
-      if ([...this.credentials].some((secret) => secret.length < MIN_CALLER_CHARS)) return REDACTED;
-      const shortValueHeld = [...this.substituted].some((value) => value.length < MIN_CALLER_CHARS);
-      return hidden.includes(1) || repeatsCallerText(text, callerText, shortValueHeld) ? REDACTED : text;
+      // A secret this short cannot be kept from answering a guess the server
+      // shortened or glued to other text (see the class comment).
+      if ([...secrets].some((secret) => secret.length < MIN_CALLER_CHARS)) return REDACTED;
+      return hidden.includes(1) || repeatsCallerText(text, callerText) ? REDACTED : text;
     }
     let out = '';
     for (let i = 0; i < text.length; i++) {
@@ -187,12 +174,11 @@ function hiddenIn(text: string, secrets: ReadonlySet<string>, credentials: Reado
  * which depends on nothing secret. Their four-character pieces are looked up
  * in a table of the text's, and their short strings in one walk over it.
  */
-function repeatsCallerText(text: string, callerText: readonly string[], shortValueHeld: boolean): boolean {
+function repeatsCallerText(text: string, callerText: readonly string[]): boolean {
   const folded = foldCase(text);
   const pieces = new HashTable(folded.length);
   for (const [, a, b] of rolled(folded, MIN_CALLER_CHARS)) pieces.add(a, b);
   const shortStrings = new Set<string>();
-  const shortWords = new Set<string>();
   let read = 0;
   for (const sent of callerText) {
     for (const spelling of new Set(spellings(sent))) {
@@ -204,19 +190,14 @@ function repeatsCallerText(text: string, callerText: readonly string[], shortVal
         continue;
       }
       for (const [, a, b] of rolled(sentFolded, MIN_CALLER_CHARS)) if (pieces.has(a, b)) return true;
-      if (!shortValueHeld) continue;
-      for (const word of sentFolded.matchAll(/[\p{L}\p{N}]+/gu)) if (word[0].length < MIN_CALLER_CHARS) shortWords.add(word[0]);
     }
   }
-  if (shortStrings.size === 0 && shortWords.size === 0) return false;
-  // Their short strings anywhere, glued to other text or not; while a short
-  // value is held, the short words of their longer strings where they stand
-  // alone. One walk, every start tried against both sets.
+  if (shortStrings.size === 0) return false;
+  // Their short strings anywhere, glued to other text or not: one walk, every
+  // start tried against the set.
   for (let at = 0; at < folded.length; at++) {
     for (let length = 1; length < MIN_CALLER_CHARS && at + length <= folded.length; length++) {
-      const piece = folded.slice(at, at + length);
-      if (shortStrings.has(piece)) return true;
-      if (shortValueHeld && shortWords.has(piece) && standsAlone(folded, at, at + length)) return true;
+      if (shortStrings.has(folded.slice(at, at + length))) return true;
     }
   }
   return false;

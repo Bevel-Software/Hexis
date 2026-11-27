@@ -104,6 +104,17 @@ describe('DownstreamToolError.redactedWith', () => {
     // Nowhere: not in a field, a MIME type, a payload, or a key the server chose.
     expect(JSON.stringify(redacted.content)).not.toContain(KEY);
   });
+
+  it('leaves out a number in a block whose digits are a secret', () => {
+    const redactor = new SecretRedactor();
+    redactor.remember('4821');
+    const failure = new DownstreamToolError('refused', [
+      { type: 'resource_link', uri: 'file:///b', name: 'b', size: 4821, annotations: { priority: 0.5 } },
+    ] as unknown as CallToolResult['content']);
+    expect(failure.redactedWith((text) => redactor.redact(text)).content).toEqual([
+      { type: 'resource_link', uri: 'file:///b', name: 'b', annotations: { priority: 0.5 } },
+    ]);
+  });
 });
 
 describe('every failure a wrapped protocol lets through', () => {
@@ -190,6 +201,19 @@ describe('every failure a wrapped protocol lets through', () => {
     expect(data.bytes).toBeUndefined();
     expect(data.detail).toBeInstanceOf(Detail);
     expect((data.detail as Detail).note).toBe('[redacted]');
+  });
+
+  it("redacts the numbers and booleans in a thrown error's payload, an HTTP status it states kept", async () => {
+    // `X-Pin` carries 4821 in the template: echoed as a number, it is a secret all the same.
+    const failure = Object.assign(new McpError(-32603, 'rejected', { pin: 4821, size: 4821, ok: false, count: 3 }), {
+      status: 401,
+      response: { status: 401, statusCode: 4821 },
+    });
+    const thrown = (await failingWith(failure)()) as McpError & { status: unknown; response: unknown };
+    expect(thrown.data).toEqual({ pin: '[redacted]', size: '[redacted]', ok: false, count: 3 });
+    expect(thrown.status).toBe(401);
+    expect(thrown.response).toEqual({ status: 401, statusCode: '[redacted]' });
+    expect(thrown.code).toBe(-32603);
   });
 
   it('redacts a thrown string', async () => {

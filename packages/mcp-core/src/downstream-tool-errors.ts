@@ -66,14 +66,21 @@ const NESTED_FIELDS: Readonly<Record<string, readonly string[]>> = {
   resource: ['uri', 'mimeType', 'text'],
   annotations: ['audience', 'priority', 'lastModified'],
 };
-/** `object` reduced to `fields`: every string redacted, numbers kept, a block's `type` (a spec kind) kept. */
+/**
+ * `object` reduced to `fields`: every string redacted, a number kept only
+ * when `redact` leaves its digits as they are, a block's `type` (a spec kind)
+ * kept.
+ */
 function specFields(object: object, fields: readonly string[], redact: (text: string) => string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const field of fields) {
     if (!(field in object)) continue;
     const value = (object as Record<string, unknown>)[field];
     const nested = NESTED_FIELDS[field];
-    if (field === 'type' || typeof value === 'number') out[field] = value;
+    if (field === 'type') out[field] = value;
+    else if (typeof value === 'number') {
+      if (redact(String(value)) === String(value)) out[field] = value;
+    }
     else if (nested && value && typeof value === 'object' && !Array.isArray(value)) out[field] = specFields(value, nested, redact);
     else if (typeof value === 'string') out[field] = redact(value);
     else if (Array.isArray(value)) out[field] = value.filter((item) => typeof item === 'string').map((item) => redact(item));
@@ -187,7 +194,9 @@ function redactedInPlace(err: Error, redact: (text: string) => string): Error {
 
 /**
  * `value` with `redact` applied to every string in it, keys included, however
- * deeply nested. An error is redacted in place, every own field (enumerable
+ * deeply nested, and to every number and boolean (one whose text `redact`
+ * changes comes back as that redacted text; an HTTP status where one is
+ * stated stays). An error is redacted in place, every own field (enumerable
  * or not) and its cause, its class, name and code kept; an array, a `Map`, a
  * `Set` or any other object is copied with its own fields redacted and its
  * prototype kept, each key defined as an own property (so a `__proto__` key
@@ -201,9 +210,13 @@ function redactedCopy(value: unknown, redact: (text: string) => string): unknown
   const pending: Array<() => void> = [];
   /** Define `key` on `target` as an own data property holding `child` redacted, once the walk reaches it. */
   const put = (target: object, key: string, child: unknown, enumerable = true) =>
-    Object.defineProperty(target, key, { value: copy(child), writable: true, configurable: true, enumerable });
-  const copy = (item: unknown): unknown => {
+    Object.defineProperty(target, key, { value: copy(child, key), writable: true, configurable: true, enumerable });
+  const copy = (item: unknown, key?: string): unknown => {
     if (typeof item === 'string') return redact(item);
+    if (typeof item === 'number' || typeof item === 'bigint' || typeof item === 'boolean') {
+      if (key !== undefined && HTTP_STATUS_FIELDS.has(key) && isHttpStatus(item)) return item;
+      return redact(String(item)) === String(item) ? item : redact(String(item));
+    }
     if (!item || typeof item !== 'object') return item;
     if (copies.has(item)) return copies.get(item);
     if (item instanceof ArrayBuffer || ArrayBuffer.isView(item)) return undefined;
@@ -265,6 +278,17 @@ function redactedCopy(value: unknown, redact: (text: string) => string): unknown
   const result = copy(value);
   while (pending.length > 0) pending.pop()!();
   return result;
+}
+
+/**
+ * Where an error or its response states an HTTP status, which the token
+ * classifier reads: kept when it is one (an integer from 100 to 599), so a
+ * rejected token is still told from a refused call. An error's `code` is kept
+ * whatever it holds, as it was.
+ */
+const HTTP_STATUS_FIELDS = new Set(['status', 'statusCode']);
+function isHttpStatus(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599;
 }
 
 /** `item[key]`, or undefined when reading it throws (a getter that fails says nothing). */

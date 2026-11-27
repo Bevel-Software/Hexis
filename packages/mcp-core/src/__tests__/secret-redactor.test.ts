@@ -170,7 +170,7 @@ describe('SecretRedactor', () => {
     expect(redactor.redact('bad value', ['z'.repeat(4_000_001)])).toBe('[redacted]');
   });
 
-  it('quotes nothing with the caller\'s text about while a credential shorter than four characters is held', () => {
+  it("quotes nothing with the caller's text about while a secret shorter than four characters is held, a substituted value too", () => {
     for (const short of ['ab1', 'a!']) {
       const redactor = new SecretRedactor();
       redactor.remember(short);
@@ -179,23 +179,14 @@ describe('SecretRedactor', () => {
         expect(redactor.redact(`no x${guess}y here`, [guess])).toBe('[redacted]');
       }
     }
-  });
-
-  it('answers a short guess at a value the same right or wrong, alone, glued or with punctuation', () => {
     const redactor = new SecretRedactor();
     redactor.rememberSubstituted('REGION', 'us');
-    redactor.rememberSubstituted('SEP', '.!');
-    for (const guess of ['us', 'eu']) {
-      expect(redactor.redact(`region ${guess} is closed`, [guess])).toBe('[redacted]');
-      expect(redactor.redact(`no x${guess}y here`, [guess])).toBe('[redacted]');
-    }
-    for (const guess of ['.!', '?!']) expect(redactor.redact(`sep ${guess} refused`, [guess])).toBe('[redacted]');
-    // A text that is nothing but the caller's punctuation.
-    expect(redactor.redact('?', ['?'])).toBe('[redacted]');
-    // A short word inside a longer string of theirs counts where it stands alone, while a short value is held;
-    // a letter outside the basic plane is a letter, so `ab` glued to one does not stand alone.
-    expect(redactor.redact('𐐀ab and ab𐐀', ['ab cdefg'])).toBe('𐐀ab and ab𐐀');
-    expect(redactor.redact('𐐀ab and ab𐐀, then ab', ['ab cdefg'])).toBe('[redacted]');
+    // A guess the server shortens to the value's length, right or wrong, and one that is nowhere in the quote.
+    expect(redactor.redact('region us is closed', ['uspadding'])).toBe('[redacted]');
+    expect(redactor.redact('region eu is closed', ['eupadding'])).toBe('[redacted]');
+    expect(redactor.redact('This tool requires a Business plan.', ['Quarterly review'])).toBe('[redacted]');
+    // Without the caller's text about, the value is taken out where it stands alone, as before.
+    expect(redactor.redact('region us is closed')).toBe('region [redacted] is closed');
   });
 
   it('takes out a credential shorter than four characters inside other words too', () => {
@@ -206,7 +197,7 @@ describe('SecretRedactor', () => {
 
   it('looks for many short strings of the caller in one walk over a long text', () => {
     const redactor = new SecretRedactor();
-    redactor.rememberSubstituted('REGION', 'us');
+    redactor.remember('sk-live-Q7xZ2abcdefgh');
     const words = 'word '.repeat(4_000);
     expect(redactor.redact(`${words}! end`, Array.from({ length: 200_000 }, () => '?'))).toBe(`${words}! end`);
     expect(redactor.redact(`${words}? end`, Array.from({ length: 200_000 }, () => '?'))).toBe('[redacted]');
