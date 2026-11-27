@@ -146,9 +146,8 @@ export class SecretRedactor {
         else shortRuns.set(key, [span]);
       }
       let read = 0;
-      reading: for (const sent of callerText) {
+      for (const sent of callerText) {
         for (const spelling of new Set(spellings(sent))) {
-          if (startsOf.size === 0 && shortRuns.size === 0) break reading;
           read += spelling.length;
           if (read > MAX_CALLER_CHARS_READ) return REDACTED;
           const sentFolded = foldCase(spelling);

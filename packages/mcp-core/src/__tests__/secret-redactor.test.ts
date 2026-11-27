@@ -135,6 +135,8 @@ describe('SecretRedactor', () => {
       expect(redactor.redact(`no x${guess}y here`, [guess])).toBe(`no x${guess}y here`);
     }
     for (const guess of ['.!', '?!']) expect(redactor.redact(`sep ${guess} refused`, [guess])).toBe('sep [redacted] refused');
+    // A text that is nothing but the caller's punctuation.
+    expect(redactor.redact('?', ['?'])).toBe('[redacted]');
   });
 
   it('takes out a credential shorter than four characters inside other words too', () => {
