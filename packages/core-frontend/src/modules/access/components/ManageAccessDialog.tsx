@@ -513,6 +513,20 @@ function rowSummary(row: PrincipalRow): string {
   return row.deniedHere ? 'Denied here' : summarizeVerbs(row.verbs);
 }
 
+/**
+ * The verbs a row is DENIED and does not hold, named beside what it holds
+ * ("edit denied" next to "Can read"), so a partial restriction reads as one on
+ * the row itself and not only inside its menu. Nothing for a row denied every
+ * verb here: its summary already says "Denied here".
+ */
+function deniedNote(row: PrincipalRow): string | undefined {
+  if (row.deniedHere) return undefined;
+  const denied = VERBS_BROADEST_FIRST.filter(
+    (v) => !row.verbs[v] && (row.denials?.[v] ?? []).length > 0,
+  );
+  return denied.length ? `${denied.map((v) => VERB_NOUN[v]).join(', ')} denied` : undefined;
+}
+
 /** Gap between a trigger and its menu, and the minimum inset from a viewport edge. */
 const MENU_GAP = 4;
 const MENU_MARGIN = 8;
@@ -834,7 +848,15 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
     const row = touchCollective(c);
     if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) row.label = 'Everyone';
   }
-  for (const u of data.deniedHere?.users ?? []) touchUser(u);
+  // A person restricted here may still hold verbs no list names them for — a
+  // member denied edit who reads through a role. The server's per-person
+  // verdicts (`holds`) are what the row holds, so it never reads "No access"
+  // while the gates let them read.
+  for (const u of data.deniedHere?.users ?? []) {
+    const row = touchUser(u);
+    const held = data.holds?.[row.key];
+    if (held) for (const v of ALL_VERBS) if (held[v]) row.verbs[v] = true;
+  }
 
   // Download implies read, the way write does. The server folds it into
   // `readers` too, so this is belt-and-braces for an older backend — but it is
@@ -1703,6 +1725,12 @@ export function ManageAccessDialog({
   // One grantee row. Direct rows get the inline verb editor and a Remove that
   // revokes in place; inherited rows are read-only with a Remove that opens the
   // cascade flow; external rows are read-only with no action.
+  /** A row's denied verbs, beside its summary; nothing when it is denied none it lacks. */
+  const deniedNoteOf = (p: PrincipalRow) => {
+    const note = deniedNote(p);
+    return note && <span className="shrink-0 text-detail text-danger">{note}</span>;
+  };
+
   const renderRow = (p: PrincipalRow) => {
     const tone = avatarTone(p.label);
     return (
@@ -1775,6 +1803,7 @@ export function ManageAccessDialog({
                 via {p.ancestors.map(folderLabel).join(', ')}
               </span>
             )}
+            {deniedNoteOf(p)}
             {/* Its own box: the menu anchors to its DOM parent, which must be
                 the trigger alone, not the trigger and Remove together. */}
             <div>
@@ -1882,6 +1911,7 @@ export function ManageAccessDialog({
         ) : (
           <span className="ml-auto flex shrink-0 items-center gap-2 text-detail text-ink-muted">
             {inviteAction(p)}
+            {deniedNoteOf(p)}
             {summarizeVerbs(p.verbs)}
           </span>
         )}

@@ -304,7 +304,10 @@ export function createAccessRoutes(
    * the principal in `deniedHere` while they stay in the eligible lists for the
    * verbs they keep; only a principal denied every verb holds nothing and drops
    * out of those lists. A deny naming a role nobody knows appears in neither
-   * field — the resolver ignores such a line, so it restricts nothing.
+   * field — the resolver ignores such a line, so it restricts nothing. The
+   * lists name a person only for a grant to their own address, so `holds` gives
+   * each person in `deniedHere` the verbs the resolver still lets them use
+   * here: a member denied write who reads through a role holds read.
    *
    * Together those two let the dialog decide its sections by LOCAL ENTRY, grant
    * or denial, rather than by local grant alone: without them a person

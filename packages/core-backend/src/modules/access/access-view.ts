@@ -6,6 +6,7 @@ import type {
   GrantSources,
   HolderList,
   IAccessControl,
+  PathVerbs,
   ResolvedPrincipal,
 } from './access-control.interface.js';
 import {
@@ -122,6 +123,25 @@ export async function resolveAccessView(
     }),
   ]);
 
+  // What each PERSON restricted here still holds, by the resolver's own
+  // per-person verdicts: the calls the gates make. The lists above name a
+  // person only for a grant written to their own address, so a member denied
+  // write whose read comes through a role is in none of them, and their row
+  // read "No access" while every gate let them read. Collectives need nothing
+  // here: a group's or a role's verbs are the lists' own entries.
+  const holds: Record<string, PathVerbs> = {};
+  await Promise.all(
+    deniedHere.users.map(async (u) => {
+      const [read, write, download, owner] = await Promise.all([
+        accessControl.canRead(workspaceId, u.email, repoRelTarget),
+        accessControl.canWrite(workspaceId, u.email, repoRelTarget),
+        accessControl.canDownload(workspaceId, u.email, repoRelTarget),
+        accessControl.canOwner(workspaceId, u.email, repoRelTarget),
+      ]);
+      holds[`u:${u.email.toLowerCase()}`] = { read, write, download, owner };
+    }),
+  );
+
   return {
     canRead,
     canWrite,
@@ -134,6 +154,7 @@ export async function resolveAccessView(
     sources,
     denials,
     deniedHere,
+    holds,
   };
 }
 
