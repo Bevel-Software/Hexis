@@ -89,6 +89,7 @@ describe('PluginProvisionService.createPlugin', () => {
       // exactly as persisted.
       displayName: 'GTM',
       created: true,
+      repaired: false,
     });
 
     const accessMd = await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/access.md'), 'utf-8');
@@ -135,6 +136,7 @@ describe('PluginProvisionService.createPlugin', () => {
       name: 'sales',
       displayName: 'Sales',
       created: true,
+      repaired: false,
     });
     const manifest = JSON.parse(await fs.readFile(path.join(h.dir, KB, 'Plugins/Teams/EU/Sales/plugin.json'), 'utf-8'));
     expect(manifest.name).toBe('sales');
@@ -313,7 +315,7 @@ describe('PluginProvisionService.deletePlugin', () => {
   });
 
   it('refuses a folder path the filesystem cannot carry with 422 — control characters, a reserved name, a dot-prefix', async () => {
-    for (const bad of ['teams/De ep', 'a\tb', 'teams/NUL', '.deleting-x', 'teams/.hidden']) {
+    for (const bad of ['teams/De\u0000ep', 'a\tb', 'teams/NUL', '.deleting-x', 'teams/.hidden']) {
       await expect(h.svc.deletePlugin(USER, bad)).rejects.toMatchObject({ status: 422 });
     }
   });
@@ -540,6 +542,7 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
       name: folder,
       displayName: folder,
       created: true,
+      repaired: false,
     });
     const accessMd = await fs.readFile(
       path.join(h.dir, KB, 'Plugins', folder, 'access.md'),
@@ -584,6 +587,91 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
     expect(a.folder).toBe(folder);
     expect(b.folder).toBe(folder);
     expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PluginProvisionService.ensurePersonalPlugin on a folder somebody else set up', () => {
+  const folder = personalPluginFolderName(USER.id);
+  const rulesPath = (dir: string) => path.join(dir, KB, 'Plugins', folder, 'access.md');
+  /** The pre-seed QA reproduced: rules an Admin wrote before the owner's first call, naming the Admin as reader. */
+  const PRE_SEEDED = '---\nread:\n  - Boss <boss@example.com>\n---\nread:\n  - Boss <boss@example.com>\nowner:\n  - Ali Vega <ali@example.com>\n';
+
+  async function seed(dir: string, files: Record<string, string>): Promise<void> {
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = path.join(dir, KB, 'Plugins', folder, rel);
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, content, 'utf-8');
+    }
+  }
+
+  it('makes it the owner\'s alone, commits that as the owner, and says so; the next call finds nothing to repair', async () => {
+    const h = await makeHarness();
+    await seed(h.dir, { 'access.md': PRE_SEEDED, 'skills/diary/SKILL.md': '# Diary\n' });
+
+    const first = await h.svc.ensurePersonalPlugin(USER);
+    expect(first).toMatchObject({ folder, path: `Plugins/${folder}`, created: false, repaired: true });
+    expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+    expect(isPrivateAccessMd(await fs.readFile(rulesPath(h.dir), 'utf-8'))).toBe(true);
+    // The content stays: only the rules are replaced.
+    expect(await fs.readFile(path.join(h.dir, KB, 'Plugins', folder, 'skills/diary/SKILL.md'), 'utf-8')).toBe('# Diary\n');
+    // Inline and system-authorized: the rules being replaced do not let the
+    // owner write them, and the push gate would read those.
+    expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+    expect(h.commits.runPendingCommit).toHaveBeenCalledWith('ws-main', DEFAULT_BRANCH, `${KB}/Plugins/${folder}/access.md`, USER, {
+      systemAuthorized: true,
+      summary: expect.stringContaining(`Plugins/${folder}`),
+    });
+    expect(h.accessControl.invalidate).toHaveBeenCalledWith('ws-main');
+
+    const second = await h.svc.ensurePersonalPlugin(USER);
+    expect(second).toMatchObject({ created: false, repaired: false });
+    expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs rules that open it to everyone, that leave the owner out, that do not parse, or that are missing', async () => {
+    const owned = 'owner:\n  - Ali Vega <ali@example.com>\n';
+    for (const rules of [
+      `---\nread:\n  - deny everyone\n---\nread:\n  - everyone\n${owned}`,
+      `---\nread:\n  - deny everyone\n---\nwrite:\n  - Admin\n${owned}`,
+      '---\nread:\n  - deny everyone\n---\nread:\n  - deny everyone\n',
+      '---\nread: [\n',
+      null,
+    ]) {
+      const h = await makeHarness();
+      await seed(h.dir, rules === null ? { 'skills/.gitkeep': '' } : { 'access.md': rules });
+      const result = await h.svc.ensurePersonalPlugin(USER);
+      expect(result.repaired, String(rules)).toBe(true);
+      expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(personalAccessMd(USER));
+    }
+  });
+
+  it('leaves rules that name only the owner as they are, wording and all', async () => {
+    const h = await makeHarness();
+    // The owner's own words in a comment, and a denial: neither names anyone in.
+    const ownerOnly = `${personalAccessMd(USER)}\n# my notes\n`;
+    await seed(h.dir, { 'access.md': ownerOnly });
+    const result = await h.svc.ensurePersonalPlugin(USER);
+    expect(result.repaired).toBe(false);
+    expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(ownerOnly);
+    expect(h.writeFile).not.toHaveBeenCalled();
+    expect(h.commits.runPendingCommit).not.toHaveBeenCalled();
+  });
+
+  it('a repair whose commit does not land puts the old rules back and fails, so nothing claims a repair that did not happen', async () => {
+    const h = await makeHarness();
+    await seed(h.dir, { 'access.md': PRE_SEEDED });
+    h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
+    await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
+    expect(await fs.readFile(rulesPath(h.dir), 'utf-8')).toBe(PRE_SEEDED);
+    expect(h.accessControl.invalidate).not.toHaveBeenCalled();
+  });
+
+  it('a repair of missing rules whose commit does not land leaves no rules behind', async () => {
+    const h = await makeHarness();
+    await seed(h.dir, { 'skills/.gitkeep': '' });
+    h.commits.runPendingCommit.mockRejectedValueOnce(new Error('push refused'));
+    await expect(h.svc.ensurePersonalPlugin(USER)).rejects.toThrow('push refused');
+    await expect(fs.stat(rulesPath(h.dir))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
 

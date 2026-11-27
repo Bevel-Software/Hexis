@@ -3,6 +3,8 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
@@ -20,6 +22,7 @@ import { closePersonalSpaceRules } from '../../workspace/startup/steps/personal-
  */
 
 const KB_DIR = 'knowledge-base';
+const execFileAsync = promisify(execFile);
 
 function stubWorkspaceService(workspaceId: string, workspaceDir: string): WorkspaceService {
   return {
@@ -133,4 +136,64 @@ describe('the seeded access templates, resolved', () => {
     expect(await svc.canRead(workspaceId, 'admin@x.io', skill)).toBe(false);
   });
 
+  describe('a personal folder nobody has provisioned', () => {
+    const ROOT_RULES = '---\nowner:\n  - Admin\n---\nwrite:\n  - Admin\n';
+    /** Every spelling of a write that would bring `personal-ali` into being before its owner. */
+    const PRE_SEEDS = [
+      'Plugins/personal-ali/access.md',
+      'Plugins/personal-ali/skills/diary/SKILL.md',
+      'Plugins/personal-ali',
+      'Plugins/Personal-Ali/access.md',
+      'plugins/personal-ali/access.md',
+    ];
+    /** Writes under the plugins root the rule must leave to the ordinary rules. */
+    const ORDINARY = ['Plugins/GTM2/access.md', 'Plugins/personalities/access.md'];
+
+    async function commitAll(): Promise<void> {
+      const repo = path.join(root, workspaceId, KB_DIR);
+      const git = (...args: string[]) => execFileAsync('git', args, { cwd: repo });
+      await git('init', '-q');
+      await git('add', '-A');
+      await git('-c', 'user.email=t@x.io', '-c', 'user.name=t', 'commit', '-q', '-m', 'seed');
+    }
+
+    it('nobody may write one into being — not Admin, not through the access.md rescue, in no spelling', async () => {
+      const svc = await makeService({ 'roles.yaml': ROLES_YAML, 'access.md': ROOT_RULES });
+      for (const who of ['admin@x.io', OWNER.email]) {
+        for (const p of PRE_SEEDS) expect(await svc.canWrite(workspaceId, who, p), `${who} ${p}`).toBe(false);
+        const batch = await svc.canWriteBatch(workspaceId, who, PRE_SEEDS);
+        expect([...batch.values()]).toEqual(PRE_SEEDS.map(() => false));
+      }
+      for (const p of ORDINARY) expect(await svc.canWrite(workspaceId, 'admin@x.io', p), p).toBe(true);
+    });
+
+    it('the lock refuses it too: the verdict at HEAD, which every file write asks before it lands', async () => {
+      await makeService({ 'roles.yaml': ROLES_YAML, 'access.md': ROOT_RULES });
+      await commitAll();
+      const svc = await makeService({});
+      const atHead = await svc.canWriteBatchAtRef(workspaceId, 'HEAD', 'admin@x.io', [...PRE_SEEDS, ...ORDINARY]);
+      expect(Object.fromEntries(atHead!)).toEqual(
+        Object.fromEntries([...PRE_SEEDS.map((p) => [p, false]), ...ORDINARY.map((p) => [p, true])]),
+      );
+    });
+
+    it('once provisioned, its own rules decide again — at HEAD as in the checkout', async () => {
+      await makeService({ ...PERSONAL, 'access.md': ROOT_RULES });
+      await commitAll();
+      const svc = await makeService({});
+      const skill = 'Plugins/personal-ali/skills/diary/SKILL.md';
+      expect(await svc.canWrite(workspaceId, OWNER.email, skill)).toBe(true);
+      expect((await svc.canWriteBatchAtRef(workspaceId, 'HEAD', OWNER.email, [skill]))!.get(skill)).toBe(true);
+      expect(await svc.canWrite(workspaceId, 'admin@x.io', skill)).toBe(false);
+    });
+
+    it('a provisioned folder whose rules do not parse is still provisioned: an admin can still repair its access.md', async () => {
+      const svc = await makeService({
+        'roles.yaml': ROLES_YAML,
+        'access.md': ROOT_RULES,
+        'Plugins/personal-ali/access.md': '---\nread: [\n',
+      });
+      expect(await svc.canWrite(workspaceId, 'admin@x.io', 'Plugins/personal-ali/access.md')).toBe(true);
+    });
+  });
 });

@@ -34,7 +34,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { IFsProbe } from '../../shared/fs.contract.js';
+import { isAbsence, type IFsProbe } from '../../shared/fs.contract.js';
 import type { Discovery, PluginSource } from './discovery/plugin-source.js';
 
 import {
@@ -54,7 +54,14 @@ import {
 import type { KbContext } from '../../shared/kb-context.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from '../access/index.js';
-import { creatorPrincipal, spliceGrant } from '../access-model/index.js';
+import {
+  accessMdSelfEntries,
+  canonicalEmail,
+  creatorPrincipal,
+  parseAccessFile,
+  spliceGrant,
+  type ParsedEntry,
+} from '../access-model/index.js';
 import { WorkspaceMutex } from '../kb-fs/index.js';
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
@@ -115,6 +122,12 @@ export interface ProvisionedPlugin {
   displayName: string;
   /** False when an ensure found the folder already there. */
   created: boolean;
+  /**
+   * True when the personal-folder ensure found the folder open to someone
+   * besides its owner and made it the owner's alone again. Always false for
+   * a named plugin.
+   */
+  repaired: boolean;
 }
 
 /** A refusal the route can pass through: message + HTTP status. */
@@ -135,9 +148,10 @@ function provisioned(
   name: string,
   displayName: string,
   created: boolean,
+  repaired = false,
 ): ProvisionedPlugin {
   const path = `${pluginsDir}/${folder}`;
-  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created };
+  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created, repaired };
 }
 
 export class PluginProvisionService {
@@ -311,12 +325,18 @@ export class PluginProvisionService {
    * {@link persistedNames}): the answer is what the file says when the call
    * reads it, so a repeated call with no edit in between answers as the call
    * that made the folder did.
+   *
+   * A folder already there is the owner's alone or is made so: when its
+   * `access.md` grants anyone else anything, or is missing or unreadable as
+   * rules, it is rewritten to the template a new folder gets, committed, and
+   * the answer says `repaired: true` (see {@link repairPersonalRules}).
    */
   async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
     const alreadyThere = async (onDisk: string): Promise<ProvisionedPlugin> => {
+      const repaired = await this.repairPersonalRules(user, onDisk);
       const { name, displayName } = await this.persistedNames(onDisk, folder);
-      return provisioned(this.pluginsRoot, folder, name, displayName, false);
+      return provisioned(this.pluginsRoot, folder, name, displayName, false, repaired);
     };
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       const existing = await this.existingFolder(folder);
@@ -500,6 +520,49 @@ export class PluginProvisionService {
   }
 
   /**
+   * Make the personal folder `folder` (its on-disk spelling) its owner's
+   * alone again when its `access.md` says otherwise; true when it did. Runs
+   * under the ensure's creation lock. The new rules are the template a new
+   * folder gets, written and committed as a provision's are — inline and
+   * `systemAuthorized`, because the rules being replaced may not let the
+   * owner write them, and the caller is the owner by the folder's very name.
+   * A commit that does not land puts the old bytes back and throws.
+   */
+  private async repairPersonalRules(user: AuthUser, folder: string): Promise<boolean> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const repoRel = `${this.pluginsRoot}/${folder}/access.md`;
+    const abs = path.join(wsDir, this.kbDirName, this.pluginsRoot, folder, 'access.md');
+    let current: string | null;
+    try {
+      current = await this.disk.readTextFile(abs);
+    } catch (err) {
+      if (!isAbsence(err)) throw err;
+      current = null;
+    }
+    if (current !== null && isOwnerOnly(current, repoRel, user.email)) return false;
+    const wsRel = `${this.kbDirName}/${repoRel}`;
+    await this.workspaceService.writeFile(wsId, wsRel, personalAccessMd(user));
+    try {
+      await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, wsRel, user, {
+        systemAuthorized: true,
+        summary: `Make ${this.pluginsRoot}/${folder} private to its owner again`,
+      });
+    } catch (err) {
+      try {
+        if (current === null) await fs.rm(abs, { force: true });
+        else await fs.writeFile(abs, current, 'utf-8');
+      } catch {
+        /* the commit's own error is the one to report */
+      }
+      throw err;
+    }
+    this.accessControl.invalidate(wsId);
+    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+    return true;
+  }
+
+  /**
    * The identity discovery gives the plugin at `folder`, or the folder's own
    * slug when it lists none there. ONE rule for every write provisioning
    * makes — create, delete — as for the rename: no write over a discovery
@@ -669,9 +732,11 @@ export function pluginAccessMd(creator: { name: string; email: string }): string
  * mark, see `isPrivateAccessMd`) looks for it, rather than leaving it to
  * what an empty block happens to inherit. Nobody else is named — not even
  * Admin: a private space is private from the people who run the deployment
- * too. (An administrator can still write this file, through the resolver's
- * access.md rescue, and so grant themselves in; that is a visible act in
- * the history, not a default.)
+ * too. (An administrator can still write this file once it exists, through
+ * the resolver's access.md rescue; that is a visible act in the history, and
+ * the owner's next ensure takes it back out — see `repairPersonalRules`. No
+ * one can write it BEFORE the owner: the resolver refuses every write into a
+ * personal folder that has not been provisioned.)
  *
  * The frontmatter is also what marks the file as body-governed. Without it
  * the splicer (and the resolver) read the older single-block format, where
@@ -689,7 +754,7 @@ export function personalAccessMd(creator: { name: string; email: string }): stri
       '# THIS BLOCK (the body) governs the FOLDER — one person\'s private space.',
       '# `deny everyone` keeps it closed even when the repository root grants',
       '# `read: everyone`; only the owner is named — not even Admin reads it.',
-      '# To share it, add a person as `Name <email>` or a role under `read:`.',
+      '# Name nobody else here: the owner\'s next `my_plugin` makes it theirs alone again.',
       'read:',
       '  - deny everyone',
       '',
@@ -697,6 +762,25 @@ export function personalAccessMd(creator: { name: string; email: string }): stri
     creator,
   );
   return spliceGrant(seeded, 'read', creatorPrincipal(creator), { allowScalar: false, target: 'node' }).text;
+}
+
+/**
+ * Whether the personal `access.md` `text` keeps its folder `ownerEmail`'s
+ * alone: it parses, its folder rules make the owner `owner`, and neither
+ * block grants anyone else anything, `everyone` included. Denials admit
+ * nobody, so they are left as they are.
+ */
+function isOwnerOnly(text: string, repoRel: string, ownerEmail: string): boolean {
+  const parsed = parseAccessFile(text, repoRel);
+  if (!parsed.ok) return false;
+  const owner = canonicalEmail(ownerEmail);
+  const isOwner = (e: ParsedEntry) => e.kind === 'user' && e.email === owner;
+  const self = accessMdSelfEntries(text);
+  const blocks = self ? [parsed.file.entries, self] : [parsed.file.entries];
+  const othersGranted = blocks.some((entries) =>
+    Object.values(entries).some((list) => list.some((e) => !e.deny && !isOwner(e))),
+  );
+  return !othersGranted && parsed.file.entries.owner.some((e) => !e.deny && isOwner(e));
 }
 
 /**
