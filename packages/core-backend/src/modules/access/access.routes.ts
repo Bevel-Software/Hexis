@@ -305,6 +305,9 @@ export function createAccessRoutes(
    * verbs they keep; only a principal denied every verb holds nothing and drops
    * out of those lists. A deny naming a role nobody knows appears in neither
    * field — the resolver ignores such a line, so it restricts nothing.
+   * `deniedAbove` is the same for a deny written in a folder ABOVE the target
+   * that still restricts here, so a person a parent denies has a row on the
+   * child, and `denials` names the folder.
    *
    * Together those two let the dialog decide its sections by LOCAL ENTRY, grant
    * or denial, rather than by local grant alone: without them a person

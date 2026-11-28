@@ -170,6 +170,17 @@ export interface AccessResponse {
     users: AccessUser[];
   };
   /**
+   * The principals a folder ABOVE this target denies some verb that the deny
+   * still takes here. A person a parent denies by name holds nothing the
+   * eligible lists could name, so without this list they have no row and the
+   * row of the role they belong to overstates what they can do. `denials`
+   * says which folder. Optional for version skew.
+   */
+  deniedAbove?: {
+    principals: ResolvedPrincipal[];
+    users: AccessUser[];
+  };
+  /**
    * Present for a file that cannot carry frontmatter (a PDF, a deck, an
    * image — or binary bytes saved under a note's name, which the server
    * judges by reading them): the repo-relative folder (`''` for the root)
