@@ -140,6 +140,14 @@ async function main(): Promise<void> {
     }
   }
 
+  // A key revoked mid-run: the server has answered the call with the sentence
+  // (and said it on stderr) and is closing itself; the process goes with it,
+  // through the same bounded exit a hang-up takes, and reports failure.
+  config.onConnectionKeyRejected = () => {
+    process.exitCode = 1;
+    exitAfterShutdown();
+  };
+
   try {
     const { server, shutdown } = await createHexisMcpServer(config, packageVersion());
     holder.shutdown = shutdown;

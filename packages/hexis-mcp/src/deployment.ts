@@ -17,6 +17,13 @@ import {
 
 /** Bounded so a wedged deployment fails startup with a message instead of hanging a client. */
 const FETCH_TIMEOUT_MS = 15_000;
+/**
+ * The key confirmation in front of every call, as ONE deadline over all of it
+ * (each request, its body, and an OAuth renewal between them): shorter,
+ * because a call it cannot confirm in time goes ahead anyway, so a longer wait
+ * would only delay a local tool behind a hanging deployment.
+ */
+const CONFIRM_TIMEOUT_MS = 3_000;
 
 export class DeploymentError extends Error {
   /**
@@ -56,25 +63,69 @@ export class NotAvailableToConnectionError extends DeploymentError {
  * literal: this process cannot know what the client named it.
  */
 export class ConnectionKeyRejectedError extends DeploymentError {
-  constructor(deployment: string) {
+  /**
+   * @param sentence The deployment's own 401 sentence, which says what the
+   * person can do: {@link REVOKED_KEY_SENTENCE} for a key that does not
+   * verify, or the switched-off account's "ask its admin", where minting a new
+   * key would change nothing. The first when the 401 carried no sentence.
+   */
+  constructor(
+    deployment: string,
+    readonly sentence: string = REVOKED_KEY_SENTENCE,
+  ) {
     super(
-      `The connection key was rejected by ${deployment}. Mint a new one in External agent access. ` +
+      `The connection key was rejected by ${deployment}. ` +
+        `${sentence === REVOKED_KEY_SENTENCE ? 'Mint a new one in External agent access.' : sentence} ` +
         '(Claude Code hides this message; run `claude mcp get <name>` or start the command in a terminal to see it.)',
     );
   }
 }
 
+/**
+ * The sentence a deployment's 401 carries for a connection key that does not
+ * verify (unknown or revoked). It stands in for the 401's own sentence when
+ * the 401 carried none.
+ */
+export const REVOKED_KEY_SENTENCE = 'Invalid or revoked connection key. Mint a new one in External agent access.';
+
+/** The `error` sentence of a refusal body, when it carries a usable one. */
+function refusalSentence(refusal: { error?: unknown } | null): string | undefined {
+  const error = typeof refusal?.error === 'string' ? refusal.error.trim() : '';
+  return error && error.length <= 500 ? error : undefined;
+}
+
+/**
+ * `work`, or a DeploymentError once `signal` aborts first. The work goes on,
+ * and stays observed whichever way this settles: its handlers are attached
+ * before the abort check, so a rejection after the deadline (already passed or
+ * not) is never unhandled.
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined, label: string): Promise<T> {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => reject(new DeploymentError(`Gave up on ${label}: ${String(signal.reason)}`));
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    if (signal.aborted) return abort();
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
 async function getJson(
   url: string,
-  init: RequestInit & { label: string; renew?: () => Promise<string> },
+  init: Omit<RequestInit, 'signal'> & { label: string; renew?: () => Promise<string>; signal?: AbortSignal },
 ): Promise<unknown> {
-  const { renew, label, ...request } = init;
+  // `signal`, when given, is ONE deadline over the whole read: both attempts,
+  // the renewal between them, and every body. Aborting a response's signal
+  // errors its body, so a refusal whose status has arrived is still decided
+  // (its sentence read as missing) when the body stalls past the deadline.
+  // Without one, each attempt gets its own FETCH_TIMEOUT_MS.
+  const { renew, label, signal, ...request } = init;
   const attempt = async (freshBearer?: string): Promise<Response> => {
     const headers = freshBearer
       ? { ...(request.headers as Record<string, string>), Authorization: `Bearer ${freshBearer}` }
       : request.headers;
     try {
-      return await fetch(url, { ...request, headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      return await fetch(url, { ...request, headers, signal: signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     } catch (err) {
       throw new DeploymentError(
         `Could not reach ${label} at ${url}: ${err instanceof Error ? err.message : String(err)}`,
@@ -94,28 +145,34 @@ async function getJson(
     // an unread body pins its connection (and, kept long enough, its memory)
     // for as long as the runtime cares to wait.
     await res.body?.cancel().catch(() => {});
-    res = await attempt(await renew());
+    res = await attempt(await untilAborted(renew(), signal, label));
     retried = true;
   }
+  // Every answer that is not a 2xx is consumed HERE, once, before any branch
+  // below throws: an unread body pins its connection, and the key check makes
+  // one of these reads before every request. Only an authenticated 401 or 403
+  // is read, because its JSON says why (the 401's sentence, the 403's refusal
+  // code); every other one is drained.
+  type Refusal = { error?: unknown; code?: unknown } | null;
+  let refusal: Refusal = null;
+  if (!res.ok) {
+    if ((res.status === 401 || res.status === 403) && authed) {
+      refusal = (await res.json().catch(() => null)) as Refusal;
+    } else {
+      await res.body?.cancel().catch(() => {});
+    }
+  }
   if (res.status === 401 && authed && !renew) {
-    await res.body?.cancel().catch(() => {});
     // The deployment, not the endpoint label: the key is the deployment's to
     // reject. Every URL here is `<baseUrl>/api/…`, and nothing after the base
     // adds another `/api/`.
-    throw new ConnectionKeyRejectedError(url.slice(0, url.lastIndexOf('/api/')));
+    throw new ConnectionKeyRejectedError(url.slice(0, url.lastIndexOf('/api/')), refusalSentence(refusal));
   }
-  if (res.status === 403 && authed) {
-    // A refusal of what the connection does not load — a connection made as
-    // an agent configuration that cannot be used — is the deployment's own answer,
-    // with its code and sentence, not a permission problem with the credential.
-    const refusal = (await res
-      .clone()
-      .json()
-      .catch(() => null)) as { error?: unknown; code?: unknown } | null;
-    if (refusal?.code === NOT_AVAILABLE_TO_CONNECTION && typeof refusal.error === 'string') {
-      await res.body?.cancel().catch(() => {});
-      throw new NotAvailableToConnectionError(refusal.error);
-    }
+  // A refusal of what the connection does not load — a connection made as
+  // an agent configuration that cannot be used — is the deployment's own answer,
+  // with its code and sentence, not a permission problem with the credential.
+  if (refusal?.code === NOT_AVAILABLE_TO_CONNECTION && typeof refusal.error === 'string') {
+    throw new NotAvailableToConnectionError(refusal.error);
   }
   if (res.status === 401 || res.status === 403) {
     // Only a request that actually carried the credential can blame it: the
@@ -143,11 +200,6 @@ async function getJson(
     );
   }
   if (!res.ok) {
-    // Drained before it is thrown away, exactly as the 401 paths above do. The
-    // catalog check asks again on every call while it fails, so a deployment that is
-    // 502-ing through a redeploy would otherwise leave one undrained body —
-    // and the connection it pins — behind on every poll for the duration.
-    await res.body?.cancel().catch(() => {});
     throw new DeploymentError(`${label} returned HTTP ${res.status} from ${url}.`, res.status);
   }
   // A 200 that is not JSON is a proxy or SPA fallback answering in the
@@ -329,6 +381,37 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
     );
     return undefined;
   }
+}
+
+/**
+ * Ask the deployment, now, whether the credential is still live: one
+ * authenticated read of the agent instructions route, a route every
+ * deployment that advertises `agentInstructions` serves to a connection key.
+ * Its body (the instructions text) is read and discarded. The local server
+ * awaits it before every listing and every call, because a local-only tool may
+ * never contact the deployment on its own (it declares no variables, or they
+ * are cached), and would otherwise keep running on a revoked key.
+ *
+ * Bounded at {@link CONFIRM_TIMEOUT_MS} in TOTAL: the deadline covers the whole
+ * read, an OAuth renewal (and the credential swap it awaits) included. A
+ * request that has not answered by then rejects as unconfirmed; a refusal
+ * whose status has arrived stays a refusal, even when its body stalls past
+ * the deadline. A renewal it started still completes for the requests after it.
+ *
+ * Every failure PROPAGATES unchanged: a {@link ConnectionKeyRejectedError} is
+ * the key-mode refusal, carrying the deployment's sentence; in OAuth mode a
+ * `SignInRefusedError` (the renewal was refused) or a {@link DeploymentError}
+ * with status 401 (refused even after renewing) is the sign-in's; anything
+ * else (a network failure, the deadline, a 5xx) means the credential could not
+ * be confirmed, never that it is dead. Deciding what each means is the caller's.
+ */
+export async function confirmConnectionKey(config: HexisMcpConfig): Promise<void> {
+  await getJson(`${config.baseUrl}/api/agent/instructions`, {
+    label: 'the agent instructions',
+    headers: { Authorization: `Bearer ${config.connectionKey}` },
+    renew: renewer(config),
+    signal: AbortSignal.timeout(CONFIRM_TIMEOUT_MS),
+  });
 }
 
 /** One `.tool` manual as `GET /api/agent/all-tools` returns it. */

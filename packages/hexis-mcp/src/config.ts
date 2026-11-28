@@ -54,6 +54,13 @@ export interface HexisMcpConfig {
    * back when it shuts down.
    */
   onSignInEnded?: (sentence: string) => void;
+  /**
+   * Called ONCE, with the sentence the call was answered with, when the
+   * deployment refused the connection key in the middle of a run. The server
+   * has already answered that call with the sentence and is shutting itself
+   * down; a host that runs it as a process (the CLI) exits non-zero here.
+   */
+  onConnectionKeyRejected?: (sentence: string) => void;
 }
 
 /**

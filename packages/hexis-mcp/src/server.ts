@@ -53,6 +53,8 @@ import { SignInRefusedError, type HexisMcpConfig } from './config.js';
 import {
   callKbTool,
   ConnectionKeyRejectedError,
+  DeploymentError,
+  confirmConnectionKey,
   fetchAllManuals,
   fetchCatalogState,
   fetchMcpApps,
@@ -1111,8 +1113,14 @@ export async function createHexisMcpServer(
     },
   );
 
-  const shutdown = async (): Promise<void> => {
-    if (closed) return;
+  /**
+   * ONE teardown however many ask for it. A second caller (the CLI's orderly
+   * exit, after the server stopped itself for a revoked key) gets the run
+   * already under way, so nobody exits while children are still closing.
+   */
+  let shutdownRun: Promise<void> | null = null;
+  const shutdown = (): Promise<void> => (shutdownRun ??= closeEverything());
+  const closeEverything = async (): Promise<void> => {
     closed = true;
     // First, because everything below tears down what a refresh would run
     // against. A poll already in flight finds `closed` at the gate and
@@ -1171,6 +1179,79 @@ export async function createHexisMcpServer(
     await releaseDiscovered();
   };
 
+  /**
+   * REFUSED KEY: the deployment's sentence, once it refuses this process's
+   * connection key mid-run; from then on nothing is listed or run, every
+   * request is answered that sentence, and the server is going away.
+   */
+  let keyRejected: string | null = null;
+  const hostKeyRejected = config.onConnectionKeyRejected;
+  /**
+   * Sticky: once ANY request has met the refusal, every request still in
+   * flight answers it too, whatever it was awaiting meanwhile (its own
+   * confirmation, which may have succeeded just before the revocation, the
+   * catalog, the hints). Called after each of those awaits and at each
+   * listing's return, so no request that outlived the refusal lists or runs.
+   */
+  const refuseIfKeyRejected = (): void => {
+    if (keyRejected !== null) throw new McpError(ErrorCode.InternalError, keyRejected);
+  };
+  /** A server going away says why: the refusal, when that is what stopped it. */
+  const shuttingDown = (): McpError =>
+    keyRejected !== null
+      ? new McpError(ErrorCode.InternalError, keyRejected)
+      : new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+  /**
+   * The gate in front of every listing and every call, local-only tools and
+   * meta-tools included: the deployment is asked, NOW, whether the credential
+   * is live. Nothing else can answer that. A local tool may never contact the
+   * deployment (no variables, or variables cached), and the catalog check runs
+   * throttled and after the call, so a previous success authorizes nothing.
+   *
+   * A refusal answers the deployment's own sentence (a revoked key is told to
+   * mint a new one, a switched-off account to ask its admin, exactly as a
+   * remote call would be) and stops the server: the call that met it
+   * gets its answer first (the stop waits a turn of the event loop), then
+   * every manual, and with it every spawned local server, is closed, and the
+   * host is told. A key that merely could not be confirmed (the deployment is
+   * unreachable, did not answer within the confirmation's short deadline, or
+   * answered 5xx) is not a revoked one: the call goes ahead and reports
+   * whatever it meets. A deployment that does not advertise the
+   * instructions route is not asked, because its unknown `/api/*` path answers
+   * 401 to every key, which would read as a revocation.
+   */
+  const confirmKeyBeforeServing = (): Promise<void> | undefined => {
+    refuseIfKeyRejected();
+    // Nothing to ask, so nothing to await: a server going away serves nothing
+    // either way and each caller says so itself, and even one extra tick would
+    // let a closing transport answer a parked request first.
+    if (closed || !agentInstructions) return undefined;
+    return confirmConnectionKey(config).catch((err: unknown) => {
+      if (err instanceof ConnectionKeyRejectedError) {
+        if (keyRejected === null) {
+          const sentence = err.sentence;
+          keyRejected = sentence;
+          console.error(`[hexis-mcp] ${printable(err.message)} hexis-mcp has stopped serving.`);
+          setImmediate(() => {
+            void shutdown();
+            hostKeyRejected?.(sentence);
+          });
+        }
+        throw new McpError(ErrorCode.InternalError, keyRejected);
+      }
+      // OAuth mode, refused even after renewing: this request runs nothing and
+      // answers hexis-mcp's own re-authorize message. Ending the sign-in stays
+      // renewal.ts's, as it is for every other read that meets this answer.
+      if (err instanceof DeploymentError && err.status === 401) {
+        throw new McpError(ErrorCode.InternalError, err.message);
+      }
+      // A sign-in refused for good (OAuth mode) has already set `signInRefused`
+      // through renewal.ts, and each caller answers it right after this gate,
+      // in the words it uses for that case. Anything else is unconfirmed, not
+      // refused (see above). Either way there is nothing more to say here.
+    }).then(refuseIfKeyRejected);
+  };
+
   try {
     server = new Server(
       { name: SERVER_NAME, version },
@@ -1202,13 +1283,19 @@ export async function createHexisMcpServer(
     // that met the refusal. Applied at each return rather than by awaiting
     // the listing from a wrapper, whose extra tick would let a closing
     // transport answer a parked listing first (see the shutdown guard below).
-    const answered = (listing: ListToolsResult): ListToolsResult =>
-      signInRefused !== null ? { tools: [signInRefusedNoticeTool(signInRefused)] } : listing;
+    // A refused key decides it the same way, and before anything else.
+    const answered = (listing: ListToolsResult): ListToolsResult => {
+      refuseIfKeyRejected();
+      return signInRefused !== null ? { tools: [signInRefusedNoticeTool(signInRefused)] } : listing;
+    };
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Before anything that could ask the workspace: nothing is left to ask it with.
       if (signInRefused !== null) return answered({ tools: [] });
       await ready;
+      const confirmingForList = confirmKeyBeforeServing();
+      if (confirmingForList) await confirmingForList;
+      if (signInRefused !== null) return answered({ tools: [] });
       // A listing is the one moment a stale toolset is answered out loud, so
       // the check is AWAITED here: the list handed back is the current one, a
       // refresh included, rather than a notification's promise of a better
@@ -1235,7 +1322,7 @@ export async function createHexisMcpServer(
       // what a correctly configured, tool-less workspace shows, which is the
       // look the notice above exists to prevent. The truth is the same one
       // the call handler gives: this server is going away.
-      if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+      if (closed) throw shuttingDown();
       // The hints are read per listing, so an admin's change on the Tools page
       // is in the very next one (see `fetchToolHints`) — from a deployment
       // that serves them; an older one keeps the conservative false default.
@@ -1249,7 +1336,7 @@ export async function createHexisMcpServer(
           hints = listedHints;
         }
       }
-      if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+      if (closed) throw shuttingDown();
       return answered({ tools: listedTools(tools, apps.tools, listedHints) });
     });
 
@@ -1279,6 +1366,23 @@ export async function createHexisMcpServer(
       // arriving. (After the first list this is already settled.)
       await ready;
       if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
+      // Two conditions must hold together when the code below starts, which
+      // runs to the dispatch without another await: no re-registration is in
+      // progress (a swap or a recovery may have the manual between its
+      // deregister and its register, where a repository lookup finds nothing),
+      // and the key was just confirmed. The confirmation is a network read, so
+      // a re-registration can start while it is asked: then wait it out and
+      // ask again, until a confirmation ends with none in progress. Before
+      // any answer below, too, so once the key is refused no call is answered
+      // anything but the refusal.
+      for (;;) {
+        while (reregisterInProgress) await reregisterInProgress;
+        const confirming = confirmKeyBeforeServing();
+        if (confirming) await confirming;
+        if (!reregisterInProgress) break;
+      }
+      // The sign-in may have ended while this call waited.
+      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       if (discoveryError !== null) {
         throw new McpError(
           ErrorCode.InternalError,
@@ -1288,18 +1392,12 @@ export async function createHexisMcpServer(
       // Nothing is callable on a connection that loads nothing, meta-tools
       // included: every call is answered with the reason.
       if (connection?.unavailable) return toolError(connection.unavailable);
-      // Never start a call mid-re-registration — a swap or a recovery may have
-      // the manual between its deregister and its register, where a repository
-      // lookup finds nothing.
-      while (reregisterInProgress) await reregisterInProgress;
-      // The sign-in may have ended while this call waited.
-      if (signInRefused !== null) throw new McpError(ErrorCode.InternalError, signInRefused);
       // Shutdown can land while a call waits here, and `shutdown` waits only
       // for the re-registration, not for callers parked behind it. Dispatching
       // now would run against a client being torn down, so the caller gets the
       // real reason rather than whatever a half-closed transport throws.
       const live = client;
-      if (closed || !live) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
+      if (closed || !live) throw shuttingDown();
       inflightCalls += 1;
       try {
         const name = request.params.name;

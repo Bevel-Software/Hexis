@@ -95,3 +95,124 @@ describe('a rejected connection key', () => {
     }
   });
 });
+
+/**
+ * END-TO-END: a key revoked WHILE the CLI runs. The stub accepts the key
+ * through startup and one listing, then refuses it the way a Disconnect on
+ * External agent access does. The next call must be answered with the plain
+ * sentence, and the process must then exit non-zero on its own: nothing is
+ * left serving on a dead key.
+ */
+describe('a connection key revoked mid-run', () => {
+  const LIVE_KEY = 'bevel_liveThenRevokedKeyThatMustNeverBePrinted';
+  const SENTENCE = 'Invalid or revoked connection key. Mint a new one in External agent access.';
+  let live: http.Server;
+  let liveBase = '';
+  let revoked = false;
+
+  beforeAll(async () => {
+    const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+    const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+    const { ListToolsRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
+    live = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => (body += chunk.toString('utf8')));
+      req.on('end', () => {
+        void (async () => {
+          const pathname = (req.url ?? '/').split('?')[0]!;
+          const json = (status: number, payload: unknown): void => {
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(payload));
+          };
+          if (pathname === '/api/config') return json(200, { mcpUrl: `${liveBase}/api/mcp`, agentInstructions: true });
+          if (revoked || req.headers.authorization !== `Bearer ${LIVE_KEY}`) return json(401, { error: SENTENCE });
+          if (pathname === '/api/agent/instructions') return json(200, { instructions: 'Search the knowledge base.' });
+          if (pathname === '/api/agent/all-tools') return json(200, { manuals: [] });
+          if (pathname === '/api/agent/tools/list_local_tools') return json(200, { tools: [] });
+          if (pathname === '/api/mcp') {
+            const parsed = body ? (JSON.parse(body) as unknown) : undefined;
+            const mcp = new Server({ name: 'stub-deployment', version: '0.0.0' }, { capabilities: { tools: {} } });
+            mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+              tools: [{ name: 'list_files', description: 'List files.', inputSchema: { type: 'object' as const } }],
+            }));
+            const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+            res.on('close', () => {
+              void transport.close();
+              void mcp.close();
+            });
+            await mcp.connect(transport);
+            await transport.handleRequest(req, res, parsed);
+            return;
+          }
+          json(404, {});
+        })().catch(() => {
+          if (!res.headersSent) res.writeHead(500);
+          res.end();
+        });
+      });
+    });
+    await new Promise<void>((resolve) => live.listen(0, '127.0.0.1', resolve));
+    liveBase = `http://127.0.0.1:${(live.address() as { port: number }).port}`;
+  });
+
+  afterAll(async () => {
+    live.closeAllConnections?.();
+    await new Promise<void>((resolve) => live.close(() => resolve()));
+  });
+
+  it('answers the next call with the sentence and exits non-zero', { timeout: 60_000 }, async () => {
+    const cli = spawn(
+      process.execPath,
+      ['--import', pathToFileURL(resolveTsxLoader()).href, path.join(pkgDir, 'src', 'cli.ts'), '--url', liveBase, '--key', LIVE_KEY],
+      { cwd: pkgDir, env: { ...process.env, HEXIS_HOME: home, HEXIS_NO_BROWSER: '1' }, stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    let stderr = '';
+    cli.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
+    const exited = new Promise<number | null>((resolve) => cli.once('exit', (c) => resolve(c)));
+    // Newline-delimited JSON-RPC, the stdio transport's framing.
+    const pending = new Map<number, (msg: { result?: unknown; error?: { message: string } }) => void>();
+    let buffered = '';
+    cli.stdout!.on('data', (chunk: Buffer) => {
+      buffered += chunk.toString('utf8');
+      let nl: number;
+      while ((nl = buffered.indexOf('\n')) >= 0) {
+        const line = buffered.slice(0, nl);
+        buffered = buffered.slice(nl + 1);
+        const msg = JSON.parse(line) as { id?: number; result?: unknown; error?: { message: string } };
+        if (typeof msg.id === 'number') pending.get(msg.id)?.(msg);
+      }
+    });
+    let nextId = 0;
+    const request = (method: string, params: unknown) =>
+      new Promise<{ result?: unknown; error?: { message: string } }>((resolve) => {
+        const id = ++nextId;
+        pending.set(id, resolve);
+        cli.stdin!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+      });
+    try {
+      const init = await request('initialize', {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'probe', version: '0.0.0' },
+      });
+      expect(init.error).toBeUndefined();
+      cli.stdin!.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
+      const listed = await request('tools/list', {});
+      expect(listed.error, stderr).toBeUndefined();
+
+      revoked = true;
+      const refused = await request('tools/call', { name: 'list_tools', arguments: {} });
+      expect(refused.error?.message).toContain(SENTENCE);
+
+      const code = await Promise.race([
+        exited,
+        new Promise<'still running'>((resolve) => setTimeout(() => resolve('still running'), 20_000)),
+      ]);
+      expect(code, stderr).toBe(1);
+      expect(stderr).toContain('hexis-mcp has stopped serving');
+      expect(stderr).not.toContain(LIVE_KEY);
+    } finally {
+      if (cli.exitCode === null && cli.signalCode === null) cli.kill('SIGKILL');
+    }
+  });
+});
