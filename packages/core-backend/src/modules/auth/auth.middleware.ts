@@ -1,6 +1,10 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { AuthService } from './auth.service.js';
 import { AccountDeactivatedError, AuthBackendError, SessionEndedError } from './account-admission.js';
+import { AUTH_COOKIE_NAME, readAuthCookie, sessionTokenOf } from './session-token.js';
+
+// Still offered from here, where auth's own files and tests learnt them.
+export { AUTH_COOKIE_NAME, readAuthCookie };
 
 // Augment Express Request so userId/userEmail are available after auth middleware
 declare global {
@@ -11,19 +15,6 @@ declare global {
     }
   }
 }
-
-/**
- * Name of the auth cookie set alongside the Bearer JWT at login. The cookie
- * exists solely so the SSE route can authenticate — the browser's
- * `EventSource` API can't set custom headers, so a Bearer token in
- * `Authorization` can't reach it. All other routes still use the Bearer
- * header, which the frontend stores in memory and attaches via `authFetch`.
- *
- * Same JWT value as the Bearer token. The cookie is `HttpOnly` + `SameSite=Lax`
- * + `Secure` when the deployment is reached over https — {@link setAuthCookie}
- * is its one issue site, for every sign-in path and the password change.
- */
-export const AUTH_COOKIE_NAME = 'bevel_token';
 
 /**
  * Max age of the JWT cookie (seconds). Matches the JWT's own `expiresIn:
@@ -63,29 +54,6 @@ export function setAuthCookie(res: Response, token: string, secure: boolean): vo
   });
 }
 
-/**
- * Read the auth cookie out of the raw `Cookie` header without pulling in
- * `cookie-parser`. We only ever look for one cookie, so a tiny parser
- * beats the dep surface of a middleware. Returns `null` if the cookie
- * is absent or empty.
- */
-export function readAuthCookie(req: Request): string | null {
-  const header = req.headers.cookie;
-  if (!header) return null;
-  for (const segment of header.split(';')) {
-    const trimmed = segment.trim();
-    if (!trimmed.startsWith(`${AUTH_COOKIE_NAME}=`)) continue;
-    const value = trimmed.slice(AUTH_COOKIE_NAME.length + 1);
-    if (!value) return null;
-    try {
-      return decodeURIComponent(value);
-    } catch {
-      return value;
-    }
-  }
-  return null;
-}
-
 export function createAuthMiddleware(authService: Pick<AuthService, 'resolveSession'>) {
   return async (req: Request, res: Response, next: NextFunction) => {
     // Bearer is the primary path — every JSON API call in the frontend
@@ -93,14 +61,7 @@ export function createAuthMiddleware(authService: Pick<AuthService, 'resolveSess
     // that can't carry headers (EventSource, image tags), set at login by
     // `/auth/login` so SSE in particular Just Works after login without
     // any frontend cooperation.
-    const header = req.headers.authorization;
-    let token: string | null = null;
-    if (header && header.startsWith('Bearer ')) {
-      token = header.slice('Bearer '.length).trim() || null;
-    }
-    if (!token) {
-      token = readAuthCookie(req);
-    }
+    const token = sessionTokenOf(req);
     if (!token) {
       res.status(401).json({ error: 'Missing or invalid Authorization header or auth cookie' });
       return;

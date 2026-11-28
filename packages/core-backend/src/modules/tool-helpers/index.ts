@@ -42,6 +42,7 @@
 export { createToolValidator, type ValidateToken, type ToolValidatorDeps } from './validate-token.js';
 export {
   toolDef,
+  withBranchInput,
   BRANCH_INPUT,
   DEFAULTED_BRANCH_INPUT,
   type ToolDefSpec,

@@ -108,6 +108,14 @@ export type {
   AdminExternalApiKeySummary,
 } from './modules/tool-auth/external-api-key.interface.js';
 
+// What a deployment wires to build and test its own platform tools, as the
+// composition root does: the tool handler factory and the internal token
+// service. Implementations, so they are offered here and not on the module
+// entries, which carry only contracts (`ToolHandlerFactory`, the
+// `InternalTokenService` type).
+export { createToolHandlerFactory } from './modules/tool-helpers/tool-handler.js';
+export { InternalTokenService } from './modules/tool-auth/internal-token.service.js';
+
 // Key port/seam types an overlay implements.
 // SyncedGroupsWriter is a CLASS — exported by VALUE so an overlay can
 // construct one; the seam types (including the writer's deps) stay type-only.
