@@ -2168,7 +2168,7 @@ describe('office documents and PDFs', () => {
       expect(def!.description!.startsWith(`${GUIDE_FIRST_SENTENCE} `), name).toBe(true);
       // Once, at the front — not once per paragraph that used to be appended.
       expect(def!.description!.split(GUIDE_FIRST_SENTENCE), name).toHaveLength(2);
-      // EVERY shared rule, in full, is in the two shared places now (see
+      // EVERY shared rule, in full, is in the guide now (see
       // agent-instructions/__tests__/shared-file-rules.test.ts) and in no
       // description. Checked on the whole body rather than on a phrase: the
       // drift this PR exists to prevent is a paragraph pasted back onto a
@@ -4424,7 +4424,7 @@ describe('preflight for moves and deletes', () => {
       expect(d.description).toMatch(/folder moves recursively/);
       expect(d.description).toMatch(/destination must not exist/);
       // What refuses a move, and the dry-run/confirm protocol it shares with the
-      // deletes, are shared rules — stated once, in the two shared places.
+      // deletes, are shared rules — stated once, in the guide.
       const rules = sharedFileRulesSection(testKbContext().layout, testKbContext().defaultBranch);
       expect(rules).toContain('is a platform file and stays in its folder.');
       expect(rules).toContain('`dryRun: true`');

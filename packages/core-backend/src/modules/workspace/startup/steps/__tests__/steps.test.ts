@@ -591,11 +591,11 @@ describe('TemplateFilesStep', () => {
     expect(shipped.trimEnd().endsWith('-->')).toBe(true);
     // The first line says how to turn the text on; the caps are stated inside.
     expect(shipped.split('\n')[0]).toMatch(/Remove this comment wrapper/);
-    expect(shipped).toContain('6,000 characters');
+    expect(shipped).toContain('1,800 characters');
     expect(shipped).toContain('first paragraph under about 220');
     expect(shipped).not.toContain('{{');
     const composed = composeAgentInstructions(shipped);
-    expect(composed.instructions).toBe(platformInstructions(DEFAULT_KB_LAYOUT, ''));
+    expect(composed.instructions).toBe(platformInstructions(''));
     expect(composed.toolPrefix).toBe(TOOL_PREFIX_LINE);
     expect(composed.unterminatedComment).toBe(false);
     expect(composed.preambleChars).toBe(0);

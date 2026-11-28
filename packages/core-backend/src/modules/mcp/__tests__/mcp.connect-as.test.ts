@@ -10,6 +10,7 @@ import { SpillStore } from '../../workspace/index.js';
 import { ToolRegistry, createManualRoutes } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 import type { ConnectionScopeWire } from '../../agent-scope/index.js';
+import { INSTRUCTIONS_CAP, PREAMBLE_CAP } from '../../agent-instructions/index.js';
 
 /**
  * The MCP proxy's half of connecting as an agent. The surfaces behind the
@@ -30,9 +31,14 @@ const GONE: ConnectionScopeWire = {
   agent: { path: 'Agents/gone.agent', name: 'Agents/gone.agent' },
   unavailable: 'This connection was made as the agent file `Agents/gone.agent`, which no longer exists.',
 };
+// A name and a path of the length a team gives its agents.
+const TYPICAL: ConnectionScopeWire = {
+  agent: { path: 'Agents/Engineering/Release-Notes-Writer.agent', name: 'Release notes writer' },
+};
 const CONNECTIONS: Record<string, ConnectionScopeWire | undefined> = {
   bevel_all: undefined,
   bevel_narrow: NARROW,
+  bevel_typical: TYPICAL,
   bevel_gone: GONE,
 };
 
@@ -52,7 +58,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function harness(opts: { revisionInProcess?: boolean } = {}) {
+async function harness(opts: { revisionInProcess?: boolean; preamble?: string; defaultBranch?: string } = {}) {
   await closeHttpServer();
   const state = { builds: 0, base: '', revisionRouteHits: 0 };
   const connectionOf = (req: express.Request) => CONNECTIONS[(req.headers.authorization ?? '').replace(/^Bearer /, '')];
@@ -110,6 +116,8 @@ async function harness(opts: { revisionInProcess?: boolean } = {}) {
     manualName: 'KNOWLEDGE_BASE',
     spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     publicFrontendUrl: 'http://localhost:5173',
+    ...(opts.preamble !== undefined ? { readAgentPreamble: async () => opts.preamble! } : {}),
+    ...(opts.defaultBranch !== undefined ? { defaultBranch: () => opts.defaultBranch! } : {}),
     // As the composition root wires it: the revision, and the agent the
     // connection is narrowed to, answered by a function for the caller the
     // request's bearer resolves to (each key here names its connection).
@@ -208,6 +216,18 @@ This connection is connected as the agent "narrow" (\`Agents/narrow.agent\`): it
     expect(gone?.endsWith(GONE.unavailable!)).toBe(true);
     expect(everything).not.toContain('connected as the agent');
     expect(state.revisionRouteHits).toBe(0);
+  });
+
+  it('keeps the whole handshake of a typical agent connection within the length Claude Code keeps', async () => {
+    // The connection line comes after the capped instructions and is not
+    // counted in INSTRUCTIONS_CAP (see its doc): this pins that a preamble
+    // past its cap and a typical agent name and path still fit, line included.
+    const { mcp } = await harness({ preamble: 'x'.repeat(PREAMBLE_CAP * 2), defaultBranch: 'main' });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const typical = (await connect(mcp, { bearer: 'bevel_typical', agentPath: TYPICAL.agent.path }, true)).getInstructions();
+    expect(typical).toContain('[preamble truncated at');
+    expect(typical!.endsWith('and of those only what you may read.')).toBe(true);
+    expect(typical!.length).toBeLessThanOrEqual(INSTRUCTIONS_CAP);
   });
 
   it('two connections of one person made as different agents never share a built surface', async () => {

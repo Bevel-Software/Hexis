@@ -16,6 +16,7 @@ export {
 export {
   SHARED_FILE_RULES_CAP,
   SHARED_RULES_SECTION,
+  SHARED_RULES_SECTION_ID,
   sharedFileRules,
   sharedFileRulesSection,
   type SharedFileRule,

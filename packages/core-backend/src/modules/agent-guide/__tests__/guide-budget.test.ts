@@ -52,7 +52,7 @@ describe('the guide fits its token budgets', () => {
   });
 
   it('keeps the platform part of the handshake instructions within its budget', () => {
-    const tokens = countTokens(platformInstructions(DEFAULT_KB_LAYOUT));
+    const tokens = countTokens(platformInstructions());
     expect(tokens, `the instructions are ${tokens} tokens (budget ${INSTRUCTIONS_TOKEN_BUDGET})`).toBeLessThanOrEqual(
       INSTRUCTIONS_TOKEN_BUDGET,
     );
@@ -63,7 +63,7 @@ describe('the guide fits its token budgets', () => {
     // `Call:` line and normalised schema), the purpose prefix on the four
     // knowledge-base tools, and the meta-tools as built for the endpoint.
     const { external, metaTools } = await hexisCatalog();
-    const { toolPrefix } = composeAgentInstructions(null, DEFAULT_KB_LAYOUT);
+    const { toolPrefix } = composeAgentInstructions(null);
     const listed = external.map((t) => {
       const entry = toListedTool({
         mcpName: t.name,

@@ -15,8 +15,18 @@
 /** The repository-root file an admin edits. */
 export const PREAMBLE_FILE = 'mcp-description.md';
 
-/** UTF-16 units of preamble sent on the handshake before the marker replaces the rest. */
-export const PREAMBLE_CAP = 6_000;
+/**
+ * UTF-16 units of preamble sent on the handshake before the marker replaces
+ * the rest.
+ *
+ * 1,800 (it was 6,000) so the whole handshake fits the length Claude Code
+ * keeps of a server's instructions (`INSTRUCTIONS_CAP` in the backend
+ * composer, 4,096): past it the client cut the text, and a description that
+ * followed the platform's opening never arrived. The backend test holds the
+ * platform opening with the longest default-branch name, this cap and the
+ * truncation marker under that length.
+ */
+export const PREAMBLE_CAP = 1_800;
 
 /** UTF-16 units of the whole tool prefix (fixed line included). */
 export const TOOL_PREFIX_CAP = 300;

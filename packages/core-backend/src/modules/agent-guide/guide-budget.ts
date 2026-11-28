@@ -25,8 +25,8 @@
 /** The encoding the budgets are counted in. */
 export const GUIDE_TOKEN_ENCODING = 'o200k_base';
 
-/** The platform's part of the handshake instructions: the header and the shared file rules. */
-export const INSTRUCTIONS_TOKEN_BUDGET = 2_000;
+/** The platform's part of the handshake instructions: the guide-first line, the header, the pointer to the shared file rules and the default branch. */
+export const INSTRUCTIONS_TOKEN_BUDGET = 400;
 
 /**
  * The platform's own tools as the hosted endpoint lists them to an MCP client:

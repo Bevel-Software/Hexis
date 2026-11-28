@@ -22,9 +22,9 @@
  * template carried (`{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}`,
  * `{{agentsFile}}`), the checkout folder's `{{kbDirName}}` and the default
  * branch's `{{defaultBranch}}`. ONE section is computed rather than read: the
- * rules every file tool shares, which the MCP handshake also sends — the same
- * string in both places, from `shared-file-rules.ts`, so a rule cannot be
- * changed in one and left stale in the other.
+ * rules every file tool shares, built by `shared-file-rules.ts`. The MCP
+ * handshake does not send them: it points at this section by its id, so the
+ * guide is the one place an agent reads them.
  *
  * The guide is LAYERED (see openspec/changes/agent-guide-layers/design.md):
  * `get_agent_guide` with no section answers with the short start section
@@ -43,7 +43,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { ONBOARDING_GUIDE_SECTION_ID } from '@bevel-software/platform-mcp-core';
 import { agentGuideDir } from '../../assets.js';
-import { sharedFileRulesSection } from '../agent-instructions/index.js';
+import { SHARED_RULES_SECTION_ID, sharedFileRulesSection } from '../agent-instructions/index.js';
 
 /** One section of the guide. */
 export interface AgentGuideSection {
@@ -92,7 +92,7 @@ export type AgentGuideHook = (
 export type AgentGuideReader = () => Promise<string>;
 
 /** The computed section: the rules every file tool shares. */
-export const WORKING_WITH_FILES_SECTION_ID = 'working-with-files';
+export const WORKING_WITH_FILES_SECTION_ID = SHARED_RULES_SECTION_ID;
 
 /**
  * The sections a hook may neither drop nor empty, because something outside
@@ -260,9 +260,9 @@ export type AgentGuideSectionsReader = () => Promise<RenderedGuideSection[]>;
  * guide keeps its order (see {@link oneSectionPerId}). TWO exceptions, the
  * sections something outside the guide points an agent at by id
  * (`REQUIRED_SECTIONS`): the shared file rules
- * ({@link WORKING_WITH_FILES_SECTION_ID}), which every file tool names — a
- * client that drops the handshake instructions has the guide as the only
- * place to read them — and the onboarding section
+ * ({@link WORKING_WITH_FILES_SECTION_ID}), which every file tool names and
+ * the handshake instructions point at by this id — the guide is the only
+ * place they are stated — and the onboarding section
  * ({@link ONBOARDING_GUIDE_SECTION_ID}), which the platform's `onboard`
  * prompt sends an agent to. Each must come back WITH TEXT IN IT, as core's
  * or as the hook's own replacement. A hook that drops one, or hands it back

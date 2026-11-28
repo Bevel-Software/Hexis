@@ -1,4 +1,3 @@
-import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { describe, expect, it } from 'vitest';
 import {
   GUIDE_FIRST_LINE,
@@ -17,12 +16,13 @@ import {
  * an absent or empty preamble yields, how comments are withheld, where both
  * caps cut, and that a cut never splits a character.
  *
- * `PLATFORM` is everything the code owns and the admin cannot edit: the header
- * and the rules every file tool shares, which is what the handshake leads with.
- * The rules themselves are pinned in `shared-file-rules.test.ts`; here they are
- * only the fixed text the preamble follows.
+ * `PLATFORM` is everything the code owns and the admin cannot edit: the
+ * guide-first line, the header and the pointer to the shared rules, which is
+ * what the handshake leads with. Where the rules are, and the length the
+ * whole text keeps to, are pinned in `shared-file-rules.test.ts`; here they
+ * are only the fixed text the preamble follows.
  */
-const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
+const PLATFORM = platformInstructions('');
 
 describe('composeAgentInstructions: the handshake text', () => {
   it('opens with the one line that sends the agent to the guide, then the header, with or without a preamble', () => {
@@ -38,7 +38,7 @@ describe('composeAgentInstructions: the handshake text', () => {
     }
   });
 
-  it('sends the platform text alone — header and shared rules — for an absent, empty, whitespace or comment-only preamble', () => {
+  it('sends the platform text alone for an absent, empty, whitespace or comment-only preamble', () => {
     for (const raw of [null, '', '   \n\n', '<!-- notes to myself -->', '<!--\nline one\nline two\n-->\n']) {
       const out = composeAgentInstructions(raw);
       expect(out.instructions, JSON.stringify(raw)).toBe(PLATFORM);
@@ -95,7 +95,7 @@ describe('composeAgentInstructions: the handshake text', () => {
     const over = composeAgentInstructions(`${exact}b`);
     expect(over.truncated).toBe(true);
     expect(over.instructions).toBe(`${PLATFORM}\n\n${exact}\n${PREAMBLE_TRUNCATION_MARKER}`);
-    expect(PREAMBLE_TRUNCATION_MARKER).toContain('6,000');
+    expect(PREAMBLE_TRUNCATION_MARKER).toContain(PREAMBLE_CAP.toLocaleString('en-US'));
     expect(PREAMBLE_TRUNCATION_MARKER).toContain('mcp-description.md');
   });
 
@@ -111,8 +111,9 @@ describe('composeAgentInstructions: the handshake text', () => {
   });
 
   it('a cut that would split a surrogate pair moves before it', () => {
-    // 5,999 ASCII units, then an astral character (two UTF-16 units): unit
-    // 6,000 is its high surrogate, so the cut must land before it.
+    // One unit short of the cap in ASCII, then an astral character (two
+    // UTF-16 units): the unit at the cap is its high surrogate, so the cut
+    // must land before it.
     const raw = `${'a'.repeat(PREAMBLE_CAP - 1)}😀tail`;
     const out = composeAgentInstructions(raw);
     expect(out.truncated).toBe(true);

@@ -5,11 +5,10 @@ import { createManualAuthMiddleware } from '../../../__tests__/tool-wiring.js';
 import type { IExternalApiKeyService, InternalTokenService } from '../../tool-auth/index.js';
 import type { AuthService } from '../../auth/index.js';
 import { createAgentInstructionsRoutes } from '../agent-instructions.routes.js';
-import { DEFAULT_KB_LAYOUT } from '@bevel-software/platform-shared';
 import { GUIDE_FIRST_LINE, TOOL_PREFIX_LINE, platformInstructions } from '../compose.js';
 
-/** The platform-owned text the route leads with: header + the shared file rules. */
-const PLATFORM = platformInstructions(DEFAULT_KB_LAYOUT, '');
+/** The platform-owned text the route leads with: the guide-first line, the header and the pointer to the shared file rules. */
+const PLATFORM = platformInstructions('');
 
 /**
  * `GET /agent/instructions` behind the REAL manual-auth gate, with the three

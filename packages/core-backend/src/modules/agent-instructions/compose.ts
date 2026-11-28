@@ -1,9 +1,11 @@
 /**
  * What a connected agent is told at the start of an MCP session, composed
- * from three layers: a platform header the code owns, the rules every file tool
- * shares (`shared-file-rules.ts`, the same text the managed guide carries), and
- * the deployment preamble an admin writes in `mcp-description.md` at the
- * repository root.
+ * from two layers: a platform opening the code owns (what Hexis is, when to
+ * use it, where the rules every file tool shares are, and the default
+ * branch), then the deployment preamble an admin writes in
+ * `mcp-description.md` at the repository root. The shared rules themselves
+ * (`shared-file-rules.ts`) are in the guide only: with them in front, Claude
+ * Code cut the text before the preamble began.
  *
  * Two channels carry the result. The full text goes out as `instructions` on
  * the initialize handshake, which Claude Code, Claude Desktop and Cursor place
@@ -23,15 +25,13 @@
 // apart. Re-exported here because this module is where the backend reads them
 // from.
 import {
-  DEFAULT_KB_LAYOUT,
   PREAMBLE_CAP,
   PREAMBLE_FILE,
   TOOL_PREFIX_CAP,
   stripHtmlComments,
-  type KbLayout,
 } from '@bevel-software/platform-shared';
 import { splitCallLine } from '@bevel-software/platform-mcp-core';
-import { sharedFileRulesSection } from './shared-file-rules.js';
+import { SHARED_RULES_SECTION, SHARED_RULES_SECTION_ID, defaultBranchSentence } from './shared-file-rules.js';
 
 export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
 
@@ -103,47 +103,66 @@ export const GUIDE_FIRST_LINE =
   `Before anything else, call \`${GET_AGENT_GUIDE_TOOL}\` and read the guide: it says what this deployment is and what this connection loads.`;
 
 /**
- * The whole platform-owned part of the handshake text: the guide-first line,
- * what Hexis is, then the rules every file tool shares (see
- * `shared-file-rules.ts`). This is what the `header` field carries and what
- * the card shows as fixed and not editable; the admin's preamble follows it.
- *
- * A FUNCTION of the layout and the default branch, because the shared rules
- * name the platform files by the root names a deployment chose (`Skills/`,
- * `Plugins/`) and name the branch it reads from, which are deployment
- * settings. The guide's name is not one of them: it is `AGENTS.md` everywhere.
+ * Where the rules every file tool shares are, in place of the rules: they run
+ * to thousands of characters, and in front of the preamble they pushed it
+ * past the point Claude Code cuts at (see {@link INSTRUCTIONS_CAP}).
  */
-export function platformInstructions(layout: KbLayout, defaultBranch = ''): string {
-  return `${GUIDE_FIRST_LINE}\n\n${PLATFORM_HEADER}\n\n${sharedFileRulesSection(layout, defaultBranch)}`;
+export const SHARED_RULES_POINTER =
+  `The rules every file tool shares (what each kind of file reads and writes as, write modes, uploads, moves and deletes) ` +
+  `are in the guide's "${SHARED_RULES_SECTION}" section: call \`get_agent_guide\` with \`section\` \`${SHARED_RULES_SECTION_ID}\`.`;
+
+/**
+ * The whole platform-owned part of the handshake text: the guide-first line,
+ * what Hexis is and when to use it, where the shared rules are, then the
+ * sentence naming the default branch when the deployment has one. This is
+ * what the `header` field carries and what the card shows as fixed and not
+ * editable; the admin's preamble follows it.
+ *
+ * A FUNCTION of the default branch, a deployment setting read when composing:
+ * every file tool asks for "the branch you are working on", and an agent left
+ * to guess guesses `main`. The sentence is the one the guide's shared rules
+ * carry, from the same helper.
+ */
+export function platformInstructions(defaultBranch = ''): string {
+  const branch = defaultBranchSentence(defaultBranch);
+  const opening = `${GUIDE_FIRST_LINE}\n\n${PLATFORM_HEADER}\n\n${SHARED_RULES_POINTER}`;
+  return branch ? `${opening}\n\n${branch}` : opening;
 }
 
 /**
- * The ceiling on the WHOLE handshake text, pinned by a test.
+ * The ceiling on the composed instructions: the length Claude Code keeps of a
+ * server's `instructions`, pinned by a test. Past it Claude Code drops the
+ * rest and appends `… [truncated]`, so anything beyond it never reaches the
+ * model.
  *
- * No client publishes a limit for `instructions` — what was observed being cut
- * was tool descriptions — so this is not a measured client limit but the
- * arithmetic ceiling of the parts, held low enough that it stays a plausible
- * system-prompt insert (under ~4,000 tokens): the header, the shared rules under their
- * own cap, and the preamble under its cap plus the marker a cut appends. The
- * test is what makes it a ceiling rather than a hope: a shared rule that grew
- * past it fails before it reaches an agent.
+ * Not the ceiling on every handshake. A connection made as an agent gets one
+ * more line after these instructions, naming the agent by its name and path
+ * (`describeConnection`, appended by both MCP servers). Neither is bounded,
+ * so with a preamble near its cap a long name or path takes the handshake
+ * past this length, and Claude Code cuts the end of that line. The guide-first
+ * line still sends the agent to the guide, which says what the connection
+ * loads. A test pins the full handshake of a typical agent connection.
  *
- * 14,400 since the shared rules' own cap rose by 400 (the `__tmp__/` ref);
- * 14,900 since it rose by 500 more (the sentence naming the default branch,
- * measured with the longest name the platform accepts — see that cap);
- * 15,100 since the guide-first line opens the text (130 characters with its
- * blank line).
+ * Measured, not guessed: Claude Code 2.1.332 (2026-11-26) cuts server
+ * instructions at 4,096 characters by default (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`
+ * overrides it; a claude.ai connector is not cut). Version 2.1.293 cut at
+ * 2,048, which is why the opening and the preamble's start must also sit
+ * within the first 2,000 characters. They do for any branch name without
+ * backticks: the opening is about 1,450 characters with `main` and 1,700
+ * with a 255-character name. A name made mostly of backticks renders as a
+ * longer code span and can push the preamble's start past 2,000, though
+ * never past this cap.
  */
-export const INSTRUCTIONS_CAP = 15_100;
+export const INSTRUCTIONS_CAP = 4_096;
 
 /** The one-line marker that replaces everything past the preamble cap. */
 export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;
 
 export interface ComposedAgentInstructions {
-  /** The platform text, then the preamble body when there is one. Sent on the initialize handshake. */
+  /** The platform opening, then the preamble body when there is one. Sent on the initialize handshake. */
   instructions: string;
   /**
-   * The platform-owned text alone — the header and the shared file rules — so a
+   * The platform-owned text alone (see {@link platformInstructions}), so a
    * card can show the fixed part apart from the admin's.
    */
   header: string;
@@ -155,7 +174,7 @@ export interface ComposedAgentInstructions {
   toolPrefix: string;
   /** The preamble exceeded {@link PREAMBLE_CAP} and was cut, marker appended. */
   truncated: boolean;
-  /** Length of the stripped preamble BEFORE the cut, so a card can show `N / 6,000`. */
+  /** Length of the stripped preamble BEFORE the cut, so a card can show `N / 1,800`. */
   preambleChars: number;
   /** The prefix exceeded {@link TOOL_PREFIX_CAP} and was cut. */
   toolPrefixTruncated: boolean;
@@ -171,23 +190,13 @@ export interface ComposedAgentInstructions {
  * unterminated `<!--` strips everything after it, so the most likely editing
  * slip withholds text rather than leaking it.
  *
- * `layout` decides the root names the shared rules spell (`Skills/`,
- * `Plugins/`, the knowledge folder) and defaults to the standard ones — a
- * caller with no layout in hand (a test, a surface that predates the setting)
- * gets the defaults. The guide's name is not among them: it is `AGENTS.md` on
- * every deployment.
- *
- * `defaultBranch` is the branch the shared rules name as the one people read
+ * `defaultBranch` is the branch the opening names as the one people read
  * (`KbContext.defaultBranch`, read when composing). Without one — a caller
- * with no knowledge base in hand, or a deployment not yet set up — the rules
- * name no branch.
+ * with no knowledge base in hand, or a deployment not yet set up — it names
+ * no branch.
  */
-export function composeAgentInstructions(
-  preamble: string | null,
-  layout: KbLayout = DEFAULT_KB_LAYOUT,
-  defaultBranch = '',
-): ComposedAgentInstructions {
-  const platform = platformInstructions(layout, defaultBranch);
+export function composeAgentInstructions(preamble: string | null, defaultBranch = ''): ComposedAgentInstructions {
+  const platform = platformInstructions(defaultBranch);
   const { text, unterminated } = stripHtmlComments(preamble ?? '');
   const normalized = text.replace(/\r\n?/g, '\n');
   const stripped = normalized.trim();
