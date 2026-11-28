@@ -10,7 +10,7 @@ import { ChatGptInstallLink } from '../ChatGptInstallLink';
 describe('ChatGptInstallLink', () => {
   it('opens ChatGPT’s connector settings for a reachable https address', () => {
     render(<ChatGptInstallLink mcpUrl="https://kb.acme.com/api/mcp" />);
-    const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
+    const link = screen.getByRole('link', { name: 'Open ChatGPT' });
     expect(link).toHaveAttribute('href', expect.stringContaining('chatgpt.com'));
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
@@ -23,7 +23,7 @@ describe('ChatGptInstallLink', () => {
    */
   it('does not put the endpoint in the href', () => {
     render(<ChatGptInstallLink mcpUrl="https://kb.acme.com/api/mcp" />);
-    const href = screen.getByRole('link', { name: 'Add to ChatGPT' }).getAttribute('href')!;
+    const href = screen.getByRole('link', { name: 'Open ChatGPT' }).getAttribute('href')!;
     expect(href).not.toContain('kb.acme.com');
   });
 

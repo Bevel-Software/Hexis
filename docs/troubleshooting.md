@@ -34,10 +34,10 @@ repository. The setup screen's test tells you which half failed. On GitHub,
 fine-grained tokens also need the repository explicitly selected, not just the
 right scopes.
 
-## Desktop agents (the local MCP server)
+## Coding agents (the local MCP server)
 
-The `npx -y @bevel-software/hexis-mcp` command from **Connect** → Desktop
-agents, on the machine the agent runs on.
+The `npx -y @bevel-software/hexis-mcp` command from **External agent access** →
+Coding agents, on the machine the agent runs on.
 
 **The client says `npx` was not found, but it runs fine in a terminal**
 The client was launched from the Dock, the Start menu or a desktop icon, so it

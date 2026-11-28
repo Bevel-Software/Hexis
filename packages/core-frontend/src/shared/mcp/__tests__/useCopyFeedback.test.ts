@@ -95,6 +95,75 @@ describe('useCopyFeedback', () => {
     expect(result.current.copied).toBe(false);
   });
 
+  /** A refusal is an answer the reader must act on: it does not fade like a success. */
+  it('keeps a refusal said until the next try', async () => {
+    vi.useFakeTimers();
+    stubClipboard({ writeText: vi.fn().mockRejectedValue(new Error('denied')) });
+    const { result } = renderHook(() => useCopyFeedback());
+    let answer: string | undefined;
+    await act(async () => {
+      answer = await result.current.copy('hello');
+    });
+    expect(answer).toBe('failed');
+    expect(result.current.status).toBe('failed');
+    act(() => vi.advanceTimersByTime(5000));
+    expect(result.current.status).toBe('failed');
+  });
+
+  /** Each copy starts from idle, so a live region reading the status changes, and says it again. */
+  it('goes back to idle while a repeat copy is on its way', async () => {
+    let land!: () => void;
+    const writeText = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(new Promise<void>((resolve) => (land = resolve)));
+    stubClipboard({ writeText });
+    const { result } = renderHook(() => useCopyFeedback());
+    await act(async () => result.current.copy('first'));
+    expect(result.current.status).toBe('copied');
+    let second!: Promise<string>;
+    act(() => {
+      second = result.current.copy('second');
+    });
+    expect(result.current.status).toBe('idle');
+    await act(async () => {
+      land();
+      await second;
+    });
+    expect(result.current.status).toBe('copied');
+  });
+
+  /** Only the latest copy speaks: a slow refusal from an earlier click cannot overwrite a later "Copied". */
+  it('drops an earlier copy’s answer that arrives after a later copy started', async () => {
+    vi.useFakeTimers();
+    let refuseFirst!: (error: Error) => void;
+    const writeText = vi
+      .fn()
+      .mockReturnValueOnce(new Promise<void>((_, reject) => (refuseFirst = reject)))
+      .mockResolvedValueOnce(undefined);
+    stubClipboard({ writeText });
+    const { result } = renderHook(() => useCopyFeedback());
+
+    let first!: Promise<string>;
+    act(() => {
+      first = result.current.copy('first');
+    });
+    await act(async () => result.current.copy('second'));
+    expect(result.current.status).toBe('copied');
+
+    let firstAnswer: string | undefined;
+    await act(async () => {
+      refuseFirst(new Error('denied'));
+      firstAnswer = await first;
+    });
+    expect(firstAnswer).toBe('idle');
+    expect(result.current.status).toBe('copied');
+
+    // The later copy's fade still runs on its own clock.
+    act(() => vi.advanceTimersByTime(1500));
+    expect(result.current.status).toBe('idle');
+  });
+
   it('clears the checkmark when a copy fails right after one succeeded', async () => {
     const writeText = vi
       .fn()

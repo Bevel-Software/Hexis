@@ -37,7 +37,7 @@ export function ChatGptInstallLink({
       rel="noopener noreferrer"
       className={buttonClasses({ variant: 'outline', size: 'sm', className })}
     >
-      Add to ChatGPT
+      Open ChatGPT
       {/* Decoration: the link's own text is its accessible name. */}
       <ExternalLink size={12} className="opacity-70" aria-hidden="true" />
     </a>

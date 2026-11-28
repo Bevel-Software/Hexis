@@ -1,33 +1,34 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
 import { configureMcpUrl } from '../../../../shared/mcp';
 import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
+import * as keysApi from '../../services/external-api-keys.api';
 
 /**
- * The Connect page's contract, and the reason this file exists at all: every
- * HOSTED snippet quotes the DEPLOYMENT's address, never the browser's — and
+ * The External agent access page's contract.
+ *
+ * One task is open (connect your agent); API keys and skills as plugins are
+ * closed rows. And the reason this file existed before any of that: every
+ * HOSTED snippet quotes the DEPLOYMENT's address, never the browser's, and
  * every LOCAL-server (hexis-mcp) snippet quotes the browser's origin, never
  * the deployment's MCP endpoint. Two families, two addresses, on purpose:
  * hexis-mcp takes the workspace base and resolves the endpoint from
  * `GET /api/config` itself, and the one base the browser has proven serves
  * the whole app is its own origin.
- *
- * Six hosted sites on this page used to rebuild the endpoint from
- * `window.location.origin` — three keyless, three carrying a freshly minted
- * external API key. They agreed with the server's own idea of its address
- * only by luck, and a proxy or a second domain was enough to break it. The
- * regression cases below name all six.
  */
 
-const { listMock, createMock, instructionsMock, facadeMock, registrationMock, adminState, agentChoicesMock } = vi.hoisted(() => ({
+const { listMock, createMock, authFetchMock, registrationMock, adminState, agentChoicesMock, agentState, copyMock } = vi.hoisted(() => ({
+  // What `useAgentConnection` answers: nothing connected unless a case says so.
+  agentState: { value: { connected: false, settled: true } as { connected: boolean; settled: boolean; at?: string; client?: string } },
+  copyMock: vi.fn<(text: string) => Promise<boolean>>(async () => true),
   agentChoicesMock: vi.fn(),
   listMock: vi.fn(),
   createMock: vi.fn(),
-  instructionsMock: vi.fn(),
-  facadeMock: vi.fn(),
+  // Every request that reaches the network layer, recorded and answered 404.
+  authFetchMock: vi.fn(async () => new Response('{}', { status: 404 })),
   registrationMock: vi.fn(),
   // Mutable so one file can mount the page as both roles: the tutorial must
   // be identical for both, and only the "not set up" notice may differ.
@@ -36,10 +37,7 @@ const { listMock, createMock, instructionsMock, facadeMock, registrationMock, ad
 
 // The other modules this page reaches, replaced at their entries: that is
 // where the page imports them from, and the one surface a mock may stand in
-// for. Only the hook is replaced on `admin`; `AdminContext` itself stays real,
-// because the instructions card below reads the context directly rather than
-// through the hook; a whole-module mock left it undefined and every case here
-// threw.
+// for. Only the hook is replaced on `admin`; the rest of its entry stays real.
 vi.mock('../../../admin', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../admin')>()),
   useAdmin: () => ({ isAdmin: adminState.isAdmin }),
@@ -51,13 +49,11 @@ vi.mock('../../../settings', async (importOriginal) => ({
   fetchMarketplaceRegistration: registrationMock,
 }));
 
-// The admin credentials endpoint this page must never call. It is reached
-// inside the settings module, by `ClaudeConnectionCard`, which the toolbar's
-// registration steps import by file rather than through the entry, so the
-// guard sits on the file too until that import moves.
-vi.mock('../../../settings/services/github-facade.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../settings/services/github-facade.api')>()),
-  fetchGitHubFacade: facadeMock,
+// The network layer, observed rather than any module's files: the admin
+// credentials endpoint is asserted below never to be asked, by whatever path.
+vi.mock('../../../../lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../lib/api')>()),
+  authFetch: authFetchMock,
 }));
 
 // The agents a key may be minted as ("Connect as").
@@ -66,19 +62,20 @@ vi.mock('../../../agents', async (importOriginal) => ({
   listAgentChoices: agentChoicesMock,
 }));
 
+// "Did an agent connect?": the page asks the onboarding module's hook.
+vi.mock('../../../onboarding', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../onboarding')>()),
+  useAgentConnection: () => agentState.value,
+}));
+
+// jsdom has no clipboard; the cases read what was copied from this.
+vi.mock('../../../../lib/clipboard', () => ({ copyToClipboard: copyMock }));
+
 vi.mock('../../services/external-api-keys.api', () => ({
   listExternalApiKeys: listMock,
   createExternalApiKey: createMock,
   disconnectExternalApiKey: vi.fn(async () => {}),
   deleteExternalApiKey: vi.fn(async () => {}),
-}));
-
-// The "What connected agents are told" card fetches on mount; its own cases
-// live in AgentInstructionsCard.test.tsx. Here it only has to stay out of the
-// way of the snippet assertions, which read every textbox on the page.
-vi.mock('../../services/agent-instructions.api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../services/agent-instructions.api')>()),
-  fetchAgentInstructions: instructionsMock,
 }));
 
 /** A deployment configured the way a real one is: public, https, its own domain. */
@@ -88,41 +85,20 @@ const LOCALHOST_URL = 'http://localhost:3001/api/mcp';
 
 const KEY = 'bvl_live_s3cret';
 
-const FACADE = {
-  host: 'kb.acme.com',
-  appId: '12345',
-  clientId: 'Iv1.abcdef',
-  clientSecret: 'ghs_secret',
-  webhookSecret: 'whsec_0123456789012345678',
-  privateKeyPem: '-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----',
-  marketplaceUrl: 'https://kb.acme.com/git/marketplace.git',
-  createdAt: Date.now(),
-  rotatedAt: null,
-};
-
 beforeEach(() => {
   adminState.isAdmin = false;
-  // Cleared, not just re-stubbed: the count is an assertion of its own below.
-  facadeMock.mockClear();
-  facadeMock.mockResolvedValue(FACADE);
+  agentState.value = { connected: false, settled: true };
+  copyMock.mockClear();
+  vi.mocked(keysApi.disconnectExternalApiKey).mockClear();
+  vi.mocked(keysApi.deleteExternalApiKey).mockClear();
+  // Cleared: what reached the network is an assertion of its own below.
+  authFetchMock.mockClear();
   registrationMock.mockReset();
-  registrationMock.mockResolvedValue(true);
+  registrationMock.mockResolvedValue(false);
   listMock.mockResolvedValue([]);
   agentChoicesMock.mockReset();
   agentChoicesMock.mockResolvedValue([]);
   createMock.mockClear();
-  instructionsMock.mockResolvedValue({
-    instructions: 'Search the knowledge base first.',
-    header: 'Search the knowledge base first.',
-    preamble: '',
-    toolPrefix: 'Search it before answering from memory.',
-    toolPrefixLine: 'Search it before answering from memory.',
-    truncated: false,
-    preambleChars: 0,
-    toolPrefixTruncated: false,
-    toolPrefixChars: 40,
-    unterminatedComment: false,
-  });
   createMock.mockResolvedValue({
     plaintext: KEY,
     summary: {
@@ -147,944 +123,409 @@ function mount(mcpUrl: string) {
   );
 }
 
-/** Opens the Cowork drawer on the Marketplaces tab — the opening is what reads the registration state. */
-async function openCowork(user: ReturnType<typeof userEvent.setup>) {
-  const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
-  await user.click(within(cowork).getByText('Cowork and claude.ai'));
-  return cowork;
-}
-
-/** Every read-only snippet on screen, as plain strings. */
+/** Everything on screen that can be copied, as plain strings (closed rows included: they are in the page, not in view). */
 function snippets(): string[] {
-  return screen
-    .getAllByRole('textbox')
-    .map((el) => (el as HTMLTextAreaElement).value);
+  return Array.from(document.querySelectorAll('.font-mono')).map((el) => el.textContent ?? '');
 }
 
-/** Mint a key so the reveal modal — and its three keyed snippets — is on screen. */
-async function revealAKey(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-  await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
-  await user.click(screen.getByRole('button', { name: 'Create key' }));
-  await screen.findByRole('heading', { name: /Save this external API key now/ });
+function row(testId: string): HTMLDetailsElement {
+  return screen.getByTestId(testId) as HTMLDetailsElement;
 }
 
-describe('the interactive tab: Claude and ChatGPT first, each family on its own address', () => {
-  it('builds all three hosted keyless snippets from the configured URL', () => {
+/** Open the API keys row, name a key and create it, so its dialog is on screen. */
+async function createAKey(user: ReturnType<typeof userEvent.setup>, name = 'CI') {
+  await user.click(within(row('keys-section')).getByText('API keys'));
+  await user.type(screen.getByRole('textbox', { name: 'Name of the new API key' }), name);
+  await user.click(within(row('keys-section')).getByRole('button', { name: 'Create key' }));
+  return screen.findByRole('dialog', { name: 'Save this key now' });
+}
+
+const KEY_ROW = {
+  id: 'k1',
+  label: 'Nightly pipeline',
+  createdAt: Date.now() - 3_600_000,
+  lastUsedAt: null,
+  revokedAt: null,
+  revokedBy: null,
+};
+
+describe('the first screen: one open task, everything else a closed row', () => {
+  it('opens on connecting an agent, with one button and two closed rows', async () => {
     mount(PUBLIC_URL);
-    const values = snippets();
+    const card = screen.getByTestId('agent-connection-section');
+    expect(within(card).getByRole('heading', { name: 'Connect your agent' })).toBeInTheDocument();
+    expect(within(card).getByRole('radiogroup', { name: 'Your agent' })).toBeInTheDocument();
+    expect(within(card).getByRole('link', { name: /Add to Claude/ })).toBeInTheDocument();
+    expect(row('keys-section').open).toBe(false);
+    expect(row('plugins-row').open).toBe(false);
+    // What agents are told is a workspace setting: it lives on Deployment.
+    expect(screen.queryByTestId('agent-instructions-section')).not.toBeInTheDocument();
+    await waitFor(() => expect(listMock).toHaveBeenCalled());
+  });
 
-    // 1. the Claude Code one-liner
-    expect(values).toContain(
-      `claude mcp add --transport http skills-tools-knowledge ${PUBLIC_URL}`,
-    );
-    // 2. the bare URL for claude.ai / Claude Desktop
+  /**
+   * API keys and skills as plugins close each other the way every closed row
+   * here does: they are `<details>` of ONE `name` group, and the browser
+   * shuts the open one when another of the group opens (the HTML exclusive
+   * accordion). The test DOM does not implement that closing, so this pins
+   * what the page owns: both rows in the same group, and no other row in it.
+   */
+  it('puts API keys and skills as plugins in one group, so opening one closes the other', async () => {
+    mount(PUBLIC_URL);
+    const group = row('keys-section').getAttribute('name');
+    expect(group).toBeTruthy();
+    expect(row('plugins-row').getAttribute('name')).toBe(group);
+    expect(document.querySelectorAll(`details[name="${group}"]`)).toHaveLength(2);
+    await waitFor(() => expect(listMock).toHaveBeenCalled());
+  });
+
+  it('waits for the agent only once the reader has acted', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    expect(screen.queryByText('Waiting for your agent…')).not.toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /Add to Claude/ });
+    link.addEventListener('click', (e) => e.preventDefault());
+    await user.click(link);
+    expect(screen.getByText('Waiting for your agent…')).toBeInTheDocument();
+  });
+
+  it('shows the connection, and no button for a job that is done, once an agent has connected', async () => {
+    agentState.value = { connected: true, settled: true, client: 'Claude', at: new Date(Date.now() - 120_000).toISOString() };
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    const card = screen.getByTestId('agent-connection-section');
+    expect(within(card).getByRole('heading', { name: 'Your agent' })).toBeInTheDocument();
+    expect(within(card).getByText('Connected. Claude reached this knowledge base 2m ago.')).toBeInTheDocument();
+    expect(within(card).queryByRole('link', { name: /Add to Claude/ })).not.toBeInTheDocument();
+
+    await user.click(within(card).getByRole('button', { name: 'Connect another agent' }));
+    expect(within(card).getByRole('link', { name: /Add to Claude/ })).toBeInTheDocument();
+  });
+});
+
+describe('each agent: one thing to do, each family on its own address', () => {
+  it('gives Claude the deployment address to add by hand', () => {
+    mount(PUBLIC_URL);
+    expect(screen.getByText('Or add it by hand').closest('details')).not.toHaveAttribute('open');
+    expect(snippets()).toContain(PUBLIC_URL);
+  });
+
+  it('gives ChatGPT the address, then a link that only opens ChatGPT', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('radio', { name: 'ChatGPT' }));
+    expect(snippets()).toContain(PUBLIC_URL);
+    expect(screen.getByRole('link', { name: /Open ChatGPT/ })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Add to ChatGPT/ })).not.toBeInTheDocument();
+  });
+
+  it('gives coding agents a prompt to paste, built from the origin, never the MCP endpoint', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('radio', { name: 'Coding agents' }));
+    await user.click(screen.getByRole('button', { name: 'Copy prompt' }));
+
+    const prompt = copyMock.mock.calls[0]![0];
+    expect(prompt).toContain('claude mcp add --scope user skills-tools-knowledge');
+    expect(prompt).toContain(`HEXIS_URL="${window.location.origin}"`);
+    expect(prompt).toContain('"mcpServers"');
+    expect(prompt).not.toContain(PUBLIC_URL);
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
+    // Copying is acting: the page now waits for the agent.
+    expect(screen.getByText('Waiting for your agent…')).toBeInTheDocument();
+
+    // By hand: the same configuration, to paste.
+    const json = snippets().find((v) => v.includes('mcpServers') && v.includes('npx'));
+    expect(JSON.parse(json!).mcpServers['skills-tools-knowledge'].env.HEXIS_URL).toBe(window.location.origin);
+  });
+
+  it('shows the prompt to select when the browser refuses the clipboard', async () => {
+    copyMock.mockResolvedValueOnce(false);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('radio', { name: 'Coding agents' }));
+    await user.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    expect(await screen.findByText(/Your browser did not allow copying/)).toBeInTheDocument();
+    expect(snippets().some((v) => v.startsWith("Connect yourself to my company's knowledge base"))).toBe(true);
+  });
+
+  it('gives any other tool the address first, then the hosted configuration and the Claude Code command', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('radio', { name: 'Other' }));
+    const values = snippets();
     expect(values).toContain(PUBLIC_URL);
-    // 3. the JSON config for everything else — the LOCAL section renders a
-    // `mcpServers` block too, so pick the hosted one by its server name.
+    expect(values).toContain(`claude mcp add --transport http skills-tools-knowledge ${PUBLIC_URL}`);
     const json = values.find((v) => v.includes('"type": "http"') && v.includes('mcpServers'));
     expect(JSON.parse(json!).mcpServers['skills-tools-knowledge'].url).toBe(PUBLIC_URL);
   });
 
-  /**
-   * Claude and ChatGPT lead, OPEN: the page arrives on the one-click button
-   * and the address to paste. Desktop agents and every other agent follow,
-   * closed — and no drawer title calls itself recommended any more.
-   */
-  it('leads with an open Claude and ChatGPT drawer, then Desktop agents, then any other agent', () => {
-    mount(PUBLIC_URL);
-    const summaries = [
-      'Claude and ChatGPT',
-      'Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar',
-      'Any other agent',
-    ].map((text) => screen.getByText(text));
-    for (const summary of summaries) expect(summary.tagName).toBe('SUMMARY');
-    // The page's own drawers, in order — the Marketplaces and Autonomous tabs are not mounted.
-    const drawers = Array.from(
-      screen.getByTestId('agent-connection-section').querySelectorAll('details > summary'),
-    );
-    expect(drawers).toEqual(summaries);
-    expect(drawers.some((d) => /recommended/i.test(d.textContent ?? ''))).toBe(false);
-    expect(summaries.map((s) => (s.closest('details') as HTMLDetailsElement).open)).toEqual([
-      true,
-      false,
-      false,
-    ]);
+  it('opens on coding agents where Claude and ChatGPT cannot reach the deployment, and says why', async () => {
+    const user = userEvent.setup();
+    mount(LOCALHOST_URL);
+    expect(screen.getByRole('radio', { name: 'Coding agents' })).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
 
-    // Everything the first drawer promises lives inside it.
-    const first = summaries[0]!.closest('details') as HTMLElement;
-    expect(within(first).getByRole('link', { name: 'Add to Claude' })).toBeInTheDocument();
-    expect(within(first).getByRole('link', { name: 'Add to ChatGPT' })).toBeInTheDocument();
-    expect(within(first).getByRole('link', { name: /Configure your tools/ })).toBeInTheDocument();
-    expect(
-      within(first).getAllByRole('textbox').map((el) => (el as HTMLTextAreaElement).value),
-    ).toContain(PUBLIC_URL);
-
-    // Desktop agents keeps the sentence about local-only tools.
-    const desktop = summaries[1]!.closest('details') as HTMLElement;
-    expect(within(desktop).getByText(/local-only tools/)).toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: 'Claude' }));
+    expect(screen.getByText(/Claude connects over the internet, and this deployment has no public https address/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Add to Claude/ })).not.toBeInTheDocument();
+    expect(snippets()).not.toContain(LOCALHOST_URL);
   });
 
-  /**
-   * The local-server snippets are KEYLESS — interactive mode signs in through
-   * the browser on first run, so no key belongs in the config. Both quote the
-   * workspace ORIGIN, because hexis-mcp resolves the endpoint from
-   * `GET <base>/api/config` itself.
-   */
-  it('gives Desktop agents keyless snippets built from the origin', () => {
+  it('gives every button an explicit type so it cannot submit a form', () => {
     mount(PUBLIC_URL);
-    const values = snippets();
-    expect(values).toContain(
-      `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" -- npx -y @bevel-software/hexis-mcp@latest`,
-    );
-    const json = values.find((v) => v.includes('mcpServers') && v.includes('"command"'));
-    const parsed = JSON.parse(json!).mcpServers['skills-tools-knowledge'];
-    expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp@latest']);
-    expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
-    // Keyless = interactive: the browser-sign-in mode carries no key env.
-    expect(parsed.env.HEXIS_CONNECTION_KEY).toBeUndefined();
-  });
-
-  /**
-   * The two things that stop this configuration working on a machine where it
-   * is otherwise correct: the wrong Node major, and a client that cannot see
-   * `npx` because it was launched from the Dock rather than from a shell. The
-   * SNIPPET must not try to fix the second one — an absolute path is specific
-   * to one machine, and baking one in would break every reader whose PATH was
-   * fine — so the prose beside it is the only place this can be said.
-   */
-  it('warns Desktop agents about Node and PATH without touching the snippet', () => {
-    mount(PUBLIC_URL);
-    const desktop = screen
-      .getByText('Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar')
-      .closest('details') as HTMLElement;
-    expect(within(desktop).getByText(/Needs Node 22\.13\+ or 24/)).toBeInTheDocument();
-    expect(within(desktop).getByText(/cannot see your shell's PATH/)).toBeInTheDocument();
-    expect(within(desktop).getByText('which npx')).toBeInTheDocument();
-    // The snippet still spawns the bare `npx`, for every client that can find it.
-    const json = snippets().find((v) => v.includes('mcpServers') && v.includes('"command"'));
-    expect(JSON.parse(json!).mcpServers['skills-tools-knowledge'].command).toBe('npx');
-  });
-
-  /**
-   * The regression stated as a negative, per family: a hosted snippet
-   * quoting the origin means one of the six sites quietly went back to
-   * deriving it, and a local snippet quoting the configured endpoint would
-   * hand hexis-mcp a base that may serve only the MCP path.
-   */
-  it('keeps each family on its own address', () => {
-    mount(PUBLIC_URL);
-    for (const value of snippets()) {
-      if (value.includes('marketplace.git')) {
-        // The marketplace remote is the deployment's own address (with the
-        // key in the userinfo, so the HOST is what survives), never the browser's.
-        expect(value).toContain(new URL(PUBLIC_URL).host);
-        expect(value).not.toContain(window.location.host);
-      } else if (value.includes('hexis')) {
-        expect(value).toContain(window.location.origin);
-        expect(value).not.toContain(PUBLIC_URL);
-      } else {
-        expect(value).not.toContain(window.location.origin);
-      }
-    }
-  });
-
-  it('still offers the tool-configuration link, at the page\'s address in Skills & Tools', () => {
-    mount(PUBLIC_URL);
-    expect(screen.getByRole('link', { name: /Configure your tools/ })).toHaveAttribute(
-      'href',
-      '/skills-and-tools/connect',
-    );
-  });
-
-  /**
-   * A bare `<button>` defaults to `type="submit"`. These render inside a
-   * shared component that does not get to assume which tree it lands in, and
-   * a copy button that submits an enclosing form is a nasty surprise.
-   */
-  it('gives every copy button an explicit type so it cannot submit a form', () => {
-    mount(PUBLIC_URL);
-    const copyButtons = screen.getAllByRole('button', { name: /^Copy/ });
-    expect(copyButtons.length).toBeGreaterThan(0);
-    for (const button of copyButtons) {
-      expect(button).toHaveAttribute('type', 'button');
-    }
+    for (const button of screen.getAllByRole('button')) expect(button).toHaveAttribute('type', 'button');
   });
 });
 
-describe('the key-bearing snippets quote the deployment too', () => {
-  it('builds all three keyed snippets from the configured URL', async () => {
-    const user = userEvent.setup();
+describe('API keys', () => {
+  it('names the row with the number of active keys', async () => {
+    listMock.mockResolvedValue([KEY_ROW, { ...KEY_ROW, id: 'k2', label: 'Old laptop', revokedAt: Date.now(), revokedBy: 'user' }]);
     mount(PUBLIC_URL);
-    await revealAKey(user);
-    const values = snippets();
-
-    // 4. the Claude Code one-liner, with the key
-    expect(values).toContain(
-      `claude mcp add --transport http skills-tools-knowledge ${PUBLIC_URL} --header "Authorization: Bearer ${KEY}"`,
-    );
-    // 5. the Langdock field list
-    expect(values).toContain(
-      `URL: ${PUBLIC_URL}\nHeader name: Authorization\nHeader value: Bearer ${KEY}`,
-    );
-    // 6. the JSON config, with the key
-    const json = values.find((v) => v.includes('mcpServers') && v.includes('headers'));
-    const parsed = JSON.parse(json!).mcpServers['skills-tools-knowledge'];
-    expect(parsed.url).toBe(PUBLIC_URL);
-    expect(parsed.headers.Authorization).toBe(`Bearer ${KEY}`);
+    expect(await within(row('keys-section')).findByText('1 active')).toBeInTheDocument();
   });
 
-  /**
-   * The modal follows the tab's order — the hosted endpoint first, the local
-   * server second — with the REAL key in both local snippets (unlike the
-   * interactive tab, which carries none). And it is the one place the page's own origin is right:
-   * hexis-mcp takes the workspace's address — the one the browser provably
-   * loaded this app from — and resolves the MCP endpoint from it itself,
-   * so the configured `mcpUrl` (possibly a proxy serving only the MCP path)
-   * must appear in neither snippet.
-   */
-  it('hands the local server the origin and the minted key, after the hosted endpoint', async () => {
+  it('keeps Create key off until the key has a name', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
-    await revealAKey(user);
-    const hosted = screen.getByText('Claude, ChatGPT and pipelines — the hosted endpoint');
-    const local = screen.getByText('Desktop agents — the local server');
-    // DOCUMENT_POSITION_FOLLOWING: the local block comes after the hosted one.
-    expect(hosted.compareDocumentPosition(local) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    const values = snippets();
-
-    // 7. the Claude Code stdio one-liner
-    expect(values).toContain(
-      `claude mcp add skills-tools-knowledge --env HEXIS_URL="${window.location.origin}" --env HEXIS_CONNECTION_KEY="${KEY}" -- npx -y @bevel-software/hexis-mcp@latest`,
-    );
-    // 8. the JSON config that spawns the package
-    const json = values.find((v) => v.includes('mcpServers') && v.includes('"command"'));
-    const parsed = JSON.parse(json!).mcpServers['skills-tools-knowledge'];
-    expect(parsed.args).toEqual(['-y', '@bevel-software/hexis-mcp@latest']);
-    expect(parsed.env.HEXIS_URL).toBe(window.location.origin);
-    expect(parsed.env.HEXIS_CONNECTION_KEY).toBe(KEY);
-    expect(json).not.toContain(PUBLIC_URL);
+    await user.click(within(row('keys-section')).getByText('API keys'));
+    const create = within(row('keys-section')).getByRole('button', { name: 'Create key' });
+    await waitFor(() => expect(agentChoicesMock).toHaveBeenCalled());
+    expect(create).toBeDisabled();
+    await user.type(screen.getByRole('textbox', { name: 'Name of the new API key' }), 'CI');
+    expect(create).toBeEnabled();
   });
 
-  /**
-   * The modal's three drawers run in the interactive tab's order — hosted
-   * endpoint for Claude and ChatGPT, Desktop agents, marketplace — and every
-   * one of them arrives closed: the key is what the
-   * dialog hands over, and the configs wait until the reader picks a side.
-   */
-  it('folds the configs into three drawers in the tab\'s order, all closed', async () => {
+  it('shows a new key once, as the one thing to copy, with each use behind a closed row', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
-    await revealAKey(user);
-    const dialog = screen.getByRole('alertdialog');
-    const summaries = [
-      'Claude, ChatGPT and pipelines — the hosted endpoint',
-      'Desktop agents — the local server',
-      'Skills as native plugins — the marketplace',
-    ].map((text) => within(dialog).getByText(text));
-    expect(Array.from(dialog.querySelectorAll('details > summary'))).toEqual(summaries);
-    for (const summary of summaries) {
-      expect(summary.tagName).toBe('SUMMARY');
-      expect((summary.closest('details') as HTMLDetailsElement).open).toBe(false);
+    const dialog = await createAKey(user);
+    expect(createMock).toHaveBeenCalledWith('CI', null);
+
+    const copyable = Array.from(dialog.querySelectorAll('.font-mono')).map((el) => el.textContent ?? '');
+    expect(copyable[0]).toBe(KEY);
+    for (const use of ['Use it in a pipeline or CI', 'Use it in Claude Code', 'Use it in Langdock', 'Use it in a coding agent on your machine']) {
+      expect(within(dialog).getByText(use).closest('details')).not.toHaveAttribute('open');
     }
-    expect(summaries[0].compareDocumentPosition(summaries[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(summaries[1].compareDocumentPosition(summaries[2]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // The key itself is not behind a drawer.
-    expect(within(dialog).getByRole('button', { name: 'Copy external API key' }).closest('details')).toBeNull();
-  });
-
-  /**
-   * The placeholder in the keyless marketplace commands is a placeholder, not
-   * a percent-encoded one: `%3Cexternal-api-key%3E` looked like a secret to
-   * paste. The commands live on the Marketplaces tab now.
-   */
-  it('shows the marketplace placeholder verbatim in the keyless commands', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const marketplace = snippets().filter((v) => v.includes('marketplace.git'));
-    expect(marketplace.length).toBeGreaterThan(0);
-    for (const v of marketplace) expect(v).not.toContain('%3C');
-    expect(marketplace.some((v) => v.includes('key:<external-api-key>@'))).toBe(true);
-  });
-
-  /**
-   * The consolidation's real risk: snippets that must carry a secret
-   * and snippets that must not. Losing the token during the move would look
-   * like working code and fail at connect time.
-   */
-  it('keeps the key in the keyed snippets and out of the keyless ones', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    expect(snippets().some((v) => v.includes(KEY))).toBe(false);
-    await revealAKey(user);
-    expect(snippets().filter((v) => v.includes(KEY))).toHaveLength(
-      // the reveal textarea itself, the three keyed hosted snippets, the two
-      // local-server (hexis-mcp) snippets, and the three marketplace commands
-      9,
-    );
-  });
-});
-
-describe('the Marketplaces tab', () => {
-  it('is the third tab, and the interactive tab points at it instead of carrying the remote', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
-      'Your agent',
-      'Marketplaces',
-      'Autonomous agents',
-    ]);
-    // The remote no longer lives on the interactive tab.
-    expect(snippets().some((v) => v.includes('marketplace.git'))).toBe(false);
-    await user.click(screen.getByRole('button', { name: 'Marketplaces' }));
-    expect(screen.getByRole('tab', { name: 'Marketplaces' })).toHaveAttribute('aria-selected', 'true');
-  });
-
-  it('leads with the Cowork route and follows with the git remote, both closed, one URL for both', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai');
-    const git = screen.getByText('Claude Code, Codex and the skills CLI');
-    expect(cowork.compareDocumentPosition(git) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    for (const drawer of [cowork, git]) {
-      expect((drawer.closest('details') as HTMLDetailsElement).open).toBe(false);
-    }
-    await openCowork(user);
-    await within(cowork.closest('details') as HTMLElement).findByRole('region', {
-      name: 'Set up the Claude marketplace',
+    // Hosted uses quote the deployment; the local server gets the origin. Both carry the key.
+    expect(copyable).toContain(`claude mcp add --transport http skills-tools-knowledge ${PUBLIC_URL} --header "Authorization: Bearer ${KEY}"`);
+    const local = copyable.find((v) => v.includes('npx') && v.includes('mcpServers'));
+    expect(JSON.parse(local!).mcpServers['skills-tools-knowledge'].env).toEqual({
+      HEXIS_URL: window.location.origin,
+      HEXIS_CONNECTION_KEY: KEY,
     });
-    const remote = `${new URL(PUBLIC_URL).origin}/git/marketplace.git`;
-    // The same address in both drawers: what Cowork adds is what Claude Code clones.
-    expect(snippets().filter((v) => v === remote)).toHaveLength(2);
-    // The keyed commands point at the deployment's host.
-    const commands = snippets().filter((v) => v.includes('key:'));
-    expect(commands.length).toBeGreaterThan(0);
-    for (const v of commands) expect(v).toContain(new URL(PUBLIC_URL).host);
+    // The footer button is the only way out: a one-time key has no cross to close it by accident.
+    expect(within(dialog).queryByRole('button', { name: 'Close' })).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Done: I’ve saved it' }));
+    expect(screen.queryByRole('dialog', { name: 'Save this key now' })).not.toBeInTheDocument();
+    expect(snippets()).not.toContain(KEY);
   });
 
-  /**
-   * The registration steps live on pages inside Claude's ADMIN settings, and
-   * now in Deployment configuration here. This page has no admin branch left:
-   * the six actions every person takes, one at a time, and none of the
-   * registration screenshots.
-   */
-  it('gives everyone only the personal steps, and none of the admin screenshots', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-
-    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-    expect(within(cowork).queryByText('Register this deployment with your Claude organization')).toBeNull();
-    expect(carousel).toHaveAttribute('aria-roledescription', 'carousel');
-    expect(within(cowork).getByText('Select repository')).toBeTruthy();
-    expect(within(cowork).getByText('Connect to URL')).toBeTruthy();
-
-    // One action shot at a time, beginning with the repository picker trigger,
-    // and not one of the four screens that only an admin can use.
-    const alts = within(cowork).getAllByRole('img').map((el) => el.getAttribute('alt') ?? '');
-    expect(alts).toHaveLength(1);
-    expect(alts[0]).toContain('Select repository');
-    expect(alts.some((a) => a.includes('admin settings'))).toBe(false);
-  });
-
-  it('pairs every screenshot with its instruction and lets the reader move through all six', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-    // One shot a slide, except the connector: that step is one action read
-    // across two screens — the row that says Not added and the dialog the
-    // button opens — so splitting it would put the check that it worked on a
-    // different slide from the control that does it.
-    const expected: [string[], string][] = [
-      [['Select repository'], 'Connect to URL'],
-      [['Plugins tab'], 'select the Plugins tab'],
-      [['Add marketplace'], 'choose Add marketplace'],
-      [['URL field'], 'Paste the Marketplace URL'],
-      [['Hexis all row'], 'choose the Hexis all row'],
-      [['Not added', 'Add custom connector dialog'], 'Add for your team'],
-    ];
-
-    for (const [alts, instruction] of expected) {
-      const shown = within(carousel)
-        .getAllByRole('img')
-        .map((el) => el.getAttribute('alt') ?? '');
-      expect(shown).toHaveLength(alts.length);
-      alts.forEach((alt, index) => expect(shown[index]).toContain(alt));
-      expect(carousel).toHaveTextContent(instruction);
-      if (within(carousel).queryByRole('button', { name: 'Next' })) {
-        await user.click(within(carousel).getByRole('button', { name: 'Next' }));
-      }
-    }
-
-    expect(within(carousel).getByRole('button', { name: 'Review again' })).toBeTruthy();
-    await user.click(within(carousel).getByRole('button', { name: 'Go to step 3: Marketplace' }));
-    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
-      'Step 3 of 6: Choose Add marketplace',
-    );
-  });
-
-  /**
-   * Installing the plugin brings the skills and leaves the knowledge base
-   * disconnected, which is where this tutorial used to stop. The last slide
-   * is the connector, and End reaches it: the carousel is reachable from the
-   * keyboard, and the step a reader most needs is the one furthest away.
-   */
-  it('ends on the connector step, reachable with End, naming Add for your team', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-
-    await user.click(within(carousel).getByRole('button', { name: 'Next' }));
-    fireEvent.keyDown(carousel, { key: 'End' });
-
-    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
-      'Step 6 of 6: Add the hexis connector',
-    );
-    expect(within(carousel).getByRole('button', { name: 'Review again' })).toBeTruthy();
-    expect(within(carousel).getByText('6 / 6')).toBeTruthy();
-
-    // What the step has to say, in the reader's own words: the plugin does
-    // not bring the connector, the row that proves it, the button, and the
-    // check that it worked.
-    expect(carousel).toHaveTextContent('does not connect its MCP server');
-    expect(carousel).toHaveTextContent('Not added');
-    expect(carousel).toHaveTextContent('Add for your team');
-    expect(carousel).toHaveTextContent('Add custom connector');
-    expect(carousel).toHaveTextContent('approve the sign-in on this deployment');
-    expect(carousel).toHaveTextContent('no longer reads');
-    expect(carousel).toHaveTextContent('Without organization-admin rights');
-
-    // Both of its screens are drawings rather than captures, and the slide
-    // says so under each one: a reader comparing their own Claude to a
-    // sketch should not be left deciding they are on the wrong screen. One
-    // note per shot.
-    expect(within(carousel).getAllByText(/Illustration, not a capture/)).toHaveLength(2);
-
-    // And Home goes back to the first, so End is not a one-way door. The
-    // first slide is a real capture, so the same press is what shows the
-    // note is per-shot rather than part of the shell. One press proving
-    // both: a second one here would only be re-entering a state the press
-    // before it had already produced.
-    fireEvent.keyDown(carousel, { key: 'Home' });
-    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
-      'Step 1 of 6: Select this deployment in Claude Code',
-    );
-    expect(within(carousel).queryByText(/Illustration, not a capture/)).toBeNull();
-  });
-
-  /**
-   * Changing slide moves no focus, so nothing would be announced: the reader
-   * is left on the control they pressed while everything under it changes.
-   * The slide group is the live region, and the counter is not, so the step
-   * is announced once rather than twice.
-   */
-  it('announces the slide that replaced it, and only once', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-
-    expect(within(carousel).getByRole('group')).toHaveAttribute('aria-live', 'polite');
-    expect(within(carousel).getByText('1 / 6')).not.toHaveAttribute('aria-live');
-  });
-
-  /**
-   * The footer control is ONE button that changes its label, so reaching the
-   * last slide cannot unmount the button the reader is focused on — focus
-   * would fall to the body and take the arrow keys with it, which this
-   * section handles. Node identity is asserted alongside focus because it is
-   * the property that actually guarantees this: it names the cause, so a
-   * `key` or a wrapper added later fails here rather than somewhere vague.
-   */
-  it('keeps focus on the footer control when the last slide relabels it', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-
-    const advance = within(carousel).getByRole('button', { name: 'Next' });
-    for (let step = 0; step < 5; step += 1) {
-      await user.click(within(carousel).getByRole('button', { name: 'Next' }));
-    }
-
-    const restart = within(carousel).getByRole('button', { name: 'Review again' });
-    expect(restart).toBe(advance);
-    expect(restart).toHaveFocus();
-
-    // And it still works as the control it now says it is.
-    await user.click(restart);
-    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
-      'Step 1 of 6: Select this deployment in Claude Code',
-    );
-  });
-
-  /**
-   * State one of three: REGISTERED. The tutorial is the same DOM for an admin
-   * as for anyone else — the admin branch is gone, not merely hidden — and
-   * no one's copy of this page asks for the credentials.
-   */
-  it('shows an admin exactly the tutorial a non-admin sees once the deployment is registered', async () => {
-    const drawerHtml = async () => {
-      const user = userEvent.setup();
-      const view = mount(PUBLIC_URL);
-      await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-      const cowork = await openCowork(user);
-      await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-      expect(within(cowork).queryByTestId('marketplace-not-configured')).toBeNull();
-      const html = cowork.innerHTML;
-      view.unmount();
-      return html;
-    };
-
-    adminState.isAdmin = false;
-    const asMember = await drawerHtml();
-    adminState.isAdmin = true;
-    const asAdmin = await drawerHtml();
-
-    expect(asAdmin).toBe(asMember);
-    expect(asAdmin).not.toContain('Register this deployment with your Claude organization');
-    expect(facadeMock).not.toHaveBeenCalled();
-  });
-
-  /**
-   * State two: NOT REGISTERED, for a non-admin. No tutorial — its first
-   * screen would list no deployment — and a notice that an admin has to
-   * configure the marketplace, with no link to a page they cannot use.
-   */
-  it('tells a non-admin an admin must configure the marketplace, and shows no tutorial', async () => {
-    registrationMock.mockResolvedValue(false);
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-
-    const notice = await within(cowork).findByTestId('marketplace-not-configured');
-    expect(notice).toHaveTextContent('An admin has to configure the marketplace');
-    expect(within(notice).queryByRole('link')).toBeNull();
-    expect(within(cowork).queryByRole('region', { name: 'Set up the Claude marketplace' })).toBeNull();
-    expect(within(cowork).queryAllByRole('img')).toHaveLength(0);
-    expect(facadeMock).not.toHaveBeenCalled();
-  });
-
-  /**
-   * State three: NOT REGISTERED, for an admin. The same absence of a
-   * tutorial, and a notice pointing at the Deployment section that fixes it —
-   * a link that actually lands there.
-   */
-  it('points an admin at the Deployment section with a working link', async () => {
-    registrationMock.mockResolvedValue(false);
-    adminState.isAdmin = true;
-    const user = userEvent.setup();
-    render(
-      <MemoryRouter initialEntries={['/external-agent-access']}>
-        <Routes>
-          <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
-          <Route path="/deployment" element={<div>Deployment settings page</div>} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-
-    const notice = await within(cowork).findByTestId('marketplace-not-configured');
-    expect(within(cowork).queryByRole('region', { name: 'Set up the Claude marketplace' })).toBeNull();
-    const link = within(notice).getByRole('link', { name: /Marketplace section of Deployment settings/ });
-    expect(link).toHaveAttribute('href', '/deployment#marketplace');
-    await user.click(link);
-    expect(await screen.findByText('Deployment settings page')).toBeInTheDocument();
-    expect(facadeMock).not.toHaveBeenCalled();
-  });
-
-  /**
-   * A closed <details> still mounts its children, so a read on mount put a
-   * request behind every visit to this tab — and never repeated it, leaving
-   * the "not set up yet" notice standing after an admin registered the
-   * deployment elsewhere. The state is read when the drawer opens, and again
-   * on every opening.
-   */
-  it('reads the registration state only when the drawer opens, and again on each opening', async () => {
-    registrationMock.mockResolvedValueOnce(false).mockResolvedValue(true);
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
-    expect(cowork.open).toBe(false);
-    expect(registrationMock).not.toHaveBeenCalled();
-
-    const summary = within(cowork).getByText('Cowork and claude.ai');
-    await user.click(summary);
-    await within(cowork).findByTestId('marketplace-not-configured');
-    expect(registrationMock).toHaveBeenCalledTimes(1);
-
-    // Registered in the meantime: closing and reopening is all it takes.
-    await user.click(summary);
-    expect(cowork.open).toBe(false);
-    await user.click(summary);
-    await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-    expect(within(cowork).queryByTestId('marketplace-not-configured')).toBeNull();
-    expect(registrationMock).toHaveBeenCalledTimes(2);
-    expect(facadeMock).not.toHaveBeenCalled();
-  });
-
-  /**
-   * Every box is decoration: `aria-hidden`, and the control it frames is
-   * named in the image's own alt text. A screen reader that never sees a red
-   * rectangle still gets the instruction.
-   */
-  it('names the highlighted control in alt text rather than only boxing it', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-    await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
-
-    for (const img of within(cowork).getAllByRole('img')) {
-      expect((img.getAttribute('alt') ?? '').length).toBeGreaterThan(40);
-    }
-    // The deployment's own host, never a hard-coded example.
-    expect(cowork).toHaveTextContent(new URL(PUBLIC_URL).host);
-  });
-
-  it('tells Claude connections from keys by their stored kind — never by the label', async () => {
+  it('lists active keys first and says what became of the others', async () => {
     listMock.mockResolvedValue([
-      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'My Cowork link', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null },
-      // A hand-made key wearing the link's usual label is still a key.
-      { id: 'k1', kind: 'key', label: 'Claude (claude.ai and Cowork)', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null },
+      { ...KEY_ROW, id: 'k3', label: 'Taken away', revokedAt: Date.now(), revokedBy: 'admin' },
+      { ...KEY_ROW, id: 'k2', label: 'Old laptop', revokedAt: Date.now(), revokedBy: 'user' },
+      KEY_ROW,
     ]);
-    const user = userEvent.setup();
     mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = await openCowork(user);
-    await screen.findByText('My Cowork link');
-    expect(cowork).toHaveTextContent('My Cowork link');
-    expect(cowork).not.toHaveTextContent('Claude (claude.ai and Cowork)');
-
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await screen.findByText('Claude (claude.ai and Cowork)');
-    expect(screen.queryByText('My Cowork link')).toBeNull();
+    const list = await screen.findByRole('list', { name: 'Your API keys' });
+    const items = within(list).getAllByRole('listitem');
+    expect(items[0]).toHaveTextContent('Nightly pipeline');
+    expect(items[0]).toHaveTextContent('Never used');
+    expect(within(list).getByText(/Revoked by an admin/)).toBeInTheDocument();
+    expect(within(list).getByText(/· Disconnected/)).toBeInTheDocument();
   });
 
-  it('tells a key an admin revoked from one you disconnected yourself', async () => {
-    // "Disconnected" invites reconnecting. A key an admin took will not come
-    // back that way, so the row must say who ended it.
-    listMock.mockResolvedValue([
-      { id: 'k1', kind: 'key', label: 'CI', createdAt: Date.now(), lastUsedAt: null, revokedAt: Date.now(), revokedBy: 'admin' },
-      { id: 'k2', kind: 'key', label: 'Laptop', createdAt: Date.now(), lastUsedAt: null, revokedAt: Date.now(), revokedBy: 'owner' },
-      // Revoked before who-did-it was recorded: read as the owner's doing.
-      { id: 'k3', kind: 'key', label: 'Old', createdAt: Date.now(), lastUsedAt: null, revokedAt: Date.now(), revokedBy: null },
-    ]);
+  it('asks before disconnecting, and disconnects only on the answer', async () => {
+    listMock.mockResolvedValue([KEY_ROW]);
     const user = userEvent.setup();
     mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await screen.findByText('CI');
-    const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
-    expect(rowOf('CI')).toHaveTextContent('Revoked by an admin');
-    expect(rowOf('CI')).not.toHaveTextContent('Disconnected');
-    expect(rowOf('Laptop')).toHaveTextContent('Disconnected');
-    expect(rowOf('Laptop')).not.toHaveTextContent('Revoked by an admin');
-    expect(rowOf('Old')).toHaveTextContent('Disconnected');
+    const list = await screen.findByRole('list', { name: 'Your API keys' });
+    await user.click(within(list).getByRole('button', { name: 'Disconnect' }));
+
+    const confirm = await screen.findByRole('dialog', { name: 'Disconnect API key' });
+    expect(confirm).toHaveTextContent('this key cannot be connected again');
+    expect(keysApi.disconnectExternalApiKey).not.toHaveBeenCalled();
+    await user.click(within(confirm).getByRole('button', { name: 'Disconnect' }));
+    expect(keysApi.disconnectExternalApiKey).toHaveBeenCalledWith('k1');
   });
 
-  it('says where the keys went when only Claude connections exist, and shows a load error on both tabs', async () => {
-    listMock.mockResolvedValue([
-      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null },
-    ]);
+  it('deletes a disconnected key only after asking', async () => {
+    listMock.mockResolvedValue([{ ...KEY_ROW, revokedAt: Date.now(), revokedBy: 'user' }]);
     const user = userEvent.setup();
-    const first = mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await screen.findByText(/Your Claude connections are on the Marketplaces tab/);
-    first.unmount();
-
-    listMock.mockRejectedValue(new Error('keys are down'));
     mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    await screen.findByText('keys are down');
-    expect(screen.queryByText(/None yet/)).toBeNull();
+    const list = await screen.findByRole('list', { name: 'Your API keys' });
+    await user.click(within(list).getByRole('button', { name: 'Delete' }));
+    const confirm = await screen.findByRole('dialog', { name: 'Delete API key' });
+    expect(confirm).toHaveTextContent('removes it and its usage history for good');
+    expect(keysApi.deleteExternalApiKey).not.toHaveBeenCalled();
+    await user.click(within(confirm).getByRole('button', { name: 'Delete' }));
+    expect(keysApi.deleteExternalApiKey).toHaveBeenCalledWith('k1');
+  });
+
+  it('says once that the keys could not be loaded, with a way to try again', async () => {
+    listMock.mockRejectedValueOnce(new Error('boom'));
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not load your keys. boom');
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+
+    listMock.mockResolvedValue([KEY_ROW]);
+    await user.click(within(alert).getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('list', { name: 'Your API keys' })).toHaveTextContent('Nightly pipeline');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('keeps a failed create beside the action that failed, and keeps the name', async () => {
+    createMock.mockRejectedValueOnce(new Error('nope'));
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(within(row('keys-section')).getByText('API keys'));
+    const field = screen.getByRole('textbox', { name: 'Name of the new API key' });
+    await user.type(field, 'CI');
+    await user.click(within(row('keys-section')).getByRole('button', { name: 'Create key' }));
+    expect(await within(row('keys-section')).findByRole('alert')).toHaveTextContent('nope');
+    expect(within(row('plugins-row')).queryByRole('alert')).not.toBeInTheDocument();
+    expect(field).toHaveValue('CI');
   });
 });
 
 describe('minting a key as an agent ("Connect as")', () => {
-  const OPS = { path: 'Agents/ops.agent', name: 'ops', description: 'Watches the dashboards.' };
+  const AGENTS = [{ path: 'Agents/Support.agent', name: 'Support', description: 'Answers customers.' }];
 
-  it('offers Everything, selected by default, then each agent by name with its description', async () => {
-    agentChoicesMock.mockResolvedValue([OPS]);
+  it('asks nothing when there is no agent to mint as', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    const group = screen.getByRole('group', { name: 'Connect as' });
-    const everything = within(group).getByRole('radio', { name: /Everything/ });
-    expect(everything).toBeChecked();
-    const ops = await within(group).findByRole('radio', { name: /ops.*Watches the dashboards\./ });
-    expect(ops).not.toBeChecked();
+    await createAKey(user);
+    expect(screen.queryByRole('group', { name: 'Connect as' })).not.toBeInTheDocument();
+    expect(createMock).toHaveBeenCalledWith('CI', null);
   });
 
-  it('asks nothing when there is no agent to mint as: the key is Everything’s, as it always was', async () => {
-    agentChoicesMock.mockResolvedValue([]);
+  it('puts the choice before the button, and mints as the agent when one is picked', async () => {
+    agentChoicesMock.mockResolvedValue(AGENTS);
     const user = userEvent.setup();
     mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
-    // Create key is enabled only once the agents answered, so the choice had its chance to appear.
-    const create = screen.getByRole('button', { name: 'Create key' });
-    expect(create).toBeEnabled();
-    expect(screen.queryByRole('group', { name: 'Connect as' })).toBeNull();
-    expect(screen.queryByText(/Connect as/)).toBeNull();
+    await user.click(within(row('keys-section')).getByText('API keys'));
+    const choice = await screen.findByRole('group', { name: 'Connect as' });
+    const create = within(row('keys-section')).getByRole('button', { name: 'Create key' });
+    expect(choice.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(within(choice).getByRole('radio', { name: /Support/ }));
+    await user.type(screen.getByRole('textbox', { name: 'Name of the new API key' }), 'CI');
     await user.click(create);
-    expect(createMock).toHaveBeenLastCalledWith('CI', null);
-  });
-
-  it('mints as Everything unless an agent is picked, and as the agent when one is', async () => {
-    agentChoicesMock.mockResolvedValue([OPS]);
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
-    await user.click(screen.getByRole('button', { name: 'Create key' }));
-    expect(createMock).toHaveBeenLastCalledWith('CI', null);
-  });
-
-  it('records the picked agent on the key', async () => {
-    agentChoicesMock.mockResolvedValue([OPS]);
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await user.click(await screen.findByRole('radio', { name: /ops/ }));
-    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'Pipeline');
-    await user.click(screen.getByRole('button', { name: 'Create key' }));
-    expect(createMock).toHaveBeenLastCalledWith('Pipeline', 'Agents/ops.agent');
-  });
-
-  it('says when the agents could not be loaded, and mints Everything only once that is confirmed', async () => {
-    agentChoicesMock.mockRejectedValue(new Error('down'));
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent(/agents couldn't be loaded/);
-    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
-    const create = screen.getByRole('button', { name: 'Create key' });
-    expect(create).toBeDisabled();
-    await user.click(screen.getByRole('checkbox', { name: 'Connect as Everything anyway' }));
-    expect(create).toBeEnabled();
-    await user.click(create);
-    expect(createMock).toHaveBeenLastCalledWith('CI', null);
-  });
-
-  it('keeps Create key disabled until the agents on offer have answered', async () => {
-    let answer!: (agents: (typeof OPS)[]) => void;
-    agentChoicesMock.mockReturnValue(new Promise((resolve) => (answer = resolve)));
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await user.type(screen.getByRole('textbox', { name: /Create an external API key/ }), 'CI');
-    const create = screen.getByRole('button', { name: 'Create key' });
-    expect(create).toBeDisabled();
-    await act(async () => answer([OPS]));
-    expect(create).toBeEnabled();
-  });
-
-  it('shows each key beside what it connects as', async () => {
-    listMock.mockResolvedValue([
-      { id: 'k1', kind: 'key', label: 'Laptop', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null, agentPath: null },
-      { id: 'k2', kind: 'key', label: 'Pipeline', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null, agentPath: 'Agents/ops.agent' },
-    ]);
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await screen.findByText('Pipeline');
-    const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
-    // Everything is what a key is unless it says otherwise: no tag.
-    expect(rowOf('Laptop')).not.toHaveTextContent('As ');
-    expect(rowOf('Pipeline')).toHaveTextContent('As ops');
+    await screen.findByRole('dialog', { name: 'Save this key now' });
+    expect(createMock).toHaveBeenCalledWith('CI', 'Agents/Support.agent');
   });
 });
 
-describe('the one-click install link', () => {
-  it('offers Add to Claude on a reachable deployment', () => {
-    mount(PUBLIC_URL);
-    const link = screen.getByRole('link', { name: 'Add to Claude' });
-    const href = new URL(link.getAttribute('href')!);
-    expect(href.origin + href.pathname).toBe('https://claude.ai/customize/connectors');
-    expect(href.searchParams.get('modal')).toBe('add-custom-connector');
-    expect(href.searchParams.get('connectorUrl')).toBe(PUBLIC_URL);
-    expect(href.searchParams.get('connectorName')).toBe('Skills, Tools and Knowledge — kb.acme.com');
-  });
-
-  it('opens in a new tab without handing Claude a window reference', () => {
-    mount(PUBLIC_URL);
-    const link = screen.getByRole('link', { name: 'Add to Claude' });
-    expect(link).toHaveAttribute('target', '_blank');
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
-  });
-
-  /**
-   * ChatGPT sits beside Claude, with the honest difference: no prefill
-   * exists, so the button opens the settings root and the copy under it
-   * names the connector to type. Same gate — an endpoint Anthropic cannot
-   * reach is one OpenAI cannot reach.
-   */
-  it('offers Add to ChatGPT beside it, naming what to call the connector', () => {
-    mount(PUBLIC_URL);
-    const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
-    // The whole href, not just the origin: it opens the settings root, not a
-    // pane anchor — ChatGPT renamed the connectors pane, so no anchor reliably
-    // lands there, and the steps beside the button start from Settings.
-    expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings');
-    expect(link).toHaveAttribute('target', '_blank');
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
-    expect(screen.getByText('Skills, Tools and Knowledge')).toBeInTheDocument();
-  });
-
-  it('offers no ChatGPT button on a localhost deployment', () => {
-    mount(LOCALHOST_URL);
-    expect(screen.queryByRole('link', { name: 'Add to ChatGPT' })).toBeNull();
-  });
-
-  /**
-   * The default install. claude.ai fetches the server from Anthropic's
-   * infrastructure and cannot reach a laptop, so the button would be dead —
-   * and a dead button is worse than none.
-   */
-  it('offers nothing to click on a localhost deployment', () => {
-    mount(LOCALHOST_URL);
-    expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
-  });
-
-  /**
-   * ...but this surface's reader is plausibly the person holding the env
-   * file, so the dead state names the variable that fixes it. Without this,
-   * one-click is a feature nobody can discover they are missing.
-   */
-  it('names PUBLIC_BACKEND_URL so an admin can turn it on', () => {
-    mount(LOCALHOST_URL);
-    expect(screen.getByText(/PUBLIC_BACKEND_URL/)).toBeInTheDocument();
-  });
-
-  // Whatever the button does, the manual route stays — it is the only one
-  // that works on every deployment.
-  it('keeps the copy-paste URL in both states', () => {
-    const { unmount } = mount(PUBLIC_URL);
-    expect(snippets()).toContain(PUBLIC_URL);
-    unmount();
-    mount(LOCALHOST_URL);
-    expect(snippets()).toContain(LOCALHOST_URL);
-  });
-});
-
-describe('tabs', () => {
-  it('puts connection setup first and agent instructions in a separate card below it', () => {
-    mount(PUBLIC_URL);
-    const connections = screen.getByTestId('agent-connection-section');
-    const instructions = screen.getByTestId('agent-instructions-section');
-    expect(within(connections).getByRole('tablist')).toBeInTheDocument();
-    expect(within(instructions).getByRole('heading', {
-      name: 'What agents are told about this knowledge base',
-    })).toBeInTheDocument();
-    expect(connections.compareDocumentPosition(instructions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(connections.parentElement).toBe(instructions.parentElement);
-    expect(connections.className).toContain('rounded-lg');
-    expect(instructions.className).toContain('rounded-lg');
-  });
-
-  it('starts on the interactive tab', () => {
-    mount(PUBLIC_URL);
-    const tabs = screen.getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Your agent', 'Marketplaces', 'Autonomous agents']);
-    expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
-    expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
-  });
-
-  /**
-   * The local server authenticates by key alone, and the key is minted on
-   * the other tab — so the recommended section names why a tool
-   * `list_local_tools` lists is worth the trip, and its inline button walks
-   * someone straight there.
-   */
-  it('points local-server users at the autonomous tab, and the button goes there', async () => {
+describe('skills as native plugins: optional, and never a command that cannot run', () => {
+  it('says how it differs from connecting, and never shows a placeholder key', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
-    expect(screen.getByText(/local-only tools/)).toBeInTheDocument();
-    expect(screen.getByText('list_local_tools')).toBeInTheDocument();
-    // The local section's button and the CI footnote's point at the same
-    // tab; the local section comes first.
-    await user.click(screen.getAllByRole('button', { name: 'Autonomous agents' })[0]!);
-    expect(screen.getByRole('tab', { name: 'Autonomous agents' })).toHaveAttribute(
-      'aria-selected',
-      'true',
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    expect(within(row('plugins-row')).getByText('Optional')).toBeInTheDocument();
+    expect(within(row('plugins-row')).getByText(/A connected agent already has your skills/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('<external-api-key>');
+  });
+
+  it('makes the install command with a key of its own, shown as the one thing to copy', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    await waitFor(() => expect(agentChoicesMock).toHaveBeenCalled());
+    await user.click(within(row('plugins-row')).getByRole('button', { name: 'Create install command' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Install your skills' });
+    expect(createMock).toHaveBeenCalledWith(expect.stringMatching(/^Plugins, /), null);
+    const copyable = Array.from(dialog.querySelectorAll('.font-mono')).map((el) => el.textContent ?? '');
+    expect(copyable[0]).toContain('claude plugin marketplace add');
+    expect(copyable[0]).toContain(KEY);
+    expect(copyable[0]).toContain('kb.acme.com/git/marketplace.git');
+    for (const other of ['Codex', 'Any other agent, through the skills CLI', 'The key alone']) {
+      expect(within(dialog).getByText(other).closest('details')).not.toHaveAttribute('open');
+    }
+    // Nothing was "saved": the reader ran a command.
+    expect(within(dialog).getByRole('button', { name: 'Done' })).toBeInTheDocument();
+    // The API keys row stays closed: nothing jumps to another card.
+    expect(row('keys-section').open).toBe(false);
+  });
+
+  it('makes the plugin key for everything, whatever the API keys row has picked, and even when agents failed to load', async () => {
+    agentChoicesMock.mockRejectedValue(new Error('agents down'));
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    await waitFor(() => expect(agentChoicesMock).toHaveBeenCalled());
+    const create = within(row('plugins-row')).getByRole('button', { name: 'Create install command' });
+    expect(create).toBeEnabled();
+    await user.click(create);
+    await screen.findByRole('dialog', { name: 'Install your skills' });
+    expect(createMock).toHaveBeenCalledWith(expect.stringMatching(/^Plugins, /), null);
+  });
+
+  it('says when the Cowork check failed, and asks again on request', async () => {
+    adminState.isAdmin = true;
+    registrationMock.mockRejectedValueOnce(new Error('down'));
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    const alert = await within(row('plugins-row')).findByRole('alert');
+    expect(alert).toHaveTextContent('Could not check whether Cowork and claude.ai are set up.');
+    expect(within(row('plugins-row')).queryByRole('link', { name: 'set it up in Deployment' })).not.toBeInTheDocument();
+
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(registrationMock).toHaveBeenCalledTimes(2));
+    expect(await within(row('plugins-row')).findByRole('link', { name: 'set it up in Deployment' })).toBeInTheDocument();
+  });
+
+  it('reads the registration only when the row is opened, and never the admin credentials', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    expect(registrationMock).not.toHaveBeenCalled();
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    await waitFor(() => expect(registrationMock).toHaveBeenCalledTimes(1));
+    // Every form authFetch accepts (a path, an absolute URL, a URL, a Request), as its pathname.
+    const asked = authFetchMock.mock.calls.map((call) => {
+      const input = (call as unknown[])[0];
+      const href = input instanceof Request ? input.url : String(input);
+      return new URL(href, window.location.origin).pathname;
+    });
+    expect(asked.filter((path) => path.startsWith('/api/admin/github-facade'))).toEqual([]);
+  });
+
+  it('shows a member nothing about Cowork until the deployment is registered', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    await waitFor(() => expect(registrationMock).toHaveBeenCalled());
+    expect(within(row('plugins-row')).queryByText(/Cowork/)).not.toBeInTheDocument();
+  });
+
+  it('sends an admin to Deployment while the deployment is not registered', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    expect(await within(row('plugins-row')).findByRole('link', { name: 'set it up in Deployment' })).toHaveAttribute(
+      'href',
+      '/deployment#marketplace',
     );
   });
 
-  // The install link belongs to the interactive tab only — the autonomous
-  // tab is for agents that cannot open a browser at all.
-  it('does not offer one-click connect on the autonomous tab', async () => {
+  it('opens the Cowork steps, with the Claude connections, once registered', async () => {
+    registrationMock.mockResolvedValue(true);
+    listMock.mockResolvedValue([{ ...KEY_ROW, id: 'c1', label: 'Claude: Ada', kind: GITHUB_LINK_KIND }]);
     const user = userEvent.setup();
     mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
-  });
-});
+    await user.click(within(row('plugins-row')).getByText('Install skills as native plugins'));
+    await user.click(await within(row('plugins-row')).findByRole('button', { name: 'show the steps' }));
 
-/**
- * Adding a marketplace installs nothing in Codex, and the compiled plugin's
- * server entry carries no credentials: the block has to carry the install and
- * the sign-in, and the page has to say why the sign-in is there.
- */
-describe('the Codex block', () => {
-  const REMOTE = 'https://key:<external-api-key>@kb.acme.com/git/marketplace.git';
-  const note = /Codex signs in through your browser once: the login line is needed because the plugin's server entry carries no credentials\./;
-
-  function codexLines(remote: string): string[] {
-    return [
-      `codex plugin marketplace add ${remote}`,
-      'codex plugin add skills-and-knowledge@hexis',
-      'codex mcp login hexis',
-      'codex exec --skip-git-repo-check "Call the hexis MCP server\'s list_tools tool and print the tool names it returns."',
-    ];
-  }
-
-  it('adds, installs, signs in and checks, in that order, and says why it signs in', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const drawer = screen.getByTestId('marketplace-section');
-    const codex = within(drawer)
-      .getAllByRole('textbox')
-      .map((el) => (el as HTMLTextAreaElement).value)
-      .find((v) => v.startsWith('codex '));
-    expect(codex?.split('\n')).toEqual(codexLines(REMOTE));
-    expect(within(drawer).getByText(note)).toBeTruthy();
-    // The other two commands are exactly what they were.
-    const values = within(drawer).getAllByRole('textbox').map((el) => (el as HTMLTextAreaElement).value);
-    expect(values).toContain(`claude plugin marketplace add ${REMOTE} && claude plugin install hexis-all@hexis`);
-    expect(values).toContain(`npx skills add ${REMOTE} --all -y`);
-  });
-
-  it('copies the whole block, not its first line', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    // Stubbed after userEvent.setup(), which installs a clipboard of its own.
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    fireEvent.click(screen.getByRole('button', { name: 'Copy: Codex' }));
-    expect(writeText).toHaveBeenCalledWith(codexLines(REMOTE).join('\n'));
-  });
-
-  it('is the same block in the connection-keys dialog, with the key filled in', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await revealAKey(user);
-    const dialog = screen.getByRole('alertdialog');
-    const block = within(dialog).getByRole('textbox', { name: 'Codex marketplace command' }) as HTMLTextAreaElement;
-    expect(block.value.split('\n')).toEqual(codexLines(`https://key:${KEY}@kb.acme.com/git/marketplace.git`));
-    expect(within(dialog).getByText(note)).toBeTruthy();
+    const dialog = await screen.findByRole('dialog', { name: 'Skills in Cowork and claude.ai' });
+    expect(within(dialog).getByText('Your Claude connections')).toBeInTheDocument();
+    expect(within(dialog).getByText('Claude: Ada')).toBeInTheDocument();
+    // A Claude connection is not an API key: it is told apart by its stored kind, never its label.
+    expect(screen.queryByRole('list', { name: 'Your API keys' })).not.toBeInTheDocument();
   });
 });

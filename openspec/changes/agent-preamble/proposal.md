@@ -8,7 +8,7 @@ An agent connected to Hexis over MCP is told how each tool works ("Read a worksp
 - The instructions are composed server-side from two layers: a short fixed platform header owned by the code (what Hexis is, search the knowledge base before answering from memory, call `start_session` first), followed by a deployment preamble the admin writes.
 - The deployment preamble lives in the knowledge-base repository as `mcp-description.md` at the repo root, on the default branch. It is seeded from the template when missing, hidden from the ordinary workspace tree, and otherwise changed only through an admin's inline editor. It remains versioned and moves with the repository.
 - A new agent-facing endpoint returns the composed text so the local bridge and the admin page read one source of truth; the hosted proxy composes it in-process at session creation from the same composer.
-- The External agent access page shows what connected agents are told in a card below connection setup, with the character count against the cap and an inline editor for admins.
+- The Deployment page shows admins what connected agents are told, with the character count against the cap and an inline editor.
 - The managed `AGENTS.md` points agents that clone the repository directly at `mcp-description.md`.
 
 No agent delivery channel is removed. The page drops only the redundant short-version preview and repository implementation copy. Deployments that never touch `mcp-description.md` still get the platform header, which alone gives the model the "search here first" signal it lacks today.
@@ -27,6 +27,6 @@ None. There are no existing specs under `openspec/specs/`; this change introduce
 
 - **core-backend**: a new `agent-instructions` module (composer, route); `McpService.createSession` composes the text in-process at session creation and passes `instructions` to the SDK `Server`; the KB template gains `mcp-description.md` and the managed `AGENTS.md` gains a pointer; `REQUIRED_FILES` in the startup phase grows by one.
 - **hexis-mcp**: fetches the same endpoint at startup and passes `instructions` to its own `Server`. Older deployments without the endpoint still work; the bridge then sends no instructions.
-- **core-frontend**: a card on the External agent access page, inline source-preserving edit helpers, and an exact-path workspace-tree filter for the backing file.
+- **core-frontend**: a section on the Deployment page below the settings form (above a distribution's own panel, when one is registered), inline source-preserving edit helpers, and an exact-path workspace-tree filter for the backing file.
 - **Every deployment**: the platform header is sent to every session from the first boot after the upgrade. The text lands in every conversation's system prompt on every connected client, so its size is capped.
 - **Dependencies**: none added. `@modelcontextprotocol/sdk` 1.30 already supports `instructions` on `Server` and `Client.getInstructions()`.

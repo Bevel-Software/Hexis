@@ -22,7 +22,7 @@ export function CopyBlock({
           // and this is a shared component now — it does not get to assume
           // which tree it renders in.
           type="button"
-          onClick={() => copy(value)}
+          onClick={() => void copy(value)}
           className="ml-auto p-1 rounded hover:bg-hover text-ink-muted"
           aria-label={label ? `Copy: ${label}` : 'Copy to clipboard'}
           title="Copy to clipboard"

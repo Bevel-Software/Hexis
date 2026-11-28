@@ -32,4 +32,7 @@ export { ClaudeInstallLink } from './ClaudeInstallLink';
 export { ChatGptInstallLink } from './ChatGptInstallLink';
 export { AssistantConnectionInstructions, OtherAgentConnectionInstructions } from './ConnectionInstructions';
 export { CopyBlock } from './CopyBlock';
+export { SegmentedChoice } from './SegmentedChoice';
+export { SnippetBlock } from './SnippetBlock';
 export { useCopyFeedback } from './useCopyFeedback';
+export { MoreRow } from './MoreRow';

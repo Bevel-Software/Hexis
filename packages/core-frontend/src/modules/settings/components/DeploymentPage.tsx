@@ -5,6 +5,7 @@ import { useAdmin } from '../../admin';
 import { useSetupStatus } from '../../setup';
 import { SetupScreen } from '../../setup/components/SetupScreen';
 import { useAppRegistry } from '../../../core/registry';
+import { AgentInstructionsCard } from '../../toolbar/components/AgentInstructionsCard';
 
 /**
  * Deployment settings, routed at `/deployment` — the first-run setup screen
@@ -84,6 +85,15 @@ export function DeploymentPage() {
           />
         </div>
       )}
+
+      {/* What every connecting agent is told about this knowledge base. A
+          workspace setting, so it sits with the other workspace settings and
+          not on the page each member opens to connect their own agent. Core's
+          last section: only a distribution's panel comes after it. */}
+      {/* The form's own column, so the two share one right edge. */}
+      <div className="w-full max-w-2xl">
+        <AgentInstructionsCard />
+      </div>
 
       {/* The distribution's panel, last on the page and outside every
           condition above: it does not depend on the settings, so neither a
