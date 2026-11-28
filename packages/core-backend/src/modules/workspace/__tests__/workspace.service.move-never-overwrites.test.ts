@@ -89,6 +89,22 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
     expect(await fs.readFile(abs(`${KB}/QA-Move/Team2/Team/notes.md`), 'utf8')).toBe('n');
   });
 
+  it('judges another case of the name by the disk: refused where it opens the source, moved where it is a sibling', async () => {
+    await svc.writeFile(workspaceId, `${KB}/QA-Move/Team/notes.md`, 'n');
+    const dest = `${KB}/QA-Move/team/Twin`;
+
+    if (await foldsCase()) {
+      await expect(svc.moveEntry(workspaceId, `${KB}/QA-Move/Team`, dest)).rejects.toMatchObject({
+        status: 400,
+        payload: { kind: 'move-into-itself' },
+      });
+      return;
+    }
+    await svc.moveEntry(workspaceId, `${KB}/QA-Move/Team`, dest);
+    expect(await fs.readFile(abs(`${dest}/notes.md`), 'utf8')).toBe('n');
+    expect(await entryVisible(`${KB}/QA-Move/Team`)).toBe(false);
+  });
+
   it('refuses a file onto a file, and the file already there keeps its content', async () => {
     // The reported bug, exactly: a Word document renamed onto a note.
     await svc.writeFile(workspaceId, `${KB}/Sales/Notes.md`, '# Notes\n');

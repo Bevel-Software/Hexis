@@ -3262,6 +3262,21 @@ describe('move_file refuses a destination inside the source, in words', () => {
     expect(run).toMatchObject({ status: 200, body: { moved: true } });
     expect(await fs.readFile(KB('QA-Move/Team2/Team/notes.md'), { encoding: 'utf8' })).toBe('n');
   });
+
+  it('another case of the name is judged by the disk: a separate folder here, so the move runs', async () => {
+    // Asked of the disk, not assumed: on a volume that folds case `team` IS
+    // `Team`, and the move is refused with the sentence instead.
+    const folds = await fs.exists(KB('QA-Move/team/notes.md'));
+    const dry = await move({ src: KB('QA-Move/Team'), dest: KB('QA-Move/team/Twin'), dryRun: true });
+    if (folds) {
+      expect(dry.body).toMatchObject({ allowed: false, reason: sentence('QA-Move/team/Twin') });
+      return;
+    }
+    expect(dry.body).toMatchObject({ allowed: true });
+    const run = await move({ src: KB('QA-Move/Team'), dest: KB('QA-Move/team/Twin') });
+    expect(run).toMatchObject({ status: 200, body: { moved: true } });
+    expect(await fs.readFile(KB('QA-Move/team/Twin/notes.md'), { encoding: 'utf8' })).toBe('n');
+  });
 });
 
 /**

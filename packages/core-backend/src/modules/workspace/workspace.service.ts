@@ -12,13 +12,14 @@ import {
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
   entryExistsMessage,
-  moveIntoItselfRefusal,
+  moveIntoItselfSentence,
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import { BevelIgnoreStack, PathHeldError, assertRepoRootNameFree, normalizeWorkspacePath, assertValidBranchName, normalizeRepositoryAddress, sameRepository } from '../kb-fs/index.js';
 import {
   DestinationTakenError,
+  destinationInsideSource,
   inspectDestination,
   renameNoReplace,
 } from '../../shared/rename-no-replace.js';
@@ -2163,10 +2164,6 @@ export class WorkspaceService implements IWorkspaceService {
     assertNoGitInternalsSegment(oldRelativePath);
     assertNoGitInternalsSegment(newRelativePath);
     assertValidPath(newRelativePath);
-    // A folder dragged or renamed into its own subtree: no filesystem can do
-    // that move, and the rename's own error names a path on the server.
-    const intoItself = moveIntoItselfRefusal(oldRelativePath, newRelativePath);
-    if (intoItself !== null) throw new VersionControlValidationError(intoItself, { kind: 'move-into-itself' });
     await assertNotGitInternals(workspaceDir, oldRelativePath, oldAbsolute);
     await assertNotGitInternals(workspaceDir, newRelativePath, newAbsolute);
     // Both ends: a link on the way to either end would carry the rename
@@ -2174,6 +2171,14 @@ export class WorkspaceService implements IWorkspaceService {
     // is not something the app moves around, any more than reads it.
     await this.assertNotThroughLink(oldAbsolute, workspaceDir);
     await this.assertNotThroughLink(newAbsolute, workspaceDir);
+    // A folder dragged or renamed into its own subtree: no filesystem can do
+    // that move, and the rename's own error names a path on the server.
+    if (await destinationInsideSource(oldAbsolute, newAbsolute)) {
+      throw new VersionControlValidationError(
+        moveIntoItselfSentence(oldRelativePath, newRelativePath),
+        { kind: 'move-into-itself' },
+      );
+    }
     // Before `mkdir`, so a refused move leaves no empty folder behind — and
     // it is the look that produces the sentence naming what is in the way.
     await this.assertDestinationFree(oldAbsolute, newAbsolute, newRelativePath);

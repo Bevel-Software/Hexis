@@ -6,6 +6,7 @@ import {
   DestinationTakenError,
   type DestinationProbe,
   claimThenRename,
+  destinationInsideSource,
   inspectDestination,
   lstatOrNull,
   landFolder,
@@ -462,5 +463,55 @@ describe('inspectDestination — the case-insensitive reading, on a disk that do
       .toEqual({ state: 'free' });
     expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/notes.md', plain))
       .toEqual({ state: 'self' });
+  });
+
+  describe('destinationInsideSource: a folder above the destination IS the source', () => {
+    const TEAM = { '/ws': { ino: 1, dir: true }, '/ws/Team': { ino: 5, dir: true }, '/ws/Team/Twin': { ino: 6, dir: true } };
+
+    it('finds the source above the destination, at any depth, whether or not the rest exists yet', async () => {
+      for (const folds of [true, false]) {
+        const disk = volume(TEAM, { folds });
+        expect(await destinationInsideSource('/ws/Team', '/ws/Team/Team', disk)).toBe(true);
+        expect(await destinationInsideSource('/ws/Team', '/ws/Team/Twin/Team', disk)).toBe(true);
+        expect(await destinationInsideSource('/ws/Team', '/ws/Team/New/Deeper/Team', disk)).toBe(true);
+      }
+    });
+
+    it('reads another case of the source as the source only on a volume that folds case', async () => {
+      // Folding: `team` opens `Team`, so the move is into itself.
+      expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', volume(TEAM))).toBe(true);
+      // Not folding: `team` is another folder, or none yet; an ordinary move.
+      expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', volume(TEAM, { folds: false }))).toBe(false);
+      const withSibling = volume({ ...TEAM, '/ws/team': { ino: 9, dir: true } }, { folds: false });
+      expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', withSibling)).toBe(false);
+    });
+
+    it('lets through a sibling with the same prefix, the parent, the source itself, a re-cased source, and a missing source', async () => {
+      const disk = volume({ ...TEAM, '/ws/Team2': { ino: 7, dir: true } });
+      expect(await destinationInsideSource('/ws/Team', '/ws/Team2/Team', disk)).toBe(false);
+      expect(await destinationInsideSource('/ws/Team/Twin', '/ws/Team', disk)).toBe(false);
+      expect(await destinationInsideSource('/ws/Team', '/ws/Team', disk)).toBe(false);
+      expect(await destinationInsideSource('/ws/Team', '/ws/team', disk)).toBe(false);
+      expect(await destinationInsideSource('/ws/Gone', '/ws/Gone/x', disk)).toBe(false);
+    });
+  });
+});
+
+describe('destinationInsideSource on the real disk', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-inside-'));
+    await fs.mkdir(path.join(dir, 'Team', 'Twin'), { recursive: true });
+  });
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('agrees with what the disk says another case of the source opens', async () => {
+    const at = (rel: string) => path.join(dir, rel);
+    expect(await destinationInsideSource(at('Team'), at('Team/Twin/Team'))).toBe(true);
+    // Whatever this disk is: another case is inside exactly when it opens the source.
+    const opensSource = (await lstatOrNull(at('team')))?.ino === (await lstatOrNull(at('Team')))?.ino;
+    expect(await destinationInsideSource(at('Team'), at('team/Twin'))).toBe(opensSource);
   });
 });
