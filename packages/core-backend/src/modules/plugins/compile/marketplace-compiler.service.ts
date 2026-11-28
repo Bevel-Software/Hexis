@@ -116,10 +116,13 @@ export class MarketplaceCompilerService {
   }
 
   /**
-   * One batch verdict per compile, then a lookup. Fail closed both ways: a
-   * path the batch skipped is unreadable, and for the everyone audience a
-   * skill is public only when the resolver says `read: everyone` applies
-   * cleanly (`restricted: false`).
+   * One batch verdict per compile for the skills, then a lookup; any other
+   * path (a skill's other files, a plugin's manifest, the file its servers
+   * come from, its folder's files) is asked once, on first use, and
+   * remembered. Fail closed both ways: a skill path
+   * the batch skipped is unreadable, and for the everyone audience a path is
+   * public only when the resolver says `read: everyone` applies cleanly
+   * (`restricted: false`).
    */
   private async readPredicate(
     wsId: string,
@@ -127,10 +130,20 @@ export class MarketplaceCompilerService {
     docPaths: string[],
   ): Promise<(repoPath: string) => Promise<boolean>> {
     if ('userEmail' in audience) {
+      const { userEmail } = audience;
       const verdicts = docPaths.length
-        ? await this.accessControl.canReadBatch(wsId, audience.userEmail, docPaths)
+        ? await this.accessControl.canReadBatch(wsId, userEmail, docPaths)
         : new Map<string, boolean>();
-      return async (p) => verdicts.get(p) === true;
+      const batched = new Set(docPaths);
+      const asked = new Map<string, boolean>();
+      return async (p) => {
+        if (batched.has(p)) return verdicts.get(p) === true;
+        const hit = asked.get(p);
+        if (hit !== undefined) return hit;
+        const verdict = (await this.accessControl.canRead(wsId, userEmail, p)) === true;
+        asked.set(p, verdict);
+        return verdict;
+      };
     }
     const cache = new Map<string, boolean>();
     return async (p) => {

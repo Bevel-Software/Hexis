@@ -78,10 +78,13 @@ export async function readNativePlugin(
     );
   }
   const mcp = parseObject(mcpJsonText);
-  const mcpServers =
+  // An empty map is no servers, as the bundle reader has it: null, so
+  // `mcpServersPath` below names a source only when there is something in it.
+  const servers =
     mcp && typeof mcp.mcpServers === 'object' && mcp.mcpServers !== null && !Array.isArray(mcp.mcpServers)
       ? (mcp.mcpServers as Record<string, unknown>)
       : null;
+  const mcpServers = servers && Object.keys(servers).length > 0 ? servers : null;
   // The plugin EXISTS to the index when its folder carries an `access.md`
   // (links followed). Absence is "no rules yet"; a probe that fails for any
   // other reason is a hole like an unreadable manifest — the plugin is not
@@ -107,6 +110,8 @@ export async function readNativePlugin(
     linkedRoots: linkedSkillRoots(manifest),
     mcpServers,
     mcpJsonText,
+    manifestPath: `${folder}/${PLUGIN_MANIFEST_FILE}`,
+    mcpServersPath: mcpServers ? `${folder}/${PLUGIN_MCP_FILE}` : null,
     linksAreManaged: true,
   };
 }

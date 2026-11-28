@@ -163,6 +163,10 @@ export async function readBundlePlugin(
     linkedRoots,
     mcpServers,
     mcpJsonText: mcpServers ? JSON.stringify({ mcpServers }) : null,
+    // The bundle file is this plugin's manifest; its servers come from the
+    // registry, not from any file in its folder.
+    manifestPath: `${folder}/${BUNDLE_FILE}`,
+    mcpServersPath: mcpServers ? DEFAULT_REGISTRY_PATH : null,
     linksAreManaged: false,
   };
 }
