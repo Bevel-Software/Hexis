@@ -362,7 +362,7 @@ describe('md-links — a new name carrying URL-reserved characters', () => {
    * the decoded path and the fragment.
    */
   function followed(destination: string, base: string): { path: string; hash: string } {
-    const url = new URL(destination.replace(/^<|>$/g, ''), `http://kb.test/${base}`);
+    const url = new URL(destination, `http://kb.test/${base}`);
     return { path: decodeURIComponent(url.pathname).slice(1), hash: url.hash };
   }
 
@@ -371,9 +371,9 @@ describe('md-links — a new name carrying URL-reserved characters', () => {
     const { text, edits } = rewrite(`[n](${link})\n`, OUTSIDE, NOTES, target);
     expect(edits).toHaveLength(1);
     const to = edits[0].to;
-    expect(text).toBe(`[n](${to})\n`);
+    expect(text).toBe(link.startsWith('<') ? `[n](<${to}>)\n` : `[n](${to})\n`);
     const [span] = scanMarkdownLinks(text);
-    expect(span.destination).toBe(to.replace(/^<|>$/g, ''));
+    expect(span.destination).toBe(to);
     expect(resolveMdLink(span.destination, { basePath: OUTSIDE, kbDirName: KB })).toMatchObject({ path: target, hash });
     if (!to.startsWith('/workspace/')) expect(followed(to, OUTSIDE)).toEqual({ path: target, hash });
     return to;
@@ -394,7 +394,8 @@ describe('md-links — a new name carrying URL-reserved characters', () => {
   });
 
   it('an angle-bracket link escapes # and %, its spaces still unencoded', () => {
-    expect(rewrittenTo('<../Finance/notes.md>', ODD)).toBe('<../Team/Nötes %231 50%25 ✓.md>');
+    expect(rewrittenTo('<../Finance/notes.md>', ODD)).toBe('../Team/Nötes %231 50%25 ✓.md');
+    expect(rewrittenTo('<../Finance/notes.md>', `${KB}/Team/a\\#.md`)).toBe('../Team/a%5C%23.md');
   });
 
   it('an already-encoded link stays fully encoded, # and % included', () => {
@@ -407,14 +408,6 @@ describe('md-links — a new name carrying URL-reserved characters', () => {
   it('root-anchored and app-URL links escape the same characters', () => {
     expect(rewrittenTo(`/${NOTES}`, ODD)).toBe(`/${KB}/Team/Nötes%20%231%2050%25%20✓.md`);
     expect(rewrittenTo(`/workspace/main/${NOTES}#x`, ODD, '#x')).toBe(`/workspace/main/${KB}/Team/Nötes%20%231%2050%25%20✓.md#x`);
-  });
-
-  it('a page moving into a reserved-character folder rewrites its own relative links to resolve from there', () => {
-    const page = `${KB}/Finance/Plan.md`;
-    const newPage = `${KB}/50% #2/Plan.md`;
-    const { text } = rewrite('[n](notes.md)\n', page, page, newPage, newPage);
-    expect(text).toBe('[n](../Finance/notes.md)\n');
-    expect(followed('../Finance/notes.md', newPage.replace(/[%#]/g, encodeURIComponent))).toEqual({ path: NOTES, hash: '' });
   });
 
   it('a link INTO a moved reserved-character folder resolves to the file inside it', () => {

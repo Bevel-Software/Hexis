@@ -628,7 +628,8 @@ function encodePath(path: string, how: { encoded: boolean; angle: boolean; inFro
       .map((s) => encodeURIComponent(s).replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29')))
       .join('/');
   } else if (how.angle) {
-    out = path.replace(new RegExp(`[<>\\n${URL_RESERVED}]`, 'g'), percentEncode);
+    // A backslash too: before punctuation it would read as a markdown escape.
+    out = path.replace(new RegExp(`[<>\\n\\\\${URL_RESERVED}]`, 'g'), percentEncode);
   } else {
     // Only what would break the link: whitespace, delimiters and — when the
     // path's parentheses do not balance — the parentheses too.
