@@ -21,6 +21,7 @@ import {
   DestinationTakenError,
   destinationInsideSource,
   inspectDestination,
+  lstatOrNull,
   renameNoReplace,
 } from '../../shared/rename-no-replace.js';
 import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
@@ -2171,6 +2172,11 @@ export class WorkspaceService implements IWorkspaceService {
     // is not something the app moves around, any more than reads it.
     await this.assertNotThroughLink(oldAbsolute, workspaceDir);
     await this.assertNotThroughLink(newAbsolute, workspaceDir);
+    // A missing source is refused before anything is made: the `mkdir` below
+    // would create the folders on the way to the destination (the source
+    // itself, when the destination is inside it), and the rename would then
+    // fail with an error naming a path on the server.
+    if (await lstatOrNull(oldAbsolute) === null) throw new PathNotFoundError(oldRelativePath);
     // A folder dragged or renamed into its own subtree: no filesystem can do
     // that move, and the rename's own error names a path on the server.
     if (await destinationInsideSource(oldAbsolute, newAbsolute)) {

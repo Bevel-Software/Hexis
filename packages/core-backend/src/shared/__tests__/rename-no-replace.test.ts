@@ -317,8 +317,8 @@ describe('renameNoReplace', () => {
 });
 
 /**
- * The reading a CASE-INSENSITIVE volume produces, run on a disk that is not
- * one.
+ * A CASE-INSENSITIVE volume, stood in for on a disk that is not one: the
+ * reading `inspectDestination` and `destinationInsideSource` get from it.
  *
  * Everything the acceptance criterion "a case-only rename is not a clash with
  * the entry itself" is about lives on the `self` side of `inspectDestination`,
@@ -337,51 +337,53 @@ describe('renameNoReplace', () => {
  * Only the READING is faked. The move itself is driven against the real
  * filesystem above, where its no-clobber calls are the thing being tested.
  */
+interface Entry {
+  /** Which file this is, on its device. Two paths sharing both are one file. */
+  ino: number;
+  /** The device (volume) it is on; 1 when not given. */
+  dev?: number;
+  dir?: boolean;
+}
+
+/**
+ * A probe over a declared tree. `folds` picks the volume being modelled:
+ * folding (macOS's default APFS, Windows) or not (this disk). Paths are
+ * absolute and `/`-separated, as `inspectDestination` receives them.
+ */
+function volume(
+  tree: Record<string, Entry>,
+  opts: { folds?: boolean; unreadable?: string[] } = {},
+): DestinationProbe {
+  const folds = opts.folds ?? true;
+  const key = (p: string) => (folds ? p.toLowerCase() : p);
+  // Folded keys collapse two spellings into one entry — a case-insensitive
+  // folder cannot hold both, and this map cannot represent both either.
+  const entries = new Map(
+    Object.entries(tree).map(([storedPath, entry]) => [key(storedPath), { storedPath, ...entry }]),
+  );
+  const absent = (call: string, p: string) =>
+    Object.assign(new Error(`ENOENT: ${call} '${p}'`), { code: 'ENOENT' });
+  return {
+    async lstat(p) {
+      const found = entries.get(key(p));
+      if (found === undefined) return null;
+      return { dev: found.dev ?? 1, ino: found.ino, isDirectory: () => found.dir === true };
+    },
+    async readdir(folder) {
+      if (opts.unreadable?.some((u) => key(u) === key(folder))) {
+        throw Object.assign(new Error(`EACCES: readdir '${folder}'`), { code: 'EACCES' });
+      }
+      if (entries.get(key(folder))?.dir !== true) throw absent('readdir', folder);
+      const prefix = `${key(folder)}/`;
+      return [...entries.values()]
+        .filter((e) => key(e.storedPath).startsWith(prefix))
+        .filter((e) => !key(e.storedPath).slice(prefix.length).includes('/'))
+        .map((e) => e.storedPath.slice(e.storedPath.lastIndexOf('/') + 1));
+    },
+  };
+}
+
 describe('inspectDestination — the case-insensitive reading, on a disk that does not fold', () => {
-  interface Entry {
-    /** Which file this is. Two paths sharing an inode are one file. */
-    ino: number;
-    dir?: boolean;
-  }
-
-  /**
-   * A probe over a declared tree. `folds` picks the volume being modelled:
-   * folding (macOS's default APFS, Windows) or not (this disk). Paths are
-   * absolute and `/`-separated, as `inspectDestination` receives them.
-   */
-  function volume(
-    tree: Record<string, Entry>,
-    opts: { folds?: boolean; unreadable?: string[] } = {},
-  ): DestinationProbe {
-    const folds = opts.folds ?? true;
-    const key = (p: string) => (folds ? p.toLowerCase() : p);
-    // Folded keys collapse two spellings into one entry — a case-insensitive
-    // folder cannot hold both, and this map cannot represent both either.
-    const entries = new Map(
-      Object.entries(tree).map(([storedPath, entry]) => [key(storedPath), { storedPath, ...entry }]),
-    );
-    const absent = (call: string, p: string) =>
-      Object.assign(new Error(`ENOENT: ${call} '${p}'`), { code: 'ENOENT' });
-    return {
-      async lstat(p) {
-        const found = entries.get(key(p));
-        if (found === undefined) return null;
-        return { dev: 1, ino: found.ino, isDirectory: () => found.dir === true };
-      },
-      async readdir(folder) {
-        if (opts.unreadable?.some((u) => key(u) === key(folder))) {
-          throw Object.assign(new Error(`EACCES: readdir '${folder}'`), { code: 'EACCES' });
-        }
-        if (entries.get(key(folder))?.dir !== true) throw absent('readdir', folder);
-        const prefix = `${key(folder)}/`;
-        return [...entries.values()]
-          .filter((e) => key(e.storedPath).startsWith(prefix))
-          .filter((e) => !key(e.storedPath).slice(prefix.length).includes('/'))
-          .map((e) => e.storedPath.slice(e.storedPath.lastIndexOf('/') + 1));
-      },
-    };
-  }
-
   /** One file in one folder — the shape every case below starts from. */
   const SALES = { '/ws': { ino: 1, dir: true }, '/ws/Sales': { ino: 5, dir: true } };
   const ONE_NOTE = { ...SALES, '/ws/Sales/notes.md': { ino: 10 } };
@@ -464,36 +466,46 @@ describe('inspectDestination — the case-insensitive reading, on a disk that do
     expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/notes.md', plain))
       .toEqual({ state: 'self' });
   });
+});
 
-  describe('destinationInsideSource: a folder above the destination IS the source', () => {
-    const TEAM = { '/ws': { ino: 1, dir: true }, '/ws/Team': { ino: 5, dir: true }, '/ws/Team/Twin': { ino: 6, dir: true } };
+describe('destinationInsideSource: a folder above the destination IS the source', () => {
+  const TEAM = { '/ws': { ino: 1, dir: true }, '/ws/Team': { ino: 5, dir: true }, '/ws/Team/Twin': { ino: 6, dir: true } };
 
-    it('finds the source above the destination, at any depth, whether or not the rest exists yet', async () => {
-      for (const folds of [true, false]) {
-        const disk = volume(TEAM, { folds });
-        expect(await destinationInsideSource('/ws/Team', '/ws/Team/Team', disk)).toBe(true);
-        expect(await destinationInsideSource('/ws/Team', '/ws/Team/Twin/Team', disk)).toBe(true);
-        expect(await destinationInsideSource('/ws/Team', '/ws/Team/New/Deeper/Team', disk)).toBe(true);
-      }
-    });
+  it('finds the source above the destination, at any depth, whether or not the rest exists yet', async () => {
+    for (const folds of [true, false]) {
+      const disk = volume(TEAM, { folds });
+      expect(await destinationInsideSource('/ws/Team', '/ws/Team/Team', disk)).toBe(true);
+      expect(await destinationInsideSource('/ws/Team', '/ws/Team/Twin/Team', disk)).toBe(true);
+      expect(await destinationInsideSource('/ws/Team', '/ws/Team/New/Deeper/Team', disk)).toBe(true);
+    }
+  });
 
-    it('reads another case of the source as the source only on a volume that folds case', async () => {
-      // Folding: `team` opens `Team`, so the move is into itself.
-      expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', volume(TEAM))).toBe(true);
-      // Not folding: `team` is another folder, or none yet; an ordinary move.
-      expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', volume(TEAM, { folds: false }))).toBe(false);
-      const withSibling = volume({ ...TEAM, '/ws/team': { ino: 9, dir: true } }, { folds: false });
-      expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', withSibling)).toBe(false);
-    });
+  it('reads another case of the source as the source only on a volume that folds case', async () => {
+    // Folding: `team` opens `Team`, so the move is into itself.
+    expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', volume(TEAM))).toBe(true);
+    // Not folding: `team` is another folder, or none yet; an ordinary move.
+    expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', volume(TEAM, { folds: false }))).toBe(false);
+    const withSibling = volume({ ...TEAM, '/ws/team': { ino: 9, dir: true } }, { folds: false });
+    expect(await destinationInsideSource('/ws/Team', '/ws/team/Twin', withSibling)).toBe(false);
+  });
 
-    it('lets through a sibling with the same prefix, the parent, the source itself, a re-cased source, and a missing source', async () => {
-      const disk = volume({ ...TEAM, '/ws/Team2': { ino: 7, dir: true } });
-      expect(await destinationInsideSource('/ws/Team', '/ws/Team2/Team', disk)).toBe(false);
-      expect(await destinationInsideSource('/ws/Team/Twin', '/ws/Team', disk)).toBe(false);
-      expect(await destinationInsideSource('/ws/Team', '/ws/Team', disk)).toBe(false);
-      expect(await destinationInsideSource('/ws/Team', '/ws/team', disk)).toBe(false);
-      expect(await destinationInsideSource('/ws/Gone', '/ws/Gone/x', disk)).toBe(false);
-    });
+  it('lets through a sibling with the same prefix, the parent, the source itself, a re-cased source, and a missing source', async () => {
+    const disk = volume({ ...TEAM, '/ws/Team2': { ino: 7, dir: true } });
+    expect(await destinationInsideSource('/ws/Team', '/ws/Team2/Team', disk)).toBe(false);
+    expect(await destinationInsideSource('/ws/Team/Twin', '/ws/Team', disk)).toBe(false);
+    expect(await destinationInsideSource('/ws/Team', '/ws/Team', disk)).toBe(false);
+    expect(await destinationInsideSource('/ws/Team', '/ws/team', disk)).toBe(false);
+    expect(await destinationInsideSource('/ws/Gone', '/ws/Gone/x', disk)).toBe(false);
+  });
+
+  it('reads an equal inode on another device as another folder', async () => {
+    // A volume mounted under the workspace numbers its own inodes: `/ws/Mnt`
+    // shares the source's inode but not its device, so it is not the source.
+    const disk = volume({ ...TEAM, '/ws/Mnt': { ino: 5, dev: 2, dir: true } });
+    expect(await destinationInsideSource('/ws/Team', '/ws/Mnt/Team', disk)).toBe(false);
+    // Same device and inode: the source, under whatever name it is reached.
+    const sameDevice = volume({ ...TEAM, '/ws/Mnt': { ino: 5, dir: true } });
+    expect(await destinationInsideSource('/ws/Team', '/ws/Mnt/Team', sameDevice)).toBe(true);
   });
 });
 
