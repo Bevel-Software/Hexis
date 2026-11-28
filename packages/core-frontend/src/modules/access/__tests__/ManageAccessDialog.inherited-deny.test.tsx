@@ -97,6 +97,17 @@ describe('ManageAccessDialog: a deny inherited from a folder', () => {
     );
   });
 
+  it('reads the same to someone who may read the sheet but not manage it', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue({ ...VIEW, canWrite: false, canOwner: false } as unknown as AccessResponse);
+    render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
+    await expandFolderSection(user);
+
+    expect(await screen.findByText('QA Denied')).toBeInTheDocument();
+    expect(screen.getByText(/^restricted in qaaccess$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^no access$/i)).toBeNull();
+  });
+
   it('a group a folder denies gets its row the same way', async () => {
     const user = userEvent.setup();
     const GTM = { name: 'GTM Team', kind: 'group' as const };

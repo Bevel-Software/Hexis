@@ -1902,7 +1902,9 @@ export function ManageAccessDialog({
         ) : (
           <span className="ml-auto flex shrink-0 items-center gap-2 text-detail text-ink-muted">
             {inviteAction(p)}
-            {summarizeVerbs(p.verbs)}
+            {/* The same words the managing trigger reads: a denied or
+                restricted row is not "No access" to a reader either. */}
+            {rowSummary(p)}
           </span>
         )}
       </div>

@@ -157,6 +157,19 @@ describe('a deny written in a folder above reaches the view of what it holds', (
     expect(v.denials[`u:${DENIED}`]?.read).toBeUndefined();
   });
 
+  it('a person another list already carries is put to the gate too: a closer ROLE grant clears the denial', async () => {
+    // qa-denied is a named reader of the file, so the view lists them anyway;
+    // the subfolder's grant to QAEditors beats the parent's deny of write.
+    await write(repo, 'QAAccess/Sub/access.md', '---\nwrite:\n  - QAEditors\n---\n');
+    await write(repo, 'QAAccess/Sub/Note.md', `---\nread:\n  - QA Denied <${DENIED}>\n---\n# Note\n`);
+    const v = await view('QAAccess/Sub/Note.md', 'file');
+
+    expect(await access.canWrite(WS, DENIED, 'QAAccess/Sub/Note.md')).toBe(true);
+    expect(v.readers.users.map((u) => u.email)).toContain(DENIED);
+    expect(v.denials[`u:${DENIED}`]?.write).toBeUndefined();
+    expect(v.deniedAbove.users).toEqual([]);
+  });
+
   it("a group's deny a closer grant beats leaves no stray deniedAbove entry", async () => {
     // The folder denies GTM Team read; a closer grant gives it back. A row with
     // no denial and no grant listed would claim a restriction nobody enforces.

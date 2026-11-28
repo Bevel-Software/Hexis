@@ -108,6 +108,7 @@ export async function resolveAccessView(
     userSet.set(key, u);
     aboveOnly.add(`u:${key}`);
   }
+  const deniedAboveKeys = new Set(deniedAboveCandidates.users.map((u) => `u:${u.email.toLowerCase()}`));
   const sources: Record<string, GrantSources> = {};
   // Denials ride in their OWN map, keyed the same way. A row reads both: the
   // grants say where each held verb comes from, the denials say why each missing
@@ -139,12 +140,13 @@ export async function resolveAccessView(
       ]);
       const key = `u:${u.email.toLowerCase()}`;
       const denied: DenialSources = { ...reported };
-      // A person only a parent's deny brings in is put to the gate, verb by
-      // verb: `denialSources` stops at a closer grant naming the PERSON, not
-      // at one naming a role they belong to, and a row saying "restricted"
-      // about a verb the gate allows would be the overstatement this row
-      // exists to correct, the other way round.
-      if (aboveOnly.has(key)) {
+      // Every person a parent's deny names is put to the gate, verb by verb,
+      // whether or not another list already carries them: `denialSources`
+      // stops at a closer grant naming the PERSON, not at one naming a role
+      // they belong to, and a row saying "restricted" about a verb the gate
+      // allows would be the overstatement this row exists to correct, the
+      // other way round.
+      if (deniedAboveKeys.has(key)) {
         const gates: Record<Verb, () => Promise<boolean>> = {
           read: () => accessControl.canRead(workspaceId, u.email, repoRelTarget),
           write: () => accessControl.canWrite(workspaceId, u.email, repoRelTarget),
