@@ -135,6 +135,6 @@ describe('ManageAccessDialog: a role member denied write', () => {
 
     const row = await rowOf('QA Denied');
     expect(within(row).getByRole('button', { name: /^denied here$/i })).toBeInTheDocument();
-    expect(within(row).queryByText(/ denied$/i)).toBeNull();
+    expect(within(row).queryByText(/^(owner|edit|download|read)(, \w+)* denied$/)).toBeNull();
   });
 });
