@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../version-control';
-import { OpenChangeRequestsContext, NO_CHANGE_REQUESTS } from '../../workspace';
+import type { useEventBus } from '../../version-control';
 
 /**
  * The file page's proposal boxes. Approval rights come from the FILE, not from
@@ -32,6 +31,17 @@ vi.mock('../../pr', async (importOriginal) => ({
   mergePullRequest: api.mergePullRequest,
   cancelPullRequest: api.cancelPullRequest,
 }));
+// What the boxes ask the app around them, stubbed at the public hooks they call: the event bus the apply listens on,
+// and which open requests are the viewer's own.
+const around = vi.hoisted(() => ({ bus: null as unknown, mineNumbers: new Set<number>() }));
+vi.mock('../../version-control', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../version-control')>()),
+  useEventBus: () => around.bus,
+}));
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
+  useOpenChangeRequests: () => ({ paths: new Set<string>(), forPath: () => [], minePaths: new Map<string, number>(), mineNumbers: around.mineNumbers }),
+}));
 
 import { FileChangeBoxes } from '../components/FileChangeBoxes';
 import { othersPendingBesides, waitingOnViewerLabel } from '../utils/author';
@@ -54,7 +64,7 @@ const CR: PullRequestSummary = {
 
 function makeFakeBus() {
   const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void } = {
+  const bus: NonNullable<ReturnType<typeof useEventBus>> & { emit(e: VersionControlEvent): void } = {
     subscribe(kind, handler) {
       (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
@@ -74,21 +84,17 @@ function makeFakeBus() {
 
 function renderBoxes(opts: { mine: boolean; canDecide: boolean; othersPending?: number }) {
   const bus = makeFakeBus();
+  around.bus = bus;
+  around.mineNumbers = new Set(opts.mine ? [CR.number] : []);
   render(
-    <EventBusContext.Provider value={bus}>
-      <OpenChangeRequestsContext.Provider
-        value={{ ...NO_CHANGE_REQUESTS, mineNumbers: new Set(opts.mine ? [CR.number] : []) }}
-      >
-        <FileChangeBoxes
-          repoRelativePath={PATH}
-          requests={[CR]}
-          canDecide={opts.canDecide}
-          ownersLabel="Docs"
-          othersPending={opts.othersPending}
-          onApplied={() => {}}
-        />
-      </OpenChangeRequestsContext.Provider>
-    </EventBusContext.Provider>,
+    <FileChangeBoxes
+      repoRelativePath={PATH}
+      requests={[CR]}
+      canDecide={opts.canDecide}
+      ownersLabel="Docs"
+      othersPending={opts.othersPending}
+      onApplied={() => {}}
+    />,
   );
   return bus;
 }
