@@ -23,7 +23,7 @@ import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService, IAccountSwitchGuard } from '../auth/index.js';
 import type { VersionControlService, VersionControlEventBus } from '../version-control/index.js';
-import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { PathNotFoundError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import { AccessDeniedError } from '../access-model/index.js';
 import {
   AccessMutationService,
@@ -73,12 +73,14 @@ function requireNonEmptyString(value: unknown, field: string): string {
 }
 
 /**
- * Is this the "the folder governs this file" refusal? It is the one mutation
- * failure that is guaranteed to have written nothing — it is thrown as the
- * file is read — so the lock it holds must be released without discarding the
- * path (see `withEditLock`).
+ * Is this a refusal the mutation raises as it READS the target: "the folder
+ * governs this file", or "there is no such file"? Those are the mutation
+ * failures guaranteed to have written nothing, so the lock they hold must be
+ * released without discarding the path (see `withEditLock`): discarding would
+ * undo an upload, or a delete, whose commit is still queued.
  */
-function isFolderGovernsRefusal(err: unknown): boolean {
+function isRefusalBeforeWrite(err: unknown): boolean {
+  if (err instanceof PathNotFoundError) return true;
   return (
     err instanceof AccessMutationError &&
     err.payload?.kind === FOLDER_GOVERNS_ACCESS_KIND
@@ -916,7 +918,7 @@ export function createAccessRoutes(
         // right after an upload whose commit is still queued that deletes the
         // upload. Every other failure may have left partial bytes, so it keeps
         // the discarding release.
-        if (isFolderGovernsRefusal(err)) {
+        if (isRefusalBeforeWrite(err)) {
           await versionControlService.releaseLockUntouched(workspaceId, branch, wsEditPath, user);
         } else {
           await versionControlService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);

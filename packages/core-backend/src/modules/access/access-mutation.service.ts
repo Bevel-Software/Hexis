@@ -53,7 +53,7 @@ import {
   AccessSpliceError,
 } from '../access-model/index.js';
 import type { Verb, Principal, TokenMatch } from '../access-model/index.js';
-import { VersionControlDomainError } from '../../shared/domain-errors.js';
+import { PathNotFoundError, VersionControlDomainError } from '../../shared/domain-errors.js';
 import {
   canCarryFrontmatter,
   FOLDER_GOVERNS_ACCESS_KIND,
@@ -192,21 +192,40 @@ export class AccessMutationService {
    * Refusing inside the lock instead makes the route release it without a
    * commit, and that release discards the path's working-tree changes — which,
    * right after an upload whose commit is still queued, deletes the upload.
-   * `readOrEmpty` repeats the check under the lock, in case the bytes changed
-   * in between. Folder targets and missing files pass through untouched (the
-   * mutation reports those as before).
+   * A file target that is not there answers `PathNotFoundError` (404
+   * `not_found`) here, for the same reason: nothing is locked or written.
+   * `readOrEmpty` repeats both checks under the lock, in case the file changed
+   * in between. Folder targets pass through untouched. The routes call this
+   * only past their write gate, so a caller the gate refuses gets the gate's
+   * answer, the same for a missing file as for an existing one.
    */
   async assertTargetHoldsText(workspaceId: string, kind: TargetKind, repoRelTarget: string): Promise<void> {
     if (kind !== 'file') return;
     const { editPath } = this.fileToEdit(kind, repoRelTarget);
+    await this.readFileTarget(workspaceId, repoRelTarget, editPath);
+  }
+
+  /**
+   * A FILE target's text. Absence is `PathNotFoundError`: a file's own rules
+   * live in its frontmatter, so there is nothing to write them into. Bytes
+   * that are not text (`isTextBytes`: no NUL, valid UTF-8, the file tools'
+   * own test) are `folder-governs-access`. Any other read failure is rethrown
+   * as it is.
+   */
+  private async readFileTarget(
+    workspaceId: string,
+    repoRelTarget: string,
+    repoRelEditPath: string,
+  ): Promise<string> {
     let bytes: Buffer;
     try {
-      bytes = await this.workspaceService.readFileBinary(workspaceId, this.toWorkspaceRelative(editPath));
+      bytes = await this.workspaceService.readFileBinary(workspaceId, this.toWorkspaceRelative(repoRelEditPath));
     } catch (err) {
-      if (isAbsence(err)) return;
+      if (isAbsence(err)) throw new PathNotFoundError(repoRelTarget);
       throw err;
     }
     if (!isTextBytes(bytes)) throw folderGovernsAccessError(repoRelTarget);
+    return bytes.toString('utf-8');
   }
 
   /**
@@ -238,14 +257,11 @@ export class AccessMutationService {
   /**
    * Read the to-be-edited file's current text, or '' when it's an expected
    * missing file. An absent file is normal only for a folder (no `access.md`
-   * yet); there we swallow ENOENT/ENOTDIR. Every other error — a typoed node
-   * target, a transient read failure — is rethrown so we never treat it as
-   * empty and write a brand-new access file.
-   *
-   * A FILE target must also hold text (`isTextBytes`: no NUL, valid UTF-8 —
-   * the file tools' own test). A path alone cannot tell a note from a binary
-   * saved as `.md`, so binary content is refused with `folder-governs-access`
-   * here, after the read and before any splice or write.
+   * yet); there we swallow ENOENT/ENOTDIR. A FILE target goes through
+   * `readFileTarget`: a missing node is `PathNotFoundError` and binary
+   * content is `folder-governs-access`, both refused after the read and
+   * before any splice or write. Every other error is rethrown so we never
+   * treat it as empty and write a brand-new access file.
    */
   private async readOrEmpty(
     workspaceId: string,
@@ -253,14 +269,9 @@ export class AccessMutationService {
     repoRelTarget: string,
     repoRelEditPath: string,
   ): Promise<string> {
-    const wsRelative = this.toWorkspaceRelative(repoRelEditPath);
-    if (kind === 'file') {
-      const bytes = await this.workspaceService.readFileBinary(workspaceId, wsRelative);
-      if (!isTextBytes(bytes)) throw folderGovernsAccessError(repoRelTarget);
-      return bytes.toString('utf-8');
-    }
+    if (kind === 'file') return this.readFileTarget(workspaceId, repoRelTarget, repoRelEditPath);
     try {
-      return await this.workspaceService.readFile(workspaceId, wsRelative);
+      return await this.workspaceService.readFile(workspaceId, this.toWorkspaceRelative(repoRelEditPath));
     } catch (err) {
       if (isAbsence(err)) return '';
       throw err;
