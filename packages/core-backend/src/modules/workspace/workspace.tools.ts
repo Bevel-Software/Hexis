@@ -55,6 +55,7 @@ import {
   isRepositoryOwnFile,
   repositoryOwnFileDeleteRefusal,
   entryExistsMessage,
+  moveIntoItselfSentence,
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
@@ -81,7 +82,7 @@ import type { IChangeReadGate } from '../access-model/index.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
-import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
+import { DestinationTakenError, destinationInsideSource, inspectDestination } from '../../shared/rename-no-replace.js';
 import type { AgentUploadStore} from './agent-upload.store.js';
 import { type ClaimedUpload } from './agent-upload.store.js';
 import type { IAgentDownloadStore } from './agent-download.store.js';
@@ -3842,9 +3843,17 @@ export function registerWorkspaceTools(
         ? []
         : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
       const mayReadDestination = blocked.length === 0;
+      // A destination inside the source: no filesystem can do that move, and
+      // the rename would fail with an error naming a path on the server. The
+      // filesystem decides (another case of the name is the source on one
+      // volume and another folder on the next), so it is asked only once the
+      // caller may read the destination, like every look below.
+      const intoItself = mayReadDestination && await destinationInsideSource(join(root, src), join(root, dest))
+        ? moveIntoItselfSentence(src, dest)
+        : null;
       const destOnDisk = mayReadDestination ? await onDiskSpelling(root, dest) : dest;
       const destManaged = mayReadDestination ? managedReason(destOnDisk, kind) : undefined;
-      const occupiedBy = srcManaged === undefined && mayReadDestination
+      const occupiedBy = srcManaged === undefined && mayReadDestination && intoItself === null
         ? await existingAt(root, dest, src)
         : null;
       const collision = occupiedBy !== null;
@@ -3865,9 +3874,7 @@ export function registerWorkspaceTools(
         ? managedWhy
         : blocked.length > 0
           ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the move cannot run.`
-          : occupiedBy !== null
-            ? entryExistsMessage(occupiedBy, dest)
-            : undefined;
+          : intoItself ?? (occupiedBy !== null ? entryExistsMessage(occupiedBy, dest) : undefined);
       // The links are planned only for a move that may run: a refused one
       // reads no page. The plan is the same on a dry run and on the move.
       const rewriteLinks = a.rewriteLinks !== false;
@@ -3939,6 +3946,7 @@ export function registerWorkspaceTools(
         const folderPath = kind === 'folder' && (blocked[0] === src || blocked[0] === dest);
         throw await writeRefusal(branch, ctx, blocked[0], folderPath ? 'dir' : 'file');
       }
+      if (intoItself !== null) throw new ToolError(intoItself, 400);
       if (collision) throw new ToolError(reason!, 409);
       if (linkPlan?.overCap !== undefined) throw new ToolError(linkPlan.overCap, 400);
       if ((accessChanges || othersChange) && a.confirm !== true) {

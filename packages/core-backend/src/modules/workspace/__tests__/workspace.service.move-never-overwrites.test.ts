@@ -3,7 +3,7 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
@@ -60,12 +60,63 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
       root,
       'https://github.com/Bevel-Software/knowledge-base.git',
       testKbContext({ kbDirName: KB }),
-      new NodeFs(),
+      realDisk(),
     );
   });
 
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('refuses a folder into its own subtree in words, naming no server path, and moves nothing', async () => {
+    await svc.writeFile(workspaceId, `${KB}/QA-Move/Team/notes.md`, 'n');
+
+    for (const dest of [`${KB}/QA-Move/Team/Team`, `${KB}/QA-Move/Team/Twin/Team`]) {
+      const err = await svc.moveEntry(workspaceId, `${KB}/QA-Move/Team`, dest).then(() => null, (e: unknown) => e);
+      expect(err).toMatchObject({
+        status: 400,
+        message: `Nothing can be moved into itself: "${dest}" is inside "${KB}/QA-Move/Team". Choose a destination outside "${KB}/QA-Move/Team".`,
+        payload: { kind: 'move-into-itself' },
+      });
+      expect((err as Error).message).not.toContain(root);
+    }
+    expect(await fs.readFile(abs(`${KB}/QA-Move/Team/notes.md`), 'utf8')).toBe('n');
+    // Refused before anything is made: no empty `Twin` is left behind.
+    expect(await entryVisible(`${KB}/QA-Move/Team/Twin`)).toBe(false);
+
+    // `Team2` only starts with the same letters; it is not inside `Team`.
+    await svc.moveEntry(workspaceId, `${KB}/QA-Move/Team`, `${KB}/QA-Move/Team2/Team`);
+    expect(await fs.readFile(abs(`${KB}/QA-Move/Team2/Team/notes.md`), 'utf8')).toBe('n');
+  });
+
+  it('refuses a missing source as missing before making anything, even a destination inside it', async () => {
+    await svc.writeFile(workspaceId, `${KB}/QA-Move/keep.md`, 'k');
+
+    for (const dest of [`${KB}/QA-Move/Gone/Twin`, `${KB}/QA-Move/Elsewhere/Gone`]) {
+      const err = await svc.moveEntry(workspaceId, `${KB}/QA-Move/Gone`, dest).then(() => null, (e: unknown) => e);
+      expect(err).toMatchObject({ status: 404, payload: { kind: 'not_found', path: `${KB}/QA-Move/Gone` } });
+      expect((err as Error).message).not.toContain(root);
+    }
+    // `mkdir` never ran: neither the source nor a folder on the way was made.
+    expect(await entryVisible(`${KB}/QA-Move/Gone`)).toBe(false);
+    expect(await entryVisible(`${KB}/QA-Move/Elsewhere`)).toBe(false);
+  });
+
+  it('judges another case of the name by the disk: refused where it opens the source, moved where it is a sibling', async () => {
+    await svc.writeFile(workspaceId, `${KB}/QA-Move/Team/notes.md`, 'n');
+    const dest = `${KB}/QA-Move/team/Twin`;
+
+    if (await foldsCase()) {
+      await expect(svc.moveEntry(workspaceId, `${KB}/QA-Move/Team`, dest)).rejects.toMatchObject({
+        status: 400,
+        payload: { kind: 'move-into-itself' },
+      });
+      expect(await fs.readFile(abs(`${KB}/QA-Move/Team/notes.md`), 'utf8')).toBe('n');
+      return;
+    }
+    await svc.moveEntry(workspaceId, `${KB}/QA-Move/Team`, dest);
+    expect(await fs.readFile(abs(`${dest}/notes.md`), 'utf8')).toBe('n');
+    expect(await entryVisible(`${KB}/QA-Move/Team`)).toBe(false);
   });
 
   it('refuses a file onto a file, and the file already there keeps its content', async () => {
@@ -197,14 +248,15 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
     expect(await fs.readFile(abs(`${KB}/Archive/2026/note.md`), 'utf-8')).toBe('note');
   });
 
-  it('still answers ENOENT when there is nothing to move', async () => {
+  it('still answers "nothing there" when there is nothing to move', async () => {
     // "There is nothing at the source" is the truer answer than "the
-    // destination is taken", and it is the one this path always gave.
+    // destination is taken", and it is the one this path always gave; now as
+    // a 404 naming the workspace path, not the rename's error.
     await svc.writeFile(workspaceId, `${KB}/Sales/taken.md`, 'taken');
 
     await expect(
       svc.moveEntry(workspaceId, `${KB}/Sales/absent.md`, `${KB}/Sales/taken.md`),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    ).rejects.toMatchObject({ status: 404, payload: { kind: 'not_found', path: `${KB}/Sales/absent.md` } });
 
     expect(await fs.readFile(abs(`${KB}/Sales/taken.md`), 'utf-8')).toBe('taken');
   });

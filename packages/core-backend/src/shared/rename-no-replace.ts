@@ -211,6 +211,32 @@ async function sameFolder(a: string, b: string, probe: DestinationProbe): Promis
   return statA.dev === statB.dev && statA.ino === statB.ino;
 }
 
+/**
+ * Whether `newAbsolute` lies inside `oldAbsolute`: one of the destination's
+ * folders IS the source. No filesystem can do that move, and its `rename`
+ * error names a path on the server.
+ *
+ * Asked of the filesystem, never of folded strings, for the reason
+ * {@link isSelfRename} gives: on a volume that folds case `team/Twin` opens
+ * inside `Team`, and on one that does not `team` is another folder (or none
+ * yet), and the move is an ordinary one. So each folder above the destination
+ * that exists is compared with the source by identity. A source that is not
+ * there is inside nothing; the move answers that it is missing.
+ */
+export async function destinationInsideSource(
+  oldAbsolute: string,
+  newAbsolute: string,
+  probe: DestinationProbe = diskProbe,
+): Promise<boolean> {
+  const source = await probe.lstat(oldAbsolute);
+  if (source === null) return false;
+  for (let folder = path.dirname(newAbsolute); ; folder = path.dirname(folder)) {
+    const entry = await probe.lstat(folder);
+    if (entry !== null && entry.dev === source.dev && entry.ino === source.ino) return true;
+    if (path.dirname(folder) === folder) return false;
+  }
+}
+
 /** The two paths are one name on a case-insensitive filesystem. */
 function foldsTogether(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();

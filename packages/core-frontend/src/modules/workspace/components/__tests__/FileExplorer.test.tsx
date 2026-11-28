@@ -4490,3 +4490,69 @@ describe('FileExplorer: a document the server could not read', () => {
     expect(screen.queryByTestId('tree-unreadable-notice')).toBeNull();
   });
 });
+
+// A folder dropped onto one of its own subfolders: the tree answers with the
+// server's sentence (the same function decides on both sides) where a refused
+// move is shown, and sends nothing.
+describe('FileExplorer: a folder dropped into itself', () => {
+  const DRAG_MIME = 'application/x-workspace-path';
+  const KB = 'knowledge-base';
+  const TREE: FileTreeEntry = rootedAtCheckout({
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          {
+            name: 'Team',
+            relativePath: `${KB}/Team`,
+            type: 'directory',
+            children: [{ name: 'Twin', relativePath: `${KB}/Team/Twin`, type: 'directory', children: [] }],
+          },
+        ],
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  it('says why in the tree, opens no confirmation and sends nothing', async () => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Twin'), {
+        dataTransfer: { getData: (t: string) => (t === DRAG_MIME ? `${KB}/Team` : ''), files: [] },
+      });
+    });
+    expect(screen.getByTestId('tree-move-error')).toHaveTextContent(
+      `Nothing can be moved into itself: "${KB}/Team/Twin/Team" is inside "${KB}/Team". Choose a destination outside "${KB}/Team".`,
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(moveEntry).not.toHaveBeenCalled();
+  });
+
+  // jsdom lays nothing out, so this pins the classes that keep a long path
+  // inside the sidebar: a path has no spaces to break at, and without them
+  // the sentence widens the row and pushes the dismiss button off-screen.
+  it('wraps a long path inside the sidebar and keeps the dismiss button usable', async () => {
+    renderExplorer({ fileTree: TREE });
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Twin'), {
+        dataTransfer: { getData: (t: string) => (t === DRAG_MIME ? `${KB}/Team` : ''), files: [] },
+      });
+    });
+    const message = screen.getByText(/^Nothing can be moved into itself:/);
+    expect(message.className).toContain('wrap-anywhere');
+    expect(message.className).toContain('min-w-0');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss move error' }));
+    });
+    expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+  });
+});
