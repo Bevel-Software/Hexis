@@ -3,7 +3,7 @@ import { testKbContext } from '../../../__tests__/kb-context.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { WorkspaceService } from '../workspace.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { newWorkspaceService } from '../../../__tests__/workspace-service.js';
@@ -60,7 +60,7 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
       root,
       'https://github.com/Bevel-Software/knowledge-base.git',
       testKbContext({ kbDirName: KB }),
-      new NodeFs(),
+      realDisk(),
     );
   });
 
