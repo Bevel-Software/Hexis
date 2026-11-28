@@ -1912,7 +1912,7 @@ export function ManageAccessDialog({
           <span className="ml-auto flex shrink-0 items-center gap-2 text-detail text-ink-muted">
             {inviteAction(p)}
             {deniedNoteOf(p)}
-            {summarizeVerbs(p.verbs)}
+            {rowSummary(p)}
           </span>
         )}
       </div>

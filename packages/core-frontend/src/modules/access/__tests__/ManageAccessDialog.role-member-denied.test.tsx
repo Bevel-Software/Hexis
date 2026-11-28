@@ -138,3 +138,38 @@ describe('ManageAccessDialog: a role member denied write', () => {
     expect(within(row).queryByText(/^(owner|edit|download|read)(, \w+)* denied$/)).toBeNull();
   });
 });
+
+describe('ManageAccessDialog: a viewer who cannot manage sees the same row', () => {
+  it('a role member denied write reads "Can read" and "edit denied", never "No access"', async () => {
+    api.fetchFileAccess.mockResolvedValue({ ...ROLE_MEMBER_DENIED_WRITE, canWrite: false, canOwner: false });
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+
+    const row = await rowOf('QA Denied');
+    expect(within(row).queryByRole('button', { name: /^can read$/i })).toBeNull();
+    expect(within(row).getByText('Can read')).toBeInTheDocument();
+    expect(within(row).getByText('edit denied')).toBeInTheDocument();
+    expect(within(row).queryByText(/no access/i)).toBeNull();
+  });
+
+  it('a person denied every verb reads "Denied here", not "No access"', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...ROLE_MEMBER_DENIED_WRITE,
+      canWrite: false,
+      canOwner: false,
+      denials: {
+        'u:qa-denied@example.com': {
+          read: [{ kind: 'direct' }],
+          write: [{ kind: 'direct' }],
+          download: [{ kind: 'direct' }],
+          owner: [{ kind: 'direct' }],
+        },
+      },
+      holds: { 'u:qa-denied@example.com': { read: false, write: false, download: false, owner: false } },
+    } as unknown as AccessResponse);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+
+    const row = await rowOf('QA Denied');
+    expect(within(row).getByText('Denied here')).toBeInTheDocument();
+    expect(within(row).queryByText(/no access/i)).toBeNull();
+  });
+});

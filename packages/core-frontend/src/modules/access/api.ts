@@ -177,7 +177,7 @@ export interface AccessResponse {
    * denied write who reads through a role is in none of them. Optional for
    * version skew.
    */
-  holds?: Record<string, { read: boolean; write: boolean; download: boolean; owner: boolean }>;
+  holds?: Record<string, Record<GrantVerb, boolean>>;
   /**
    * Present for a file that cannot carry frontmatter (a PDF, a deck, an
    * image — or binary bytes saved under a note's name, which the server
