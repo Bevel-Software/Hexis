@@ -3,8 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import { NodeFs } from '../../kb-fs/node-fs.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import type { WorkspaceService } from '../../workspace/index.js';
 import { AccessControlService } from '../access-control.service.js';
 import { emailsInView, labelAccountHolders, resolveAccessView } from '../access-view.js';
 
@@ -56,7 +56,7 @@ describe('a deny written in a folder above reaches the view of what it holds', (
       PARENT_MD,
       `---\nwrite:\n  - QAEditors\n  - deny QA Denied <${DENIED}>\nread:\n  - deny GTM Team\n---\n# QAAccess\n`,
     );
-    access = new AccessControlService(stubWorkspace(workspaceDir), KB, new NodeFs());
+    access = new AccessControlService(stubWorkspace(workspaceDir), KB, realDisk());
   });
 
   afterEach(async () => {
