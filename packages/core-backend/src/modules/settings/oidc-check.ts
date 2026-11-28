@@ -30,7 +30,8 @@ export type IssuerCheck =
  * The three answers a configuration can give:
  *
  *  - `verified`: the issuer is an OIDC issuer, and its token endpoint accepted
- *    the application id and secret (it went on to refuse the made-up code);
+ *    the application id and secret (it went on to refuse the made-up code,
+ *    and refused the same client id with a made-up secret as a client);
  *  - `unverified`: the issuer is fine, but the token endpoint's answer says
  *    nothing definite about the credentials — saved, labelled Unverified;
  *  - `rejected`: a definitive no — the issuer (on the issuer field) or the
@@ -49,12 +50,10 @@ export type OidcCheck =
 /** Bounds each request, so a hung issuer cannot hold a save open. */
 const REQUEST_TIMEOUT_MS = 10_000;
 
-/**
- * The token endpoint's `error` codes that mean "the client authenticated, and
- * then the code was refused". `invalid_grant` is the one RFC 6749 §5.2 names
- * for a bad authorization code, and the one every mainstream provider sends.
- */
-const CODE_REJECTIONS: readonly string[] = ['invalid_grant'];
+/** RFC 6749 §5.2: the client failed to authenticate. */
+const CLIENT_REJECTION = 'invalid_client';
+/** RFC 6749 §5.2: the authorization code was refused. */
+const CODE_REJECTION = 'invalid_grant';
 
 /** The issuer as the provider appends `/.well-known/...` to it: no trailing slash. */
 export function normalizeIssuerUrl(issuerUrl: string): string {
@@ -130,22 +129,75 @@ export async function checkOidcIssuer(
   return { outcome: 'verified', tokenEndpoint: endpoint('token_endpoint') };
 }
 
+const NO_ANSWER: OidcCheck = {
+  outcome: 'unverified',
+  error: 'The provider’s token endpoint did not answer, so the application ID and secret could not be verified.',
+};
+
+/** Random, so it cannot collide with a code, client or secret anyone was issued. */
+function madeUp(): string {
+  return `hexis-configuration-check-${randomBytes(16).toString('hex')}`;
+}
+
+/**
+ * One token request for an authorization code that does not exist, with the
+ * client id and secret as HTTP Basic and the configured redirect URI: exactly
+ * the shape the real callback sends. Answers the HTTP status and the `error`
+ * code alone (never the rest of the body), or `null` when no answer came back.
+ */
+async function requestMadeUpCode(
+  tokenEndpoint: string,
+  config: OidcConfiguration,
+  fetchImpl: typeof fetch,
+): Promise<{ status: number; errorCode: string } | null> {
+  const basic = Buffer.from(
+    `${encodeURIComponent(config.clientId)}:${encodeURIComponent(config.clientSecret)}`,
+    'utf8',
+  ).toString('base64');
+  try {
+    const res = await fetchImpl(tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+        Authorization: `Basic ${basic}`,
+      },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: madeUp(),
+        redirect_uri: config.redirectUri,
+        // No `code_verifier`: no challenge was ever issued for this code, and
+        // a PKCE-enforcing provider could answer a verifier it cannot match
+        // with something other than the code rejection this reads.
+      }).toString(),
+      redirect: 'error',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+    return { status: res.status, errorCode: body && typeof body.error === 'string' ? body.error : '' };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Ask the issuer whether this configuration signs people in: discovery first,
- * then a token request for an authorization code that does not exist, with the
- * application id and secret as HTTP Basic and the configured redirect URI —
- * exactly the shape the real callback sends.
+ * then a token request for an authorization code that does not exist.
  *
- * A provider authenticates the client BEFORE it looks at the code, so its
- * refusal says which half was wrong: `invalid_client` is the credentials,
- * `invalid_grant` is the code (and so the credentials passed). Nothing else is
- * read as an answer either way.
+ * `invalid_client` is the credentials: refused. `invalid_grant` is the code,
+ * and says the credentials passed ONLY where the provider authenticates the
+ * client before it looks at the code. Not every provider does: Microsoft Entra
+ * refuses a malformed code first (AADSTS9002313), for any client id at all. So
+ * a code refusal is followed by the same request with the same client id and
+ * a made-up secret: only a provider that refuses that with `invalid_client`
+ * has shown it checks the secret before the code, and only then is the
+ * configuration Verified. Nothing else is read as an answer either way.
  *
  * THE SECRET GOES ONLY TO THE TOKEN ENDPOINT THIS ISSUER PUBLISHES, over
  * https, with redirects refused so it is never re-sent to a redirect target —
  * and never into a log line or a returned message: every message here is
  * fixed text, and the provider's response body is read for its `error` code
- * alone.
+ * alone. The control request carries the client id, never the real secret.
  *
  * The ONE function both "Test sign-in configuration" and the settings save
  * call, so the button can never say "verified" about values the save refuses.
@@ -160,43 +212,10 @@ export async function checkOidcConfiguration(
     return { outcome: 'rejected', reason: issuer.outcome, field: issuer.field, error: issuer.error };
   }
 
-  const basic = Buffer.from(
-    `${encodeURIComponent(config.clientId)}:${encodeURIComponent(config.clientSecret)}`,
-    'utf8',
-  ).toString('base64');
-  let status: number;
-  let errorCode = '';
-  try {
-    const res = await fetchImpl(issuer.tokenEndpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-        Authorization: `Basic ${basic}`,
-      },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        // Random, so it cannot collide with a code anyone was issued.
-        code: `hexis-configuration-check-${randomBytes(16).toString('hex')}`,
-        redirect_uri: config.redirectUri,
-        // No `code_verifier`: no challenge was ever issued for this code, and
-        // a PKCE-enforcing provider could answer a verifier it cannot match
-        // with something other than the code rejection this reads.
-      }).toString(),
-      redirect: 'error',
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    status = res.status;
-    const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-    if (body && typeof body.error === 'string') errorCode = body.error;
-  } catch {
-    return {
-      outcome: 'unverified',
-      error: 'The provider’s token endpoint did not answer, so the application ID and secret could not be verified.',
-    };
-  }
+  const answer = await requestMadeUpCode(issuer.tokenEndpoint, config, fetchImpl);
+  if (!answer) return NO_ANSWER;
 
-  if (errorCode === 'invalid_client') {
+  if (answer.errorCode === CLIENT_REJECTION) {
     return {
       outcome: 'rejected',
       reason: 'credentials',
@@ -204,13 +223,26 @@ export async function checkOidcConfiguration(
       error: 'The provider rejected the application ID or secret.',
     };
   }
-  if (CODE_REJECTIONS.includes(errorCode)) return { outcome: 'verified' };
-  // Only a standard error code is echoed (the one list the vault reads a
-  // refusal by too) — anything else could be text of the provider's choosing,
-  // the secret included.
-  const code = isStandardTokenErrorCode(errorCode) ? ` (${errorCode})` : ` (HTTP ${status})`;
+  if (answer.errorCode === CODE_REJECTION) {
+    const control = await requestMadeUpCode(issuer.tokenEndpoint, { ...config, clientSecret: madeUp() }, fetchImpl);
+    if (!control) return NO_ANSWER;
+    if (control.errorCode === CLIENT_REJECTION) return { outcome: 'verified' };
+    return {
+      outcome: 'unverified',
+      error: `The application ID and secret could not be verified — the provider did not refuse a made-up secret with invalid_client${observed(control)}.`,
+    };
+  }
   return {
     outcome: 'unverified',
-    error: `The application ID and secret could not be verified — the provider gave an answer that does not say whether they are right${code}.`,
+    error: `The application ID and secret could not be verified — the provider gave an answer that does not say whether they are right${observed(answer)}.`,
   };
+}
+
+/**
+ * What the provider answered, for a message. Only a standard error code is
+ * echoed (the one list the vault reads a refusal by too): anything else could
+ * be text of the provider's choosing, the secret included.
+ */
+function observed({ status, errorCode }: { status: number; errorCode: string }): string {
+  return isStandardTokenErrorCode(errorCode) ? ` (${errorCode})` : ` (HTTP ${status})`;
 }
