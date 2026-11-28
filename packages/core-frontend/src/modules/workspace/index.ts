@@ -42,7 +42,10 @@
  */
 export {
   CanDownloadContext,
+  hasFileViewer,
+  isBinaryFile,
   isViewOnlyFile,
+  rendersAsText,
   OpenPageInPlatformContext,
   PageToolsContext,
   pickFileRenderer,

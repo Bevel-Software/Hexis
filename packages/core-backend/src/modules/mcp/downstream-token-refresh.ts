@@ -14,6 +14,8 @@
  * manual) per minute so a broken grant can never loop the provider.
  */
 
+import { DownstreamToolError } from '@bevel-software/platform-mcp-core';
+
 /** How far up a `cause` chain to look before giving up. */
 const MAX_CAUSE_DEPTH = 8;
 
@@ -35,12 +37,19 @@ export const DOWNSTREAM_REFRESH_WINDOW_MS = 60_000;
  * STATES its HTTP status is believed over its prose, so a 403 whose body says
  * `invalid_token` (or any other non-401 status that mentions one) is not
  * refreshed: the status is the server's verdict, the message only its wording.
+ *
+ * A {@link DownstreamToolError} is never a rejection: the server accepted the
+ * token and ran the call, and its own answer said the call failed. Its words
+ * ("401 from the upstream API", "Unauthorized: page not shared") are the
+ * tool's, so a refresh would change nothing, and the retry would run the tool
+ * a second time.
  */
 export function isDownstreamTokenRejection(err: unknown): boolean {
   const seen = new Set<unknown>();
   let current = err;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && current != null && !seen.has(current); depth += 1) {
     seen.add(current);
+    if (current instanceof DownstreamToolError) return false;
     if (typeof current === 'string') return saysTokenRejected(current);
     if (typeof current !== 'object') return false;
     const e = current as Record<string, unknown>;

@@ -20,7 +20,7 @@ import type {
   ShareChangesRequest,
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
-import { isFolderPlaceholder } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder, isOwnBranch } from '@bevel-software/platform-shared';
 import { mergeCommitMessageNames } from './merge-commit.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { VersionControlHooks, CommitValidationContext } from '../version-control-hooks.js';
@@ -36,8 +36,6 @@ import { linkedAncestor } from '../../../shared/no-link-below.js';
 import {
   assertValidBranchName,
   assertValidRelativePath,
-  isBranchAuthoredBy,
-  isOwnSuggestionsBranch,
 } from '../../kb-fs/index.js';
 import type { KbContext } from '../../../shared/kb-context.js';
 import {
@@ -992,16 +990,15 @@ export class GitService implements IGitService {
    * predicate is the existing source of truth for `Admin`-role membership
    * inside the access model — no separate `isAdmin()` plumbing needed.
    *
-   * Two authorship conventions: `<localpart>/…` UI drafts, and the
-   * `suggestions/<who>-<id8>/…` namespace the propose flow files its branches
-   * under — a user resetting THEIR OWN suggestion bundle is deleting their
-   * own branch.
+   * Authorship is read by `isOwnBranch`, the one predicate the branch
+   * switcher's delete button reads too. Two conventions make a branch
+   * theirs: `<localpart>/…` drafts, and their `suggestions/<who>-<id8>/…`
+   * prefix, which holds the Knowledge bundle the propose flow files (a user
+   * resetting THEIR OWN bundle is deleting their own branch) and the drafts
+   * of a person whose address has no usable localpart.
    */
   async mayDeleteBranch(workspaceId: string, name: string, user: AuthUser): Promise<boolean> {
-    const isAuthor =
-      isBranchAuthoredBy(name, user.email) ||
-      isOwnSuggestionsBranch(name, { email: user.email, id: user.id });
-    if (isAuthor) return true;
+    if (isOwnBranch(name, { email: user.email, id: user.id })) return true;
     return this.accessControl
       ? await this.accessControl.canWrite(workspaceId, user.email, 'roles.yaml')
       : false;

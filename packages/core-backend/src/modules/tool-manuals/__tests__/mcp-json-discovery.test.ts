@@ -273,3 +273,45 @@ describe('descriptorsFromMcpJson', () => {
     ).toEqual([]);
   });
 });
+
+describe('excludeTools in the plugin.json extension', () => {
+  const MCP = JSON.stringify({ mcpServers: { notion: { type: 'streamable-http', url: 'https://mcp.notion.com/mcp' } } });
+  const manifestWith = (excludeTools: unknown) =>
+    JSON.stringify({ name: 'support', extensions: { 'software.bevel.hexis': { mcpServers: { notion: { excludeTools } } } } });
+
+  it('carries the left-out tools onto the server, each once', () => {
+    const [notion] = fromMcpJson('Support', MCP, manifestWith(['notion-spawn-session', 'notion-stop-session', 'notion-spawn-session']));
+    expect(notion?.excludeTools).toEqual(['notion-spawn-session', 'notion-stop-session']);
+  });
+
+  it('leaves the field off a server that excludes nothing: no list, or an empty one', () => {
+    for (const manifest of [null, manifestWith([])]) {
+      const [notion] = fromMcpJson('Support', MCP, manifest);
+      expect(notion).toBeDefined();
+      expect(notion?.excludeTools).toBeUndefined();
+    }
+  });
+
+  it('reads a manifest that does not parse, or a server entry in it that is no object, as no list: the server is offered whole, and the warning says the lists are ignored', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const [unparsable] = fromMcpJson('Support', MCP, '{ not json');
+    expect(unparsable).toMatchObject({ slug: 'notion' });
+    expect(unparsable?.excludeTools).toBeUndefined();
+    expect(warn.mock.calls.flat().join(' ')).toMatch(/plugin\.json is not valid JSON.*excludeTools/);
+
+    const notAnObject = JSON.stringify({ name: 'support', extensions: { 'software.bevel.hexis': { mcpServers: { notion: 'spawn' } } } });
+    const [whole] = fromMcpJson('Support', MCP, notAnObject);
+    expect(whole).toMatchObject({ slug: 'notion' });
+    expect(whole?.excludeTools).toBeUndefined();
+  });
+
+  it('keeps a server with a malformed list offline instead of offering every tool', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const refused: string[] = [];
+    const out = descriptorsFromMcpJson('Support', MCP, manifestWith('notion-spawn-session'), DEFAULT_KB_LAYOUT, (server, reason) =>
+      refused.push(`${server}: ${reason}`),
+    );
+    expect(out).toEqual([]);
+    expect(refused).toEqual([expect.stringMatching(/^notion: .*excludeTools/)]);
+  });
+});

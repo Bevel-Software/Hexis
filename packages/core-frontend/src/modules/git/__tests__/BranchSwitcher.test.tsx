@@ -11,25 +11,23 @@ import type {
 // admin-membership signal). Default the mock to `canWrite: false` so the
 // existing author-only / dropdown tests keep their non-admin semantics;
 // admin-specific cases below override the resolved value in `beforeEach`.
-vi.mock('../../access/api', () => ({
+vi.mock('../../access', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../access')>()),
   fetchFileAccess: vi.fn().mockResolvedValue({
     canWrite: false,
       canDownload: false,
     eligible: { roles: [], users: [] },
   }),
 }));
-import { fetchFileAccess } from '../../access/api';
+import { suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
+import { fetchFileAccess } from '../../access';
 
 import { BranchSwitcher } from '../components/BranchSwitcher';
 import { ConfirmProvider } from '../../../shared/components';
 import { askBeforeBranchDelete } from '../state/branch-delete-confirm';
 import { GitContext, type GitContextValue } from '../state/git.context';
-import { ReviewContext, type ReviewContextValue } from '../../review/state/review.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
-import {
-  WorkspaceContext,
-  type WorkspaceContextValue,
-} from '../../workspace/state/workspace.context';
+import { AuthContext, type AuthContextValue } from '../../auth';
+import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace';
 
 function makeStatus(overrides: Partial<WorkingTreeStatus> = {}): WorkingTreeStatus {
   return {
@@ -61,27 +59,8 @@ function makeGit(overrides: Partial<GitContextValue> = {}): GitContextValue {
   };
 }
 
-function makeReview(overrides: Partial<ReviewContextValue> = {}): ReviewContextValue {
-  return {
-    session: null,
-    selectedPath: null,
-    fileDiff: null,
-    isLoadingDiff: false,
-    lastError: null,
-    isLoading: false,
-    refresh: async () => {},
-    selectPath: async () => {},
-    acceptOne: async () => {},
-    rejectOne: async () => {},
-    acceptAll: async () => {},
-    rejectAll: async () => {},
-    clearError: () => {},
-    ...overrides,
-  };
-}
-
 // BranchSwitcher mounts DirtySwitchDialog + ShareChangesDialog (both closed),
-// whose hook bodies still reach into Auth / Chat / Workspace / Review on mount.
+// whose hook bodies still reach into Auth / Chat / Workspace on mount.
 const auth = {
   user: { id: 'u1', email: 'alice@example.com', name: 'Alice' },
   token: 't',
@@ -102,9 +81,7 @@ function renderSwitcher(git: GitContextValue = makeGit(), authValue: AuthContext
       <AuthContext.Provider value={authValue}>
         <WorkspaceContext.Provider value={workspace}>
           <GitContext.Provider value={git}>
-            <ReviewContext.Provider value={makeReview()}>
-              <BranchSwitcher />
-            </ReviewContext.Provider>
+            <BranchSwitcher />
           </GitContext.Provider>
         </WorkspaceContext.Provider>
       </AuthContext.Provider>
@@ -187,6 +164,40 @@ describe('BranchSwitcher dropdown', () => {
 // (the orphan-cleanup mental model). Now the picker also offers delete for
 // drafts authored by the current user (per `<email-localpart>/...` naming),
 // and routes the destructive remote-delete through a confirm dialog.
+describe('BranchSwitcher: naming a new draft', () => {
+  it.each([
+    ['alice@example.com', 'alice/fix-the-typo'],
+    // No usable local-part: the person's own `suggestions/` prefix, which they can delete.
+    ['+++@example.com', 'suggestions/user-u1/fix-the-typo'],
+    // A local-part no branch name can start with (`-ops`) is no prefix either.
+    ['_ops@example.com', 'suggestions/_ops-u1/fix-the-typo'],
+  ])("gives a draft made as %s the prefix that makes it its maker's own", async (email, expected) => {
+    const user = { id: 'u1', email, name: 'Someone' };
+    const createBranch = vi.fn(async () => {});
+    renderSwitcher(makeGit({ createBranch }), { ...auth, user } as unknown as AuthContextValue);
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+    fireEvent.click(screen.getByText('Start a shared draft…'));
+    const input = screen.getByPlaceholderText('e.g. Add owner to Checkout process');
+    fireEvent.change(input, { target: { value: 'Fix the typo' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(createBranch).toHaveBeenCalledWith(expected));
+  });
+
+  it('never sends a name without a prefix: with nobody signed in it creates nothing', async () => {
+    const createBranch = vi.fn(async () => {});
+    renderSwitcher(makeGit({ createBranch }), { ...auth, user: null } as unknown as AuthContextValue);
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+    fireEvent.click(screen.getByText('Start a shared draft…'));
+    const input = screen.getByPlaceholderText('e.g. Add owner to Checkout process');
+    fireEvent.change(input, { target: { value: 'Fix the typo' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    // The input is still there with what was typed: nothing was created or navigated to.
+    await waitFor(() => expect(screen.getByPlaceholderText('e.g. Add owner to Checkout process')).toHaveValue('Fix the typo'));
+    expect(createBranch).not.toHaveBeenCalled();
+  });
+});
+
 describe('BranchSwitcher: author-can-delete affordance', () => {
   beforeEach(() => {
     vi.mocked(fetchFileAccess).mockResolvedValue({
@@ -246,6 +257,17 @@ describe('BranchSwitcher: author-can-delete affordance', () => {
         'Delete shared draft "bob/other-draft": removes it for everyone',
       ),
     ).toBeNull();
+  });
+
+  it("shows the delete button for the user's own suggestions draft", () => {
+    const user = { id: 'u1', email: '+++@example.com', name: 'No localpart' };
+    const own = `${suggestionsBranchPrefixFor(user)}fix-typo`;
+    renderSwitcher(
+      makeGitWithBranches([{ name: own, isProtected: false, hasRemote: true }]),
+      { ...auth, user } as unknown as AuthContextValue,
+    );
+    fireEvent.click(screen.getByTitle('Your active shared draft'));
+    expect(screen.getByLabelText(`Delete shared draft "${own}": removes it for everyone`)).toBeInTheDocument();
   });
 
   it('keeps the orphan-cleanup path (hasRemote=false) deletable for anyone', () => {
