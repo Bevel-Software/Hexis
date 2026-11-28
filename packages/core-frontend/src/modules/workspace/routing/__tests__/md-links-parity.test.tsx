@@ -105,13 +105,15 @@ describe('md-links agrees with the app on a shared fixture set', () => {
     }
   });
 
+  // The whole target the app navigates to: a relative or root link opens on the
+  // branch the reader stands on (null), an app URL on the branch it names.
   it.each([
-    ['bare', '[n](../B/notes.md#risks)'],
-    ['angle', '[n](<../B/notes.md#risks>)'],
-    ['encoded', '[n](../%42/notes.md#risks)'],
-    ['root', `[n](/${KB}/Projects/B/notes.md#risks)`],
-    ['app URL', `[n](/workspace/main/${KB}/Projects/B/notes.md#risks)`],
-  ])('a %s link rewritten to a name with # and %% opens the moved file in the app', (_form, page) => {
+    ['bare', '[n](../B/notes.md#risks)', null],
+    ['angle', '[n](<../B/notes.md#risks>)', null],
+    ['encoded', '[n](../%42/notes.md#risks)', null],
+    ['root', `[n](/${KB}/Projects/B/notes.md#risks)`, null],
+    ['app URL', `[n](/workspace/main/${KB}/Projects/B/notes.md#risks)`, 'main'],
+  ])('a %s link rewritten to a name with # and %% opens the moved file in the app', (_form, page, branch) => {
     const dest = `${KB}/Projects/Team/Nötes #1 50% ✓?.md`;
     const { text } = rewriteMdLinks(page, {
       oldPath: BASE,
@@ -122,7 +124,12 @@ describe('md-links agrees with the app on a shared fixture set', () => {
     });
     expect(text).not.toBe(page);
     const [href] = rendered(text);
-    expect(resolveKbHref(href, { basePath: BASE, kbDirName: KB })).toMatchObject({ path: dest, hash: '#risks' });
+    expect(resolveKbHref(href, { basePath: BASE, kbDirName: KB })).toEqual({
+      kind: 'workspace',
+      branch,
+      path: dest,
+      hash: '#risks',
+    });
   });
 
   it('link syntax inside inline code: a link to neither the app nor the rewriter', () => {
