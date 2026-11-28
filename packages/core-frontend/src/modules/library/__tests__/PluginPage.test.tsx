@@ -249,6 +249,7 @@ describe('PluginPage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Remove outreach' }));
     expect(await screen.findByText(/Everyone here loses it/)).toBeInTheDocument();
+    expect(screen.queryByText(/Only you lose it/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
 
     // The skill FOLDER, repo-relative — the recursive delete under it runs

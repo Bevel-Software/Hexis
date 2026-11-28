@@ -192,6 +192,18 @@ describe('your own space', () => {
     ).toBeInTheDocument();
   });
 
+  // Nobody else has your space, so the confirm must not warn that everyone
+  // loses the skill: only its owner does. The shared-plugin warning is pinned
+  // in `PluginPage.test`.
+  it('confirms a skill removal as losing it for you alone, not for everyone', async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove rfi' }));
+    const dialog = await screen.findByRole('dialog', { name: /Remove rfi\?/ });
+    expect(within(dialog).getByText(/Only you lose it/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Everyone here/)).toBeNull();
+  });
+
   it('leaves the tool card alone', async () => {
     renderPage();
 
