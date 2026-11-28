@@ -1,11 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
-import {
-  OpenChangeRequestsContext,
-  NO_CHANGE_REQUESTS,
-} from '../../workspace/state/open-change-requests.context';
+import type { useEventBus } from '../../version-control';
 
 /**
  * The file page's proposal boxes. Approval rights come from the FILE, not from
@@ -18,6 +14,7 @@ const api = vi.hoisted(() => ({
   readFileAtForkPoint: vi.fn(),
   fetchPrDetail: vi.fn(),
   approvePrFile: vi.fn(),
+  revertPrFile: vi.fn(),
   mergePullRequest: vi.fn(),
   cancelPullRequest: vi.fn(),
 }));
@@ -25,13 +22,30 @@ vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: api.readFileOnBranch,
   readFileAtForkPoint: api.readFileAtForkPoint,
 }));
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: api.fetchPrDetail }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: api.approvePrFile }));
-vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: api.mergePullRequest }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({ cancelPullRequest: api.cancelPullRequest }));
+// The pr module through its entry, as the components import it: the calls these boxes make are faked, the rest is real.
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  fetchPrDetail: api.fetchPrDetail,
+  approvePrFile: api.approvePrFile,
+  revertPrFile: api.revertPrFile,
+  mergePullRequest: api.mergePullRequest,
+  cancelPullRequest: api.cancelPullRequest,
+}));
+// What the boxes ask the app around them, stubbed at the public hooks they call: the event bus the apply listens on,
+// and which open requests are the viewer's own.
+const around = vi.hoisted(() => ({ bus: null as unknown, mineNumbers: new Set<number>() }));
+vi.mock('../../version-control', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../version-control')>()),
+  useEventBus: () => around.bus,
+}));
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
+  useOpenChangeRequests: () => ({ paths: new Set<string>(), forPath: () => [], minePaths: new Map<string, number>(), mineNumbers: around.mineNumbers }),
+}));
 
 import { FileChangeBoxes } from '../components/FileChangeBoxes';
 import { othersPendingBesides, waitingOnViewerLabel } from '../utils/author';
+import { PR_STALE_EVENT } from '../../../core/events';
 
 const PATH = 'Docs/guide.md';
 
@@ -51,7 +65,7 @@ const CR: PullRequestSummary = {
 
 function makeFakeBus() {
   const handlers: Record<string, ((e: VersionControlEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: VersionControlEvent): void } = {
+  const bus: NonNullable<ReturnType<typeof useEventBus>> & { emit(e: VersionControlEvent): void } = {
     subscribe(kind, handler) {
       (handlers[kind] ??= []).push(handler as (e: VersionControlEvent) => void);
       return () => {
@@ -71,21 +85,17 @@ function makeFakeBus() {
 
 function renderBoxes(opts: { mine: boolean; canDecide: boolean; othersPending?: number }) {
   const bus = makeFakeBus();
+  around.bus = bus;
+  around.mineNumbers = new Set(opts.mine ? [CR.number] : []);
   render(
-    <EventBusContext.Provider value={bus}>
-      <OpenChangeRequestsContext.Provider
-        value={{ ...NO_CHANGE_REQUESTS, mineNumbers: new Set(opts.mine ? [CR.number] : []) }}
-      >
-        <FileChangeBoxes
-          repoRelativePath={PATH}
-          requests={[CR]}
-          canDecide={opts.canDecide}
-          ownersLabel="Docs"
-          othersPending={opts.othersPending}
-          onApplied={() => {}}
-        />
-      </OpenChangeRequestsContext.Provider>
-    </EventBusContext.Provider>,
+    <FileChangeBoxes
+      repoRelativePath={PATH}
+      requests={[CR]}
+      canDecide={opts.canDecide}
+      ownersLabel="Docs"
+      othersPending={opts.othersPending}
+      onApplied={() => {}}
+    />,
   );
   return bus;
 }
@@ -115,6 +125,7 @@ beforeEach(() => {
   api.approvePrFile.mockResolvedValue([]);
   api.mergePullRequest.mockResolvedValue(undefined);
   api.cancelPullRequest.mockResolvedValue(undefined);
+  api.revertPrFile.mockResolvedValue({ closed: false, remainingPaths: ['Docs/other.md'] });
 });
 
 describe('FileChangeBoxes: who may decide', () => {
@@ -159,6 +170,86 @@ describe('FileChangeBoxes: who may decide', () => {
     expect(
       await screen.findByText('Published: the file now reads with that change.'),
     ).toBeInTheDocument();
+  });
+});
+
+describe('FileChangeBoxes: Decline and Withdraw', () => {
+  it('Decline reverts only THIS file and does not cancel the request', async () => {
+    renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+
+    await waitFor(() => expect(api.revertPrFile).toHaveBeenCalledWith(CR.number, PATH));
+    expect(api.cancelPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('a Decline the server refuses says so', async () => {
+    api.revertPrFile.mockRejectedValue(new Error('You may not decline this file.'));
+    renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('You may not decline this file.');
+  });
+
+  it("Withdraw is still the author's take-back of the whole request", async () => {
+    renderBoxes({ mine: true, canDecide: false, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Withdraw' }));
+
+    await waitFor(() => expect(api.cancelPullRequest).toHaveBeenCalledWith(CR.number));
+    expect(api.revertPrFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('FileChangeBoxes: what the whole-change dialog settled', () => {
+  /** The request's detail as the dialog reads it: one file, the viewer's to approve, approved already or not. */
+  const fullDetail = (isApproved = false) => ({
+    ...CR,
+    body: '',
+    headSha: 'h',
+    baseSha: 'b',
+    files: [{ path: PATH, status: 'modified' as const, additions: 1, deletions: 1, isBinary: false, sha: '', rawUrl: '' }],
+    approvals: [{ path: PATH, eligibleApprovers: { roles: ['Docs'], users: [] }, approvedBy: [], isApproved, inMergeGate: true, viewerCanApprove: true }],
+    mergeableInBevel: true,
+    mergeBlockedReasons: [],
+    mergeWarnings: [],
+    viewerCanBypassMerge: false,
+    viewerCanCancel: false,
+  });
+
+  it('says Published when the dialog applied the request', async () => {
+    api.fetchPrDetail.mockResolvedValue(fullDetail(true));
+    const bus = renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Read the whole change' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply changes' }));
+    await waitFor(() => expect(api.mergePullRequest).toHaveBeenCalledWith(CR.number));
+    act(() => {
+      bus.emit({ kind: 'change-request-merged', number: CR.number } as unknown as VersionControlEvent);
+    });
+
+    expect(await screen.findByText('Published: the file now reads with that change.')).toBeInTheDocument();
+  });
+
+  it('says nothing was published when the dialog closed the request by declining its last file', async () => {
+    api.fetchPrDetail.mockResolvedValue(fullDetail());
+    api.revertPrFile.mockResolvedValue({ closed: true, remainingPaths: [] });
+    const stale = vi.fn();
+    window.addEventListener(PR_STALE_EVENT, stale);
+    renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Read the whole change' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this file' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Really decline this file?' }));
+
+    await waitFor(() => expect(api.revertPrFile).toHaveBeenCalledWith(CR.number, PATH));
+    // The dialog is gone and the lists are told to refresh, but nothing claims the change landed.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Really decline this file?' })).not.toBeInTheDocument());
+    expect(stale).toHaveBeenCalled();
+    expect(screen.queryByText('Published: the file now reads with that change.')).not.toBeInTheDocument();
+    expect(api.mergePullRequest).not.toHaveBeenCalled();
+    window.removeEventListener(PR_STALE_EVENT, stale);
   });
 });
 

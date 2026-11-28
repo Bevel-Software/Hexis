@@ -26,7 +26,7 @@ import { GitApiError, friendlyGitError, friendlyGitMessage } from '../../git';
 import { GitSyncFailedBanner } from '../../git/components/GitSyncFailedBanner';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { WorkspaceApiError } from '../../workspace';
+import { WorkspaceApiError, hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace';
 import { describeReadFailure } from '../services/denied-file.api';
 import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
@@ -35,7 +35,6 @@ import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { useForkPointFileRead } from '../hooks/useForkPointFile';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace/components/renderers';
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
@@ -55,6 +54,9 @@ export interface ChangeRequestScope {
   baseFiles: string[];
 }
 
+/** How a change request the dialog settled ended: merged, or closed with nothing merged. */
+export type ChangeRequestOutcome = 'applied' | 'closed';
+
 interface ChangeRequestDialogProps {
   cr: PullRequestSummary;
   scope?: ChangeRequestScope;
@@ -70,9 +72,14 @@ interface ChangeRequestDialogProps {
    */
   initialPath?: string;
   onClose(): void;
-  /** Applying is the only verdict this view reaches. Declining a change
-   *  request lives on the skill page, beside the request's own row. */
-  onResolved(): void;
+  /**
+   * The request is settled and the dialog's subject is gone, and how:
+   * `applied` when its changes were merged, `closed` when it ended with
+   * nothing merged (its last file declined, or the request deleted). A caller
+   * that tells the person what happened reads it; one that only refreshes can
+   * ignore it.
+   */
+  onResolved(outcome: ChangeRequestOutcome): void;
 }
 
 /**
@@ -691,11 +698,21 @@ export function ChangeRequestDialog({
     detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved || a.viewerCanApprove) &&
     detail.approvals.some((a) => a.isApproved || a.viewerCanApprove);
 
-  /** Approve / revert verbs — approve from the file header and the footer, revert from the tree. */
+  /**
+   * Approve / decline verbs — approve from the file header and the footer,
+   * decline from the file header and the tree's right-click "Revert file…".
+   */
   const [verbBusy, setVerbBusy] = useState(false);
   const [verbError, setVerbError] = useState<string | null>(null);
+  /**
+   * The file whose header Decline was pressed once and now asks to be sure,
+   * the same armed second click the tree's menu takes. Moving to another file
+   * disarms it, so coming back to this one asks again.
+   */
+  const [declineArmedFor, setDeclineArmedFor] = useState<string | null>(null);
   useEffect(() => {
     setVerbError(null);
+    setDeclineArmedFor(null);
   }, [selected]);
 
   /**
@@ -752,9 +769,9 @@ export function ChangeRequestDialog({
       const result = await revertPrFile(cr.number, path);
       if (result.closed) {
         // That was the last file: the request closed itself and its branch
-        // is retired. The dialog's subject is gone — leave through the same
-        // door an apply does, so every list behind it refreshes.
-        onResolved();
+        // is retired, with nothing merged. The dialog's subject is gone, so
+        // every list behind it refreshes — and is told it was not applied.
+        onResolved('closed');
         return;
       }
       // The file is out of the diff; the branch copy we cached for it is
@@ -884,7 +901,7 @@ export function ChangeRequestDialog({
     setVerbError(null);
     try {
       await deleteChangeRequest(cr.number);
-      onResolved();
+      onResolved('closed');
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't delete this change request.");
       setDeleting(false);
@@ -963,7 +980,7 @@ export function ChangeRequestDialog({
    * why awaiting it is not an answer.
    */
   const applying = useApplyChangeRequest({
-    onApplied: () => onResolved(),
+    onApplied: () => onResolved('applied'),
     onFailed: (_number, refusal) => {
       // Git refusing the merge IS the conflict answer — say what happened and
       // what fixes it, instead of leaving a button that will fail again. Any
@@ -1403,9 +1420,35 @@ export function ChangeRequestDialog({
                   size="tiny"
                   className="ml-auto shrink-0"
                   disabled={verbBusy || applyBusy || bringingUpToDate}
-                  onClick={() => void toggleApprove(selected, headerVerb === 'undo')}
+                  onClick={() => {
+                    setDeclineArmedFor(null);
+                    void toggleApprove(selected, headerVerb === 'undo');
+                  }}
                 >
                   {headerVerb === 'approve' ? 'Approve this file' : 'Approved – Undo'}
+                </Button>
+              )}
+              {/* Approve's counterpart, beside it: the tree's right-click
+                  "Revert file…" was the only way to say no to one file, and
+                  nobody found it. Same verb, same gate (a changed file the
+                  viewer may approve), same armed second click. */}
+              {headerVerb && (
+                <Button
+                  variant="danger"
+                  size="tiny"
+                  className="shrink-0"
+                  title="Take this file's changes out of the request. The other files stay in it."
+                  disabled={verbBusy || applyBusy || bringingUpToDate}
+                  onClick={() => {
+                    if (declineArmedFor === selected) {
+                      setDeclineArmedFor(null);
+                      void revertFile(selected);
+                    } else {
+                      setDeclineArmedFor(selected);
+                    }
+                  }}
+                >
+                  {declineArmedFor === selected ? 'Really decline this file?' : 'Decline this file'}
                 </Button>
               )}
             </div>

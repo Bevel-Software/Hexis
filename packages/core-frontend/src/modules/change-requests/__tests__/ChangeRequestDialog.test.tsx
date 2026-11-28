@@ -11,35 +11,33 @@ import type { FileApprovalState, PullRequestSummary } from '@bevel-software/plat
  */
 
 const detailMock = vi.hoisted(() => ({ fetchPrDetail: vi.fn() }));
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: detailMock.fetchPrDetail }));
 
 vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: vi.fn(async () => 'branch copy'),
 }));
 const approvalsApi = vi.hoisted(() => ({ approvePrFile: vi.fn(), revertPrFile: vi.fn(), unapprovePrFile: vi.fn() }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({
-  approvePrFile: approvalsApi.approvePrFile,
-  revertPrFile: approvalsApi.revertPrFile,
-  unapprovePrFile: approvalsApi.unapprovePrFile,
-}));
 const mergeApi = vi.hoisted(() => ({
   mergePullRequest: vi.fn(),
   refreshChangeRequestFromTarget: vi.fn(),
 }));
-vi.mock('../../pr/services/pr-merge.api', () => ({
+const cancelApi = vi.hoisted(() => ({ deleteChangeRequest: vi.fn() }));
+// The pr module through its entry, as the dialog imports it: the calls the dialog makes are faked, the rest is real.
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  fetchPrDetail: detailMock.fetchPrDetail,
+  approvePrFile: approvalsApi.approvePrFile,
+  revertPrFile: approvalsApi.revertPrFile,
+  unapprovePrFile: approvalsApi.unapprovePrFile,
   mergePullRequest: mergeApi.mergePullRequest,
   refreshChangeRequestFromTarget: mergeApi.refreshChangeRequestFromTarget,
-}));
-const cancelApi = vi.hoisted(() => ({ deleteChangeRequest: vi.fn() }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({
   cancelPullRequest: vi.fn(),
   deleteChangeRequest: cancelApi.deleteChangeRequest,
 }));
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
-import { AuthContext } from '../../auth/state/auth.context';
+import { AuthContext } from '../../auth';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { GitApiError } from '../../git/services/git.api';
+import { GitApiError } from '../../git';
 
 const CR: PullRequestSummary = {
   number: 12,
@@ -382,7 +380,81 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Really revert this file?' }));
 
     await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
-    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith('closed'));
+  });
+
+  it('the header offers Decline beside Approve, with its own confirm; the last file resolves the dialog', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([approval({ viewerCanApprove: true })]),
+    );
+    approvalsApi.revertPrFile.mockReset();
+    approvalsApi.revertPrFile.mockResolvedValue({ closed: true, remainingPaths: [] });
+    const onResolved = vi.fn();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
+
+    const approve = await screen.findByRole('button', { name: 'Approve this file' });
+    const decline = screen.getByRole('button', { name: 'Decline this file' });
+    // Beside Approve, so the reviewer finds both answers where they read.
+    expect(approve.nextElementSibling).toBe(decline);
+
+    fireEvent.click(decline);
+    // Nothing sent yet — the armed second click is the verdict.
+    expect(approvalsApi.revertPrFile).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Really decline this file?' }));
+
+    await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith('closed'));
+  });
+
+  it('declining one of two files keeps the dialog open on the rest', async () => {
+    const both = detailWith([
+      approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+      approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+    ]);
+    const onlyB = detailWith([approval({ path: 'Docs/b.md', viewerCanApprove: true })]);
+    detailMock.fetchPrDetail.mockResolvedValueOnce(both).mockResolvedValue(onlyB);
+    approvalsApi.revertPrFile.mockReset();
+    approvalsApi.revertPrFile.mockResolvedValue({ closed: false, remainingPaths: ['Docs/b.md'] });
+    const onResolved = vi.fn();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={onResolved} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this file' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Really decline this file?' }));
+
+    await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+    await waitFor(() => expect(screen.queryByTitle('Docs/a.md')).not.toBeInTheDocument());
+    expect(screen.getByTitle('Docs/b.md')).toBeInTheDocument();
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+
+  it('moving to another file disarms Decline, and coming back asks again', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+        approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+      ]),
+    );
+    approvalsApi.revertPrFile.mockReset();
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this file' }));
+    expect(screen.getByRole('button', { name: 'Really decline this file?' })).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('Docs/b.md'));
+    expect(await screen.findByRole('button', { name: 'Decline this file' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Really decline this file?' })).not.toBeInTheDocument();
+
+    // Back on the first file: still disarmed, so one click only arms again.
+    fireEvent.click(screen.getByTitle('Docs/a.md'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this file' }));
+    expect(screen.getByRole('button', { name: 'Really decline this file?' })).toBeInTheDocument();
+    expect(approvalsApi.revertPrFile).not.toHaveBeenCalled();
+  });
+
+  it('offers no Decline to a viewer who cannot approve the file', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(detailWith([approval({})]));
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    await screen.findByText('Waiting on Admin');
+    expect(screen.queryByRole('button', { name: 'Decline this file' })).not.toBeInTheDocument();
   });
 
   /**
@@ -411,7 +483,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
       screen.getByRole('button', { name: `Really delete request and branch ${CR.branch}?` }),
     );
     await waitFor(() => expect(cancelApi.deleteChangeRequest).toHaveBeenCalledWith(12));
-    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith('closed'));
   });
 
   it('shows no Delete request when the server says the viewer may not delete', async () => {

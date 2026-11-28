@@ -1,14 +1,13 @@
 import { useCallback, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { Banner, Button } from '../../../shared/components';
-import { cancelPullRequest } from '../../pr';
-import { useOpenChangeRequests, displayFileName, fileNameTooltip } from '../../workspace';
+import { cancelPullRequest, revertPrFile } from '../../pr';
+import { useOpenChangeRequests, displayFileName, fileNameTooltip, isBinaryFile } from '../../workspace';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { refusalLine, useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
 import { changeAuthorName, formatWhen } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
-import { isBinaryFile } from '../../workspace/components/renderers';
 import { ChangeBox } from './ChangeBox';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
 
@@ -39,7 +38,8 @@ export interface FileChangeBoxesProps {
  *
  * Owns the whole decision loop: per-request diffs from each request's fork
  * point (see `useCrFileDiffs`), Approve (approvals → merge → wait for the outcome event),
- * Decline, the author's Withdraw, and "Read the whole change" opening the
+ * Decline (this file only), the author's Withdraw (the whole request), and
+ * "Read the whole change" opening the
  * shared {@link ChangeRequestDialog}. Resolutions dispatch
  * {@link PR_STALE_EVENT} so the tree dots, the tabs and this very list
  * refetch.
@@ -84,7 +84,7 @@ export function FileChangeBoxes({
     },
   });
 
-  /** Decline (an owner's no) and Withdraw (the author's) are the same cancel. */
+  /** Withdraw: the author takes back their whole request. */
   const cancel = useCallback(async (cr: PullRequestSummary) => {
     setBusyCr(cr.number);
     setActionError(null);
@@ -97,6 +97,28 @@ export function FileChangeBoxes({
       setBusyCr(null);
     }
   }, []);
+
+  /**
+   * Decline: an owner's no to THIS file, which is what the box sits under and
+   * asks about. Only this file's change leaves the request (the dialog's
+   * "Decline this file" and the tree's "Revert file…"); the request's other
+   * files stay proposed. Declining its last file closes the request.
+   */
+  const decline = useCallback(
+    async (cr: PullRequestSummary) => {
+      setBusyCr(cr.number);
+      setActionError(null);
+      try {
+        await revertPrFile(cr.number, repoRelativePath);
+        window.dispatchEvent(new Event(PR_STALE_EVENT));
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : "Couldn't decline this change.");
+      } finally {
+        setBusyCr(null);
+      }
+    },
+    [repoRelativePath],
+  );
 
   const boxes = requests.filter((c) => c.touchedNodePaths.includes(repoRelativePath));
 
@@ -149,7 +171,7 @@ export function FileChangeBoxes({
             busy={busyCr === cr.number || applying.activeCr === cr.number}
             phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
             onApprove={() => applying.apply(cr)}
-            onDecline={() => void cancel(cr)}
+            onDecline={() => void decline(cr)}
             onWithdraw={() => void cancel(cr)}
             onOpenFull={() => setOpenCr(cr)}
           />
@@ -160,11 +182,13 @@ export function FileChangeBoxes({
         <ChangeRequestDialog
           cr={openCr}
           onClose={() => setOpenCr(null)}
-          // Applying is the only verdict the dialog reaches now — declining
-          // and withdrawing live on the boxes.
-          onResolved={() => {
+          // Applied: published, the same banner the box's own Approve shows.
+          // Closed (its last file declined, or the request deleted): nothing
+          // was published, so the lists refresh and no banner says otherwise.
+          onResolved={(outcome) => {
             setOpenCr(null);
-            resolved();
+            if (outcome === 'applied') resolved();
+            else window.dispatchEvent(new Event(PR_STALE_EVENT));
           }}
         />
       )}
