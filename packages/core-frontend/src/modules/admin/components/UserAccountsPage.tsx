@@ -24,16 +24,18 @@ import {
  * wins over the system flag for the same reason: the server reports
  * `isEnvAdmin` only while it accepts the environment password for that address
  * (`ADMIN_EMAIL` with `ADMIN_PASSWORD` set and password login on), whatever
- * else the address is. Any other account the platform runs its own work as
- * signs in with nothing, unless its row still holds a hash from before (no
- * password write gives it one now): password sign-in accepts that hash.
+ * else the address is. Any other account the platform runs its own work as is
+ * named for what it is, and nothing is claimed about whether it signs in: that
+ * rests on server settings this page cannot see (a bot address overridden to
+ * one the identity provider knows signs in through it; a hash left from before
+ * signs in while password login is on).
  */
 function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin' | 'isSystem'>): string {
   if (account.isEnvAdmin) return 'Password (owner)';
   if (account.isSystem) {
     return account.hasPassword
-      ? 'System account — still signs in with an old stored password'
-      : 'System account — nobody signs in with it';
+      ? 'System account — holds a stored password from before'
+      : 'System account — the platform runs its own work as it';
   }
   if (account.hasPassword) return 'Password';
   return 'No password — signs in with single sign-on';
@@ -51,7 +53,7 @@ function signInAfterDelete(account: AccountSummary): string {
   if (account.isSystem) {
     return account.hasPassword
       ? `${label}: deleting it removes that password.`
-      : `${label}, so deleting it takes nobody's sign-in away.`;
+      : `${label}.`;
   }
   if (account.hasPassword) {
     return `${label}: to sign in again they will need an admin to create a new account for them.`;
