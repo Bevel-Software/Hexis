@@ -20,10 +20,23 @@ import {
 /**
  * How an account signs in, in the words this page uses everywhere (the row and
  * the delete confirmation). The deployment admin wins over a stored hash: both
- * can be true, and the environment credential is the one that survives.
+ * can be true, and the environment credential is the one that survives. It
+ * wins over the system flag for the same reason: the server reports
+ * `isEnvAdmin` only while it accepts the environment password for that address
+ * (`ADMIN_EMAIL` with `ADMIN_PASSWORD` set and password login on), whatever
+ * else the address is. Any other account the platform runs its own work as is
+ * named for what it is, and nothing is claimed about whether it signs in: that
+ * rests on server settings this page cannot see (a bot address overridden to
+ * one the identity provider knows signs in through it; a hash left from before
+ * signs in while password login is on).
  */
-function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin'>): string {
+function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin' | 'isSystem'>): string {
   if (account.isEnvAdmin) return 'Password (owner)';
+  if (account.isSystem) {
+    return account.hasPassword
+      ? 'System account — holds a stored password from before'
+      : 'System account — the platform runs its own work as it';
+  }
   if (account.hasPassword) return 'Password';
   return 'No password — signs in with single sign-on';
 }
@@ -36,6 +49,11 @@ function signInAfterDelete(account: AccountSummary): string {
   const label = signInMethodLabel(account);
   if (account.isEnvAdmin) {
     return `${label}: they can still sign in with the owner password set on the server, but will start fresh.`;
+  }
+  if (account.isSystem) {
+    return account.hasPassword
+      ? `${label}: deleting it removes that password.`
+      : `${label}.`;
   }
   if (account.hasPassword) {
     return `${label}: to sign in again they will need an admin to create a new account for them.`;
@@ -428,10 +446,12 @@ export function UserAccountsPage() {
                         <span className="text-meta text-ink-muted text-right max-w-[13rem]">
                           Password set in the deployment environment
                         </span>
-                      ) : account.isOwner ? null : (
+                      ) : account.isOwner || account.isSystem ? null : (
                         // Nor for any other owner: another admin setting the
                         // owner's password could then sign in as them. The
-                        // owner sets their own on the Account page.
+                        // owner sets their own on the Account page. Nor for an
+                        // account the platform runs its own work as: the
+                        // backend refuses it a password, set or reset.
                         <button
                           onClick={() => openPasswordDialog(account)}
                           className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
