@@ -21,9 +21,11 @@ import {
  * How an account signs in, in the words this page uses everywhere (the row and
  * the delete confirmation). The deployment admin wins over a stored hash: both
  * can be true, and the environment credential is the one that survives. It
- * wins over the system flag for the same reason: the server accepts the
- * environment password for `ADMIN_EMAIL` whatever else that address is. Any
- * other account the platform runs its own work as signs in with nothing.
+ * wins over the system flag for the same reason: the server reports
+ * `isEnvAdmin` only while it accepts the environment password for that address
+ * (`ADMIN_EMAIL` with `ADMIN_PASSWORD` set and password login on), whatever
+ * else the address is. Any other account the platform runs its own work as
+ * signs in with nothing.
  */
 function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin' | 'isSystem'>): string {
   if (account.isEnvAdmin) return 'Password (owner)';

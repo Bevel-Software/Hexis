@@ -293,8 +293,9 @@ describe('UserAccountsPage', () => {
     expect(screen.getByRole('button', { name: 'Reset password for bob@example.com' })).toBeInTheDocument();
   });
 
-  // A system address configured as ADMIN_EMAIL too: the server accepts the
-  // environment password for it, so it does sign in, and the page says so.
+  // A system address the server reports as the deployment admin (ADMIN_EMAIL
+  // with ADMIN_PASSWORD set and password login on): it does sign in with the
+  // environment password, and the page says so.
   it('labels a system account that is also the deployment admin as the deployment admin', async () => {
     vi.mocked(listAccounts).mockResolvedValue([
       { ...ROOT, id: 'u-bot-root', email: 'recovery-bot@bevel.local', name: 'Recovery Bot Root', isSystem: true },
