@@ -192,6 +192,23 @@ describe('your own space', () => {
     ).toBeInTheDocument();
   });
 
+  // Nobody else has your space, so the confirm must not warn that everyone
+  // loses the skill: its owner does, and whoever they shared that skill with
+  // (a card's Share grants its folder). The shared-plugin warning is pinned in
+  // `PluginPage.test`.
+  it('confirms a skill removal as losing it for you and those you shared it with, not everyone', async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove rfi' }));
+    const dialog = await screen.findByRole('dialog', { name: /Remove rfi\?/ });
+    expect(
+      within(dialog).getByText(
+        /You lose it the next time your agent connects, and so does anyone you shared it with\./,
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Everyone here/)).toBeNull();
+  });
+
   it('leaves the tool card alone', async () => {
     renderPage();
 

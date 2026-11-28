@@ -224,6 +224,7 @@ export function PersonalPluginPage() {
         <RemoveLibraryItemDialog
           item={removing}
           place="your space"
+          personal
           onClose={() => setRemoving(null)}
           onRemoved={() => {
             toast(`Removed ${removing.name}.`);

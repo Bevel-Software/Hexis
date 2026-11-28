@@ -275,11 +275,16 @@ export function CardGrid({
  * points at it, so "remove" means unlink — the manifest entry and the
  * plugin's grant go, the skill stays where it is. Sending a link through the
  * delete path would delete a shared skill (or be refused by its own rules).
+ *
+ * Your own space is the exception to "everyone": nobody else has it, so a
+ * skill deleted there is lost to its owner and to whoever the owner shared
+ * that skill with (a card's Share grants its folder), and the copy says so.
  */
 export function RemoveLibraryItemDialog({
   item,
   place,
   linked = false,
+  personal = false,
   onClose,
   onRemoved,
 }: {
@@ -288,6 +293,8 @@ export function RemoveLibraryItemDialog({
   place: string;
   /** The item is in `place` by LINK — remove the link, not the item. `place` is then the plugin. */
   linked?: boolean;
+  /** `place` is the caller's own space: they lose what is removed, and so does anyone they shared it with. */
+  personal?: boolean;
   onClose(): void;
   /** Fired after the delete lands; the host page reloads and says so. */
   onRemoved(): void;
@@ -334,7 +341,11 @@ export function RemoveLibraryItemDialog({
         {linked
           ? `This removes the link from ${place}. The skill itself stays where it lives; ${place}'s members stop seeing it here.`
           : item.kind === 'skill'
-            ? `This deletes the skill and its files from ${place}. Everyone here loses it the next time their agent connects.`
+            ? `This deletes the skill and its files from ${place}. ${
+                personal
+                  ? 'You lose it the next time your agent connects, and so does anyone you shared it with.'
+                  : 'Everyone here loses it the next time their agent connects.'
+              }`
             : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
       </p>
       {error && (
