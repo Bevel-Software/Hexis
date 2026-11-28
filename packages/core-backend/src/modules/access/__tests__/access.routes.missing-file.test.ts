@@ -41,7 +41,9 @@ const MUTATIONS = [
   { name: 'deny-here', route: 'revoke', extra: { mode: 'deny-here' } },
 ] as const;
 
-const notFoundBody = (p: string) => ({
+const DEAL = '---\nnodeType: process\n---\n# Deal\n';
+
+const notFoundBody =(p: string) => ({
   error: `There is no file or directory at "${p}" in this workspace. Check the path with list_files.`,
   kind: 'not_found',
   path: p,
@@ -61,7 +63,7 @@ describe('access mutations on a file that does not exist', () => {
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-missing-file-'));
     await fs.mkdir(path.join(root, KB, 'Sales'), { recursive: true });
-    await fs.writeFile(path.join(root, KB, 'Sales/Deal.md'), '---\nnodeType: process\n---\n# Deal\n');
+    await fs.writeFile(path.join(root, KB, 'Sales/Deal.md'), DEAL);
 
     writeFile = vi.fn(async (_id: string, wsRel: string, content: string) => {
       await fs.mkdir(path.dirname(path.join(root, wsRel)), { recursive: true });
@@ -162,8 +164,11 @@ describe('access mutations on a file that does not exist', () => {
         expect(await res.json()).toEqual(notFoundBody(rel));
         expect(acquireLock).not.toHaveBeenCalled();
         expect(writeFile).not.toHaveBeenCalled();
-        expect(await exists('Sales/missing.md')).toBe(false);
+        // The disk is checked at the path this iteration sent, plus what a
+        // write there would have created or clobbered on the way.
+        expect(await exists(rel)).toBe(false);
         expect(await exists('Sales/Sub')).toBe(false);
+        expect(await fs.readFile(path.join(root, KB, 'Sales/Deal.md'), 'utf-8')).toBe(DEAL);
       });
     }
   }
