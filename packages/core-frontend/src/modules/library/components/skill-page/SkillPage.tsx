@@ -18,7 +18,7 @@ import {
   useFocusHandoff,
 } from '../../../../shared/components';
 import { useAuth } from '../../../auth';
-import { useWorkspace, kbFileUrl, useFileNav, useFileNodeId, useNodeIdNav, useWorkspaceImageResolver } from '../../../workspace';
+import { useWorkspace, kbFileUrl, useFileNav, useFileNodeId, useNodeIdNav, useWorkspaceImageResolver, isBinaryFile } from '../../../workspace';
 import { useGit } from '../../../git';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
 import { cancelPullRequest } from '../../../pr';
@@ -53,7 +53,7 @@ import { skillPanelId, skillTabId } from './tab-ids';
 import { SkillFilePane } from './SkillFilePane';
 import { SkillFileEditor } from './SkillFileEditor';
 import { ChangeBox } from '../../../change-requests/components/ChangeBox';
-import { isBinaryFile } from '../../../workspace/components/renderers';
+import { changeRequestOutcomeMessage } from '../../utils/change-request-outcome';
 
 /**
  * One skill, as a page — the prototype's skill item (line 1964), which says of
@@ -665,7 +665,7 @@ export function SkillPage({
         scope={{ prefix: skill.path, baseFiles: files }}
         onClose={() => setCompareCr(null)}
         onResolved={(outcome) => {
-          toast(outcome === 'applied' ? 'Change request is being applied' : 'Change request closed. Nothing was changed.');
+          toast(changeRequestOutcomeMessage(outcome));
           setCompareCr(null);
           data.reload();
         }}
