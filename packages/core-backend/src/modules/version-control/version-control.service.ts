@@ -74,7 +74,7 @@ import type { Database } from '../database/index.js';
 import { changeRequests, pgErrorCode } from '../database/index.js';
 import type { GitService } from './git/git.service.js';
 import { redactSecret } from '../../shared/redact-secret.js';
-import type { PullRequestService } from './git/pull-request.service.js';
+import { writesEveryChangedPath, type PullRequestService } from './git/pull-request.service.js';
 import type { IChangeRequestReviewService } from './change-request-review/change-request-review.interface.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -3663,8 +3663,8 @@ export class VersionControlService implements IVersionControlService {
    * (`rejectChangeRequest`) or rewrite what it asks (`updateChangeRequest`):
    *   - its author (the stored author hash, never anything the caller sends),
    *   - an admin (write on `roles.yaml` at `origin/<base>`), or
-   *   - the holder of write on every file it changes at `origin/<base>`,
-   *     i.e. anyone who may merge it.
+   *   - the holder of write on every file it changes at `origin/<base>`
+   *     (a moved file's previous path included), i.e. anyone who may merge it.
    * Returns which grant the caller holds, or `null` for none.
    *
    * The grants beyond authorship are read at `origin/<base>`, never a local
@@ -3727,17 +3727,14 @@ export class VersionControlService implements IVersionControlService {
       this.kickDeletedBranchSweep();
       throw err;
     }
-    const paths = detail?.files.map((f) => f.path) ?? [];
-    if (paths.length > 0) {
-      const writeMap = await this.accessControl.canWriteBatchAtRef(
-        workspaceId,
-        `origin/${baseBranch}`,
-        user.email,
-        paths,
-      );
-      if (writeMap && paths.every((p) => writeMap.get(p) === true)) return 'writes-every-file';
-    }
-    return null;
+    const writesAll = await writesEveryChangedPath(
+      this.accessControl,
+      workspaceId,
+      `origin/${baseBranch}`,
+      user.email,
+      detail?.files ?? [],
+    );
+    return writesAll ? 'writes-every-file' : null;
   }
 
   /**

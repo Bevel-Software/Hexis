@@ -5,6 +5,7 @@ import {
   type PullRequestDetail,
   type PullRequestSummary,
   type UpdateChangeRequestInput,
+  viewerFinishesApproval,
 } from '@bevel-software/platform-shared';
 import '../change-requests.css';
 import { Banner, Button, Surface, TextAreaField, TextField } from '../../../shared/components';
@@ -681,9 +682,10 @@ export function ChangeRequestDialog({
 
   /**
    * The old CR system's rule, restored: Apply exists only when every file is
-   * either already approved or approvable BY THIS VIEWER (they hold write on
-   * it, so their click completes the gate). Anything less and Apply was a
-   * button that walked into "Waiting on approval for …" — offering a verdict
+   * either already approved or finished by THIS VIEWER's approval
+   * (`viewerFinishesApproval`: theirs to approve, with no other end of a
+   * moved file left waiting). Anything less and Apply was a button that
+   * walked into "Waiting on approval for …" — offering a verdict
    * the viewer cannot actually deliver. Only files the merge gate binds can
    * hold it up; the rest neither warn nor block on the server, but the viewer
    * still has to hold at least one file of the request to be offered Apply.
@@ -695,8 +697,8 @@ export function ChangeRequestDialog({
     detail !== null &&
     detail.state === 'open' &&
     detail.approvals.length > 0 &&
-    detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved || a.viewerCanApprove) &&
-    detail.approvals.some((a) => a.isApproved || a.viewerCanApprove);
+    detail.approvals.filter((a) => a.inMergeGate).every(viewerFinishesApproval) &&
+    detail.approvals.some(viewerFinishesApproval);
 
   /**
    * Approve / decline verbs — approve from the file header and the footer,
@@ -835,7 +837,7 @@ export function ChangeRequestDialog({
   const waitingOn = useMemo(() => {
     const names = new Set<string>();
     for (const a of detail?.approvals ?? []) {
-      if (!a.inMergeGate || a.isApproved || a.viewerCanApprove) continue;
+      if (!a.inMergeGate || viewerFinishesApproval(a)) continue;
       for (const r of a.eligibleApprovers.roles) names.add(r);
       for (const u of a.eligibleApprovers.users) names.add(u.name || u.email);
     }

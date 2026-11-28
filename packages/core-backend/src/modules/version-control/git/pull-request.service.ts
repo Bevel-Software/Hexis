@@ -13,7 +13,7 @@ import type {
   PullRequestSummary,
   IGitService,
 } from '@bevel-software/platform-shared';
-import { isFolderPlaceholder } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder, viewerFinishesApproval } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/index.js';
 import { changeRequests } from '../../database/index.js';
 import type { WorkspaceService } from '../../workspace/index.js';
@@ -873,16 +873,33 @@ export class PullRequestService implements IPullRequestService {
       }
     }
 
+    // The close/edit routes' third grant (`changeRequestDecisionGrant`): write
+    // on every path the request changes, a moved file's previous path
+    // included. Asked through the same function the routes call, not read off
+    // `viewerCanApprove`: approving a moved file can take write on one end
+    // alone, deciding the request takes both. Best-effort: a failed read
+    // leaves the hint false, and the routes re-check.
+    let viewerWritesAllFiles = false;
+    if (workspaceId && opts.viewerEmail && summary.state === 'open' && !viewerCanBypassMerge) {
+      try {
+        viewerWritesAllFiles = await writesEveryChangedPath(
+          this.accessControl,
+          workspaceId,
+          `origin/${summary.base}`,
+          opts.viewerEmail,
+          files,
+        );
+      } catch (err) {
+        log.warn(`viewerWritesAllFiles lookup failed for #${prNumber}:`, { err });
+      }
+    }
+
     const viewerCanCancel = computeViewerCanCancel({
       state: summary.state,
       authorId: summary.authorId,
       viewerEmail: opts.viewerEmail,
       viewerCanBypassMerge,
-      // The reject route's third grant (see `rejectChangeRequest`): write on
-      // every changed file at origin/<base>. Derived from the per-file
-      // `viewerCanApprove` flags — the SAME `canWriteBatchAtRef` predicate the
-      // route enforces — so the hint cannot drift from the enforcement.
-      viewerWritesAllFiles: approvals.length > 0 && approvals.every((a) => a.viewerCanApprove),
+      viewerWritesAllFiles,
     });
 
     const viewerCanUpdate = computeViewerCanUpdate({
@@ -994,11 +1011,36 @@ export class PullRequestService implements IPullRequestService {
 }
 
 /**
+ * Does `email` hold write, at `ref`, on every path a request changes: each
+ * file's path and, for a moved file, the previous path it takes the file out
+ * of? The grant to close or edit a request that its author and an admin do
+ * not need. `changeRequestDecisionGrant` enforces it and the `viewerCanCancel`
+ * / `viewerCanEdit` hints report it, both through this one function. No
+ * files, or an access tree that cannot be read, grants nothing.
+ */
+export async function writesEveryChangedPath(
+  access: Pick<IAccessControl, 'canWriteBatchAtRef'>,
+  workspaceId: string,
+  ref: string,
+  email: string,
+  files: readonly Pick<PullRequestFile, 'path' | 'previousPath'>[],
+): Promise<boolean> {
+  const paths = [
+    ...new Set(
+      files.flatMap((f) => (f.previousPath && f.previousPath !== f.path ? [f.path, f.previousPath] : [f.path])),
+    ),
+  ];
+  if (paths.length === 0) return false;
+  const writeMap = await access.canWriteBatchAtRef(workspaceId, ref, email, paths);
+  return !!writeMap && paths.every((p) => writeMap.get(p) === true);
+}
+
+/**
  * Pure predicate for the `viewerCanCancel` hint. The viewer can cancel iff
  * the PR is open AND they're the author (hash-match against the stored
  * author), an admin (`viewerCanBypassMerge` is the proxy — same
  * `canWriteAtRef('roles.yaml')` predicate), or they hold write on EVERY
- * changed file (`viewerWritesAllFiles`) — the reject route's full
+ * changed path (`viewerWritesAllFiles`, see `writesEveryChangedPath`) — the reject route's full
  * authorization set, mirrored exactly so the hint never claims less (or
  * more) than the server enforces. Fail-closed: no viewer email → false,
  * whatever the grants say.
@@ -1020,8 +1062,8 @@ export function computeViewerCanCancel(input: {
  * Pure predicate for `viewerCanUpdate` — who may merge a request's target
  * into it. The request's author (it is their proposal to bring up to date)
  * and anyone who may apply it, by the merge gate's own reading: every file
- * the gate binds (`isGateRelevant`) already approved or approvable by this
- * viewer — files outside the gate (`inMergeGate: false`) need nobody's
+ * the gate binds (`inMergeGate`) already approved or finished by this
+ * viewer's approval (`viewerFinishesApproval`) — files outside the gate (`inMergeGate: false`) need nobody's
  * approval to apply, so they cannot withhold Update either — or an admin, who
  * may apply over missing approvals. That exemption holds only for a file whose
  * approvers were actually resolved (`eligibilityResolved`): when the access
@@ -1042,7 +1084,7 @@ export function computeViewerCanUpdate(input: {
   const viewerMayApply =
     input.approvals.length > 0 &&
     input.approvals.every(
-      (a) => (a.eligibilityResolved === true && !a.inMergeGate) || a.isApproved || a.viewerCanApprove,
+      (a) => (a.eligibilityResolved === true && !a.inMergeGate) || viewerFinishesApproval(a),
     );
   return viewerIsAuthor || input.viewerCanBypassMerge || viewerMayApply;
 }

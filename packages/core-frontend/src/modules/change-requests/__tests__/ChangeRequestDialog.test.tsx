@@ -138,6 +138,19 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
   });
 
+  it('hides Apply when the viewer may approve a moved file but their approval leaves it waiting', async () => {
+    // The source folder's owner: theirs to approve, as the source's consent,
+    // while the destination's owners still have to approve.
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([approval({ viewerCanApprove: true, viewerApprovalLeavesWaiting: true })]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    // Asked for their approval, and offered no Apply it would not complete.
+    expect(await screen.findByText('Your approval is needed on 1 file')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Bypass approval and apply' })).not.toBeInTheDocument();
+  });
+
   it('all files approved → plain Apply; approvable-but-unapproved → Bypass approval and apply', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([

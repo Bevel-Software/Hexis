@@ -84,10 +84,18 @@ export interface IChangeRequestReviewService {
   ): Promise<FileApprovalState[]>;
 
   /**
-   * Approve one file. Requires the caller to hold `write` on the path per
-   * the access tree on `origin/<baseBranch>` (403 otherwise). Idempotent —
-   * approving twice on the same headSha is a no-op. Returns the fresh
-   * composite state for all files.
+   * Approve one file, under the access tree on `origin/<baseBranch>`. A
+   * caller who does not qualify gets 403; 422 (`no-eligible-approvers`) when
+   * write cannot be resolved at that ref for any of the file's paths, so
+   * nobody can be judged eligible; 404 when the path is not in the request.
+   * For a file that is not moved, the caller qualifies iff they hold `write`
+   * on its path. A MOVED file is also a deletion of its `previousPath`, and
+   * the caller qualifies iff they write the previous path, or they write the
+   * new path, may read the previous path, and it is settled: it has no
+   * approvers, or one of them has approved the current head. A caller who
+   * may not read it gets the same 403 whether it is settled or not.
+   * Idempotent — approving twice on the same headSha is a no-op.
+   * Returns the fresh composite state for all files.
    */
   approveFile(
     prNumber: number,

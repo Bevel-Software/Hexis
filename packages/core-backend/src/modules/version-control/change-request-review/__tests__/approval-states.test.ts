@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { PullRequestFile } from '@bevel-software/platform-shared';
+import { viewerFinishesApproval, type PullRequestFile } from '@bevel-software/platform-shared';
 
 // mergePr merges locally through GitService now (no `gh`), so we stub the git
 // seam and spy on it. `mergeChangeRequestMock` stands in for the real
@@ -13,7 +13,7 @@ const mergeChangeRequestMock = vi.fn(async () => ({
 }));
 
 import { ChangeRequestReviewService } from '../change-request-review.service.js';
-import { changeRequests } from '../../../database/index.js';
+import { changeRequests, users } from '../../../database/index.js';
 import type { Database } from '../../../database/index.js';
 import type { WorkspaceService } from '../../../workspace/index.js';
 import type { GitService } from '../../git/git.service.js';
@@ -71,19 +71,31 @@ function makeDb(rows: ApprovalRow[]): Database {
     p.limit = () => Promise.resolve(data);
     return p;
   };
+  // Table-aware: the changeRequests lookup gets the CR row, the approver's
+  // account check finds an account; everything else (pr_file_approvals) gets
+  // the canned approval rows.
+  const select = () => ({
+    from: (table: unknown) => ({
+      where: () =>
+        thenable(table === changeRequests ? [CR_ROW] : table === users ? [{ id: 'account' }] : rows),
+    }),
+  });
+  // An approval write lands in `rows`, so the states read after it see it.
+  const insert = () => ({
+    values: (values: Omit<ApprovalRow, 'approvedAt'>) => ({
+      returning: async () => [{ id: 'merge-log-1' }],
+      onConflictDoNothing: async () => {
+        rows.push({ ...values, approvedAt: new Date('2026-11-25T00:00:00Z') });
+      },
+    }),
+  });
   return {
-    // Table-aware: the changeRequests lookup gets the CR row; everything else
-    // (pr_file_approvals) gets the canned approval rows.
-    select: () => ({
-      from: (table: unknown) => ({
-        where: () => thenable(table === changeRequests ? [CR_ROW] : rows),
-      }),
-    }),
-    insert: () => ({
-      values: () => ({
-        returning: async () => [{ id: 'merge-log-1' }],
-      }),
-    }),
+    select,
+    insert,
+    // `approveFile` writes under the approval lock: a transaction whose
+    // advisory-lock statements are no-ops here.
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
+      fn({ execute: async () => undefined, select, insert }),
     update: () => ({
       set: () => ({
         // `where()` is awaited directly by the prMergeLog updates, and the
@@ -806,5 +818,249 @@ describe('ChangeRequestReviewService.getApprovalStates — unreadable access tre
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+/**
+ * A MOVE out of a folder the person may not write. Reported against v0.28.0:
+ * a Business user who writes `Open/` but not `Locked/` moved `Locked/s2.md` to
+ * `Open/s2-moved.md`, was offered "Approve this file" and the apply, and the
+ * file left `Locked/` with no approval from anyone who may write there — the
+ * gate asked about the destination only. A move is a deletion at its previous
+ * path too, and is gated on that folder's owners as a deletion is.
+ *
+ * Driven through the service calls the REST routes make (`files/approve` →
+ * `approveFile`, `merge` → `getApprovalStates` + `mergePr`) and the per-file
+ * flags the app renders its controls from (`viewerCanApprove`, `isApproved`,
+ * `eligibleApprovers`).
+ */
+describe('a move out of a folder the person may not write', () => {
+  beforeEach(() => {
+    mergeChangeRequestMock.mockClear();
+  });
+
+  const HEAD = 'head-sha-1';
+  const BASE = 'current-company-state';
+  const LOCKED = 'QA-Apply/Locked/s2.md';
+  const MOVED = 'QA-Apply/Open/s2-moved.md';
+  const USER = { id: 'u-business', name: 'Business user', email: 'business@example.com' };
+  const ADMIN = { id: 'u-admin', name: 'Admin', email: 'admin@bevel.software' };
+  // Writes `Locked/` only — the folder's owner who is no admin.
+  const OWNER = { id: 'u-owner', name: 'Locked owner', email: 'owner@example.com' };
+  const AUTHOR_HASH = hash(USER.email);
+
+  const byPath: EligibilityByPath = {
+    [LOCKED]: {
+      roles: ['Admin'],
+      users: [{ name: OWNER.name, email: OWNER.email }],
+      emails: [ADMIN.email, OWNER.email],
+    },
+    [MOVED]: {
+      roles: ['Admin'],
+      users: [{ name: USER.name, email: USER.email }],
+      emails: [ADMIN.email, USER.email],
+    },
+    'QA-Apply/Open/a.md': {
+      roles: ['Admin'],
+      users: [{ name: USER.name, email: USER.email }],
+      emails: [ADMIN.email, USER.email],
+    },
+    'QA-Apply/Open/b.md': {
+      roles: ['Admin'],
+      users: [{ name: USER.name, email: USER.email }],
+      emails: [ADMIN.email, USER.email],
+    },
+  };
+
+  /**
+   * The service over `rows`, with the viewer batch answering as the single
+   * lookup does. Everyone reads everything unless `reads` says otherwise.
+   */
+  function makeMoveService(rows: ApprovalRow[], reads: (email: string, path: string) => boolean = () => true) {
+    const base = makeAccessControl(byPath);
+    const access: IAccessControl = {
+      ...base,
+      canWriteBatchAtRef: async (ws, ref, email, paths) => {
+        const out = new Map<string, boolean>();
+        for (const p of paths) out.set(p, (await base.canWriteAtRef(ws, ref, email, p)) === true);
+        return out;
+      },
+      canReadAtRef: async (_ws, _ref, email, path) => reads(email, path),
+      canReadBatchAtRef: async (_ws, _ref, email, paths) => new Map(paths.map((p) => [p, reads(email, p)])),
+    };
+    const workspace = {
+      ensureRemotesFetched: vi.fn(async () => undefined),
+      getOrCreateForBranch: vi.fn(async () => ({ id: 'ws-base' })),
+    } as unknown as WorkspaceService;
+    const git = { mergeChangeRequest: mergeChangeRequestMock } as unknown as GitService;
+    return new ChangeRequestReviewService(makeDb(rows), access, workspace, git);
+  }
+
+  const moveOut = [file({ path: MOVED, previousPath: LOCKED, status: 'renamed' })];
+  const states = (svc: ChangeRequestReviewService, viewer: string, files = moveOut) =>
+    svc.getApprovalStates(1, files, HEAD, BASE, AUTHOR_HASH, 'ws-1', viewer);
+  const approve = (svc: ChangeRequestReviewService, who: typeof USER, files = moveOut) =>
+    svc.approveFile(1, files[0].path, who, files, HEAD, BASE, AUTHOR_HASH, 'ws-1');
+
+  it('names the source folder’s owners among the moved file’s approvers', async () => {
+    const [state] = await states(makeMoveService([]), USER.email);
+    expect(state.eligibleApprovers.roles).toEqual(['Admin']);
+    expect(state.eligibleApprovers.users.map((u) => u.email)).toEqual([USER.email, OWNER.email]);
+    expect(state.inMergeGate).toBe(true);
+  });
+
+  it('offers the Business user no approve control and no apply (app)', async () => {
+    const [state] = await states(makeMoveService([]), USER.email);
+    // The app shows "Approve this file" and the apply only when every gated
+    // file is approved or `viewerCanApprove`: neither holds.
+    expect(state.viewerCanApprove).toBe(false);
+    expect(state.isApproved).toBe(false);
+  });
+
+  it('refuses the Business user’s approval of it, and records none (REST files/approve)', async () => {
+    const rows: ApprovalRow[] = [];
+    const svc = makeMoveService(rows);
+    await expect(approve(svc, USER)).rejects.toMatchObject({ name: 'ApprovalAuthError', status: 403 });
+    expect(rows).toEqual([]);
+  });
+
+  it('refuses the merge even with the Business user’s own approval on it, and the file stays (REST merge)', async () => {
+    // A self-approval recorded before the fix, or by any route that skipped it.
+    const rows: ApprovalRow[] = [
+      { prNumber: 1, path: MOVED, approverEmail: USER.email, approverName: USER.name, headSha: HEAD, approvedAt: new Date() },
+    ];
+    const svc = makeMoveService(rows);
+    const approvals = await states(svc, USER.email);
+    expect(approvals[0].isApproved).toBe(false);
+    expect(svc.evaluateMergeGate({ prNumber: 1, state: 'open', approvals }).mergeable).toBe(false);
+    await expect(
+      svc.mergePr(1, USER, HEAD, approvals, 'open', 'Move s2', BASE, 'ws-1'),
+    ).rejects.toMatchObject({
+      name: 'MergeBlockedError',
+      status: 422,
+      message: expect.stringContaining(`Waiting on approval for ${MOVED}`),
+    });
+    // Nor past it: the bypass is an admin's.
+    await expect(
+      svc.mergePr(1, USER, HEAD, approvals, 'open', 'Move s2', BASE, 'ws-1', { bypass: true }),
+    ).rejects.toMatchObject({ name: 'BypassAuthError' });
+    expect(mergeChangeRequestMock).not.toHaveBeenCalled();
+  });
+
+  it('applies once an admin — who may write both folders — has approved it', async () => {
+    const rows: ApprovalRow[] = [];
+    const svc = makeMoveService(rows);
+    await approve(svc, ADMIN);
+    const approvals = await states(svc, USER.email);
+    expect(approvals[0].isApproved).toBe(true);
+    await svc.mergePr(1, USER, HEAD, approvals, 'open', 'Move s2', BASE, 'ws-1');
+    expect(mergeChangeRequestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the source folder’s owner approve their side, and the Business user complete it after', async () => {
+    const rows: ApprovalRow[] = [];
+    const svc = makeMoveService(rows);
+    // The owner may write `Locked/` but not `Open/`: their approval settles the
+    // source side and leaves the destination's to its own writers.
+    expect((await states(svc, OWNER.email))[0].viewerCanApprove).toBe(true);
+    const afterOwner = await approve(svc, OWNER);
+    expect(afterOwner[0].isApproved).toBe(false);
+    await expect(
+      svc.mergePr(1, USER, HEAD, await states(svc, USER.email), 'open', 'Move s2', BASE, 'ws-1'),
+    ).rejects.toMatchObject({ name: 'MergeBlockedError' });
+
+    // An approver of the source has approved: now the move is the Business
+    // user's to approve, and their approval completes it.
+    expect((await states(svc, USER.email))[0].viewerCanApprove).toBe(true);
+    const afterUser = await approve(svc, USER);
+    expect(afterUser[0].isApproved).toBe(true);
+    await svc.mergePr(1, USER, HEAD, afterUser, 'open', 'Move s2', BASE, 'ws-1');
+    expect(mergeChangeRequestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not count an approval of an earlier head for the source side', async () => {
+    const rows: ApprovalRow[] = [
+      { prNumber: 1, path: MOVED, approverEmail: OWNER.email, approverName: OWNER.name, headSha: 'old-head', approvedAt: new Date() },
+    ];
+    const svc = makeMoveService(rows);
+    expect((await states(svc, USER.email))[0].viewerCanApprove).toBe(false);
+    await expect(approve(svc, USER)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('still lets the Business user approve and apply a move between folders they may write', async () => {
+    const files = [file({ path: 'QA-Apply/Open/b.md', previousPath: 'QA-Apply/Open/a.md', status: 'renamed' })];
+    const rows: ApprovalRow[] = [];
+    const svc = makeMoveService(rows);
+    expect((await states(svc, USER.email, files))[0].viewerCanApprove).toBe(true);
+    const approvals = await approve(svc, USER, files);
+    expect(approvals[0].isApproved).toBe(true);
+    await svc.mergePr(1, USER, HEAD, approvals, 'open', 'Rename a', BASE, 'ws-1');
+    expect(mergeChangeRequestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the source owner their approval leaves the move waiting on the destination', async () => {
+    const svc = makeMoveService([]);
+    const [owner] = await states(svc, OWNER.email);
+    // Theirs to approve, as the source's consent — but not theirs to finish,
+    // so the app offers them Approve and not Apply.
+    expect(owner.viewerCanApprove).toBe(true);
+    expect(owner.viewerApprovalLeavesWaiting).toBe(true);
+    expect(viewerFinishesApproval(owner)).toBe(false);
+    // An admin writes both ends: their approval finishes it.
+    const [admin] = await states(svc, ADMIN.email);
+    expect(admin.viewerApprovalLeavesWaiting).toBeUndefined();
+    expect(viewerFinishesApproval(admin)).toBe(true);
+    // Once the owner has approved, the Business user's approval finishes it.
+    await approve(svc, OWNER);
+    const [user] = await states(svc, USER.email);
+    expect(user.viewerApprovalLeavesWaiting).toBeUndefined();
+    expect(viewerFinishesApproval(user)).toBe(true);
+  });
+
+  it('lets the source owner finish a move into a folder nobody can approve', async () => {
+    const files = [file({ path: 'Ungoverned/s2.md', previousPath: LOCKED, status: 'renamed' })];
+    const [owner] = await states(makeMoveService([]), OWNER.email, files);
+    expect(owner.viewerCanApprove).toBe(true);
+    expect(viewerFinishesApproval(owner)).toBe(true);
+  });
+
+  describe('a viewer who may not read the source', () => {
+    const notLocked = (email: string, path: string) => !(email === USER.email && path === LOCKED);
+
+    it('is shown the destination’s approvers alone, and the gate still binds the file', async () => {
+      const svc = makeMoveService([], notLocked);
+      const [state] = await states(svc, USER.email);
+      expect(state.eligibleApprovers.users.map((u) => u.email)).toEqual([USER.email]);
+      expect(state.inMergeGate).toBe(true);
+      // Into a folder nobody can approve: nothing is shown, and the gate
+      // still waits on the source's owners.
+      const files = [file({ path: 'Ungoverned/s2.md', previousPath: LOCKED, status: 'renamed' })];
+      const approvals = await states(svc, USER.email, files);
+      expect(approvals[0].eligibleApprovers).toEqual({ roles: [], users: [] });
+      expect(approvals[0].inMergeGate).toBe(true);
+      expect(svc.evaluateMergeGate({ prNumber: 1, state: 'open', approvals }).mergeable).toBe(false);
+    });
+
+    it('gets the same answer before and after the source owner approves (app and REST)', async () => {
+      const rows: ApprovalRow[] = [];
+      const svc = makeMoveService(rows, notLocked);
+      expect((await states(svc, USER.email))[0].viewerCanApprove).toBe(false);
+      await expect(approve(svc, USER)).rejects.toMatchObject({ name: 'ApprovalAuthError', status: 403 });
+
+      await approve(svc, OWNER);
+      // The owner's consent is not told to them: still not theirs to approve.
+      expect((await states(svc, USER.email))[0].viewerCanApprove).toBe(false);
+      await expect(approve(svc, USER)).rejects.toMatchObject({ name: 'ApprovalAuthError', status: 403 });
+      expect(rows.map((r) => r.approverEmail)).toEqual([OWNER.email]);
+    });
+  });
+
+  it('treats a move out of a folder nobody can approve as the destination alone', async () => {
+    const files = [file({ path: MOVED, previousPath: 'Ungoverned/s2.md', status: 'renamed' })];
+    const svc = makeMoveService([]);
+    expect((await states(svc, USER.email, files))[0].viewerCanApprove).toBe(true);
+    const approvals = await approve(svc, USER, files);
+    expect(approvals[0].isApproved).toBe(true);
+    expect(approvals[0].eligibleApprovers.users.map((u) => u.email)).toEqual([USER.email]);
   });
 });

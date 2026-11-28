@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { PullRequestService } from '../pull-request.service.js';
-import type { Database } from '../../../database/connection.js';
-import type { WorkspaceService } from '../../../workspace/workspace.service.js';
+import type { Database } from '../../../database/index.js';
+import type { WorkspaceService } from '../../../workspace/index.js';
 import type { GitService } from '../git.service.js';
-import type { IAccessControl } from '../../../access/access-control.interface.js';
+import type { IAccessControl } from '../../../access/index.js';
 
 const ROW = {
   id: 'cr-7',
@@ -335,5 +335,86 @@ describe('PullRequestService.getPrDetail — needsUpdate', () => {
     const detail = await h.svc.getPrDetail(7, { fresh: true });
     expect(detail?.needsUpdate).toBe(false);
     expect(detail?.behind).toBe(false);
+  });
+});
+
+/**
+ * Who may close or edit a request without being its author or an admin: the
+ * holder of write on every path it changes, a moved file's previous path
+ * included. The hints come from the same function the routes call
+ * (`writesEveryChangedPath`), not from `viewerCanApprove`, which for a moved
+ * file can be true on write at one end alone.
+ */
+describe('PullRequestService.getPrDetail — close and edit hints on a move', () => {
+  const MOVE = {
+    path: 'Shared/plan.md',
+    previousPath: 'Finance/plan.md',
+    status: 'renamed',
+    additions: 0,
+    deletions: 0,
+    isBinary: false,
+    sha: 'd'.repeat(40),
+    rawUrl: '',
+  };
+
+  function harness(writable: (path: string) => boolean) {
+    const git = {
+      resolvePrShas: async () => ({ baseSha: BASE, headSha: HEAD }),
+      changedFilesForPr: async () => [MOVE],
+      forkPointForPr: async () => ({ mergeBaseSha: FORK, behind: false }),
+      pathsChangedBetween: async () => [],
+    } as unknown as GitService;
+    const workspace = {
+      findAnyWorkspaceId: async () => 'ws-main',
+      ensureRemotesFetched: async () => undefined,
+    } as unknown as WorkspaceService;
+    const canWriteBatchAtRef = vi.fn(async (_ws: string, _ref: string, _email: string, asked: string[]) =>
+      new Map(asked.map((p) => [p, writable(p)])),
+    );
+    // Not an admin: no write on roles.yaml.
+    const access = { canWriteAtRef: async () => false, canWriteBatchAtRef } as unknown as IAccessControl;
+    const svc = new PullRequestService(makeDb(), workspace, access, git);
+    svc.setDetailEnricher({
+      // The enricher is stubbed: the approval state is fixed, not computed,
+      // and this suite tests only the close and edit hints. It is fixed at
+      // `viewerCanApprove: true` so the hints are seen not to follow it.
+      getApprovalStates: async () => [
+        {
+          path: MOVE.path,
+          eligibleApprovers: { roles: ['finance'], users: [] },
+          approvedBy: [],
+          eligibilityResolved: true,
+          isApproved: false,
+          inMergeGate: true,
+          viewerCanApprove: true,
+        },
+      ],
+      evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
+    });
+    return { svc, canWriteBatchAtRef };
+  }
+
+  it('a person who writes only the destination is offered neither Close nor Edit', async () => {
+    const { svc, canWriteBatchAtRef } = harness((p) => p.startsWith('Shared/'));
+    const detail = await svc.getPrDetail(7, { fresh: true, viewerEmail: 'bob@bevel.software' });
+    expect(detail?.approvals[0]?.viewerCanApprove).toBe(true);
+    expect(detail?.viewerCanCancel).toBe(false);
+    expect(detail?.viewerCanEdit).toBe(false);
+    // Asked about both ends of the move.
+    expect(canWriteBatchAtRef.mock.calls.at(-1)?.[3]).toEqual(['Shared/plan.md', 'Finance/plan.md']);
+  });
+
+  it('a person who writes only the source is offered neither Close nor Edit', async () => {
+    const { svc } = harness((p) => p.startsWith('Finance/'));
+    const detail = await svc.getPrDetail(7, { fresh: true, viewerEmail: 'bob@bevel.software' });
+    expect(detail?.viewerCanCancel).toBe(false);
+    expect(detail?.viewerCanEdit).toBe(false);
+  });
+
+  it('a person who writes both ends is offered Close and Edit', async () => {
+    const { svc } = harness(() => true);
+    const detail = await svc.getPrDetail(7, { fresh: true, viewerEmail: 'bob@bevel.software' });
+    expect(detail?.viewerCanCancel).toBe(true);
+    expect(detail?.viewerCanEdit).toBe(true);
   });
 });
