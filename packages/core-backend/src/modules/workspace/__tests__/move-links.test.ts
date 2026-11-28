@@ -227,6 +227,18 @@ describe('planMoveLinks', () => {
     expect(plan.edits.map((e) => e.path).sort()).toEqual([`${KB}/Escaped.md`, `${KB}/Lower.md`, `${KB}/Mixed.md`, `${KB}/Partial.md`]);
   });
 
+  it('a move to a name with # and %: the plan (what a dry run reports) and the edit write the same resolving link', async () => {
+    const files = {
+      [`${KB}/Finance/notes.md`]: 'x\n',
+      [`${KB}/Index.md`]: '[notes](Finance/notes.md#top)\n',
+    };
+    const dest = `${KB}/Team/Nötes #1 50% ✓.md`;
+    const plan = await planMoveLinks(inputOf(files, { src: `${KB}/Finance/notes.md`, dest }));
+    const to = 'Team/Nötes%20%231%2050%25%20✓.md#top';
+    expect(plan.report.edits).toEqual([{ path: `${KB}/Index.md`, from: 'Finance/notes.md#top', to }]);
+    expect(plan.edits.map((e) => e.content)).toEqual([`[notes](${to})\n`]);
+  });
+
   it('a page gone between the listing and its read is skipped; one that cannot be opened marks the search incomplete', async () => {
     const files = {
       [`${KB}/Old/One.md`]: 'x\n',

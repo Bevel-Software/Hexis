@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkFrontmatter from 'remark-frontmatter';
-import { MD_ID_LINK_RE, resolveMdLink, scanMarkdownLinks } from '@bevel-software/platform-shared';
+import { MD_ID_LINK_RE, resolveMdLink, rewriteMdLinks, scanMarkdownLinks } from '@bevel-software/platform-shared';
 import { NODE_ID_LINK_RE, resolveKbHref, safeDecode } from '../kb-routes';
 
 /**
@@ -103,6 +103,26 @@ describe('md-links agrees with the app on a shared fixture set', () => {
         hash: theirs.hash,
       });
     }
+  });
+
+  it.each([
+    ['bare', '[n](../B/notes.md#risks)'],
+    ['angle', '[n](<../B/notes.md#risks>)'],
+    ['encoded', '[n](../%42/notes.md#risks)'],
+    ['root', `[n](/${KB}/Projects/B/notes.md#risks)`],
+    ['app URL', `[n](/workspace/main/${KB}/Projects/B/notes.md#risks)`],
+  ])('a %s link rewritten to a name with # and %% opens the moved file in the app', (_form, page) => {
+    const dest = `${KB}/Projects/Team/Nötes #1 50% ✓?.md`;
+    const { text } = rewriteMdLinks(page, {
+      oldPath: BASE,
+      newPath: BASE,
+      mapPath: (p) => (p === `${KB}/Projects/B/notes.md` ? dest : null),
+      kbDirName: KB,
+      branch: 'main',
+    });
+    expect(text).not.toBe(page);
+    const [href] = rendered(text);
+    expect(resolveKbHref(href, { basePath: BASE, kbDirName: KB })).toMatchObject({ path: dest, hash: '#risks' });
   });
 
   it('link syntax inside inline code: a link to neither the app nor the rewriter', () => {
