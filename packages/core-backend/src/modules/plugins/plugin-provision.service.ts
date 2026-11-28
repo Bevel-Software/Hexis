@@ -52,10 +52,42 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { KbContext } from '../../shared/kb-context.js';
+import type { IPluginProvisioning, ProvisionedPlugin } from './plugins.contract.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { IAccessControl } from '../access/index.js';
 import { creatorPrincipal, spliceGrant } from '../access-model/index.js';
 import { WorkspaceMutex } from '../kb-fs/index.js';
+import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
+
+/**
+ * Every commit this service makes goes through here, so each of them draws
+ * the same line between a commit that did not land and one that did.
+ * `commit` failing means nothing landed: `undo` puts the disk back,
+ * best-effort (the commit's own error is the one the caller needs), and the
+ * error goes up. `PushNeedsAgentResolutionError` is the one failure that is
+ * NOT a failed commit: the commit landed locally and only its push did not.
+ * Undoing then would leave the tree disagreeing with a real commit and break
+ * the push recovery, so the tree is left as committed, `landed` runs as on
+ * success, and the error goes up for the recovery flow (as
+ * `PluginRenameService` does).
+ */
+async function commitOrUndo(
+  commit: () => Promise<void>,
+  undo: () => Promise<void>,
+  landed: () => Promise<void> | void,
+): Promise<void> {
+  try {
+    await commit();
+  } catch (err) {
+    if (err instanceof PushNeedsAgentResolutionError) {
+      await landed();
+      throw err;
+    }
+    await undo().catch(() => {});
+    throw err;
+  }
+  await landed();
+}
 
 /** Commit machinery the provision rides — the pending-commit pipeline, run inline. */
 export interface ProvisionCommitDriver {
@@ -98,25 +130,6 @@ function incompleteDiscovery(unreadable: string[]): PluginProvisionError {
   );
 }
 
-export interface ProvisionedPlugin {
-  /** The folder's path below `Plugins/` — `GTM`, or `Teams/GTM` for one made inside a grouping folder. */
-  folder: string;
-  /** The same folder, repo-relative — `Plugins/Teams/GTM` — as the file tools address it. */
-  path: string;
-  /** Where its skills go: `<path>/skills`, each skill a subfolder holding a `SKILL.md`. */
-  skillsDir: string;
-  /** The plugin's identity — the manifest name written for it. */
-  name: string;
-  /**
-   * What a person sees it called — the manifest's `displayName`, which is the
-   * name the creator typed, trimmed. Exactly as persisted: the answer and the
-   * file on disk can never say two different things.
-   */
-  displayName: string;
-  /** False when an ensure found the folder already there. */
-  created: boolean;
-}
-
 /** A refusal the route can pass through: message + HTTP status. */
 export class PluginProvisionError extends Error {
   constructor(
@@ -140,7 +153,7 @@ function provisioned(
   return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created };
 }
 
-export class PluginProvisionService {
+export class PluginProvisionService implements IPluginProvisioning {
   /**
    * Serialises creations and deletions by MANIFEST SLUG
    * (`pluginManifestName(name)`). The wx write arbitrates same-path races,
@@ -312,9 +325,17 @@ export class PluginProvisionService {
    * reads it, so a repeated call with no edit in between answers as the call
    * that made the folder did.
    */
-  async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
+  async ensurePersonalPlugin(user: AuthUser, givenName?: string): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
+    // The name its owner gave it (`my_plugin`'s `name`), trimmed; blank is
+    // refused rather than read as "no name", so a caller who meant to name
+    // the plugin never gets an answer that looks like it worked.
+    const given = givenName?.trim();
+    if (givenName !== undefined && !given) {
+      throw new PluginProvisionError('name must not be blank. Omit it to keep the current name.', 400);
+    }
     const alreadyThere = async (onDisk: string): Promise<ProvisionedPlugin> => {
+      if (given) await this.namePersonalPlugin(user, onDisk, given);
       const { name, displayName } = await this.persistedNames(onDisk, folder);
       return provisioned(this.pluginsRoot, folder, name, displayName, false);
     };
@@ -322,7 +343,7 @@ export class PluginProvisionService {
       const existing = await this.existingFolder(folder);
       if (existing !== null) return alreadyThere(existing);
       try {
-        await this.provision(user, folder, folder, personalAccessMd(user));
+        await this.provision(user, folder, folder, personalAccessMd(user), given);
       } catch (err) {
         // ENSURE semantics even under a race the lock cannot see (another
         // process, a checkout that appeared between check and write): the
@@ -330,8 +351,71 @@ export class PluginProvisionService {
         if (err instanceof PluginProvisionError && err.status === 409) return alreadyThere(folder);
         throw err;
       }
-      return provisioned(this.pluginsRoot, folder, pluginManifestName(folder), folder, true);
+      return provisioned(this.pluginsRoot, folder, pluginManifestName(folder), given ?? folder, true);
     });
+  }
+
+  /**
+   * The name the caller gave their personal plugin, or null when they gave
+   * none — the app then calls it by its fixed default. Read from the
+   * manifest's `displayName` by the shared reader, so a name an agent wrote
+   * into `plugin.json` by hand counts exactly as one `my_plugin` stored.
+   *
+   * "Gave none" is a manifest whose display name is still the folder's own
+   * label (or its identifier): what the ensure writes when no name is asked
+   * for, and what the startup backfill wrote into older manifests. Reads,
+   * never creates: a person with no personal folder yet has no name either.
+   * Reads in the ensure's slug lock, so it never sees a name `my_plugin`
+   * has written but not yet committed.
+   */
+  async personalPluginName(user: AuthUser): Promise<string | null> {
+    const folder = personalPluginFolderName(user.id);
+    return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
+      const existing = await this.existingFolder(folder);
+      if (existing === null) return null;
+      const shown = (await this.persistedNames(existing, folder)).displayName;
+      const unnamed = [folder, pluginManifestName(folder)].some((label) => label.toLowerCase() === shown.toLowerCase());
+      return unnamed ? null : shown;
+    });
+  }
+
+  /**
+   * Store `displayName` in the existing personal folder's manifest, keeping
+   * every other field, and commit it. Runs inside the ensure's slug lock, so
+   * the read it compares against and the write are one step. Nothing is
+   * written when the manifest already says it. A `plugin.json` that is there
+   * but is not a JSON object is refused rather than replaced: overwriting it
+   * would destroy whatever its owner wrote. A commit that does not land puts
+   * the file back as it was, so the next call does not read an uncommitted
+   * name as stored; one that landed but could not be pushed keeps it (see
+   * {@link commitOrUndo}).
+   */
+  private async namePersonalPlugin(user: AuthUser, folder: string, displayName: string): Promise<void> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const rel = `${this.kbDirName}/${this.pluginsRoot}/${folder}/${PLUGIN_MANIFEST_FILE}`;
+    const abs = path.join(wsDir, ...rel.split('/'));
+    const before = await fs.readFile(abs, 'utf-8').catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null;
+      throw err;
+    });
+    const manifest = before === null ? null : await this.disk.readJsonObject(abs);
+    if (before !== null && manifest === null) {
+      throw new PluginProvisionError(
+        `${PLUGIN_MANIFEST_FILE} in your personal plugin is not a JSON object, so the name cannot be stored in it. Fix the file first.`,
+        409,
+      );
+    }
+    if (manifest?.displayName === displayName) return;
+    const next = manifest === null
+      ? renderPluginManifest(folder, displayName)
+      : `${JSON.stringify({ ...manifest, displayName }, null, 2)}\n`;
+    await this.workspaceService.writeFile(wsId, rel, next);
+    await commitOrUndo(
+      () => this.commits.runPendingCommit(wsId, this.kb.defaultBranch, rel, user, { summary: 'Name personal plugin' }),
+      () => (before === null ? fs.rm(abs, { force: true }) : fs.writeFile(abs, before, 'utf-8')),
+      () => this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch }),
+    );
   }
 
   /**
@@ -412,7 +496,7 @@ export class PluginProvisionService {
       // the filesystem's component limit parks as well as a short one.
       const parkedDir = path.join(path.dirname(folderDir), `.deleting-${randomUUID()}`);
       await fs.rename(folderDir, parkedDir);
-      try {
+      await commitOrUndo(
         // Inline and `systemAuthorized`, for `provision`'s reasons in
         // reverse: the gate reads rules at HEAD, and the endpoint has
         // already authorized the delete (owner verdict), so the per-user
@@ -420,28 +504,26 @@ export class PluginProvisionService {
         // removes — is skipped for exactly this commit. `commitFile` is
         // path-scoped (`git add -- <path>`), and a folder path stages every
         // deletion under it: one commit, one removed plugin.
-        await this.commits.runPendingCommit(
-          wsId,
-          this.kb.defaultBranch,
-          `${this.kbDirName}/${this.pluginsRoot}/${name}`,
-          user,
-          { systemAuthorized: true },
-        );
-      } catch (err) {
+        () =>
+          this.commits.runPendingCommit(
+            wsId,
+            this.kb.defaultBranch,
+            `${this.kbDirName}/${this.pluginsRoot}/${name}`,
+            user,
+            { systemAuthorized: true },
+          ),
         // The commit did not land: put the folder back, so a failed delete
         // is a no-op rather than a plugin that exists at origin but not here.
-        try {
-          await fs.rename(parkedDir, folderDir);
-        } catch {
-          /* the park survives for the next attempt — better than masking the real error */
-        }
-        throw err;
-      }
-      await fs.rm(parkedDir, { recursive: true, force: true }).catch(() => {});
-      // The folder's rules left the access model — drop the resolver cache
-      // so the very next check runs against a tree without them.
-      this.accessControl.invalidate(wsId);
-      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+        // A rename that fails leaves the park for the next attempt.
+        () => fs.rename(parkedDir, folderDir),
+        async () => {
+          await fs.rm(parkedDir, { recursive: true, force: true }).catch(() => {});
+          // The folder's rules left the access model — drop the resolver cache
+          // so the very next check runs against a tree without them.
+          this.accessControl.invalidate(wsId);
+          this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+        },
+      );
     });
   }
 
@@ -547,9 +629,10 @@ export class PluginProvisionService {
 
   /**
    * Seed `Plugins/<folder>/` — `folder` being the path below the root, `leaf`
-   * its last segment, which names the manifest — and commit it.
+   * its last segment, which names the manifest — and commit it. `displayName`
+   * is the personal folder's given name; absent, the leaf is what people see.
    */
-  private async provision(user: AuthUser, folder: string, leaf: string, accessMd: string): Promise<void> {
+  private async provision(user: AuthUser, folder: string, leaf: string, accessMd: string, displayName?: string): Promise<void> {
     const wsId = await this.readyWorkspaceId();
     const folderPath = `${this.kbDirName}/${this.pluginsRoot}/${folder}`;
     const wsRelPath = `${folderPath}/access.md`;
@@ -565,7 +648,7 @@ export class PluginProvisionService {
       }
       throw err;
     }
-    try {
+    const seedAndCommit = async (): Promise<void> => {
       // The manifest is what makes the folder a PLUGIN to anything outside
       // this app, so it lands in the same commit as the access rules — and
       // INSIDE the rollback scope: a manifest write that fails must clean up
@@ -580,7 +663,7 @@ export class PluginProvisionService {
       await this.workspaceService.writeFile(
         wsId,
         `${folderPath}/${PLUGIN_MANIFEST_FILE}`,
-        renderPluginManifest(leaf),
+        renderPluginManifest(leaf, displayName),
       );
       // Inline, not enqueued: the gate reads rules at HEAD, so the folder is
       // only real once this commit lands. `runPendingCommit` is the same
@@ -593,27 +676,29 @@ export class PluginProvisionService {
       await this.commits.runPendingCommit(wsId, this.kb.defaultBranch, folderPath, user, {
         systemAuthorized: true,
       });
-    } catch (err) {
+    };
+    await commitOrUndo(
+      seedAndCommit,
       // The commit did not land: roll the seeded file back off the disk,
       // best-effort, so a retry doesn't find a half-made plugin and report
       // "already exists" for something that never got committed. Only OUR
       // file and — when that leaves it empty — the folder; never recursive,
-      // so a concurrent writer's bytes can't be collateral.
-      try {
+      // so a concurrent writer's bytes can't be collateral. A removal that
+      // fails is left for the next attempt's wx conflict.
+      async () => {
         const wsDir = await this.workspaceService.getWorkspacePath(wsId);
         const folderDir = path.join(wsDir, this.kbDirName, this.pluginsRoot, folder);
         await fs.rm(path.join(folderDir, 'access.md'), { force: true });
         await fs.rm(path.join(folderDir, PLUGIN_MANIFEST_FILE), { force: true });
         await fs.rmdir(folderDir).catch(() => {});
-      } catch {
-        /* leave it for the next attempt's wx conflict — better than masking the real error */
-      }
-      throw err;
-    }
-    // The folder's rules changed the access model — drop the resolver cache
-    // so the very next check (the creator's first skill write) sees them.
-    this.accessControl.invalidate(wsId);
-    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+      },
+      () => {
+        // The folder's rules changed the access model — drop the resolver cache
+        // so the very next check (the creator's first skill write) sees them.
+        this.accessControl.invalidate(wsId);
+        this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: this.kb.defaultBranch });
+      },
+    );
   }
 
   private async readyWorkspaceId(): Promise<string> {

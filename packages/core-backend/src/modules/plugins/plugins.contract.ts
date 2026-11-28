@@ -33,6 +33,8 @@
  * change requests; only the UI dresses them up.
  */
 
+import type { AuthUser } from '@bevel-software/platform-shared';
+
 export type { PluginMembership } from '../skills/index.js';
 
 /** Access-rule principals as the resolver hands them back. */
@@ -172,6 +174,42 @@ export interface PluginCatalogEntry {
    * was left out.
    */
   warnings: string[];
+}
+
+/** What a provisioning call answers: the plugin folder it made or found. */
+export interface ProvisionedPlugin {
+  /** The folder's path below `Plugins/` — `GTM`, or `Teams/GTM` for one made inside a grouping folder. */
+  folder: string;
+  /** The same folder, repo-relative — `Plugins/Teams/GTM` — as the file tools address it. */
+  path: string;
+  /** Where its skills go: `<path>/skills`, each skill a subfolder holding a `SKILL.md`. */
+  skillsDir: string;
+  /** The plugin's identity — the manifest name written for it. */
+  name: string;
+  /**
+   * What a person sees it called — the manifest's `displayName`, which is the
+   * name the creator typed, trimmed. Exactly as persisted: the answer and the
+   * file on disk can never say two different things.
+   */
+  displayName: string;
+  /** False when an ensure found the folder already there. */
+  created: boolean;
+}
+
+/**
+ * Making, naming and deleting plugin folders — what the plugin routes call.
+ * A refusal the caller can pass through is a `PluginProvisionError` carrying
+ * its HTTP status. Implemented by `PluginProvisionService`.
+ */
+export interface IPluginProvisioning {
+  /** Make a shared plugin named `name`, optionally inside the grouping folder `parent`. */
+  createPlugin(user: AuthUser, name: string, parent?: string): Promise<ProvisionedPlugin>;
+  /** Ensure the caller's personal plugin exists; a `name` is stored as its manifest `displayName`. */
+  ensurePersonalPlugin(user: AuthUser, name?: string): Promise<ProvisionedPlugin>;
+  /** The name the caller gave their personal plugin, or null when they gave none. */
+  personalPluginName(user: AuthUser): Promise<string | null>;
+  /** Delete the plugin at `folder` (its path below the plugins root). The caller has checked ownership. */
+  deletePlugin(user: AuthUser, folder: string): Promise<void>;
 }
 
 export interface IPluginIndexService {

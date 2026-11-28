@@ -6,15 +6,21 @@
  * the same page, the same sections, the same card grid as `Plugins/Engineering`.
  * The only difference is which items it holds, and that is a query, not a kind.
  *
- * One name for everyone, deliberately: the page is always the reader's own,
- * so the reader's name on it adds nothing — and a sign-in record's spelling
- * of a name is not a style guide. (`displayFirstName` still greets people
- * on the welcome page.)
+ * The DEFAULT is one name for everyone, deliberately: the page is always the
+ * reader's own, so the reader's sign-in name on it adds nothing — and a
+ * sign-in record's spelling of a name is not a style guide. (`displayFirstName`
+ * still greets people on the welcome page.)
  */
 export const PERSONAL_PLUGIN_NAME = 'Personal plugin';
 
-export function personalPluginName(): string {
-  return PERSONAL_PLUGIN_NAME;
+/**
+ * What the personal plugin is called on screen: the name its owner gave it
+ * (the manifest `displayName`, as the Library context carries it in
+ * `personalName`), else the default. One rule for the card, the page and the
+ * sidebar, so they can never disagree.
+ */
+export function personalPluginName(given?: string | null): string {
+  return given?.trim() || PERSONAL_PLUGIN_NAME;
 }
 
 /**

@@ -4,12 +4,11 @@ import { isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { HEADER_COLUMN_TOP } from '../../../shared/theme/header';
-import { useAdmin } from '../../admin';
+import { pathForGroupMembers, useAdmin } from '../../admin';
 import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import { CONNECT_TOOLS_PATH, libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
 import { EVERYONE_TEAM, filterLibraryItems, pluginsOfItem, type LibraryFilter } from '../utils/status';
-import { pathForGroupMembers } from '../../admin/components/group-members-path';
 import { ownedLensOf, pluginEntriesFor } from '../utils/plugin-entries';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 import { useLibraryToast } from '../state/toast.context';
@@ -59,7 +58,7 @@ export function LibraryLayout() {
   const { collapsed } = useSidebar();
 
   const filter = libraryFilterForPath(location.pathname);
-  const personalLabel = personalPluginName();
+  const personalLabel = personalPluginName(lib.personalName);
 
   /**
    * One row per team: how much of the catalog the team can use, and — in

@@ -225,8 +225,14 @@ describe('LibraryCard', () => {
 });
 
 describe('personalPluginName', () => {
-  it('is one name for everyone — the page is always the reader\'s own', () => {
+  it('is one default for everyone — the page is always the reader\'s own', () => {
     expect(personalPluginName()).toBe('Personal plugin');
+    expect(personalPluginName(null)).toBe('Personal plugin');
+    expect(personalPluginName('   ')).toBe('Personal plugin');
+  });
+
+  it('is the name its owner gave it, when they gave one', () => {
+    expect(personalPluginName("QA User's Toolkit")).toBe("QA User's Toolkit");
   });
 });
 

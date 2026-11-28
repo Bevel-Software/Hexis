@@ -3,16 +3,16 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import { AdminContext, type AdminContextValue } from '../../admin/state/admin.context';
-import { AuthContext } from '../../auth/state/auth.context';
+import { AdminContext, type AdminContextValue } from '../../admin';
+import { AuthContext } from '../../auth';
 import { authValue } from '../../library/__tests__/auth-harness';
 import { LibraryContext } from '../../library/state/library-context';
 import type { LibraryContextValue } from '../../library/state/library-data';
 import { LibraryToastProvider } from '../../library/state/toast';
 import { LibraryPage } from '../../library/components/LibraryPage';
-import { LIBRARY_ROOT } from '../../library/routes/library-paths';
+import { LIBRARY_ROOT } from '../../library';
 import type { LibraryFilter } from '../../library/utils/status';
-import { WorkspaceContext } from '../../workspace/state/workspace.context';
+import { WorkspaceContext } from '../../workspace';
 import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
 import { resetOnboardingForTests } from '../state/onboarding';
 
@@ -61,6 +61,7 @@ function library(over: Partial<LibraryContextValue> = {}): LibraryContextValue {
     teams: [],
     teamsLoading: false,
     teamsError: null,
+    personalName: null,
     reloadPlugins: vi.fn(),
     ...over,
   };

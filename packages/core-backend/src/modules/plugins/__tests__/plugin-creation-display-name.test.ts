@@ -9,8 +9,9 @@ import type { IAccessControl } from '../../access/index.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import { PluginProvisionService } from '../plugin-provision.service.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
-import { CREATE_PLUGIN } from '../plugins.tools.js';
+import { CREATE_PLUGIN, myPluginDef } from '../plugins.tools.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { realDisk, realPluginSource } from '../../../__tests__/real-disk.js';
 
 /**
@@ -39,6 +40,8 @@ function toolUrl(base: string): string {
 interface Harness {
   dir: string;
   svc: PluginProvisionService;
+  /** The inline commit every provisioning write rides; resolves unless a test says otherwise. */
+  commit: ReturnType<typeof vi.fn>;
   baseUrl: string;
   manifestOf(folder: string): Promise<Record<string, unknown>>;
   /** The dialog's door: a POST of the body its form builds. */
@@ -72,9 +75,10 @@ async function makeHarness(
       }
     },
   } as unknown as WorkspaceService;
+  const commit = vi.fn<(...args: unknown[]) => Promise<undefined>>(async () => undefined);
   const svc = new PluginProvisionService(
     workspaceService,
-    { runPendingCommit: vi.fn(async () => undefined) },
+    { runPendingCommit: commit },
     { invalidate: vi.fn() } as unknown as IAccessControl,
     testKbContext({ kbDirName: KB }),
     undefined,
@@ -107,6 +111,7 @@ async function makeHarness(
   return {
     dir,
     svc,
+    commit,
     baseUrl,
     manifestOf: async (folder) =>
       JSON.parse(await fs.readFile(path.join(dir, KB, 'Plugins', folder, 'plugin.json'), 'utf-8')),
@@ -298,5 +303,190 @@ describe('creation derives and stores the display name the same way through ever
     expect(Object.keys(outputs.properties)).toContain('displayName');
     const { body } = await h.byTool('Ops Desk');
     for (const field of Object.keys(outputs.properties)) expect(body).toHaveProperty(field);
+  });
+});
+
+describe('a person names their personal plugin, and that name is what it is called', () => {
+  /**
+   * The `my_plugin` tool's own declaration, made here as registration makes
+   * it, so the route checks a call against the arguments the tool advertises
+   * (see `declareRouteTool`) and the URL is the one an agent is handed.
+   */
+  const MY_PLUGIN = myPluginDef(testKbContext({ kbDirName: KB }).layout);
+  const PERSONAL = 'personal-u-alice';
+
+  async function myPlugin(h: Harness, body?: Record<string, unknown>) {
+    const url = (MY_PLUGIN.tool_call_template as { url: string }).url.replace('${API_URL}', h.baseUrl);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    });
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  }
+
+  const manifestPath = (h: Harness) => path.join(h.dir, KB, 'Plugins', PERSONAL, 'plugin.json');
+
+  it('the tool advertises an optional `name`', () => {
+    // `toolDef` wraps the flat inputs under `body`.
+    const inputs = (MY_PLUGIN.inputs as { properties: { body: { properties: Record<string, { type: string }>; required?: string[] } } }).properties.body;
+    expect(inputs.properties.name).toMatchObject({ type: 'string' });
+    expect(inputs.required ?? []).not.toContain('name');
+  });
+
+  it('my_plugin with a name creates the plugin under that display name, and the app is told it', async () => {
+    const h = await makeHarness();
+    const { status, body } = await myPlugin(h, { name: '  Razvan Tools  ' });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ created: true, folder: PERSONAL, name: PERSONAL, displayName: 'Razvan Tools' });
+    // Persisted as the manifest `displayName`; the identity and folder stay keyed to the owner.
+    expect(await h.manifestOf(PERSONAL)).toMatchObject({ name: PERSONAL, displayName: 'Razvan Tools' });
+    expect(await h.svc.personalPluginName(ALICE)).toBe('Razvan Tools');
+  });
+
+  it('my_plugin with a name on an existing plugin stores it, keeps the rest of the manifest, and commits it', async () => {
+    const h = await makeHarness();
+    await myPlugin(h);
+    await fs.writeFile(
+      manifestPath(h),
+      JSON.stringify({ name: PERSONAL, displayName: PERSONAL, description: 'mine', version: '1.0.0' }),
+    );
+    h.commit.mockClear();
+
+    const { status, body } = await myPlugin(h, { name: "QA User's Toolkit" });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ created: false, displayName: "QA User's Toolkit" });
+    expect(await h.manifestOf(PERSONAL)).toEqual({
+      name: PERSONAL,
+      displayName: "QA User's Toolkit",
+      description: 'mine',
+      version: '1.0.0',
+    });
+    expect(h.commit).toHaveBeenCalledTimes(1);
+    expect(h.commit.mock.calls[0]![2]).toBe(`${KB}/Plugins/${PERSONAL}/plugin.json`);
+    expect(await h.svc.personalPluginName(ALICE)).toBe("QA User's Toolkit");
+
+    // The same name again writes and commits nothing.
+    h.commit.mockClear();
+    await myPlugin(h, { name: "QA User's Toolkit" });
+    expect(h.commit).not.toHaveBeenCalled();
+  });
+
+  it('a name set later in the manifest by hand is the name the app is told', async () => {
+    const h = await makeHarness();
+    await myPlugin(h);
+    // Nothing given yet: the default label, so the app shows its own default.
+    expect(await h.svc.personalPluginName(ALICE)).toBeNull();
+    await fs.writeFile(manifestPath(h), JSON.stringify({ name: PERSONAL, displayName: "QA User's Toolkit" }));
+    expect(await h.svc.personalPluginName(ALICE)).toBe("QA User's Toolkit");
+    // And my_plugin without a name keeps it, answering with it.
+    const { body } = await myPlugin(h);
+    expect(body).toMatchObject({ created: false, displayName: "QA User's Toolkit" });
+    expect((await h.manifestOf(PERSONAL)).displayName).toBe("QA User's Toolkit");
+  });
+
+  it('no personal folder yet, or one still carrying its folder label, has no given name', async () => {
+    const h = await makeHarness();
+    expect(await h.svc.personalPluginName(ALICE)).toBeNull();
+    await myPlugin(h);
+    expect(await h.svc.personalPluginName(ALICE)).toBeNull();
+    // Reading created nothing for a person who never asked.
+    const bob = { ...ALICE, id: 'u-bob' } as AuthUser;
+    expect(await h.svc.personalPluginName(bob)).toBeNull();
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/personal-u-bob'))).rejects.toThrow();
+  });
+
+  it('a blank or non-string name is refused, and nothing is created', async () => {
+    const h = await makeHarness();
+    for (const name of ['', '   ', 7]) {
+      const { status } = await myPlugin(h, { name });
+      expect(status, JSON.stringify(name)).toBeGreaterThanOrEqual(400);
+      expect(status, JSON.stringify(name)).toBeLessThan(500);
+    }
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins', PERSONAL))).rejects.toThrow();
+  });
+
+  it('a commit that does not land puts the manifest back, so the name is not read as stored', async () => {
+    const h = await makeHarness();
+    await myPlugin(h);
+    const before = await fs.readFile(manifestPath(h), 'utf-8');
+    h.commit.mockRejectedValueOnce(new Error('push refused'));
+    await expect(h.svc.ensurePersonalPlugin(ALICE, 'Razvan Tools')).rejects.toThrow('push refused');
+    expect(await fs.readFile(manifestPath(h), 'utf-8')).toBe(before);
+    expect(await h.svc.personalPluginName(ALICE)).toBeNull();
+  });
+
+  it('a commit that landed but could not be pushed keeps the name, and the caller is told the push needs help', async () => {
+    const h = await makeHarness();
+    await myPlugin(h);
+    const pushOnly = new PushNeedsAgentResolutionError('main', `${KB}/Plugins/${PERSONAL}/plugin.json`, 'rejected', 'rebase failed', 'refused');
+    h.commit.mockRejectedValueOnce(pushOnly);
+    await expect(h.svc.ensurePersonalPlugin(ALICE, 'Razvan Tools')).rejects.toBe(pushOnly);
+    // The tree agrees with the commit that landed: nothing was undone.
+    expect((await h.manifestOf(PERSONAL)).displayName).toBe('Razvan Tools');
+    expect(await h.svc.personalPluginName(ALICE)).toBe('Razvan Tools');
+  });
+
+  it('a personal folder whose commit landed but could not be pushed is kept, not rolled back', async () => {
+    const h = await makeHarness();
+    h.commit.mockRejectedValueOnce(
+      new PushNeedsAgentResolutionError('main', `${KB}/Plugins/${PERSONAL}`, 'rejected', 'rebase failed', 'refused'),
+    );
+    await expect(h.svc.ensurePersonalPlugin(ALICE)).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins', PERSONAL, 'access.md'))).resolves.toBeTruthy();
+    expect((await h.manifestOf(PERSONAL)).name).toBe(PERSONAL);
+  });
+
+  it('a plugin delete whose commit landed but could not be pushed stays deleted, never parked back', async () => {
+    const h = await makeHarness();
+    await h.svc.createPlugin(ALICE, 'GTM');
+    h.commit.mockRejectedValueOnce(new PushNeedsAgentResolutionError('main', `${KB}/Plugins/GTM`, 'rejected', 'rebase failed', 'refused'));
+    await expect(h.svc.deletePlugin(ALICE, 'GTM')).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    // Neither the folder nor its park is left: the tree is what was committed.
+    expect((await fs.readdir(path.join(h.dir, KB, 'Plugins'))).filter((n) => n !== PERSONAL)).toEqual([]);
+  });
+
+  it('reading the name waits for a naming in flight, so it never answers a name whose commit then fails', async () => {
+    const h = await makeHarness();
+    await myPlugin(h);
+    let entered!: () => void;
+    const inCommit = new Promise<void>((r) => (entered = r));
+    let refuse!: (err: Error) => void;
+    h.commit.mockImplementationOnce(() => {
+      entered();
+      return new Promise<undefined>((_, reject) => (refuse = reject));
+    });
+    const naming = h.svc.ensurePersonalPlugin(ALICE, 'Razvan Tools');
+    await inCommit;
+    // The name is on disk but not committed: the read must not answer yet.
+    const read = h.svc.personalPluginName(ALICE);
+    const early = await Promise.race([read.then(() => 'answered'), new Promise((r) => setTimeout(() => r('waiting'), 100))]);
+    expect(early).toBe('waiting');
+    refuse(new Error('commit refused'));
+    await expect(naming).rejects.toThrow('commit refused');
+    expect(await read).toBeNull();
+  });
+
+  it('a plugin.json that is not a JSON object is refused, never overwritten', async () => {
+    const h = await makeHarness();
+    await myPlugin(h);
+    await fs.writeFile(manifestPath(h), 'not json {');
+    h.commit.mockClear();
+    const { status, body } = await myPlugin(h, { name: 'Razvan Tools' });
+    expect(status).toBe(409);
+    expect(String(body.error)).toContain('plugin.json');
+    expect(await fs.readFile(manifestPath(h), 'utf-8')).toBe('not json {');
+    expect(h.commit).not.toHaveBeenCalled();
+  });
+});
+
+describe('naming a personal plugin whose manifest is missing', () => {
+  it('writes a fresh manifest carrying the name', async () => {
+    const h = await makeHarness();
+    await h.svc.ensurePersonalPlugin(ALICE);
+    await fs.rm(path.join(h.dir, KB, 'Plugins/personal-u-alice/plugin.json'));
+    const answer = await h.svc.ensurePersonalPlugin(ALICE, 'Razvan Tools');
+    expect(answer).toMatchObject({ created: false, displayName: 'Razvan Tools' });
+    expect(await h.manifestOf('personal-u-alice')).toMatchObject({ name: 'personal-u-alice', displayName: 'Razvan Tools' });
   });
 });

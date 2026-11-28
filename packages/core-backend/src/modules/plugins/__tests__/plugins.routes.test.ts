@@ -11,6 +11,7 @@ import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import type { ChangeRequest, IVersionControlService } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/index.js';
 import type { IAccessControl } from '../../access/index.js';
 import type { ISkillService, SkillSummary } from '../../skills/index.js';
@@ -207,7 +208,8 @@ async function makeHarness(opts: HarnessOpts = {}) {
   // here only need to prove what they hand it and when they refuse to.
   const provision = {
     createPlugin: vi.fn(async () => ({ folder: 'GTM', created: true })),
-    ensurePersonalPlugin: vi.fn(async () => ({ folder: 'personal-u-1', created: false })),
+    ensurePersonalPlugin: vi.fn<(...args: unknown[]) => Promise<{ folder: string; created: boolean }>>(async () => ({ folder: 'personal-u-1', created: false })),
+    personalPluginName: vi.fn<(...args: unknown[]) => Promise<string | null>>(async () => 'Razvan Tools'),
     deletePlugin: vi.fn(async () => undefined),
   };
 
@@ -309,12 +311,51 @@ describe('/api/plugins routes', () => {
     const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ folder: 'personal-u-1', created: false });
-    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }));
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }), undefined);
 
     const anon = await makeHarness({ email: null });
     try {
       expect((await fetch(`${anon.baseUrl}/api/plugins/personal`, { method: 'POST' })).status).toBe(401);
       expect(anon.provision.ensurePersonalPlugin).not.toHaveBeenCalled();
+    } finally {
+      await close(anon.server);
+    }
+  });
+
+  it('POST /plugins/personal hands the service the name its owner gave; a name that is not a string is a 400', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const post = (body: unknown) =>
+      fetch(`${h.baseUrl}/api/plugins/personal`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    expect((await post({ name: 'Razvan Tools' })).status).toBe(200);
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenLastCalledWith(expect.objectContaining({ email: ALI }), 'Razvan Tools');
+    expect((await post({ name: 7 })).status).toBe(400);
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledTimes(1);
+  });
+
+  it("GET /plugins/personal answers the caller's given name, reading only; no caller, no answer", async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ name: 'Razvan Tools' });
+    expect(h.provision.personalPluginName).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }));
+    expect(h.provision.ensurePersonalPlugin).not.toHaveBeenCalled();
+
+    h.provision.personalPluginName.mockResolvedValueOnce(null);
+    expect(await (await fetch(`${h.baseUrl}/api/plugins/personal`)).json()).toEqual({ name: null });
+
+    h.provision.personalPluginName.mockRejectedValueOnce(new Error('disk gone'));
+    expect((await fetch(`${h.baseUrl}/api/plugins/personal`)).status).toBe(500);
+
+    const anon = await makeHarness({ email: null });
+    try {
+      expect((await fetch(`${anon.baseUrl}/api/plugins/personal`)).status).toBe(401);
+      expect(anon.provision.personalPluginName).not.toHaveBeenCalled();
     } finally {
       await close(anon.server);
     }
@@ -328,6 +369,31 @@ describe('/api/plugins routes', () => {
     const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'Plugin discovery is incomplete' });
+  });
+
+  it('create, personal plugin (with its name) and delete answer a push-only failure as saved locally (409 and its kind), never a 500', async () => {
+    const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
+    server = h.server;
+    const pushOnly = () => new PushNeedsAgentResolutionError(DEFAULT_BRANCH, 'knowledge-base/Plugins/X', 'rejected', '(not attempted)', 'refused');
+    h.provision.createPlugin.mockRejectedValueOnce(pushOnly());
+    h.provision.ensurePersonalPlugin.mockRejectedValueOnce(pushOnly());
+    h.provision.deletePlugin.mockRejectedValueOnce(pushOnly());
+    const json = { 'content-type': 'application/json' };
+    const calls = [
+      ['POST /api/plugins', fetch(`${h.baseUrl}/api/plugins`, { method: 'POST', headers: json, body: JSON.stringify({ name: 'Sales' }) })],
+      ['POST /api/plugins/personal', fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST', headers: json, body: JSON.stringify({ name: 'Mine' }) })],
+      ['DELETE /api/plugins/gtm', fetch(`${h.baseUrl}/api/plugins/gtm`, { method: 'DELETE' })],
+    ] as const;
+    for (const [route, pending] of calls) {
+      const res = await pending;
+      expect(res.status, route).toBe(409);
+      expect(await res.json(), route).toEqual({
+        kind: 'push-needs-resolution',
+        branch: DEFAULT_BRANCH,
+        path: 'knowledge-base/Plugins/X',
+        error: pushOnly().message,
+      });
+    }
   });
 
   it('lists member plugins sorted, counting by pluginOfPath', async () => {

@@ -53,7 +53,7 @@ const PROVISIONED_OUTPUT = {
     skillsDir: { type: 'string', description: 'Where its skills go: `<path>/skills`. Each skill is a subfolder holding a `SKILL.md`.' },
     folder: { type: 'string', description: 'The same folder as its path below the plugins root.' },
     name: { type: 'string', description: 'The plugin identity (its manifest name), as grants and the marketplace spell it.' },
-    displayName: { type: 'string', description: 'What people see it called — the manifest `displayName`, exactly as persisted: for `create_plugin`, the name that was asked for, trimmed; for `my_plugin`, the personal folder\'s own label.' },
+    displayName: { type: 'string', description: 'What people see it called — the manifest `displayName`, exactly as persisted: for `create_plugin`, the name that was asked for, trimmed; for `my_plugin`, the name its owner gave it, else the personal folder\'s own label.' },
     created: { type: 'boolean', description: 'False when the folder already existed.' },
   },
 } as const;
@@ -101,15 +101,26 @@ export function myPluginDescription(layout: KbLayout): string {
 
 /**
  * The `my_plugin` definition for `layout`. Everything but the description is
- * the same on every deployment and byte-identical to what it has always been:
- * the same endpoint, the same (empty) inputs, the same outputs, the same tags.
+ * the same on every deployment: the same endpoint, the one optional input,
+ * the same outputs, the same tags.
  */
 export function myPluginDef(layout: KbLayout): UtcpTool {
   return toolDef({
     name: 'my_plugin',
     description: myPluginDescription(layout),
     path: '/api/plugins/personal',
-    inputs: { type: 'object', properties: {}, additionalProperties: false },
+    inputs: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          minLength: 1,
+          description:
+            'Optional: what the person calls their plugin, e.g. `Razvan Tools`. Stored as its manifest `displayName` and shown in the app. Omit to keep the current name.',
+        },
+      },
+      additionalProperties: false,
+    },
     outputs: PROVISIONED_OUTPUT,
     // `write`: both make folders and commit — a read-scoped caller's manual
     // must not advertise them (see `declaresWrite` in `tool.contract.ts`).

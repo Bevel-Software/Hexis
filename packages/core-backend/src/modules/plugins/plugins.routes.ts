@@ -15,7 +15,7 @@ import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { pluginFolderBelowRoot } from './plugins.service.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
+import { PluginProvisionError } from './plugin-provision.service.js';
 import { argumentsRefusal } from '../tool-helpers/index.js';
 import { resolveConnectionScope, type IAgentScopeResolver } from '../agent-scope/index.js';
 import '../tool-auth/index.js'; // Express Request.toolAuth augmentation
@@ -29,6 +29,7 @@ import type {
   PluginCatalogEntry,
   PluginSummary,
   IPluginIndexService,
+  IPluginProvisioning,
 } from './plugins.contract.js';
 
 /**
@@ -86,6 +87,28 @@ function refuseMismatchedArguments(req: express.Request, res: express.Response):
 }
 
 /**
+ * THE failure answer of every route that provisions, names or deletes through
+ * `IPluginProvisioning`. The service's own refusals keep their status (a 503
+ * for incomplete discovery tells the caller to try again). A version-control
+ * refusal keeps its status and payload through `domainErrorBody`, so a commit
+ * that landed locally but was not pushed (`PushNeedsAgentResolutionError`,
+ * which the service rethrows with the change kept) answers its saved-locally
+ * `kind` rather than a 500. Anything else is logged and answers a 500.
+ */
+function sendProvisionFailure(res: express.Response, err: unknown, what: string): void {
+  if (err instanceof PluginProvisionError) {
+    res.status(err.status).json({ error: err.message });
+    return;
+  }
+  if (err instanceof VersionControlDomainError) {
+    res.status(err.status).json(domainErrorBody(err));
+    return;
+  }
+  log.error(`${what} failed:`, { err });
+  res.status(500).json({ error: `Failed to ${what}` });
+}
+
+/**
  * Answer the connection-scope refusal when the caller's connection was made
  * as an agent configuration that does not list `toolName`; `true` when it answered.
  * These routes ARE the `create_plugin` and `my_plugin` tools but are not
@@ -129,7 +152,7 @@ async function refuseOutsideConnectionScope(
  * gate established.
  */
 export function createPluginCreationRoutes(
-  provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
+  provision: Pick<IPluginProvisioning, 'createPlugin' | 'ensurePersonalPlugin'>,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
   /** Resolves a connection's agent choice to its scope; absent, a narrowed connection loads nothing. */
   agentScope?: Pick<IAgentScopeResolver, 'resolve'>,
@@ -167,12 +190,7 @@ export function createPluginCreationRoutes(
       const result = await provision.createPlugin(user, name, parent);
       res.status(201).json(result);
     } catch (err) {
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      log.error('create failed:', { err });
-      res.status(500).json({ error: 'Failed to create the plugin' });
+      sendProvisionFailure(res, err, 'create the plugin');
     }
   });
 
@@ -189,17 +207,17 @@ export function createPluginCreationRoutes(
     // anything is provisioned.
     if (await refuseOutsideConnectionScope(req, res, user, 'my_plugin', agentScope)) return;
     if (refuseMismatchedArguments(req, res)) return;
+    // `name`: what its owner calls it, stored as the manifest `displayName`.
+    // Absent keeps the name it has; the service refuses a blank one.
+    const { name } = (req.body ?? {}) as { name?: unknown };
+    if (name !== undefined && typeof name !== 'string') {
+      res.status(400).json({ error: 'name must be a string' });
+      return;
+    }
     try {
-      res.json(await provision.ensurePersonalPlugin(user));
+      res.json(await provision.ensurePersonalPlugin(user, name));
     } catch (err) {
-      // The service's own refusals keep their status — a 503 for incomplete
-      // discovery tells the caller to try again, which a 500 would not.
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      log.error('personal-folder ensure failed:', { err });
-      res.status(500).json({ error: 'Failed to prepare your personal folder' });
+      sendProvisionFailure(res, err, 'prepare your personal folder');
     }
   });
 
@@ -219,7 +237,7 @@ export function createPluginsRoutes(
    * all, having no file of its own left to write.
    */
   joinRequestJobs: PluginJoinRequestJobs,
-  provision: PluginProvisionService,
+  provision: Pick<IPluginProvisioning, 'personalPluginName' | 'deletePlugin'>,
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
   /** The released branch's clone — every verdict here is read from it. */
   kb: Pick<KbContext, 'defaultWorkspaceId'>,
@@ -374,6 +392,26 @@ export function createPluginsRoutes(
   const openJoinCr = (mine: ChangeRequest[], email: string, plugin: string): ChangeRequest | null =>
     mine.find((cr) => cr.state === 'open' && cr.branch === joinBranchFor(email, plugin)) ?? null;
 
+  /**
+   * What the caller named their own personal plugin — `{ name }`, null when
+   * they gave it none (the app then shows its fixed default). The catalog
+   * never lists a personal folder, so this is where the app learns it.
+   * Reads only: a person with no personal folder yet has no name either.
+   *
+   *   GET /api/plugins/personal  → { name: string | null }
+   */
+  router.get('/plugins/personal', async (req, res) => {
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    try {
+      res.json({ name: await provision.personalPluginName(user) });
+    } catch (err) {
+      sendProvisionFailure(res, err, "read your personal plugin's name");
+    }
+  });
 
   router.get('/plugins', async (req, res) => {
     const email = req.userEmail;
@@ -561,12 +599,7 @@ export function createPluginsRoutes(
       pluginIndex.invalidate();
       res.json({ ok: true });
     } catch (err) {
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      log.error('delete failed:', { err });
-      res.status(500).json({ error: 'Failed to delete the plugin' });
+      sendProvisionFailure(res, err, 'delete the plugin');
     }
   });
 

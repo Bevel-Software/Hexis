@@ -1,20 +1,21 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '../../tool-registry/tool-registry.js';
-import { InternalTokenService } from '../../tool-auth/internal-token.service.js';
-import { createToolAuthMiddleware } from '../../tool-auth/tool-auth.middleware.js';
-import { keyOrSessionAuth } from '../../tool-auth/key-or-session.middleware.js';
-import { createAuthMiddleware } from '../../auth/auth.middleware.js';
+import { GUIDE_FIRST_SENTENCE, TOOL_DESCRIPTION_CAP, ToolRegistry } from '../../tool-registry/index.js';
 import { DEFAULT_KB_LAYOUT, validateKbLayout } from '@bevel-software/platform-shared';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { CLIENT_SHORT_CUT, TOOL_DESCRIPTION_CAP, clientVisibleLength } from '../../tool-registry/description-length.js';
-import { GUIDE_FIRST_SENTENCE } from '../../tool-registry/guide-first.js';
+import {
+  InternalTokenService,
+  createAuthMiddleware,
+  createToolAuthMiddleware,
+  keyOrSessionAuth,
+} from '../../../__tests__/tool-wiring.js';
+import { CLIENT_SHORT_CUT, clientVisibleLength } from '../../../__tests__/tool-description.js';
 import { registerPluginsTools, CREATE_PLUGIN, myPluginDef, myPluginDescription } from '../plugins.tools.js';
 import { createPluginCreationRoutes } from '../plugins.routes.js';
 import { PluginProvisionError } from '../plugin-provision.service.js';
 import type { IAgentScopeResolver } from '../../agent-scope/index.js';
-import { agentFile, agentScopeOver, inMemoryKb } from '../../agent-scope/__tests__/in-memory-kb.js';
+import { agentFile, agentScopeOver, inMemoryKb } from '../../../__tests__/in-memory-agent-scope.js';
 
 /**
  * The plugin tools are DESCRIPTIONS of the app's own creation endpoints.
@@ -149,19 +150,22 @@ describe('what my_plugin tells an agent about the personal plugin', () => {
     );
   });
 
-  /** Only the description changed: the call an agent makes is the call it made. */
-  it('keeps its endpoint, inputs, outputs and tags exactly as they were', () => {
+  /** The call an agent made still works: one optional input, the same endpoint, outputs and tags. */
+  it('keeps its endpoint, outputs and tags, and takes only an optional name', () => {
     const def = myPluginDef(DEFAULT_KB_LAYOUT);
     expect((def.tool_call_template as { url: string; http_method: string }).url).toBe('${API_URL}/api/plugins/personal');
     expect((def.tool_call_template as { http_method: string }).http_method).toBe('POST');
-    // The flat inputs are wrapped under `body` by `toolDef`; `my_plugin` takes
-    // none, so the envelope is optional too and `my_plugin({})` is a call
-    // that matches (see `bodyEnvelope`).
-    expect(def.inputs).toEqual({
-      type: 'object',
-      properties: { body: { type: 'object', properties: {}, additionalProperties: false } },
-      additionalProperties: false,
-    });
+    // The flat inputs are wrapped under `body` by `toolDef`; `my_plugin`'s one
+    // input is optional, so the envelope is optional too and `my_plugin({})`
+    // is still a call that matches (see `bodyEnvelope`).
+    const inputs = def.inputs as {
+      required?: string[];
+      properties: { body: { required?: string[]; additionalProperties: boolean; properties: Record<string, unknown> } };
+    };
+    expect(inputs.required ?? []).toEqual([]);
+    expect(inputs.properties.body.required ?? []).toEqual([]);
+    expect(inputs.properties.body.additionalProperties).toBe(false);
+    expect(Object.keys(inputs.properties.body.properties)).toEqual(['name']);
     expect(Object.keys((def.outputs as { properties: Record<string, unknown> }).properties)).toEqual([
       'path',
       'skillsDir',
@@ -276,7 +280,8 @@ describe('the creation endpoints behind the key-or-session gate', () => {
     const res = await post(base, '/api/plugins/personal', {}, 'bevel_alice');
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ path: 'Plugins/personal-user-alice', skillsDir: 'Plugins/personal-user-alice/skills' });
-    expect(ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ id: ALICE.id }));
+    // No `name` sent: the service keeps whatever name the plugin has.
+    expect(ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ id: ALICE.id }), undefined);
   });
 
   it("refuses a bad key and a bad session alike, and passes the service's refusal through with its status", async () => {
