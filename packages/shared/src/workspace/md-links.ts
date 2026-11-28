@@ -609,10 +609,16 @@ function relativeFrom(dir: string, target: string): string {
   return rel === '' ? '.' : rel;
 }
 
-/** Characters that would end or break a destination written without angle brackets. */
-function escapeBare(segment: string): string {
-  return segment.replace(/[\s<>()\\]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
+/** `c` as UTF-8 percent-escapes, which every resolver decodes back to `c`. */
+function percentEncode(c: string): string {
+  return [...new TextEncoder().encode(c)].map((b) => `%${b.toString(16).toUpperCase().padStart(2, '0')}`).join('');
 }
+
+/**
+ * A path written as a link target in any form: `%` would start an escape,
+ * `#` a fragment and `?` a query, so a name carrying one is escaped.
+ */
+const URL_RESERVED = '%#?';
 
 function encodePath(path: string, how: { encoded: boolean; angle: boolean; inFrontmatter: boolean }): string {
   let out: string;
@@ -622,10 +628,13 @@ function encodePath(path: string, how: { encoded: boolean; angle: boolean; inFro
       .map((s) => encodeURIComponent(s).replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29')))
       .join('/');
   } else if (how.angle) {
-    out = path.replace(/[<>\n]/g, (c) => encodeURIComponent(c));
+    // A backslash too: before punctuation it would read as a markdown escape.
+    out = path.replace(new RegExp(`[<>\\n\\\\${URL_RESERVED}]`, 'g'), percentEncode);
   } else {
-    // Only what would break the link: a balanced bare path stays as it is.
-    out = /[\s<>\\]/.test(path) || !balanced(path) ? escapeBare(path) : path;
+    // Only what would break the link: whitespace, delimiters and — when the
+    // path's parentheses do not balance — the parentheses too.
+    const breaks = /[\s<>\\]/.test(path) || !balanced(path) ? '\\s<>()\\\\' : '';
+    out = path.replace(new RegExp(`[${breaks}${URL_RESERVED}]`, 'g'), percentEncode);
   }
   // A frontmatter link sits inside a YAML quoted string, double or single:
   // either quote in the path would end the string early.
