@@ -51,8 +51,9 @@ export class KbPluginSource implements PluginSource {
 
   async walkWith(kbRoot: string, listeners: readonly WalkListener[]): Promise<PluginSourceWalk> {
     const warnings: string[] = [];
-    const registry = await loadRegistry(kbRoot, warnings);
-    const listener = pluginListener(this.disk, kbRoot, this.kb.layout, registry, warnings);
+    const serversUnseen: string[] = [];
+    const registry = await loadRegistry(kbRoot, warnings, serversUnseen);
+    const listener = pluginListener(this.disk, kbRoot, this.kb.layout, registry, warnings, serversUnseen);
     const { holes } = await this.disk.walkKb(kbRoot, [listener.listener, ...listeners]);
     return { discovery: listener.result(), holes };
   }
@@ -65,6 +66,7 @@ function pluginListener(
   layout: KbLayout,
   registry: McpRegistry | null,
   warnings: string[],
+  serversUnseen: string[],
 ): { listener: WalkListener; result(): Discovery } {
   const { pluginsDir } = layout;
   const unreadable: string[] = [];
@@ -101,7 +103,7 @@ function pluginListener(
         if (has(PLUGIN_MANIFEST_FILE)) {
           claimed.push(rel);
           // A manifest that could not be read: a hole, and still claimed.
-          const native = await readNativePlugin(disk, dir, rel, relFolder, warnings, unreadable, layout);
+          const native = await readNativePlugin(disk, dir, rel, relFolder, warnings, unreadable, serversUnseen, layout);
           if (native) claim(native);
         } else if (has(BUNDLE_FILE)) {
           claimed.push(rel);
@@ -119,6 +121,6 @@ function pluginListener(
         unreadable.push(rel);
       },
     },
-    result: () => ({ plugins, warnings, unreadable, claimed }),
+    result: () => ({ plugins, warnings, unreadable, serversUnseen, claimed }),
   };
 }

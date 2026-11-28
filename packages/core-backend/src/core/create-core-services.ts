@@ -1356,6 +1356,10 @@ export async function createCoreServices(
   // UTCP's and process-wide while the vault is this graph's.
   const secretsScope = tenantKey ? `${config.tenantId}/${config.dbSchema}` : DEFAULT_SECRETS_SCOPE;
   registerBevelSecretsVariableLoader(secretsVaultService, secretsScope);
+  // A tool's stored keys go with the tool: when a scan finds its name no
+  // longer declared (file deleted outside its page too), every value under
+  // it is wiped, so a later tool reusing the name starts with none.
+  toolManualService.setNamespaceRetirement((prefix) => secretsVaultService.removeNamespace(prefix));
 
   // Deleting ONE tool from its page — the owner's verb, the other end of the
   // promise that made them the owner. Built here because it is the one service

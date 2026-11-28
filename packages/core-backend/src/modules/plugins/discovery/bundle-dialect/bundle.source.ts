@@ -46,8 +46,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** The registry, when the repository has one; a missing file is null, a broken one warns. */
-export async function loadRegistry(kbRoot: string, warnings: string[]): Promise<McpRegistry | null> {
+/** The registry, when the repository has one; a missing file is null, a broken one warns and counts in `serversUnseen`. */
+export async function loadRegistry(
+  kbRoot: string,
+  warnings: string[],
+  serversUnseen: string[],
+): Promise<McpRegistry | null> {
   let text: string;
   try {
     text = await fs.readFile(path.join(kbRoot, DEFAULT_REGISTRY_PATH), 'utf-8');
@@ -57,11 +61,13 @@ export async function loadRegistry(kbRoot: string, warnings: string[]): Promise<
     if (!isAbsence(err)) {
       const code = (err as { code?: unknown } | null)?.code;
       warnings.push(`${DEFAULT_REGISTRY_PATH} could not be read (${String(code ?? err)}) — every mcpProfile is unresolved`);
+      serversUnseen.push(DEFAULT_REGISTRY_PATH);
     }
     return null;
   }
   const registry = parseRegistry(text);
   warnings.push(...registry.warnings);
+  if (!registry.whole) serversUnseen.push(DEFAULT_REGISTRY_PATH);
   return registry;
 }
 

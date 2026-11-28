@@ -74,12 +74,21 @@ export interface Discovery {
    * a manifest or bundle that could not be opened. Nothing behind a hole is
    * in `plugins`: not absent, unseen, and never listed under a guessed name.
    * A file that carries no identity (an `mcp.json`) is never a hole; its
-   * failure is a warning. A reader that only shows what it can carries on
+   * failure is a warning, counted in `serversUnseen`. A reader that only shows what it can carries on
    * (the catalog does); a WRITER that keys a change on the set of plugins
    * (a rename claiming a name) must refuse while this is not empty, or it
    * may take an identity it could not see.
    */
   unreadable: string[];
+  /**
+   * Files that declare MCP servers and exist but could NOT be read whole,
+   * repo-relative: a plugin's `mcp.json` that could not be read, the bundle
+   * registry that could not be read or is not whole (`McpRegistry.whole`). Not holes (no
+   * identity, so no writer refuses over them), but which servers they
+   * declare is not fully known: a reader comparing server lists between scans
+   * must not read them as declaring only what it could read.
+   */
+  serversUnseen: string[];
   /**
    * Every folder a plugin CLAIMS, repo-relative — in `plugins` or not: a
    * twin skipped for sharing a slug, a manifest that could not be read.

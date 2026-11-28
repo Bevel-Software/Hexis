@@ -3,13 +3,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_BRANCH, type AuthUser } from '@bevel-software/platform-shared';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { IAccessControl } from '../../access/access-control.interface.js';
-import type { ISkillService } from '../../skills/skills.contract.js';
-import type { IPluginIndexService, PluginCatalogEntry } from '../../plugins/plugins.contract.js';
-import type { PluginSource, Discovery } from '../../plugins/discovery/plugin-source.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { IAccessControl } from '../../access/index.js';
+import type { ISkillService } from '../../skills/index.js';
+import type { IPluginIndexService, PluginCatalogEntry, PluginSource, Discovery } from '../../plugins/index.js';
 import type { IToolManualService, ToolManualSummary } from '../tool-manuals.contract.js';
 import { ToolDeleteError, ToolDeleteService } from '../tool-delete.service.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
@@ -91,6 +90,7 @@ function discovery(plugins: Partial<Discovery['plugins'][number]>[]): PluginSour
       })),
       warnings: [],
       unreadable: [],
+      serversUnseen: [],
       claimed: [],
     })),
   } as unknown as PluginSource;
@@ -149,7 +149,7 @@ function build(
     opts.source ?? discovery([]),
     vault as never,
     testKbContext({ kbDirName: KB }),
-    new NodeFs(),
+    realDisk(),
   );
 }
 
@@ -419,6 +419,7 @@ describe('dependents the caller must not be told about', () => {
         plugins: [],
         warnings: [],
         unreadable: ['Plugins/Locked'],
+        serversUnseen: [],
         claimed: [],
       })),
     } as unknown as PluginSource;

@@ -23,7 +23,7 @@ import type { DiscoveredPlugin } from './plugin-source.js';
  * identity, and a plugin whose identity nobody could see is not listed under
  * a guessed one — it is a hole (`unreadable`), like a folder that could not
  * be listed. The optional `mcp.json` carries no identity, so its read
- * failure is a warning and nothing more.
+ * failure is not a hole: a warning, counted in `serversUnseen`.
  */
 export async function readNativePlugin(
   disk: IFsProbe,
@@ -32,6 +32,7 @@ export async function readNativePlugin(
   relFolder: string,
   warnings: string[],
   unreadable: string[],
+  serversUnseen: string[],
   /** Names the plugins root a personal folder sits directly under. */
   layout: KbLayout,
 ): Promise<DiscoveredPlugin | null> {
@@ -45,7 +46,9 @@ export async function readNativePlugin(
   // between probe and read — then this is no plugin, not one under a guessed name.
   if (manifestRead.text === null) return null;
   const manifestText = manifestRead.text;
-  const mcpJsonText = (await readText(path.join(dir, PLUGIN_MCP_FILE), folder, warnings)).text;
+  const mcpRead = await readText(path.join(dir, PLUGIN_MCP_FILE), folder, warnings);
+  if (mcpRead.failed) serversUnseen.push(`${folder}/${PLUGIN_MCP_FILE}`);
+  const mcpJsonText = mcpRead.text;
   const manifest = parseObject(manifestText);
   if (manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
