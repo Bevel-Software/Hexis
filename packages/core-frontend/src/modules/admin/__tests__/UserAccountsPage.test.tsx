@@ -186,11 +186,13 @@ describe('UserAccountsPage', () => {
       BOB,
       ROOT,
       { ...ALICE, id: 'u-bot', email: 'recovery-bot@bevel.local', name: 'Recovery Bot', isSystem: true },
+      { ...BOB, id: 'u-bot-hashed', email: 'sync-bot@bevel.local', name: 'Sync Bot', isSystem: true },
     ]);
     renderPage();
     await waitFor(() => screen.getByText('Alice'));
     const cases: Array<[string, RegExp]> = [
       ['recovery-bot@bevel.local', /System account — nobody signs in with it, so deleting it takes nobody's sign-in away\./],
+      ['sync-bot@bevel.local', /System account — still signs in with an old stored password: deleting it removes that password\./],
       ['alice@example.com', /No password — signs in with single sign-on: they can sign in again later with single sign-on/],
       ['bob@example.com', /Password: to sign in again they will need an admin/],
       ['root@example.com', /Password \(owner\): they can still sign in with the owner password set on the server, but will start fresh\./],
@@ -273,9 +275,10 @@ describe('UserAccountsPage', () => {
 
   // The whole point of the ticket: first setup and replacing a working
   // credential are different acts, so they are not offered in the same words.
-  // An account the platform runs its own work as: nobody signs in with it, and
-  // the service refuses it a stored password, so the row must neither claim
-  // single sign-on nor offer a password action that can only fail.
+  // An account the platform runs its own work as: the service refuses it a
+  // password, so the row must neither claim single sign-on nor offer a
+  // password action that can only fail. One whose row still holds a hash from
+  // before does sign in with it, and the row says so.
   it('labels a system account as one and offers it no password action', async () => {
     vi.mocked(listAccounts).mockResolvedValue([
       ALICE,
@@ -285,8 +288,9 @@ describe('UserAccountsPage', () => {
     ]);
     renderPage();
     await waitFor(() => screen.getByText('Recovery Bot'));
+    expect(row('Recovery Bot')).toHaveTextContent(/· System account — nobody signs in with it$/);
+    expect(row('Sync Bot')).toHaveTextContent(/· System account — still signs in with an old stored password$/);
     for (const name of ['Recovery Bot', 'Sync Bot']) {
-      expect(row(name)).toHaveTextContent(/· System account — nobody signs in with it$/);
       expect(row(name)).not.toHaveTextContent(/single sign-on/);
     }
     for (const email of ['recovery-bot@bevel.local', 'sync-bot@bevel.local']) {
