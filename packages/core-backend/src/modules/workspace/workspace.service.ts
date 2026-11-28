@@ -12,6 +12,7 @@ import {
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
   entryExistsMessage,
+  moveIntoItselfRefusal,
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type IgnoreRules, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
@@ -2162,6 +2163,10 @@ export class WorkspaceService implements IWorkspaceService {
     assertNoGitInternalsSegment(oldRelativePath);
     assertNoGitInternalsSegment(newRelativePath);
     assertValidPath(newRelativePath);
+    // A folder dragged or renamed into its own subtree: no filesystem can do
+    // that move, and the rename's own error names a path on the server.
+    const intoItself = moveIntoItselfRefusal(oldRelativePath, newRelativePath);
+    if (intoItself !== null) throw new VersionControlValidationError(intoItself, { kind: 'move-into-itself' });
     await assertNotGitInternals(workspaceDir, oldRelativePath, oldAbsolute);
     await assertNotGitInternals(workspaceDir, newRelativePath, newAbsolute);
     // Both ends: a link on the way to either end would carry the rename

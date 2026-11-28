@@ -68,6 +68,27 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it('refuses a folder into its own subtree in words, naming no server path, and moves nothing', async () => {
+    await svc.writeFile(workspaceId, `${KB}/QA-Move/Team/notes.md`, 'n');
+
+    for (const dest of [`${KB}/QA-Move/Team/Team`, `${KB}/QA-Move/Team/Twin/Team`]) {
+      const err = await svc.moveEntry(workspaceId, `${KB}/QA-Move/Team`, dest).then(() => null, (e: unknown) => e);
+      expect(err).toMatchObject({
+        status: 400,
+        message: `Nothing can be moved into itself: "${dest}" is inside "${KB}/QA-Move/Team". Choose a destination outside "${KB}/QA-Move/Team".`,
+        payload: { kind: 'move-into-itself' },
+      });
+      expect((err as Error).message).not.toContain(root);
+    }
+    expect(await fs.readFile(abs(`${KB}/QA-Move/Team/notes.md`), 'utf8')).toBe('n');
+    // Refused before anything is made: no empty `Twin` is left behind.
+    expect(await entryVisible(`${KB}/QA-Move/Team/Twin`)).toBe(false);
+
+    // `Team2` only starts with the same letters; it is not inside `Team`.
+    await svc.moveEntry(workspaceId, `${KB}/QA-Move/Team`, `${KB}/QA-Move/Team2/Team`);
+    expect(await fs.readFile(abs(`${KB}/QA-Move/Team2/Team/notes.md`), 'utf8')).toBe('n');
+  });
+
   it('refuses a file onto a file, and the file already there keeps its content', async () => {
     // The reported bug, exactly: a Word document renamed onto a note.
     await svc.writeFile(workspaceId, `${KB}/Sales/Notes.md`, '# Notes\n');

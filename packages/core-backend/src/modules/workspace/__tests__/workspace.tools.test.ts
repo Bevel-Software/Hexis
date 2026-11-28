@@ -3226,6 +3226,51 @@ describe('the tools place an unprefixed path inside the repository', () => {
  * LocalFilesystem, so "committed" is proven the way git sees it: a real
  * repository in the clone folder, committed and freshly cloned.
  */
+describe('move_file refuses a destination inside the source, in words', () => {
+  const KB = (p: string) => `${KB_DIR}/${p}`;
+  const move = async (body: Record<string, unknown>) => {
+    const res = await post(`${base}/api/agent/tools/move_file`, body);
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  };
+  let base = '';
+  const sentence = (dest: string) =>
+    `Nothing can be moved into itself: "${KB(dest)}" is inside "${KB('QA-Move/Team')}". Choose a destination outside "${KB('QA-Move/Team')}".`;
+
+  beforeEach(async () => {
+    base = await start();
+    await fs.writeFile(KB('QA-Move/Team/notes.md'), 'n');
+    await fs.writeFile(KB('QA-Move/Team/Twin/keep.md'), 'k');
+  });
+
+  for (const dest of ['QA-Move/Team/Team', 'QA-Move/Team/Twin/Team', 'QA-Move/Team/Twin/Deeper/Team/']) {
+    it(`dry run and move both refuse ${dest}, and nothing moves`, async () => {
+      const shown = dest.replace(/\/$/, '');
+      const dry = await move({ src: KB('QA-Move/Team'), dest: KB(dest), dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ allowed: false, reason: sentence(shown), moved: false, dryRun: true });
+      expect(dry.body).not.toHaveProperty('links');
+
+      const run = await move({ src: KB('QA-Move/Team'), dest: KB(dest), confirm: true });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toBe(sentence(shown));
+      // No server path in the answer: the refusal is the sentence, not the rename's error.
+      expect(JSON.stringify(run.body)).not.toContain(tempDir);
+      expect(JSON.stringify(dry.body)).not.toContain(tempDir);
+      expect(await fs.readFile(KB('QA-Move/Team/notes.md'), { encoding: 'utf8' })).toBe('n');
+      expect(await fs.readFile(KB('QA-Move/Team/Twin/keep.md'), { encoding: 'utf8' })).toBe('k');
+      expect(await fs.exists(KB(`${shown}`))).toBe(false);
+    });
+  }
+
+  it('a sibling whose name starts the same is not inside it, and the move runs', async () => {
+    const dry = await move({ src: KB('QA-Move/Team'), dest: KB('QA-Move/Team2/Team'), dryRun: true });
+    expect(dry.body).toMatchObject({ allowed: true });
+    const run = await move({ src: KB('QA-Move/Team'), dest: KB('QA-Move/Team2/Team') });
+    expect(run).toMatchObject({ status: 200, body: { moved: true } });
+    expect(await fs.readFile(KB('QA-Move/Team2/Team/notes.md'), { encoding: 'utf8' })).toBe('n');
+  });
+});
+
 describe('folders never vanish', () => {
   const KB = (p: string) => `${KB_DIR}/${p}`;
   const tool = async (base: string, name: string, body: Record<string, unknown>) => {

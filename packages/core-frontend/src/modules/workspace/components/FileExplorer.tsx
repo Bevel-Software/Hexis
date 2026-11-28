@@ -37,6 +37,7 @@ import {
   SKILLS_DIR,
   AGENTS_DIR,
   WORKFLOWS_DIR,
+  moveIntoItselfRefusal,
 } from '@bevel-software/platform-shared';
 import {
   KNOWLEDGE_UPLOAD_TARGET,
@@ -1395,12 +1396,9 @@ export function FileTreeNode({
             : droppedOn;
         const name = sourcePath.split('/').pop()!;
         const newPath = targetDir ? `${targetDir}/${name}` : name;
-        // Skip no-op or nesting a directory inside itself
-        if (
-          newPath === sourcePath ||
-          targetDir === sourcePath ||
-          targetDir.startsWith(sourcePath + '/')
-        ) {
+        // Skip a no-op, or nesting a folder inside itself (the server refuses
+        // that too, with the same check)
+        if (newPath === sourcePath || moveIntoItselfRefusal(sourcePath, newPath) !== null) {
           return;
         }
         // The dragged row is a platform file: refused here, with the server's
