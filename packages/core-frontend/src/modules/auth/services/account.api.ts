@@ -135,6 +135,21 @@ export async function createAccount(
 }
 
 /**
+ * Set or reset the password of the account with this id (a row of the User
+ * accounts page). It changes that account and never makes one: when the
+ * account is gone (another admin deleted it, say) the server refuses, in
+ * words the dialog shows as they are, and nothing is created.
+ */
+export async function setAccountPassword(userId: string, password: string): Promise<void> {
+  const res = await authFetch(`/api/admin/accounts/${encodeURIComponent(userId)}/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) throw new Error(await readError(res, 'Could not save the password'));
+}
+
+/**
  * Switch an account off: it keeps its history and its place in roles and
  * groups, but cannot sign in, and its keys and agent connections stop working.
  */

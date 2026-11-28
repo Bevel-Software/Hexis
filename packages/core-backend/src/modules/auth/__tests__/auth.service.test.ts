@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import type { CoreConfig } from '../../../core-config.js';
 import jwt from 'jsonwebtoken';
 import { AuthService, PasswordChangedMeanwhileError, PasswordRefusedError } from '../auth.service.js';
@@ -399,6 +399,60 @@ describe('AuthService.createAccountWithStartingPassword — an invite never repl
 });
 
 /**
+ * Set password and Reset password from an account's row. The real-Postgres
+ * half (`account-set-password.pg.test.ts`) proves a deleted account is
+ * refused end to end; these pin the service's side without a database.
+ */
+describe('AuthService.setPassword — changes the account with this id, never makes one', () => {
+  it('writes a hash to the account by id and moves its session generation on, inserting nothing', async () => {
+    const { db, captured } = makeFakeDb([[{ email: ROW.email }], [{ id: ROW.id }]]);
+    await expect(new AuthService(db, makeConfig()).setPassword('user-1', 'brand-new-pass')).resolves.toBe(true);
+    const set = captured.set[0] as { passwordHash: string; sessionVersion: SQL };
+    expect(await verifyPassword('brand-new-pass', set.passwordHash)).toBe(true);
+    expect(new PgDialect().sqlToQuery(set.sessionVersion).sql).toBe('"users"."session_version" + 1');
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it('answers false, and makes no account, when there is none by the read or none left by the write', async () => {
+    const none = makeFakeDb([[]]);
+    await expect(new AuthService(none.db, makeConfig()).setPassword('gone', 'brand-new-pass')).resolves.toBe(false);
+    expect(none.db.update).not.toHaveBeenCalled();
+    expect(none.db.insert).not.toHaveBeenCalled();
+
+    // Deleted between the read and the write: the update matches no row.
+    const deleted = makeFakeDb([[{ email: ROW.email }], []]);
+    await expect(new AuthService(deleted.db, makeConfig()).setPassword('user-1', 'brand-new-pass')).resolves.toBe(false);
+    expect(deleted.db.insert).not.toHaveBeenCalled();
+  });
+
+  it.each([RECOVERY_BOT_EMAIL, DIRECTORY_SYNC_BOT_EMAIL])(
+    'refuses the platform account %s, writing nothing',
+    async (email) => {
+      const { db } = makeFakeDb([[{ email }]]);
+      await expect(new AuthService(db, makeConfig()).setPassword('bot', 'brand-new-pass')).rejects.toThrow(
+        'System accounts cannot be given a password',
+      );
+      expect(db.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses the deployment admin before the policy check, writing nothing', async () => {
+    const { db } = makeFakeDb([[{ email: 'root@example.com' }]]);
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
+    await expect(new AuthService(db, config).setPassword('user-root', 'short')).rejects.toThrow(
+      /set in the deployment environment/,
+    );
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('enforces the password policy, writing nothing', async () => {
+    const { db } = makeFakeDb([[{ email: ROW.email }]]);
+    await expect(new AuthService(db, makeConfig()).setPassword('user-1', 'short')).rejects.toThrow(/at least/);
+    expect(db.update).not.toHaveBeenCalled();
+  });
+});
+
+/**
  * The three kinds of account that reach the Account page's password change,
  * and what separates them.
  *
@@ -545,7 +599,8 @@ describe('AuthService.changePassword — the three account kinds', () => {
     });
 
     // The Account page is not the only way to a stored hash: any admin can aim
-    // "Set password" (POST /api/admin/accounts → createAccount) at this email.
+    // a password at this email over the API (POST /api/admin/accounts →
+    // createAccount; the page's Set password is `setPassword`, pinned above).
     // A hash planted there would be exactly the second credential the
     // self-service refusal exists to prevent, so it is refused at the service.
     it("is refused an admin's Set password too, and nothing is written", async () => {

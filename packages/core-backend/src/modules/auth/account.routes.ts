@@ -5,7 +5,7 @@ import { printable } from '../../shared/printable.js';
 
 const log = logger('accounts');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import type { AuthService } from './auth.service.js';
+import { PasswordRefusedError, type AuthService } from './auth.service.js';
 import type { IAccountHooks } from './account-hooks.js';
 import { AccountAdmissionRefusedError, AccountChangeRefusedError } from './account-admission.js';
 import { erasedAccountId, type IAccountErasureService } from './account-erasure.service.js';
@@ -15,6 +15,14 @@ import { sendError } from '../access/index.js';
 import { VersionControlDomainError } from '../../shared/domain-errors.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
 import './auth.middleware.js'; // Express Request augmentation
+
+const OWNER_PASSWORD_REFUSAL = "The owner's password can't be set by another admin; the owner sets it on their Account page.";
+
+/**
+ * The 404 of a password set from an account's row, in words for the dialog
+ * that shows it: that dialog names an account the list held when it opened.
+ */
+const ACCOUNT_GONE = 'This account no longer exists.';
 
 /**
  * Admin account management — the ONE account surface (the core User Accounts
@@ -39,6 +47,7 @@ export function createAccountRoutes(
     | 'reactivate'
     | 'isOwnerEmail'
     | 'assertDeletable'
+    | 'setPassword'
   >,
   adminAccess: IAdminAccessService,
   accountErasure: Pick<IAccountErasureService, 'eraseUser'>,
@@ -60,6 +69,12 @@ export function createAccountRoutes(
     }
     next();
   };
+
+  // Another admin setting an owner's password could then sign in as the
+  // owner. The owner sets their own on the Account page. Both routes that
+  // take a password ask this.
+  const isAnotherAdminsOwner = (email: string, callerEmail: string | undefined): boolean =>
+    authService.isOwnerEmail(email) && canonicalEmail(email) !== canonicalEmail(callerEmail ?? '');
 
   // GET /api/admin/accounts — id, email, name, whether a password hash is
   // stored, whether the account is the env bootstrap admin, and whether it is
@@ -101,17 +116,12 @@ export function createAccountRoutes(
       res.status(400).json({ error: 'keepExistingPassword needs a password' });
       return;
     }
-    // Another admin setting an owner's password could then sign in as the
-    // owner. The owner sets their own on the Account page; an owner account
-    // without a password (restoring one, say; an empty one counts as none,
-    // as in createAccount) is still created here. An invite's starting
-    // password is a password too: the owner is invited by nobody.
-    if (
-      password &&
-      authService.isOwnerEmail(email) &&
-      canonicalEmail(email) !== canonicalEmail(req.userEmail ?? '')
-    ) {
-      res.status(400).json({ error: "The owner's password can't be set by another admin; the owner sets it on their Account page." });
+    // An owner account without a password (restoring one, say; an empty one
+    // counts as none, as in createAccount) is still created here. An
+    // invite's starting password is a password too: the owner is invited by
+    // nobody.
+    if (password && isAnotherAdminsOwner(email, req.userEmail)) {
+      res.status(400).json({ error: OWNER_PASSWORD_REFUSAL });
       return;
     }
     try {
@@ -150,9 +160,11 @@ export function createAccountRoutes(
         res.status(201).json({ ...user, notified });
         return;
       }
-      // Set or reset password: an account that is here already, or one an
-      // admin makes with a password from the API. Not an invitation the
-      // listeners are told of: the dialog that invites never sends this form.
+      // A password for this address, on an account that is here already or
+      // on one an admin makes with a password from the API. Not an
+      // invitation the listeners are told of: the dialog that invites never
+      // sends this form. The User accounts page sets and resets a password
+      // through the route below, which never makes an account.
       const user = await authService.createAccount(email, name, password);
       res.status(201).json(user);
     } catch (error) {
@@ -166,6 +178,47 @@ export function createAccountRoutes(
         return;
       }
       res.status(400).json({ error: msg });
+    }
+  });
+
+  // POST /api/admin/accounts/:userId/password { password } — set or reset
+  // the password of this account, from its row on the User accounts page.
+  // It changes the account and never makes one: an account deleted before
+  // the write (by another admin, say) answers 404 like the routes beside
+  // it, and nothing is created (see AuthService.setPassword).
+  router.post('/admin/accounts/:userId/password', requireAdmin, async (req, res) => {
+    const userId = String(req.params.userId);
+    const { password } = (req.body ?? {}) as { password?: unknown };
+    if (typeof password !== 'string') {
+      res.status(400).json({ error: 'password must be a string' });
+      return;
+    }
+    try {
+      const target = await authService.getUserById(userId);
+      if (!target) {
+        res.status(404).json({ error: ACCOUNT_GONE });
+        return;
+      }
+      if (isAnotherAdminsOwner(target.email, req.userEmail)) {
+        res.status(400).json({ error: OWNER_PASSWORD_REFUSAL });
+        return;
+      }
+      if (!(await authService.setPassword(userId, password))) {
+        res.status(404).json({ error: ACCOUNT_GONE });
+        return;
+      }
+      log.info('account audit:', { action: 'set-password', actorUserId: req.userId, targetUserId: userId });
+      res.status(204).end();
+    } catch (error) {
+      // A refusal the service made on purpose (a system account, the
+      // deployment admin, the policy) is the admin's to read; anything else
+      // is a fault, logged in full and answered generic.
+      if (error instanceof PasswordRefusedError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      log.error('setting a password failed:', { err: error });
+      res.status(500).json({ error: 'Could not set the password' });
     }
   });
 

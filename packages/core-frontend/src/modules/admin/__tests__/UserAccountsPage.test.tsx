@@ -3,29 +3,38 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UserAccountsPage } from '../components/UserAccountsPage';
 import { AdminContext } from '../state/admin.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
-  InviteDialogContext,
-  type InviteDialogController,
-} from '../../onboarding/state/invite-dialog.context';
-import {
+  AuthContext,
   createAccount,
   deactivateAccount,
   deleteAccount,
   getAccountReferences,
   listAccounts,
   reactivateAccount,
+  setAccountPassword,
   type AccountReferences,
   type AccountSummary,
-} from '../../auth/services/account.api';
+  type AuthContextValue,
+} from '../../auth';
+import { useInviteDialog, type InviteDialogController } from '../../onboarding';
 
-vi.mock('../../auth/services/account.api', () => ({
+// The auth entry as it is, but for the account calls the page makes.
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   createAccount: vi.fn(),
   deactivateAccount: vi.fn(),
   deleteAccount: vi.fn(),
   reactivateAccount: vi.fn(),
   getAccountReferences: vi.fn(),
   listAccounts: vi.fn(),
+  setAccountPassword: vi.fn(),
+}));
+
+// The Invite dialog's controller, as the onboarding entry hands it to the
+// page: each render answers whatever the test last gave it.
+vi.mock('../../onboarding', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../onboarding')>()),
+  useInviteDialog: vi.fn(() => null),
 }));
 
 const REFS = {
@@ -95,6 +104,7 @@ function renderPage(opts: { isAdmin?: boolean; invite?: InviteDialogController |
     login: vi.fn(async () => {}),
     logout: vi.fn(),
   };
+  vi.mocked(useInviteDialog).mockReturnValue(opts.invite === undefined ? null : opts.invite);
   return render(
     <AuthContext.Provider value={auth}>
       <AdminContext.Provider
@@ -109,9 +119,7 @@ function renderPage(opts: { isAdmin?: boolean; invite?: InviteDialogController |
           runRolesRecovery: async () => {},
         }}
       >
-        <InviteDialogContext.Provider value={opts.invite === undefined ? null : opts.invite}>
-          <UserAccountsPage />
-        </InviteDialogContext.Provider>
+        <UserAccountsPage />
       </AdminContext.Provider>
     </AuthContext.Provider>,
   );
@@ -129,6 +137,7 @@ beforeEach(() => {
   vi.mocked(createAccount).mockReset().mockResolvedValue({});
   vi.mocked(deactivateAccount).mockReset().mockResolvedValue(undefined);
   vi.mocked(reactivateAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(setAccountPassword).mockReset().mockResolvedValue(undefined);
 });
 
 describe('UserAccountsPage', () => {
@@ -306,12 +315,13 @@ describe('UserAccountsPage', () => {
     expect(within(dialog).getByRole('button', { name: 'Reset password' })).toBeInTheDocument();
     // It asks before it does anything: the question is on screen and nothing
     // has been sent until the confirm button is pressed.
-    expect(createAccount).not.toHaveBeenCalled();
+    expect(setAccountPassword).not.toHaveBeenCalled();
     await userEvent.type(within(dialog).getByLabelText('New password'), 'fresh-password-2');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Reset password' }));
-    await waitFor(() =>
-      expect(createAccount).toHaveBeenCalledWith('bob@example.com', '', 'fresh-password-2'),
-    );
+    // By the row's id, never by address: an address is what the upsert that
+    // makes accounts is keyed on.
+    await waitFor(() => expect(setAccountPassword).toHaveBeenCalledWith('u-bob', 'fresh-password-2'));
+    expect(createAccount).not.toHaveBeenCalled();
     // ...and the banner reports the act that was actually performed.
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Password reset for bob@example.com',
@@ -327,7 +337,7 @@ describe('UserAccountsPage', () => {
     await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-2');
     await userEvent.click(dialog.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(createAccount).not.toHaveBeenCalled();
+    expect(setAccountPassword).not.toHaveBeenCalled();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(listAccounts).toHaveBeenCalledTimes(1);
   });
@@ -341,12 +351,35 @@ describe('UserAccountsPage', () => {
     expect(dialog.getByRole('button', { name: 'Set password' })).toBeDisabled();
     await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-1');
     await userEvent.click(dialog.getByRole('button', { name: 'Set password' }));
-    await waitFor(() =>
-      expect(createAccount).toHaveBeenCalledWith('alice@example.com', '', 'fresh-password-1'),
-    );
+    // The id and the password, and no name to write over theirs.
+    await waitFor(() => expect(setAccountPassword).toHaveBeenCalledWith('u-alice', 'fresh-password-1'));
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Password set for alice@example.com',
     );
+  });
+
+  it('a reset for an account deleted meanwhile shows the refusal in the dialog and drops the row', async () => {
+    // Bob is listed when the page loads; another admin deletes him while the
+    // Reset dialog is open, so the next read no longer has him.
+    vi.mocked(listAccounts).mockResolvedValueOnce([ALICE, BOB]).mockResolvedValueOnce([ALICE]);
+    vi.mocked(setAccountPassword).mockRejectedValueOnce(new Error('This account no longer exists.'));
+    renderPage();
+    await waitFor(() => screen.getByText('Bob'));
+    // Bob's row, found whether or not the open dialog hides the page from assistive tech.
+    const bobsRow = () => screen.queryByRole('button', { name: 'Delete account bob@example.com', hidden: true });
+    await userEvent.click(screen.getByRole('button', { name: 'Reset password for bob@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-2');
+    expect(bobsRow()).toBeInTheDocument();
+    await userEvent.click(dialog.getByRole('button', { name: 'Reset password' }));
+
+    // Said in the dialog, which stays open, and never reported as a reset.
+    expect(await dialog.findByRole('alert')).toHaveTextContent('This account no longer exists.');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    // The list is read again, and the account that is gone leaves it.
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bobsRow()).not.toBeInTheDocument());
+    expect(createAccount).not.toHaveBeenCalled();
   });
 
   it('deletes an account after confirmation', async () => {
@@ -684,6 +717,7 @@ describe('UserAccountsPage — inviting new users', () => {
       ALICE,
       { ...BOB, id: 'u-lena', email: 'lena@example.com', name: 'lena' },
     ]);
+    vi.mocked(useInviteDialog).mockReturnValue(controller(1));
     view.rerender(
       <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
         <AdminContext.Provider
@@ -698,9 +732,7 @@ describe('UserAccountsPage — inviting new users', () => {
             runRolesRecovery: async () => {},
           }}
         >
-          <InviteDialogContext.Provider value={controller(1)}>
-            <UserAccountsPage />
-          </InviteDialogContext.Provider>
+          <UserAccountsPage />
         </AdminContext.Provider>
       </AuthContext.Provider>,
     );
@@ -719,26 +751,27 @@ describe('UserAccountsPage — inviting new users', () => {
       .mockReset()
       .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
       .mockResolvedValue(withLena);
-    const page = (revision: number) => (
-      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
-        <AdminContext.Provider
-          value={{
-            isAdmin: true,
-            unreadCount: 0,
-            lastSeen: null,
-            markSeen: () => {},
-            refresh: () => {},
-            rolesConfigCorrupted: false,
-            rolesConfigErrors: [],
-            runRolesRecovery: async () => {},
-          }}
-        >
-          <InviteDialogContext.Provider value={controller(revision)}>
+    const page = (revision: number) => {
+      vi.mocked(useInviteDialog).mockReturnValue(controller(revision));
+      return (
+        <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+          <AdminContext.Provider
+            value={{
+              isAdmin: true,
+              unreadCount: 0,
+              lastSeen: null,
+              markSeen: () => {},
+              refresh: () => {},
+              rolesConfigCorrupted: false,
+              rolesConfigErrors: [],
+              runRolesRecovery: async () => {},
+            }}
+          >
             <UserAccountsPage />
-          </InviteDialogContext.Provider>
-        </AdminContext.Provider>
-      </AuthContext.Provider>
-    );
+          </AdminContext.Provider>
+        </AuthContext.Provider>
+      );
+    };
     const view = render(page(0));
     view.rerender(page(1));
     expect(await screen.findByText('lena')).toBeInTheDocument();
@@ -758,26 +791,27 @@ describe('UserAccountsPage — inviting new users', () => {
       .mockResolvedValueOnce([ALICE])
       .mockImplementationOnce(() => new Promise((resolve) => (answerSwitch = resolve)))
       .mockImplementationOnce(() => new Promise((resolve) => (answerSend = resolve)));
-    const page = (revision: number) => (
-      <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
-        <AdminContext.Provider
-          value={{
-            isAdmin: true,
-            unreadCount: 0,
-            lastSeen: null,
-            markSeen: () => {},
-            refresh: () => {},
-            rolesConfigCorrupted: false,
-            rolesConfigErrors: [],
-            runRolesRecovery: async () => {},
-          }}
-        >
-          <InviteDialogContext.Provider value={controller(revision)}>
+    const page = (revision: number) => {
+      vi.mocked(useInviteDialog).mockReturnValue(controller(revision));
+      return (
+        <AuthContext.Provider value={{ user: ME, token: 't', isLoading: false, login: vi.fn(async () => {}), logout: vi.fn() }}>
+          <AdminContext.Provider
+            value={{
+              isAdmin: true,
+              unreadCount: 0,
+              lastSeen: null,
+              markSeen: () => {},
+              refresh: () => {},
+              rolesConfigCorrupted: false,
+              rolesConfigErrors: [],
+              runRolesRecovery: async () => {},
+            }}
+          >
             <UserAccountsPage />
-          </InviteDialogContext.Provider>
-        </AdminContext.Provider>
-      </AuthContext.Provider>
-    );
+          </AdminContext.Provider>
+        </AuthContext.Provider>
+      );
+    };
     const view = render(page(0));
     await user.click(await screen.findByRole('button', { name: 'Switch off alice@example.com' }));
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Switch off' }));
