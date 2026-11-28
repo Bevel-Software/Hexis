@@ -7,14 +7,13 @@ import express from 'express';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { IAccessControl } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService, VersionControlEventBus } from '../../version-control/index.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * An access change aimed at a file that does not exist answers 404, not 500.
@@ -124,7 +123,7 @@ describe('access mutations on a file that does not exist', () => {
         { emit: vi.fn() } as unknown as VersionControlEventBus,
         usersDbDouble(),
         testKbContext({ kbDirName: KB }),
-        new NodeFs(),
+        realDisk(),
       ),
     );
     server = await new Promise<Server>((resolve) => {
