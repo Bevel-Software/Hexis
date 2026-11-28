@@ -3,12 +3,8 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UserAccountsPage } from '../components/UserAccountsPage';
 import { AdminContext } from '../state/admin.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
-  InviteDialogContext,
-  type InviteDialogController,
-} from '../../onboarding/state/invite-dialog.context';
-import {
+  AuthContext,
   createAccount,
   deactivateAccount,
   deleteAccount,
@@ -17,9 +13,15 @@ import {
   reactivateAccount,
   type AccountReferences,
   type AccountSummary,
-} from '../../auth/services/account.api';
+  type AuthContextValue,
+} from '../../auth';
+import { useInviteDialog, type InviteDialogController } from '../../onboarding';
 
-vi.mock('../../auth/services/account.api', () => ({
+// Both modules are reached through their entries, as the page reaches them:
+// the account calls are doubled there, and the Invite dialog is what the
+// public hook answers rather than its internal context.
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   createAccount: vi.fn(),
   deactivateAccount: vi.fn(),
   deleteAccount: vi.fn(),
@@ -27,6 +29,13 @@ vi.mock('../../auth/services/account.api', () => ({
   getAccountReferences: vi.fn(),
   listAccounts: vi.fn(),
 }));
+vi.mock('../../onboarding', () => ({ useInviteDialog: vi.fn() }));
+
+/** The page, with `useInviteDialog` answering `invite` from this render on. */
+function pageWithInvite(invite: InviteDialogController | null) {
+  vi.mocked(useInviteDialog).mockReturnValue(invite);
+  return <UserAccountsPage />;
+}
 
 const REFS = {
   roles: 1,
@@ -109,9 +118,7 @@ function renderPage(opts: { isAdmin?: boolean; invite?: InviteDialogController |
           runRolesRecovery: async () => {},
         }}
       >
-        <InviteDialogContext.Provider value={opts.invite === undefined ? null : opts.invite}>
-          <UserAccountsPage />
-        </InviteDialogContext.Provider>
+        {pageWithInvite(opts.invite === undefined ? null : opts.invite)}
       </AdminContext.Provider>
     </AuthContext.Provider>,
   );
@@ -748,9 +755,7 @@ describe('UserAccountsPage — inviting new users', () => {
             runRolesRecovery: async () => {},
           }}
         >
-          <InviteDialogContext.Provider value={controller(1)}>
-            <UserAccountsPage />
-          </InviteDialogContext.Provider>
+          {pageWithInvite(controller(1))}
         </AdminContext.Provider>
       </AuthContext.Provider>,
     );
@@ -783,9 +788,7 @@ describe('UserAccountsPage — inviting new users', () => {
             runRolesRecovery: async () => {},
           }}
         >
-          <InviteDialogContext.Provider value={controller(revision)}>
-            <UserAccountsPage />
-          </InviteDialogContext.Provider>
+          {pageWithInvite(controller(revision))}
         </AdminContext.Provider>
       </AuthContext.Provider>
     );
@@ -822,9 +825,7 @@ describe('UserAccountsPage — inviting new users', () => {
             runRolesRecovery: async () => {},
           }}
         >
-          <InviteDialogContext.Provider value={controller(revision)}>
-            <UserAccountsPage />
-          </InviteDialogContext.Provider>
+          {pageWithInvite(controller(revision))}
         </AdminContext.Provider>
       </AuthContext.Provider>
     );
