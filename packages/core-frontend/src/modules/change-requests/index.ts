@@ -12,3 +12,4 @@ export type { KnowledgeSuggestionTarget } from './services/propose.api';
 export { changeAuthorName, formatWhen, othersPendingBesides } from './utils/author';
 export { conflictResolutionPrompt } from './utils/conflict';
 export type { DiffLine } from './utils/diff';
+export type { ChangeRequestOutcome } from './components/ChangeRequestDialog';
