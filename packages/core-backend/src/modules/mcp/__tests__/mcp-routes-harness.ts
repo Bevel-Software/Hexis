@@ -54,6 +54,7 @@ export interface McpRoutesDeps {
   internalTokens?: unknown;
   oauthProvider?: unknown;
   resourceMetadataUrl?: string;
+  lastCalls?: unknown;
   agents?: unknown;
 }
 
@@ -80,6 +81,7 @@ export async function mountMcpRoutes(deps: McpRoutesDeps = {}): Promise<string> 
       (deps.internalTokens ?? stub) as never,
       (deps.oauthProvider ?? stub) as never,
       deps.resourceMetadataUrl ?? '',
+      (deps.lastCalls ?? stub) as never,
       deps.agents as never,
     ),
   );

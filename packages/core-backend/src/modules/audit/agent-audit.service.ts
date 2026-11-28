@@ -20,6 +20,7 @@ import {
   type IAgentAuditService,
   type IAgentConnectionStatus,
   type IAgentEventRecorder,
+  type IAgentLastCalls,
 } from './audit.contract.js';
 
 const log = logger('audit');
@@ -43,7 +44,9 @@ const PRUNE_INTERVAL_MS = 60 * 60_000;
  * Connection keys are read through the key service rather than joined here,
  * so their summary shape (kind, revoked-by, …) has exactly one definition.
  */
-export class AgentAuditService implements IAgentAuditService, IAgentEventRecorder, IAgentConnectionStatus {
+export class AgentAuditService
+  implements IAgentAuditService, IAgentEventRecorder, IAgentConnectionStatus, IAgentLastCalls
+{
   private lastPruneAt = 0;
 
   constructor(
@@ -109,11 +112,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         // Not by email: that column is randomized ciphertext, and ORDER BY
         // on it is noise. The sort below orders by email in-process.
         .orderBy(desc(agentConnections.connectedAt)),
-      this.db
-        .select({ keyId: agentEvents.keyId, connectionId: agentEvents.connectionId, n: count() })
-        .from(agentEvents)
-        .where(mine === null ? undefined : eq(agentEvents.userId, mine))
-        .groupBy(agentEvents.keyId, agentEvents.connectionId),
+      this.eventTotals(mine),
       // A page has no row of its own: it is every event recorded under one
       // person and one path, so its "created" is its first call and its
       // "last used" its latest.
@@ -132,11 +131,7 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         .groupBy(agentEvents.userId, agentEvents.pagePath, users.id, users.email, users.name),
     ]);
 
-    const counts = new Map<string, number>();
-    for (const row of countRows) {
-      const id = row.keyId ?? row.connectionId;
-      if (id) counts.set(id, Number(row.n));
-    }
+    const totals = totalsById(countRows);
 
     const principals: AuditPrincipal[] = [
       ...keyRows.map((k) => ({
@@ -145,11 +140,11 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         label: k.label,
         keyKind: k.kind,
         createdAt: k.createdAt,
-        lastUsedAt: k.lastUsedAt,
+        lastUsedAt: totals.get(k.id)?.last ?? null,
         revokedAt: k.revokedAt,
         revokedBy: k.revokedBy,
         deletedAt: k.deletedAt,
-        eventCount: counts.get(k.id) ?? 0,
+        eventCount: totals.get(k.id)?.n ?? 0,
         user: k.user,
         agentPath: k.agentPath ?? null,
       })),
@@ -158,10 +153,10 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
         id: c.id,
         label: c.clientName ?? 'Unnamed agent',
         createdAt: c.connectedAt.getTime(),
-        lastUsedAt: c.lastUsedAt ? c.lastUsedAt.getTime() : null,
+        lastUsedAt: totals.get(c.id)?.last ?? null,
         revokedAt: c.revokedAt ? c.revokedAt.getTime() : null,
         revokedBy: (c.revokedBy as 'owner' | 'admin' | null) ?? null,
-        eventCount: counts.get(c.id) ?? 0,
+        eventCount: totals.get(c.id)?.n ?? 0,
         user,
         agentPath: c.agentPath ?? null,
       })),
@@ -197,6 +192,38 @@ export class AgentAuditService implements IAgentAuditService, IAgentEventRecorde
       return byUse !== 0 ? byUse : b.createdAt - a.createdAt;
     });
     return principals;
+  }
+
+  async lastCalls(userId: string): Promise<Map<string, number>> {
+    const last = new Map<string, number>();
+    for (const [id, t] of totalsById(await this.eventTotals(userId))) {
+      if (t.last !== null) last.set(id, t.last);
+    }
+    return last;
+  }
+
+  /**
+   * Events on record per key and per connection, with the newest one's
+   * instant: one person's, or the deployment's when `mine` is null. The one
+   * read behind both the count and "last used", for the Audit log and for a
+   * person's own key list, so the two can never show different dates.
+   *
+   * "Last used" comes from here and not from the `last_used_at` stamps: an
+   * agent stamps those on every signed-in request and token refresh, so a
+   * client that connects and lists its tools whenever a chat opens moves the
+   * stamp while calling nothing the log shows.
+   */
+  private eventTotals(mine: string | null) {
+    return this.db
+      .select({
+        keyId: agentEvents.keyId,
+        connectionId: agentEvents.connectionId,
+        n: count(),
+        last: max(agentEvents.at),
+      })
+      .from(agentEvents)
+      .where(mine === null ? undefined : eq(agentEvents.userId, mine))
+      .groupBy(agentEvents.keyId, agentEvents.connectionId);
   }
 
   /** One person's keys, with the owner attached the way the deployment listing attaches it. */
@@ -394,6 +421,18 @@ function principalFilter(principal: AuditPrincipalRef): SQL {
   const page = parsePagePrincipalId(principal.id);
   if (!page) return isNull(agentEvents.id);
   return and(eq(agentEvents.userId, page.userId), eq(agentEvents.pagePath, page.path))!;
+}
+
+/** The grouped event totals by key or connection id; a page's events carry neither and are left out. */
+function totalsById(
+  rows: { keyId: string | null; connectionId: string | null; n: number | string; last?: Date | string | null }[],
+): Map<string, { n: number; last: number | null }> {
+  const totals = new Map<string, { n: number; last: number | null }>();
+  for (const row of rows) {
+    const id = row.keyId ?? row.connectionId;
+    if (id) totals.set(id, { n: Number(row.n), last: row.last ? toMs(row.last) : null });
+  }
+  return totals;
 }
 
 /** An aggregate's timestamp, which a driver may hand back as a Date or as the text Postgres sent. */

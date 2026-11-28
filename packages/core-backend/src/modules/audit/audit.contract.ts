@@ -119,6 +119,13 @@ export interface AuditPrincipal {
   keyKind?: string;
   /** When the key was created / the agent connected / the page first called a tool. Epoch ms. */
   createdAt: number;
+  /**
+   * When its newest recorded event happened (a tool call, a skill read, a
+   * meta-tool run), epoch ms; null when it has none on record. Connecting,
+   * listing tools or refreshing a sign-in records no event, so none of them
+   * counts. Events past the retention window are pruned, so a principal whose
+   * only calls were pruned reads null again.
+   */
   lastUsedAt: number | null;
   revokedAt: number | null;
   /** Who ended it, once revoked: the owner, or an admin. */
@@ -203,6 +210,16 @@ export interface AgentUse {
 export interface IAgentConnectionStatus {
   /** The newest use among the person's live agent connections and connection keys; null when none has been used. */
   lastAgentUse(userId: string): Promise<AgentUse | null>;
+}
+
+/**
+ * When each of one person's keys and agent connections last made a recorded
+ * call: the same instant the Audit log shows as its "last used", for a page
+ * outside this module that lists the same keys.
+ */
+export interface IAgentLastCalls {
+  /** Newest event instant (epoch ms) by key or connection id; an id with no event on record is absent. */
+  lastCalls(userId: string): Promise<Map<string, number>>;
 }
 
 export class AuditPrincipalNotFoundError extends Error {
