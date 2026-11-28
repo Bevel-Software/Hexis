@@ -106,6 +106,10 @@ function manual() {
       // `.invalid` never resolves (RFC 6761): the call fails, after the line
       // naming its URL has been written.
       tool('key_in_host', `https://\${API_KEY}.invalid/anything`, undefined),
+      // Spellings the URL parser reads as the same URL: one slash after the
+      // scheme, and backslashes for slashes.
+      tool('key_in_query_one_slash', `http:/${hostPort()}/unauthorized?key=\${API_KEY}`, undefined),
+      tool('key_in_path_backslashes', `http:\\\\${hostPort()}\\bad-gateway\\hooks\\\${API_KEY}`, undefined),
       tool(FORGED, `${base}/unauthorized`, undefined),
     ],
   };
@@ -113,6 +117,21 @@ function manual() {
 
 /** A provider-chosen tool name that would start a line of its own, and clear and colour the terminal. */
 const FORGED = 'x\n[HttpCommunicationProtocol] all clear\u001b[2J\u009b31m';
+
+/** The provider's `host:port`, for URLs spelled other than `http://`. */
+function hostPort(): string {
+  return base.slice('http://'.length);
+}
+
+/** A manual whose URL is spelled with backslashes, the key in its query. */
+function slantedManual() {
+  return {
+    name: 'slanted',
+    call_template_type: 'http',
+    http_method: 'GET',
+    url: `http:\\\\${hostPort()}\\unauthorized\\manual?key=\${API_KEY}`,
+  } as Parameters<UtcpClient['registerManual']>[0];
+}
 
 /** A client whose `svc` manual holds the given variables, as the vault serves them. */
 async function clientWith(variables: Record<string, string>) {
@@ -234,6 +253,26 @@ describe('a failed http tool call', () => {
     expect(printed.join('\n')).toMatch(/Error discovering tools from HTTP provider 'locked':.*status 401/);
   });
 
+  it('logs no part of a key in a URL spelled with one slash or with backslashes, for a call or a discovery', async () => {
+    // The URL parser reads these as `http://` URLs, so the stock protocol logs
+    // them as written before the request fails (the stock control below shows
+    // the key in those lines); the log line is cut at its URL field, not at
+    // something that looks like a URL.
+    const secret = key();
+    const client = await clientWith({ svc_API_KEY: secret, slanted_API_KEY: secret });
+
+    await expect(client.callTool('svc.key_in_query_one_slash', {})).rejects.toThrow();
+    await expect(client.callTool('svc.key_in_path_backslashes', {})).rejects.toThrow();
+    const registered = await client.registerManual(slantedManual());
+
+    expect(registered.success).toBe(false);
+    expectNotPrinted(secret);
+    const all = printed.join('\n');
+    expect(all).toContain("Executing HTTP tool 'svc.key_in_query_one_slash' with URL: <url>");
+    expect(all).toContain("Executing HTTP tool 'svc.key_in_path_backslashes' with URL: <url>");
+    expect(all).toContain("Discovering tools from 'slanted' (HTTP) at <url>");
+  });
+
   it('returns and logs no part of a key written into the host of a manual it cannot reach', async () => {
     const secret = key();
     const client = await UtcpClient.create(
@@ -313,6 +352,20 @@ describe('a failed http tool call', () => {
       await expect(client.callTool('svc.unauthorized', {})).rejects.toThrow();
 
       expect(printed.join('\n')).toContain(secret);
+    });
+
+    it('prints the key written into a URL spelled with one slash or with backslashes', async () => {
+      const secret = key();
+      const client = await clientWith({ svc_API_KEY: secret, slanted_API_KEY: secret });
+
+      await expect(client.callTool('svc.key_in_query_one_slash', {})).rejects.toThrow();
+      await expect(client.callTool('svc.key_in_path_backslashes', {})).rejects.toThrow();
+      await client.registerManual(slantedManual());
+
+      const line = (start: string) => printed.find((entry) => entry.includes(start)) ?? '';
+      expect(line("Executing HTTP tool 'svc.key_in_query_one_slash'")).toContain(secret);
+      expect(line("Executing HTTP tool 'svc.key_in_path_backslashes'")).toContain(secret);
+      expect(line("Discovering tools from 'slanted'")).toContain(secret);
     });
 
     it('prints the key a refused discovery echoes', async () => {

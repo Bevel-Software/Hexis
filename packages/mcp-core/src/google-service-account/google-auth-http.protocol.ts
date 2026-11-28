@@ -93,14 +93,17 @@ export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
 }
 
 /**
- * A log line cut at its first URL: the URL and everything after it become
- * `<url>`. A substituted key can sit in any part of a URL, the host included
- * (`https://${API_KEY}.example.com`), and may itself hold a space, so no part
- * of it is kept, and no guess is made where it ends. The stock lines name the
- * tool or provider before the URL, so the line still says what it concerns.
+ * A log line cut at its URL field. The stock lines that carry a URL carry it
+ * as a field: `Discovering tools from '<name>' (HTTP) at <url>` and
+ * `Executing HTTP tool '<name>' with URL: <url> and method: <method>`. The
+ * URL is the template's, spelled as the template spells it (`http:/host`,
+ * backslashes, a key in the host, a space), so it is not recognised by its
+ * look: everything after the first ` at ` or ` with URL: ` becomes `<url>`.
+ * A name that holds one of the two cuts the line earlier, never later. The
+ * name stays, so the line still says what it concerns.
  */
 function withoutUrls(message: string): string {
-  return message.replace(/\bhttps?:\/\/[\s\S]*/i, '<url>');
+  return message.replace(/( at | with URL: )[\s\S]*/, '$1<url>');
 }
 
 /**
