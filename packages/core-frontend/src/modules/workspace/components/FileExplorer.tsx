@@ -1396,9 +1396,12 @@ export function FileTreeNode({
             : droppedOn;
         const name = sourcePath.split('/').pop()!;
         const newPath = targetDir ? `${targetDir}/${name}` : name;
-        // Skip a no-op, or nesting a folder inside itself (the server refuses
-        // that too, with the same check)
-        if (newPath === sourcePath || moveIntoItselfRefusal(sourcePath, newPath) !== null) {
+        if (newPath === sourcePath) return;
+        // A folder dropped into its own subtree: the server's sentence, shown
+        // where a refused move is shown, and nothing is sent.
+        const intoItself = moveIntoItselfRefusal(sourcePath, newPath);
+        if (intoItself !== null) {
+          setMoveError(intoItself);
           return;
         }
         // The dragged row is a platform file: refused here, with the server's

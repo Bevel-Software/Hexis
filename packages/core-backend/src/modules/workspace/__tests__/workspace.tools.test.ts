@@ -3219,13 +3219,6 @@ describe('the tools place an unprefixed path inside the repository', () => {
   });
 });
 
-/**
- * A folder exists until someone deletes it, and its placeholder is never shown
- * as content — the agent tools' half (the UI routes' half lives in
- * `workspace.routes.folders.test.ts`). The filesystem here is a plain
- * LocalFilesystem, so "committed" is proven the way git sees it: a real
- * repository in the clone folder, committed and freshly cloned.
- */
 describe('move_file refuses a destination inside the source, in words', () => {
   const KB = (p: string) => `${KB_DIR}/${p}`;
   const move = async (body: Record<string, unknown>) => {
@@ -3271,6 +3264,13 @@ describe('move_file refuses a destination inside the source, in words', () => {
   });
 });
 
+/**
+ * A folder exists until someone deletes it, and its placeholder is never shown
+ * as content — the agent tools' half (the UI routes' half lives in
+ * `workspace.routes.folders.test.ts`). The filesystem here is a plain
+ * LocalFilesystem, so "committed" is proven the way git sees it: a real
+ * repository in the clone folder, committed and freshly cloned.
+ */
 describe('folders never vanish', () => {
   const KB = (p: string) => `${KB_DIR}/${p}`;
   const tool = async (base: string, name: string, body: Record<string, unknown>) => {
