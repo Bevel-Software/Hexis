@@ -175,6 +175,25 @@ describe('ManageAccessDialog: a viewer who cannot manage', () => {
     expect(within(row).queryByText(/can read/i)).toBeNull();
   });
 
+  it('withheld verdicts with a direct grant listed: the listed verb is not shown as the whole set', async () => {
+    // Read granted to their own address puts them in `readers`; what else they
+    // hold (download through a role) only `holds` would say, and it was withheld.
+    api.fetchFileAccess.mockResolvedValue({
+      ...ROLE_MEMBER_DENIED_WRITE,
+      canWrite: false,
+      canOwner: false,
+      readers: { ...ROLE_MEMBER_DENIED_WRITE.readers, users: [DENIED] },
+      sources: { ...ROLE_MEMBER_DENIED_WRITE.sources, 'u:qa-denied@example.com': { read: [{ kind: 'direct' }] } },
+      holds: {},
+    } as unknown as AccessResponse);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+
+    const row = await rowOf('QA Denied');
+    expect(within(row).getByText('edit denied')).toBeInTheDocument();
+    expect(within(row).queryByText(/can read/i)).toBeNull();
+    expect(within(row).queryByText(/no access/i)).toBeNull();
+  });
+
   it('a person denied every verb reads "Denied here", not "No access"', async () => {
     api.fetchFileAccess.mockResolvedValue({
       ...ROLE_MEMBER_DENIED_WRITE,

@@ -17,13 +17,15 @@ import {
   GROUP_TOKEN_PREFIX,
   type Verb,
 } from '../access-model/index.js';
-import { accessRulesPathOf } from './access-mutation.service.js';
 
 /**
  * The resolved access view of one target, as the Manage access dialog reads it
  * (`GET /api/workspace/:id/access`): the caller's four verdicts, the eligible
  * principals per verb, and per-principal, per-verb grant sources. Shared by
  * that route and by `file_stat`'s access roster, so both list the same people.
+ * `rulesPath` is the target's rules file as `accessRulesPathOf` decides
+ * it, bytes included: write on it is what lets the caller see other people's
+ * verdicts. Without it, nobody else's are given.
  */
 export async function resolveAccessView(
   accessControl: IAccessControl,
@@ -31,6 +33,7 @@ export async function resolveAccessView(
   repoRelTarget: string,
   userEmail: string,
   kind: AccessTargetKind,
+  rulesPath?: string,
 ) {
   const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, deniedHere] =
     await Promise.all([
@@ -144,7 +147,8 @@ export async function resolveAccessView(
   }
   const mayInspect =
     others.length > 0 &&
-    (await accessControl.canWrite(workspaceId, userEmail, accessRulesPathOf(kind, repoRelTarget)));
+    rulesPath !== undefined &&
+    (await accessControl.canWrite(workspaceId, userEmail, rulesPath));
   await Promise.all(
     (mayInspect ? others : []).map(async (u) => {
       const [read, write, download, owner] = await Promise.all([

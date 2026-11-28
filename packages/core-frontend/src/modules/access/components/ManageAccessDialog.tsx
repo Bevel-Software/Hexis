@@ -860,11 +860,12 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
   // member denied edit who reads through a role. The server's per-person
   // verdicts (`holds`) are what the row holds, so it never reads "No access"
   // while the gates let them read. A server that reports `holds` but leaves a
-  // person out withheld them from this caller; a list naming them still counts.
+  // person out withheld them from this caller: what the lists name them for is
+  // then only part of what they hold, so the row claims no summary.
   for (const u of data.deniedHere?.users ?? []) {
     const row = touchUser(u);
     const held = data.holds?.[row.key];
-    if (!held) row.holdsWithheld = !!data.holds && !ALL_VERBS.some((v) => row.verbs[v]);
+    if (!held) row.holdsWithheld = !!data.holds;
     else for (const v of ALL_VERBS) if (held[v]) row.verbs[v] = true;
   }
 
