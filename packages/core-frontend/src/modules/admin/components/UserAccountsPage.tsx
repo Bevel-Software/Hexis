@@ -20,12 +20,14 @@ import {
 /**
  * How an account signs in, in the words this page uses everywhere (the row and
  * the delete confirmation). The deployment admin wins over a stored hash: both
- * can be true, and the environment credential is the one that survives. An
- * account the platform runs its own work as signs in with nothing at all.
+ * can be true, and the environment credential is the one that survives. It
+ * wins over the system flag for the same reason: the server accepts the
+ * environment password for `ADMIN_EMAIL` whatever else that address is. Any
+ * other account the platform runs its own work as signs in with nothing.
  */
 function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin' | 'isSystem'>): string {
-  if (account.isSystem) return 'System account — nobody signs in with it';
   if (account.isEnvAdmin) return 'Password (owner)';
+  if (account.isSystem) return 'System account — nobody signs in with it';
   if (account.hasPassword) return 'Password';
   return 'No password — signs in with single sign-on';
 }
@@ -36,10 +38,10 @@ function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvA
  */
 function signInAfterDelete(account: AccountSummary): string {
   const label = signInMethodLabel(account);
-  if (account.isSystem) return `${label}, so deleting it takes nobody's sign-in away.`;
   if (account.isEnvAdmin) {
     return `${label}: they can still sign in with the owner password set on the server, but will start fresh.`;
   }
+  if (account.isSystem) return `${label}, so deleting it takes nobody's sign-in away.`;
   if (account.hasPassword) {
     return `${label}: to sign in again they will need an admin to create a new account for them.`;
   }

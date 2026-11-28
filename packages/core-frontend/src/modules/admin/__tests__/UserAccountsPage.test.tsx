@@ -293,6 +293,22 @@ describe('UserAccountsPage', () => {
     expect(screen.getByRole('button', { name: 'Reset password for bob@example.com' })).toBeInTheDocument();
   });
 
+  // A system address configured as ADMIN_EMAIL too: the server accepts the
+  // environment password for it, so it does sign in, and the page says so.
+  it('labels a system account that is also the deployment admin as the deployment admin', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      { ...ROOT, id: 'u-bot-root', email: 'recovery-bot@bevel.local', name: 'Recovery Bot Root', isSystem: true },
+    ]);
+    renderPage();
+    await waitFor(() => screen.getByText('Recovery Bot Root'));
+    expect(row('Recovery Bot Root')).toHaveTextContent(/· Password \(owner\)$/);
+    expect(screen.getByText('Password set in the deployment environment')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account recovery-bot@bevel.local' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(/Password \(owner\): they can still sign in with the owner password set on the server/);
+    expect(dialog).not.toHaveTextContent(/System account/);
+  });
+
   it('offers Set password without one and Reset password with one', async () => {
     vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
     renderPage();
