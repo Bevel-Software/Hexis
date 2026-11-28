@@ -11,35 +11,33 @@ import type { FileApprovalState, PullRequestSummary } from '@bevel-software/plat
  */
 
 const detailMock = vi.hoisted(() => ({ fetchPrDetail: vi.fn() }));
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: detailMock.fetchPrDetail }));
 
 vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: vi.fn(async () => 'branch copy'),
 }));
 const approvalsApi = vi.hoisted(() => ({ approvePrFile: vi.fn(), revertPrFile: vi.fn(), unapprovePrFile: vi.fn() }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({
-  approvePrFile: approvalsApi.approvePrFile,
-  revertPrFile: approvalsApi.revertPrFile,
-  unapprovePrFile: approvalsApi.unapprovePrFile,
-}));
 const mergeApi = vi.hoisted(() => ({
   mergePullRequest: vi.fn(),
   refreshChangeRequestFromTarget: vi.fn(),
 }));
-vi.mock('../../pr/services/pr-merge.api', () => ({
+const cancelApi = vi.hoisted(() => ({ deleteChangeRequest: vi.fn() }));
+// The pr module through its entry, as the dialog imports it: the calls the dialog makes are faked, the rest is real.
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  fetchPrDetail: detailMock.fetchPrDetail,
+  approvePrFile: approvalsApi.approvePrFile,
+  revertPrFile: approvalsApi.revertPrFile,
+  unapprovePrFile: approvalsApi.unapprovePrFile,
   mergePullRequest: mergeApi.mergePullRequest,
   refreshChangeRequestFromTarget: mergeApi.refreshChangeRequestFromTarget,
-}));
-const cancelApi = vi.hoisted(() => ({ deleteChangeRequest: vi.fn() }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({
   cancelPullRequest: vi.fn(),
   deleteChangeRequest: cancelApi.deleteChangeRequest,
 }));
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
-import { AuthContext } from '../../auth/state/auth.context';
+import { AuthContext } from '../../auth';
 import { readFileOnBranch } from '../services/change-requests.api';
-import { GitApiError } from '../../git/services/git.api';
+import { GitApiError } from '../../git';
 
 const CR: PullRequestSummary = {
   number: 12,

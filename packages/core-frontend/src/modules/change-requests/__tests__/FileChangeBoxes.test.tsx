@@ -1,11 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { PullRequestSummary, VersionControlEvent } from '@bevel-software/platform-shared';
-import { EventBusContext, type EventBusContextValue } from '../../version-control/state/event-bus.context';
-import {
-  OpenChangeRequestsContext,
-  NO_CHANGE_REQUESTS,
-} from '../../workspace/state/open-change-requests.context';
+import { EventBusContext, type EventBusContextValue } from '../../version-control';
+import { OpenChangeRequestsContext, NO_CHANGE_REQUESTS } from '../../workspace';
 
 /**
  * The file page's proposal boxes. Approval rights come from the FILE, not from
@@ -26,13 +23,15 @@ vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: api.readFileOnBranch,
   readFileAtForkPoint: api.readFileAtForkPoint,
 }));
-vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: api.fetchPrDetail }));
-vi.mock('../../pr/services/pr-approvals.api', () => ({
+// The pr module through its entry, as the components import it: the calls these boxes make are faked, the rest is real.
+vi.mock('../../pr', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../pr')>()),
+  fetchPrDetail: api.fetchPrDetail,
   approvePrFile: api.approvePrFile,
   revertPrFile: api.revertPrFile,
+  mergePullRequest: api.mergePullRequest,
+  cancelPullRequest: api.cancelPullRequest,
 }));
-vi.mock('../../pr/services/pr-merge.api', () => ({ mergePullRequest: api.mergePullRequest }));
-vi.mock('../../pr/services/pr-cancel.api', () => ({ cancelPullRequest: api.cancelPullRequest }));
 
 import { FileChangeBoxes } from '../components/FileChangeBoxes';
 import { othersPendingBesides, waitingOnViewerLabel } from '../utils/author';

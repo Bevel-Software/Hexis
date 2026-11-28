@@ -2,13 +2,12 @@ import { useCallback, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { Banner, Button } from '../../../shared/components';
 import { cancelPullRequest, revertPrFile } from '../../pr';
-import { useOpenChangeRequests, displayFileName, fileNameTooltip } from '../../workspace';
+import { useOpenChangeRequests, displayFileName, fileNameTooltip, isBinaryFile } from '../../workspace';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { refusalLine, useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
 import { changeAuthorName, formatWhen } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
-import { isBinaryFile } from '../../workspace/components/renderers';
 import { ChangeBox } from './ChangeBox';
 import { ChangeRequestDialog } from './ChangeRequestDialog';
 

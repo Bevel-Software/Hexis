@@ -42,7 +42,10 @@
  */
 export {
   CanDownloadContext,
+  hasFileViewer,
+  isBinaryFile,
   isViewOnlyFile,
+  rendersAsText,
   OpenPageInPlatformContext,
   PageToolsContext,
   pickFileRenderer,
@@ -74,6 +77,7 @@ export {
 export { useCreatePage } from './hooks/useCreatePage';
 export { useMergedWorkspaceTree } from './hooks/useMergedWorkspaceTree';
 export { useOpenChangeRequests } from './hooks/useOpenChangeRequests';
+export { NO_CHANGE_REQUESTS, OpenChangeRequestsContext } from './state/open-change-requests.context';
 export { useWorkspaceImageResolver } from './hooks/useWorkspaceImageResolver';
 // What the explorer's `lead` (a hosting app's navigation) may be: a node
 // that renders something. The shell's folder surface narrows its `nav` to it.
