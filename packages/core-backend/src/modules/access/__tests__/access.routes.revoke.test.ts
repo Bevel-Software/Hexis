@@ -4,14 +4,13 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import type { IAccessControl, GrantSources } from '../access-control.interface.js';
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { VersionControlService } from '../../version-control/version-control.service.js';
-import type { VersionControlEventBus } from '../../version-control/event-bus.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AuthService } from '../../auth/index.js';
+import type { VersionControlService, VersionControlEventBus } from '../../version-control/index.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { usersDbDouble } from './users-db-double.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
 
 /**
  * HTTP-level contract tests for the revoke route's CLASSIFICATION + MODE logic —
@@ -33,6 +32,7 @@ interface Stubs {
   acquireLock: ReturnType<typeof vi.fn>;
   releaseLock: ReturnType<typeof vi.fn>;
   releaseLockNoCommit: ReturnType<typeof vi.fn>;
+  releaseLockUntouched: ReturnType<typeof vi.fn>;
 }
 
 interface Harness {
@@ -121,11 +121,13 @@ async function makeHarness(opts: {
   const acquireLock = vi.fn(async () => ({ acquired: true, lock: {} }));
   const releaseLock = vi.fn(async () => undefined);
   const releaseLockNoCommit = vi.fn(async () => undefined);
+  const releaseLockUntouched = vi.fn(async () => undefined);
   const versionControlService = {
     getLock: vi.fn(async () => null),
     acquireLock,
     releaseLock,
     releaseLockNoCommit,
+    releaseLockUntouched,
   } as unknown as VersionControlService;
 
   const eventBus = { emit: vi.fn() } as unknown as VersionControlEventBus;
@@ -137,7 +139,7 @@ async function makeHarness(opts: {
     (req as unknown as { userId: string }).userId = USER.id;
     next();
   });
-  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), new NodeFs()));
+  app.use('/api', createAccessRoutes(accessControl, workspaceService, authService, authService, versionControlService, eventBus, db, testKbContext({ kbDirName: KB }), realDisk()));
 
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -146,7 +148,7 @@ async function makeHarness(opts: {
   return {
     server,
     baseUrl: `http://127.0.0.1:${addr.port}`,
-    stubs: { files, canWrite, grantSources, acquireLock, releaseLock, releaseLockNoCommit },
+    stubs: { files, canWrite, grantSources, acquireLock, releaseLock, releaseLockNoCommit, releaseLockUntouched },
   };
 }
 
@@ -383,9 +385,12 @@ describe('POST /access/revoke — route classification + modes', () => {
       });
       expect(res.status).toBe(409);
       expect((await res.json()).kind).toBe('stale-ancestor');
-      // Lock acquired (the re-check is under the lock) then released WITHOUT commit.
+      // Lock acquired (the re-check is under the lock) then released WITHOUT
+      // commit AND without the reset to HEAD: the refusal wrote nothing, and
+      // a reset would discard an earlier change whose commit is still queued.
       expect(h.stubs.acquireLock).toHaveBeenCalledOnce();
-      expect(h.stubs.releaseLockNoCommit).toHaveBeenCalledOnce();
+      expect(h.stubs.releaseLockUntouched).toHaveBeenCalledOnce();
+      expect(h.stubs.releaseLockNoCommit).not.toHaveBeenCalled();
       expect(h.stubs.releaseLock).not.toHaveBeenCalled();
       expect(h.stubs.files.get(`${KB}/Sales/access.md`)).toContain('Admin'); // untouched
     });

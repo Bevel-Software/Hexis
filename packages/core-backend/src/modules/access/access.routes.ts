@@ -8,10 +8,7 @@ import { printable } from '../../shared/printable.js';
 const grantLog = logger('access.grant');
 const revokeLog = logger('access.revoke');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import {
-  pluginManifestName,
-  FOLDER_GOVERNS_ACCESS_KIND,
-} from '@bevel-software/platform-shared';
+import { pluginManifestName } from '@bevel-software/platform-shared';
 import type {
   IAccessControl,
   GrantPrincipal,
@@ -19,7 +16,7 @@ import type {
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/index.js';
 import type { KbContext } from '../../shared/kb-context.js';
-import type { ITreeWalker } from '../../shared/fs.contract.js';
+import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { AuthService, IAccountSwitchGuard } from '../auth/index.js';
 import type { VersionControlService, VersionControlEventBus } from '../version-control/index.js';
@@ -73,16 +70,18 @@ function requireNonEmptyString(value: unknown, field: string): string {
 }
 
 /**
- * Is this the "the folder governs this file" refusal? It is the one mutation
- * failure that is guaranteed to have written nothing — it is thrown as the
- * file is read — so the lock it holds must be released without discarding the
- * path (see `withEditLock`).
+ * A path's bytes for the unchanged-after-failure test in `lockAndRun`: the
+ * content, `null` when nothing is there, `undefined` when the read failed —
+ * an unknown state, which {@link sameBytes} never calls unchanged, so an
+ * unreadable path keeps the discarding release (the fail-closed side).
  */
-function isFolderGovernsRefusal(err: unknown): boolean {
-  return (
-    err instanceof AccessMutationError &&
-    err.payload?.kind === FOLDER_GOVERNS_ACCESS_KIND
-  );
+type Snapshot = Buffer | null | undefined;
+
+/** Whether two snapshots are known to be the same bytes (absent counts as a state). */
+function sameBytes(a: Snapshot, b: Snapshot): boolean {
+  if (a === undefined || b === undefined) return false;
+  if (a === null || b === null) return a === b;
+  return a.equals(b);
 }
 
 export function createAccessRoutes(
@@ -873,6 +872,15 @@ export function createAccessRoutes(
     );
   }
 
+  /** See {@link Snapshot}: the bytes at `wsPath`, `null` when absent, `undefined` when unreadable. */
+  async function snapshotOf(workspaceId: string, wsPath: string): Promise<Snapshot> {
+    try {
+      return await workspaceService.readFileBinary(workspaceId, wsPath);
+    } catch (err) {
+      return isAbsence(err) ? null : undefined;
+    }
+  }
+
   /** The acquire → op → release half of {@link withEditLock}, inside the turn. */
   async function lockAndRun(
     workspaceId: string,
@@ -907,16 +915,21 @@ export function createAccessRoutes(
       err.status = 409;
       throw err;
     }
+    // The path's bytes as the op finds them, read under the lock and the turn
+    // so no other writer moves them in between: they may hold an earlier
+    // change whose commit is still queued (a grant, an upload).
+    const before = await snapshotOf(workspaceId, wsEditPath);
     try {
       await op();
     } catch (err) {
       try {
-        // A refusal wrote NOTHING, so the release must leave the disk alone:
-        // `releaseLockNoCommit` discards the path's working-tree changes, and
-        // right after an upload whose commit is still queued that deletes the
-        // upload. Every other failure may have left partial bytes, so it keeps
-        // the discarding release.
-        if (isFolderGovernsRefusal(err)) {
+        // `releaseLockNoCommit` resets the PATH to HEAD, not "this op's
+        // bytes", so it would also destroy that queued change. A failed op
+        // that left the bytes exactly as it found them — every refusal does —
+        // releases without touching disk or queue. Anything else (partial
+        // bytes, or bytes that cannot be re-read) keeps the discarding release
+        // so partial state never commits under the user's name.
+        if (sameBytes(before, await snapshotOf(workspaceId, wsEditPath))) {
           await versionControlService.releaseLockUntouched(workspaceId, branch, wsEditPath, user);
         } else {
           await versionControlService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
