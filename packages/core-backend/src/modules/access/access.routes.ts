@@ -1067,8 +1067,8 @@ export function createAccessRoutes(
    *     `verb` (optional) narrows a direct revoke to one verb.
    *
    *   `mode: 'remove-from-parent'` — cascade up. Body adds `ancestor` (the
-   *     repo-relative ancestor folder, echoed opaquely from the 409 sources).
-   *     Gates + locks on the ANCESTOR's access.md, re-validates under the lock
+   *     repo-relative ancestor folder, echoed opaquely from the 409 sources;
+   *     `''` is the workspace root). Gates + locks on the ANCESTOR's access.md, re-validates under the lock
    *     that the principal is still inherited from it, then revokes there.
    *
    *   `mode: 'deny-here'` — per-item override. Adds a `deny <principal>` at the
@@ -1108,12 +1108,17 @@ export function createAccessRoutes(
       // ---- mode: remove-from-parent (cascade up the ancestor) --------------
       if (mode === 'remove-from-parent') {
         const rawAncestor = (req.body as { ancestor?: unknown }).ancestor;
-        if (typeof rawAncestor !== 'string' || !rawAncestor) {
-          throw new AccessMutationError("'ancestor' is required for remove-from-parent");
+        // An ABSENT ancestor is refused rather than read as the root: a body
+        // that forgot the field must never strip the whole workspace's grant.
+        if (typeof rawAncestor !== 'string') {
+          throw new AccessMutationError('Choose the folder to remove this access from, then try again.');
         }
         // The ancestor is the repo-relative FOLDER whose access.md grants the
-        // principal — we revoke against it as a folder target. Strip the kbDir
-        // prefix if the client (defensively) sent a prefixed path.
+        // principal — we revoke against it as a folder target. The workspace
+        // root is the empty folder, which a client may spell `''` (the root
+        // `access.md` with its file name stripped) or as the kbDir name;
+        // `toRepoRelative` turns both into `''`, and strips the kbDir prefix
+        // from a defensively prefixed folder path.
         const ancestorDir = toRepoRelative(rawAncestor);
         assertRepoRelativeTarget(ancestorDir, 'folder');
         const { gatePath: ancestorGate } = gateAndEditPaths('folder', ancestorDir);
