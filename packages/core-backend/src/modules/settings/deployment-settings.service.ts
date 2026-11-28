@@ -13,6 +13,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
+import { parseEmailDomainList } from '../../shared/email-domains.js';
 import { assertKbDirNameFree, hasControlCharacter } from '../kb-fs/index.js';
 import { parseRetentionWindow } from '../audit/index.js';
 import { normalizeIssuerUrl } from './oidc-check.js';
@@ -141,6 +142,9 @@ export function parseToolReadOnlyOverrides(raw: string): Record<string, boolean>
   // plain object would send a valid name like `__proto__` to its prototype.
   return Object.fromEntries(entries) as Record<string, boolean>;
 }
+
+/** A lower-case DNS name: dot-separated labels of letters, digits and inner hyphens. */
+const EMAIL_DOMAIN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
 
 export const CORE_SETTINGS: SettingDef[] = [
   {
@@ -400,10 +404,21 @@ export const CORE_SETTINGS: SettingDef[] = [
     // Belongs with SSO because SSO is what makes it load-bearing: sign-in
     // auto-provisions, so against a multi-tenant issuer this list is the only
     // thing between "has an account somewhere" and "has an account here".
+    // Read at every check (see `resolveAllowedEmailDomains`), so it applies
+    // without a restart, like the provider settings it guards. A blank is
+    // its default, no guard: erasing the field clears the list.
     key: 'allowedEmailDomains',
     envVar: 'ALLOWED_EMAIL_DOMAINS',
     section: 'sign-in',
-    restartToApply: true,
+    blankMeansDefault: true,
+    // Judged by the parser the check reads it with, so a saved value that
+    // names no domain cannot pass for a guard while the check reads none.
+    validate: (v) => {
+      const domains = parseEmailDomainList(v);
+      if (domains.length === 0) return 'Name at least one domain, or leave the field empty to allow every domain.';
+      const bad = domains.find((d) => !EMAIL_DOMAIN.test(d));
+      return bad ? `"${bad}" is not a domain.` : null;
+    },
   },
 
   {
@@ -565,8 +580,9 @@ export interface ResolvedSetting {
  * second replica at that moment.
  *
  * The single sign-on settings are the first to bend that: they apply live, so
- * on a multi-replica deployment an OIDC change reaches only the replica that
- * served the save until the others restart.
+ * on a multi-replica deployment an OIDC change, or a change to the allowed
+ * email domains, reaches only the replica that served the save until the
+ * others restart.
  *
  * It stops being acceptable the moment a setting is something an operator
  * changes on a live multi-replica deployment. Adding one means adding
@@ -1018,6 +1034,16 @@ export class DeploymentSettingsService {
       clientId: this.resolve('oidcClientId'),
       clientSecret: this.resolve('oidcClientSecret'),
     };
+  }
+
+  /**
+   * The SSO domain allow-list in effect, as domains (see
+   * `parseEmailDomainList`). Empty means no guard. Answers from the
+   * environment, else the stored row, at the moment it is asked, so a save
+   * is in effect for the next sign-in.
+   */
+  resolveAllowedEmailDomains(): string[] {
+    return parseEmailDomainList(this.resolve('allowedEmailDomains'));
   }
 
   /**

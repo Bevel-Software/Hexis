@@ -73,6 +73,23 @@ describe('tenantConfigFrom', () => {
     expect(tenantConfigFrom(acme, settings).settingsEnv).toEqual({});
   });
 
+  it('reads an allowed-domain entry the way ALLOWED_EMAIL_DOMAINS is read: one entry may name several domains', () => {
+    // Commas and whitespace inside an entry separate domains, so `["a.com, b.com"]`
+    // means the same two domains here as in the environment variable the record
+    // is handed on as, rather than one domain no email could ever match.
+    const config = tenantConfigFrom(
+      { ...acme, allowedEmailDomains: ['Acme.com, @eu.acme.com', ' globex.test\tinitech.test ', '', ' , '] },
+      settings,
+    );
+    const domains = ['acme.com', 'eu.acme.com', 'globex.test', 'initech.test'];
+    expect(config.allowedEmailDomains).toEqual(domains);
+    expect(config.settingsEnv.ALLOWED_EMAIL_DOMAINS).toBe(domains.join(','));
+    // Entries that name nothing pin nothing.
+    const blank = tenantConfigFrom({ ...acme, allowedEmailDomains: ['', ' , '] }, settings);
+    expect(blank.allowedEmailDomains).toEqual([]);
+    expect(blank.settingsEnv).toEqual({});
+  });
+
   it('derives the three secrets from the master key, differently per tenant', () => {
     const a = tenantConfigFrom(acme, settings);
     const b = tenantConfigFrom({ ...acme, slug: 'globex', hosts: ['globex.example.test'] }, settings);

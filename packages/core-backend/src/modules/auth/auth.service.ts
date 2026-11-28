@@ -145,7 +145,12 @@ export interface AuthConfig {
   jwtSecret: string;
   adminEmail: string;
   adminPassword: string;
-  allowedEmailDomains: string[];
+  /**
+   * The SSO domain allow-list. Read on EVERY check and never copied, so a
+   * caller that supplies it as a getter has a saved list in effect for the
+   * next sign-in, without a restart (the composition root does).
+   */
+  readonly allowedEmailDomains: readonly string[];
   /**
    * Whether password sign-in is offered at all (`LOGIN_PASSWORD`, default
    * true). With it off, `ADMIN_PASSWORD` is a credential nothing accepts, so

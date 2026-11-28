@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
@@ -13,12 +13,6 @@ vi.mock('../services/setup.api', async () => {
   const actual = await vi.importActual<typeof import('../services/setup.api')>('../services/setup.api');
   return { ...actual, ...api };
 });
-vi.mock('../../settings/services/github-facade.api', () => ({
-  fetchGitHubFacade: vi.fn(),
-  rotateGitHubFacade: vi.fn(),
-  fetchMarketplaceRegistration: vi.fn(async () => false),
-  setMarketplaceRegistration: vi.fn(),
-}));
 
 import { SetupGate } from '../components/SetupGate';
 import { SetupScreen } from '../components/SetupScreen';
@@ -44,8 +38,33 @@ const SETTINGS: SettingStatus[] = [
   setting('allowedEmailDomains', 'ALLOWED_EMAIL_DOMAINS'),
 ];
 
+// The Deployment page also composes the settings module's marketplace card,
+// which asks the server whether this deployment is registered. This suite is
+// about the Single sign-on card, so the network answers that one request with
+// "not registered"; any other request is unplanned and fails the test.
+const REGISTRATION = '/api/github-facade/registration';
+let unplannedRequests: string[] = [];
+
 beforeEach(() => {
   for (const fn of Object.values(api)) fn.mockReset();
+  unplannedRequests = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (method === 'GET' && new URL(url, 'http://localhost').pathname === REGISTRATION) {
+        return new Response(JSON.stringify({ registered: false }), { status: 200 });
+      }
+      unplannedRequests.push(`${method} ${url}`);
+      return new Response(JSON.stringify({ error: 'unplanned request in test' }), { status: 500 });
+    }),
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  expect(unplannedRequests).toEqual([]);
 });
 
 const field = (label: string) => screen.getByLabelText(label, { exact: false });
@@ -99,6 +118,27 @@ describe('SetupScreen — single sign-on check', () => {
     await userEvent.click(screen.getByRole('button', { name: /Save/ }));
     const problem = await screen.findByText('The provider rejected the application ID or secret.');
     expect(problem).toHaveAttribute('id', 'oidcClientSecret-problem');
+  });
+
+  /**
+   * The allowed domains apply at the next sign-in, so their save answers no
+   * restart and the page claims none; a save that does owe one says so on
+   * the Deployment page, whichever field on the card it came from.
+   */
+  it.each([
+    [false, false],
+    [true, true],
+  ])('after saving the allowed domains with restartRequired %s, a restart notice shown: %s', async (owed, shown) => {
+    api.saveSettings.mockResolvedValue({ restartRequired: owed, complete: true, settings: SETTINGS });
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" />);
+    await userEvent.type(field('Allowed email domains'), 'example.org');
+    await userEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ allowedEmailDomains: 'example.org' }));
+    const notice = screen.queryByText(/only takes effect when the server starts/);
+    if (shown) expect(notice).toBeInTheDocument();
+    else expect(notice).not.toBeInTheDocument();
   });
 
   it('labels the configuration with what the save answered', async () => {
