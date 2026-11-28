@@ -664,8 +664,8 @@ export function SkillPage({
         cr={compareCr}
         scope={{ prefix: skill.path, baseFiles: files }}
         onClose={() => setCompareCr(null)}
-        onResolved={() => {
-          toast('Change request is being applied');
+        onResolved={(outcome) => {
+          toast(outcome === 'applied' ? 'Change request is being applied' : 'Change request closed. Nothing was changed.');
           setCompareCr(null);
           data.reload();
         }}

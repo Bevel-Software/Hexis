@@ -380,7 +380,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Really revert this file?' }));
 
     await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
-    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith('closed'));
   });
 
   it('the header offers Decline beside Approve, with its own confirm; the last file resolves the dialog', async () => {
@@ -403,7 +403,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Really decline this file?' }));
 
     await waitFor(() => expect(approvalsApi.revertPrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
-    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith('closed'));
   });
 
   it('declining one of two files keeps the dialog open on the rest', async () => {
@@ -483,7 +483,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
       screen.getByRole('button', { name: `Really delete request and branch ${CR.branch}?` }),
     );
     await waitFor(() => expect(cancelApi.deleteChangeRequest).toHaveBeenCalledWith(12));
-    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith('closed'));
   });
 
   it('shows no Delete request when the server says the viewer may not delete', async () => {

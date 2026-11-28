@@ -1846,7 +1846,7 @@ export function FileViewer() {
         <ChangeRequestDialog
           cr={bannerCr}
           onClose={() => setBannerCr(null)}
-          // Applying is the only verdict the dialog reaches now.
+          // Applied or closed, the request is settled: refresh either way.
           onResolved={() => {
             setBannerCr(null);
             window.dispatchEvent(new Event(PR_STALE_EVENT));

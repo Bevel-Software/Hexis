@@ -45,6 +45,7 @@ vi.mock('../../workspace', async (importOriginal) => ({
 
 import { FileChangeBoxes } from '../components/FileChangeBoxes';
 import { othersPendingBesides, waitingOnViewerLabel } from '../utils/author';
+import { PR_STALE_EVENT } from '../../../core/events';
 
 const PATH = 'Docs/guide.md';
 
@@ -198,6 +199,57 @@ describe('FileChangeBoxes: Decline and Withdraw', () => {
 
     await waitFor(() => expect(api.cancelPullRequest).toHaveBeenCalledWith(CR.number));
     expect(api.revertPrFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('FileChangeBoxes: what the whole-change dialog settled', () => {
+  /** The request's detail as the dialog reads it: one file, the viewer's to approve, approved already or not. */
+  const fullDetail = (isApproved = false) => ({
+    ...CR,
+    body: '',
+    headSha: 'h',
+    baseSha: 'b',
+    files: [{ path: PATH, status: 'modified' as const, additions: 1, deletions: 1, isBinary: false, sha: '', rawUrl: '' }],
+    approvals: [{ path: PATH, eligibleApprovers: { roles: ['Docs'], users: [] }, approvedBy: [], isApproved, inMergeGate: true, viewerCanApprove: true }],
+    mergeableInBevel: true,
+    mergeBlockedReasons: [],
+    mergeWarnings: [],
+    viewerCanBypassMerge: false,
+    viewerCanCancel: false,
+  });
+
+  it('says Published when the dialog applied the request', async () => {
+    api.fetchPrDetail.mockResolvedValue(fullDetail(true));
+    const bus = renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Read the whole change' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply changes' }));
+    await waitFor(() => expect(api.mergePullRequest).toHaveBeenCalledWith(CR.number));
+    act(() => {
+      bus.emit({ kind: 'change-request-merged', number: CR.number } as unknown as VersionControlEvent);
+    });
+
+    expect(await screen.findByText('Published: the file now reads with that change.')).toBeInTheDocument();
+  });
+
+  it('says nothing was published when the dialog closed the request by declining its last file', async () => {
+    api.fetchPrDetail.mockResolvedValue(fullDetail());
+    api.revertPrFile.mockResolvedValue({ closed: true, remainingPaths: [] });
+    const stale = vi.fn();
+    window.addEventListener(PR_STALE_EVENT, stale);
+    renderBoxes({ mine: false, canDecide: true, othersPending: 0 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Read the whole change' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline this file' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Really decline this file?' }));
+
+    await waitFor(() => expect(api.revertPrFile).toHaveBeenCalledWith(CR.number, PATH));
+    // The dialog is gone and the lists are told to refresh, but nothing claims the change landed.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Really decline this file?' })).not.toBeInTheDocument());
+    expect(stale).toHaveBeenCalled();
+    expect(screen.queryByText('Published: the file now reads with that change.')).not.toBeInTheDocument();
+    expect(api.mergePullRequest).not.toHaveBeenCalled();
+    window.removeEventListener(PR_STALE_EVENT, stale);
   });
 });
 

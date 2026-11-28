@@ -54,6 +54,9 @@ export interface ChangeRequestScope {
   baseFiles: string[];
 }
 
+/** How a change request the dialog settled ended: merged, or closed with nothing merged. */
+export type ChangeRequestOutcome = 'applied' | 'closed';
+
 interface ChangeRequestDialogProps {
   cr: PullRequestSummary;
   scope?: ChangeRequestScope;
@@ -69,9 +72,14 @@ interface ChangeRequestDialogProps {
    */
   initialPath?: string;
   onClose(): void;
-  /** Applying is the only verdict this view reaches. Declining a change
-   *  request lives on the skill page, beside the request's own row. */
-  onResolved(): void;
+  /**
+   * The request is settled and the dialog's subject is gone, and how:
+   * `applied` when its changes were merged, `closed` when it ended with
+   * nothing merged (its last file declined, or the request deleted). A caller
+   * that tells the person what happened reads it; one that only refreshes can
+   * ignore it.
+   */
+  onResolved(outcome: ChangeRequestOutcome): void;
 }
 
 /**
@@ -761,9 +769,9 @@ export function ChangeRequestDialog({
       const result = await revertPrFile(cr.number, path);
       if (result.closed) {
         // That was the last file: the request closed itself and its branch
-        // is retired. The dialog's subject is gone — leave through the same
-        // door an apply does, so every list behind it refreshes.
-        onResolved();
+        // is retired, with nothing merged. The dialog's subject is gone, so
+        // every list behind it refreshes — and is told it was not applied.
+        onResolved('closed');
         return;
       }
       // The file is out of the diff; the branch copy we cached for it is
@@ -893,7 +901,7 @@ export function ChangeRequestDialog({
     setVerbError(null);
     try {
       await deleteChangeRequest(cr.number);
-      onResolved();
+      onResolved('closed');
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't delete this change request.");
       setDeleting(false);
@@ -972,7 +980,7 @@ export function ChangeRequestDialog({
    * why awaiting it is not an answer.
    */
   const applying = useApplyChangeRequest({
-    onApplied: () => onResolved(),
+    onApplied: () => onResolved('applied'),
     onFailed: (_number, refusal) => {
       // Git refusing the merge IS the conflict answer — say what happened and
       // what fixes it, instead of leaving a button that will fail again. Any

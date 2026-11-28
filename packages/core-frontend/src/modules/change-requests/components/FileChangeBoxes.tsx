@@ -182,11 +182,13 @@ export function FileChangeBoxes({
         <ChangeRequestDialog
           cr={openCr}
           onClose={() => setOpenCr(null)}
-          // Applying is the only verdict the dialog reaches now — declining
-          // and withdrawing live on the boxes.
-          onResolved={() => {
+          // Applied: published, the same banner the box's own Approve shows.
+          // Closed (its last file declined, or the request deleted): nothing
+          // was published, so the lists refresh and no banner says otherwise.
+          onResolved={(outcome) => {
             setOpenCr(null);
-            resolved();
+            if (outcome === 'applied') resolved();
+            else window.dispatchEvent(new Event(PR_STALE_EVENT));
           }}
         />
       )}
