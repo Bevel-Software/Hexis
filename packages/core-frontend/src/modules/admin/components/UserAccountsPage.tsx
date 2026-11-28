@@ -20,9 +20,11 @@ import {
 /**
  * How an account signs in, in the words this page uses everywhere (the row and
  * the delete confirmation). The deployment admin wins over a stored hash: both
- * can be true, and the environment credential is the one that survives.
+ * can be true, and the environment credential is the one that survives. An
+ * account the platform runs its own work as signs in with nothing at all.
  */
-function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin'>): string {
+function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin' | 'isSystem'>): string {
+  if (account.isSystem) return 'System account — nobody signs in with it';
   if (account.isEnvAdmin) return 'Password (owner)';
   if (account.hasPassword) return 'Password';
   return 'No password — signs in with single sign-on';
@@ -34,6 +36,7 @@ function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvA
  */
 function signInAfterDelete(account: AccountSummary): string {
   const label = signInMethodLabel(account);
+  if (account.isSystem) return `${label}, so deleting it takes nobody's sign-in away.`;
   if (account.isEnvAdmin) {
     return `${label}: they can still sign in with the owner password set on the server, but will start fresh.`;
   }
@@ -428,10 +431,12 @@ export function UserAccountsPage() {
                         <span className="text-meta text-ink-muted text-right max-w-[13rem]">
                           Password set in the deployment environment
                         </span>
-                      ) : account.isOwner ? null : (
+                      ) : account.isOwner || account.isSystem ? null : (
                         // Nor for any other owner: another admin setting the
                         // owner's password could then sign in as them. The
-                        // owner sets their own on the Account page.
+                        // owner sets their own on the Account page. Nor for an
+                        // account the platform runs its own work as: nobody
+                        // signs in with it, and the backend refuses it one.
                         <button
                           onClick={() => openPasswordDialog(account)}
                           className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"

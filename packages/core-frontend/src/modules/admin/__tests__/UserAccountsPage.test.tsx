@@ -174,10 +174,16 @@ describe('UserAccountsPage', () => {
   });
 
   it('the delete confirmation describes the password state in the same words', async () => {
-    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB, ROOT]);
+    vi.mocked(listAccounts).mockResolvedValue([
+      ALICE,
+      BOB,
+      ROOT,
+      { ...ALICE, id: 'u-bot', email: 'recovery-bot@bevel.local', name: 'Recovery Bot', isSystem: true },
+    ]);
     renderPage();
     await waitFor(() => screen.getByText('Alice'));
     const cases: Array<[string, RegExp]> = [
+      ['recovery-bot@bevel.local', /System account — nobody signs in with it, so deleting it takes nobody's sign-in away\./],
       ['alice@example.com', /No password — signs in with single sign-on: they can sign in again later with single sign-on/],
       ['bob@example.com', /Password: to sign in again they will need an admin/],
       ['root@example.com', /Password \(owner\): they can still sign in with the owner password set on the server, but will start fresh\./],
@@ -260,6 +266,33 @@ describe('UserAccountsPage', () => {
 
   // The whole point of the ticket: first setup and replacing a working
   // credential are different acts, so they are not offered in the same words.
+  // An account the platform runs its own work as: nobody signs in with it, and
+  // the service refuses it a stored password, so the row must neither claim
+  // single sign-on nor offer a password action that can only fail.
+  it('labels a system account as one and offers it no password action', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      ALICE,
+      BOB,
+      { ...ALICE, id: 'u-bot', email: 'recovery-bot@bevel.local', name: 'Recovery Bot', isSystem: true },
+      { ...BOB, id: 'u-bot-hashed', email: 'sync-bot@bevel.local', name: 'Sync Bot', isSystem: true },
+    ]);
+    renderPage();
+    await waitFor(() => screen.getByText('Recovery Bot'));
+    for (const name of ['Recovery Bot', 'Sync Bot']) {
+      expect(row(name)).toHaveTextContent(/· System account — nobody signs in with it$/);
+      expect(row(name)).not.toHaveTextContent(/single sign-on/);
+    }
+    for (const email of ['recovery-bot@bevel.local', 'sync-bot@bevel.local']) {
+      expect(screen.queryByRole('button', { name: `Set password for ${email}` })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: `Reset password for ${email}` })).not.toBeInTheDocument();
+    }
+    // The ordinary rows beside them are unchanged.
+    expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
+    expect(row('Bob')).toHaveTextContent(/· Password$/);
+    expect(screen.getByRole('button', { name: 'Set password for alice@example.com' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reset password for bob@example.com' })).toBeInTheDocument();
+  });
+
   it('offers Set password without one and Reset password with one', async () => {
     vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
     renderPage();
