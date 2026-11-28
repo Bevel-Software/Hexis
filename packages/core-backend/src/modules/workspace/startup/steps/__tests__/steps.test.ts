@@ -680,6 +680,29 @@ describe('TemplateFilesStep: the guide copies earlier releases wrote', () => {
     expect((await git(await checkout(DEFAULT_BRANCH), ['rev-parse', 'HEAD'])).trim()).toBe(head);
   });
 
+  it('removes a copy whose header sits below the frontmatter its release wrote, and leaves a note of the organisation\'s own', async () => {
+    // The releases of 2026-09-09..2026-10-06 wrote the guide with a `read:
+    // everyone` frontmatter, which put the header on line 14 of the file.
+    const frontmatter = '---\n# The guide\'s own access rule.\n#\n#\n#\nread:\n  - everyone\n---\n';
+    const releaseCopy = `${frontmatter}# Knowledge base\n\nThis is a git-backed knowledge base. You are the primary agent responsible for\nmaintaining it.\n\n${MANAGED_GUIDE_COPY.split('\n').slice(2).join('\n')}`;
+    expect(releaseCopy.split('\n').findIndex((line) => line.startsWith('> **This file'))).toBe(13);
+    const customerNote = `${frontmatter}# Our notes\n${'\nA line of ours.'.repeat(15)}\n\n> **This file is managed by the platform.** (quoted from the old guide)\n`;
+    const scaffold = await fullScaffold();
+    scaffold['AGENTS.md'] = releaseCopy;
+    scaffold['HEXIS.md'] = releaseCopy;
+    scaffold['Notes.md'] = customerNote;
+    scaffold['.bevelignore'] = `${OLD_RELEASE_IGNORE}\n# The platform's agent guide.\nHEXIS.md\n`;
+    await seedUpstream(scaffold);
+    await makeRunner([new TemplateFilesStep(realDisk(), kbContext)]).runAll();
+
+    for (const branch of PROTECTED) {
+      const dir = await checkout(branch);
+      expect(await exists(dir, 'AGENTS.md'), branch).toBe(false);
+      expect(await exists(dir, 'HEXIS.md'), branch).toBe(false);
+      expect(norm(await fs.readFile(path.join(dir, 'Notes.md'), 'utf8')), branch).toBe(customerNote);
+    }
+  });
+
   it("leaves the organisation's own AGENTS.md byte for byte, and stops hiding it", async () => {
     await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': CUSTOMER_GUIDE, '.bevelignore': OLD_RELEASE_IGNORE });
     await makeRunner([new TemplateFilesStep(realDisk(), kbContext)]).runAll();
