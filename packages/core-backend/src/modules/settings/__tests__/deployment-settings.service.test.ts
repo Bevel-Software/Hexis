@@ -10,7 +10,7 @@ import {
   retireMergedBranchesOn,
   parseToolReadOnlyOverrides,
 } from '../deployment-settings.service.js';
-import type { Database } from '../../database/connection.js';
+import type { Database } from '../../database/index.js';
 import { ToolReadOnlyHints, ToolRegistry } from '../../tool-registry/index.js';
 import { toolDef } from '../../tool-helpers/index.js';
 
@@ -82,6 +82,9 @@ function makeDb() {
         }),
       }),
     }),
+    transaction(run: (tx: unknown) => unknown) {
+      return run(this);
+    },
   } as unknown as Database;
   return { db, rows };
 }

@@ -536,6 +536,19 @@ export function SetupScreen({
     setLatest(null);
   }
   const verification = latest ?? oidcVerification;
+  /** Whether the admin has asked to remove the provider and is being asked to confirm. */
+  const [confirmingRemoval, setConfirmingRemoval] = useState(false);
+  /**
+   * The provider values Remove takes away: the saved ones. None while the
+   * environment sets the provider address, since removing the rest would not
+   * take the provider away, or the secret, which stays paired with the saved
+   * address and is changed only there, so the server refuses the removal.
+   */
+  const sourceOf = (key: string) => settings.find((s) => s.key === key)?.source;
+  const removableOidc =
+    sourceOf('oidcIssuerUrl') === 'stored' && sourceOf('oidcClientSecret') !== 'env'
+      ? settings.filter((s) => OIDC_KEYS.includes(s.key) && s.source === 'stored').map((s) => s.key)
+      : [];
 
   /**
    * What a field would save as, given a set of typed answers: what is in them,
@@ -851,6 +864,31 @@ export function SetupScreen({
     }
   }
 
+  /**
+   * Remove the saved provider: its address, application ID and secret go,
+   * and the sign-in page stops offering it at once. Nothing is probed.
+   */
+  async function removeOidc() {
+    if (saving || retrying || oidcTesting) return;
+    setSaving(true);
+    setError(null);
+    setProblems({});
+    try {
+      const result = await saveSettings(Object.fromEntries(removableOidc.map((key) => [key, null])));
+      oidcEpoch.current++;
+      setOidcTest(null);
+      setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !OIDC_KEYS.includes(key))));
+      if (result.oidcVerification) setLatest(result.oidcVerification);
+      onSaved();
+    } catch (err) {
+      if (err instanceof SettingsProblems) showProblems(err.problems);
+      else setError(err instanceof Error ? err.message : 'Could not remove single sign-on.');
+    } finally {
+      setConfirmingRemoval(false);
+      setSaving(false);
+    }
+  }
+
   /** What a sign-in test came back with, in words. */
   function describeOidcTest(result: OidcTest): string {
     switch (result.outcome) {
@@ -911,6 +949,33 @@ export function SetupScreen({
           >
             {describeOidcTest(oidcTest)}
           </p>
+        )}
+        {removableOidc.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            {confirmingRemoval ? (
+              <>
+                <span className="text-detail text-ink">
+                  Remove single sign-on? The sign-in page stops offering it at once. Accounts it created are kept.
+                </span>
+                <Button type="button" variant="danger" size="sm" onClick={() => void removeOidc()} disabled={saving}>
+                  {saving ? 'Removing…' : 'Remove'}
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => setConfirmingRemoval(false)} disabled={saving}>
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmingRemoval(true)}
+                disabled={oidcTesting || saving}
+              >
+                Remove single sign-on
+              </Button>
+            )}
+          </div>
         )}
       </Surface>
     );

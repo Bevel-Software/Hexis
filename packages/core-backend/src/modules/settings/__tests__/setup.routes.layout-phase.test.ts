@@ -10,13 +10,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { testKbContext } from '../../../__tests__/kb-context.js';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
-import { NodeGitRunner } from '../../version-control/git/node-git-runner.js';
-import { TemplateFilesStep } from '../../workspace/startup/steps/template-files.step.js';
-import { NodeFs } from '../../kb-fs/node-fs.js';
+import { NodeGitRunner } from '../../version-control/index.js';
 import { defaultKbTemplateDir } from '../../../assets.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
-import { newKbStartupRunner } from '../../../__tests__/workspace-service.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
+import { newKbStartupRunner, templateFilesStep } from '../../../__tests__/workspace-service.js';
 
 /**
  * The completing save and the REAL initialization phase, wired the way the
@@ -99,6 +97,9 @@ function boot() {
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
     delete: () => ({ where: () => Promise.resolve() }),
+    transaction(run: (tx: unknown) => unknown) {
+      return run(this);
+    },
   } as unknown as Database;
   const settings = new DeploymentSettingsService(db, ENC_KEY);
   // ONE context for the step and the routes, as the composition root builds
@@ -114,7 +115,7 @@ function boot() {
     defaultBranch: () => BRANCH,
     protectedBranches: () => [BRANCH],
     seedAdminEmails: ['admin@example.com'],
-    steps: [new TemplateFilesStep(new NodeFs(), kb)],
+    steps: [templateFilesStep(kb)],
     buildSeedTree: async () => [],
   });
   const app = express();

@@ -1,15 +1,17 @@
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { IssuerCheck, OidcCheck, OidcConfiguration } from '../oidc-check.js';
-import { OidcAuthProvider, oidcSettingsFrom } from '../../auth/oidc-auth-provider.js';
-import type { AuthService } from '../../auth/auth.service.js';
-import type { Database } from '../../database/connection.js';
-import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { AuthService } from '../../auth/index.js';
+import type { Database } from '../../database/index.js';
+import type { IAdminAccessService } from '../../admin/index.js';
 import { testKbContext } from '../../../__tests__/kb-context.js';
+import { realOidcProvider } from '../../../__tests__/real-oidc.js';
 
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 const ISSUER = 'https://login.example.com/tenant/v2.0';
@@ -56,16 +58,30 @@ afterEach(() => {
 type Row = { key: string; value: string; encrypted: boolean };
 
 /**
- * An in-memory table. Conditions are not evaluated — a select answers every
- * row, which the service narrows by key itself — and deletes are only counted.
+ * An in-memory table. A select answers every row, which the service narrows
+ * by key itself; a delete removes the rows whose key the statement binds (the
+ * service deletes by key) and records those keys. A transaction runs its
+ * statements on the same rows and, as Postgres does, puts them all back when
+ * it fails. `failingWrite` names a key whose write fails, as a database
+ * connection lost part-way through a save would.
  */
-function memoryDb(rows: Row[] = [], deleted: string[][] = []) {
+function memoryDb(rows: Row[] = [], deleted: string[][] = [], failingWrite?: string) {
   const all = () => Promise.resolve(rows);
   return {
     select: () => ({ from: () => Object.assign(all(), { where: all }) }),
+    async transaction(run: (tx: unknown) => Promise<unknown>) {
+      const before = rows.map((row) => ({ ...row }));
+      try {
+        return await run(this);
+      } catch (error) {
+        rows.splice(0, rows.length, ...before);
+        throw error;
+      }
+    },
     insert: () => ({
       values: (row: Row) => ({
         onConflictDoUpdate: (conflict: { set: Pick<Row, 'value' | 'encrypted'> }) => {
+          if (row.key === failingWrite) return Promise.reject(new Error('connection lost'));
           const existing = rows.find((r) => r.key === row.key);
           if (existing) Object.assign(existing, { value: conflict.set.value, encrypted: conflict.set.encrypted });
           else rows.push({ ...row });
@@ -78,8 +94,10 @@ function memoryDb(rows: Row[] = [], deleted: string[][] = []) {
       }),
     }),
     delete: () => ({
-      where: () => {
-        deleted.push(rows.map((r) => r.key));
+      where: (predicate: SQL) => {
+        const keys = new PgDialect().sqlToQuery(predicate).params as string[];
+        deleted.push(keys);
+        rows.splice(0, rows.length, ...rows.filter((r) => !keys.includes(r.key)));
         return Promise.resolve();
       },
     }),
@@ -104,8 +122,9 @@ function listen(opts: {
   checkIssuer?: (issuerUrl: string) => Promise<IssuerCheck>;
   isAdmin?: boolean;
   encKey?: string;
+  db?: Database;
 }) {
-  const settings = new DeploymentSettingsService(fakeDb(), opts.encKey ?? ENC_KEY);
+  const settings = new DeploymentSettingsService(opts.db ?? fakeDb(), opts.encKey ?? ENC_KEY);
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -301,6 +320,115 @@ describe('POST /setup/settings — a sign-in configuration is checked before it 
   });
 });
 
+describe('POST /setup/settings — removing the sign-in provider', () => {
+  const REMOVE = { oidcIssuerUrl: null, oidcClientId: null, oidcClientSecret: null };
+
+  it('removes the saved issuer, application id and secret, without probing, and the status reads not configured', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const db = memoryDb();
+    const { base, settings } = listen({ checkOidc: idp.check, db });
+    await settings.save(FULL, null);
+    await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
+
+    const res = await post(base, '/api/setup/settings', { settings: REMOVE });
+    expect(res.status).toBe(200);
+    expect((await res.json()).oidcVerification).toBe('not-configured');
+    expect(idp.asked).toEqual([]);
+    expect(settings.resolveOidcCredentials()).toEqual({ issuerUrl: '', clientId: '', clientSecret: '' });
+    const status = await (await fetch(`${base}/api/setup/status`)).json();
+    expect(status.oidcVerification).toBe('not-configured');
+    for (const key of Object.keys(REMOVE)) {
+      expect(status.settings.find((s: { key: string }) => s.key === key)).toMatchObject({ source: 'unset', configured: false });
+    }
+    // Gone from the table, not only from this replica's cache.
+    const reloaded = new DeploymentSettingsService(db, ENC_KEY);
+    await reloaded.load();
+    expect(reloaded.resolveOidcCredentials()).toEqual({ issuerUrl: '', clientId: '', clientSecret: '' });
+  });
+
+  it('a blank still leaves the provider alone — only null removes it', async () => {
+    const { base, settings } = listen({ checkOidc: provider({ outcome: 'verified' }).check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { oidcIssuerUrl: '', oidcClientId: '', oidcClientSecret: '' },
+    });
+    expect(res.status).toBe(200);
+    expect(settings.resolveOidcCredentials()).toEqual({ issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'secret-1' });
+  });
+
+  it('refuses null for a setting that cannot be removed, and the whole batch with it', async () => {
+    const { base, settings } = listen({ checkOidc: provider({ outcome: 'verified' }).check });
+    await settings.save({ ...FULL, oidcScopes: 'openid email' }, null);
+    const res = await post(base, '/api/setup/settings', { settings: { ...REMOVE, oidcScopes: null } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems).toEqual({ oidcScopes: 'This setting cannot be removed.' });
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+    expect(settings.resolve('oidcScopes')).toBe('openid email');
+  });
+
+  it('refuses to remove the issuer while the saved secret stays — the next issuer would be handed it', async () => {
+    const { base, settings } = listen({ checkOidc: provider({ outcome: 'verified' }).check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.oidcClientSecret).toMatch(/Remove the application secret/);
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+  });
+
+  it('removes the issuer when a new secret comes in the same save — the saved one is gone', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null, oidcClientSecret: 'secret-2' } });
+    expect(res.status).toBe(200);
+    expect(idp.asked).toEqual([]);
+    expect(settings.resolveOidcCredentials()).toEqual({ issuerUrl: '', clientId: 'app-id', clientSecret: 'secret-2' });
+  });
+
+  it('a removal that fails part-way removes nothing — the saved secret never outlives its issuer', async () => {
+    const table: Row[] = [];
+    await new DeploymentSettingsService(memoryDb(table), ENC_KEY).save(FULL, null);
+    const db = memoryDb(table, [], 'oidcClientSecret');
+    const { base, settings } = listen({ checkOidc: provider({ outcome: 'verified' }).check, db });
+    await settings.load();
+
+    // The issuer's row goes first; the new secret's write then fails.
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null, oidcClientSecret: 'secret-2' } });
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    const saved = { issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'secret-1' };
+    expect(settings.resolveOidcCredentials()).toEqual(saved);
+    const reloaded = new DeploymentSettingsService(db, ENC_KEY);
+    await reloaded.load();
+    expect(reloaded.resolveOidcCredentials()).toEqual(saved);
+  });
+
+  it("refuses to remove the issuer beside an OIDC_CLIENT_SECRET — the environment's secret would go to the next issuer saved", async () => {
+    process.env.OIDC_CLIENT_SECRET = 'from-env';
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save({ oidcIssuerUrl: ISSUER, oidcClientId: 'app-id' }, null);
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null, oidcClientId: null } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.oidcIssuerUrl).toMatch(/OIDC_CLIENT_SECRET environment variable/);
+    expect(idp.asked).toEqual([]);
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+  });
+
+  it('refuses to remove a value the environment sets', async () => {
+    process.env.OIDC_ISSUER_URL = ISSUER;
+    const { base } = listen({ checkOidc: provider({ outcome: 'verified' }).check });
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: null } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.oidcIssuerUrl).toMatch(/OIDC_ISSUER_URL environment variable/);
+  });
+
+  it('still refuses a value that is neither a string nor null', async () => {
+    const { base } = listen({});
+    const res = await post(base, '/api/setup/settings', { settings: { oidcIssuerUrl: 42 } });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('POST /setup/test-oidc', () => {
   it('checks the typed values and reports the outcome, without saving them', async () => {
     const idp = provider({ outcome: 'verified' });
@@ -457,8 +585,7 @@ describe('the verification state', () => {
       if (url === `${ISSUER}/userinfo`) return Response.json({ email: 'carol@example.com', name: 'Carol' });
       return new Response('', { status: 404 });
     }) as typeof fetch;
-    const oidc = new OidcAuthProvider({
-      settings: () => oidcSettingsFrom(settings),
+    const oidc = realOidcProvider(settings, {
       publicBackendUrl: 'http://localhost:3001',
       publicFrontendUrl: 'http://localhost:5173',
       cookieSecure: false,

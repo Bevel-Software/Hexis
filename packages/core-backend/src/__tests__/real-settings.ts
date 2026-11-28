@@ -23,12 +23,36 @@ import { DeploymentSettingsService } from '../modules/settings/deployment-settin
  * rule (one row per key) and each statement's bound values: an upsert, an
  * insert that yields to a row already there, a read of every row or of one
  * key's, a delete by key (every value the statement binds is taken as a key),
- * and the conditional delete and update that match on key AND value. It is
+ * the conditional delete and update that match on key AND value, and a
+ * transaction, whose statements run on the same table. It is
  * not a SQL engine: a statement of another shape is not modelled.
  * `real-settings.test.ts` drives each of these through the service.
  */
 export function realDeploymentSettings(env: NodeJS.ProcessEnv = {}): Settings {
-  return new DeploymentSettingsService(settingsTable(), randomBytes(32).toString('base64'), undefined, { env });
+  return realDeploymentSettingsOn(settingsTable(), env);
+}
+
+/**
+ * The same service over a database the test opened itself — a real Postgres
+ * from `pg-scratch.ts` — for a suite that needs settings and another
+ * module's rows in ONE database (removing a setting must leave the accounts
+ * beside it alone).
+ */
+export function realDeploymentSettingsOn(db: Database, env: NodeJS.ProcessEnv = {}): Settings {
+  return new DeploymentSettingsService(db, randomBytes(32).toString('base64'), undefined, { env });
+}
+
+/**
+ * The same service, and a look at its table's rows: for a suite that checks
+ * how a value was STORED (a secret sealed, not in the clear), which the
+ * service itself never shows.
+ */
+export function realDeploymentSettingsWithRows(env: NodeJS.ProcessEnv = {}): {
+  settings: Settings;
+  row: (key: string) => Readonly<Row> | undefined;
+} {
+  const rows: Row[] = [];
+  return { settings: realDeploymentSettingsOn(settingsTable(rows), env), row: (key) => rows.find((r) => r.key === key) };
 }
 
 interface Row {
@@ -51,8 +75,7 @@ function statement<T>(run: () => T): PromiseLike<T> {
   return { then: (resolved, rejected) => Promise.resolve().then(run).then(resolved, rejected) };
 }
 
-function settingsTable(): Database {
-  const rows: Row[] = [];
+function settingsTable(rows: Row[] = []): Database {
   const copies = (of: Row[]) => of.map((row) => ({ ...row }));
   return {
     select: () => ({
@@ -117,5 +140,9 @@ function settingsTable(): Database {
         }),
       }),
     }),
+    // A transaction's statements run on this same table.
+    transaction(run: (tx: unknown) => unknown) {
+      return run(this);
+    },
   } as unknown as Database;
 }

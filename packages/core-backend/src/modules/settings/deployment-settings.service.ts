@@ -19,6 +19,12 @@ import { normalizeIssuerUrl } from './oidc-check.js';
 import { GIT_MODES, isGitMode } from './repository-source.js';
 
 /**
+ * What a save names: each setting's new value, or `null` to remove a
+ * `removable` one (see {@link SettingDef.removable}).
+ */
+export type SettingsBatch = Record<string, string | null>;
+
+/**
  * A setting an admin may set from the setup screen instead of the environment.
  *
  * `envVar` is the name that still wins if it is set — see
@@ -58,6 +64,13 @@ export interface SettingDef {
    * clearing it is the one way back to that default and never a loss.
    */
   blankMeansDefault?: boolean;
+  /**
+   * A save may REMOVE the stored value by naming the setting with `null`.
+   * Not a blank: a blank still leaves the value alone, so a stray Enter or a
+   * secret field left empty never unconfigures anything. `null` is a request
+   * nobody sends by accident — the single sign-on card's Remove control.
+   */
+  removable?: boolean;
   /**
    * What an UNSET setting already means to the code that reads it — the
    * layout's defaults, the pointer consent's "on unless turned off".
@@ -361,12 +374,14 @@ export const CORE_SETTINGS: SettingDef[] = [
   /**
    * Single sign-on. Applies without a restart: the OIDC provider is mounted
    * once at boot but reads these on every probe and sign-in, advertising
-   * itself only while issuer, client id and secret are all set.
+   * itself only while issuer, client id and secret are all set. The three
+   * are `removable`: removing them is how an admin takes the provider away.
    */
   {
     key: 'oidcIssuerUrl',
     envVar: 'OIDC_ISSUER_URL',
     section: 'sign-in',
+    removable: true,
     validate: (v) => {
       try {
         return new URL(v).protocol === 'https:' ? null : 'The issuer URL must start with https://';
@@ -379,12 +394,14 @@ export const CORE_SETTINGS: SettingDef[] = [
     key: 'oidcClientId',
     envVar: 'OIDC_CLIENT_ID',
     section: 'sign-in',
+    removable: true,
   },
   {
     key: 'oidcClientSecret',
     envVar: 'OIDC_CLIENT_SECRET',
     section: 'sign-in',
     secret: true,
+    removable: true,
   },
   {
     key: 'oidcScopes',
@@ -746,7 +763,9 @@ export class DeploymentSettingsService {
   /**
    * Validate and persist. Rejects the whole batch if any field fails, so a
    * half-applied configuration is never written — a KB URL saved without the
-   * token that reads it is a deployment that fails at first clone.
+   * token that reads it is a deployment that fails at first clone. A valid
+   * batch is written in one transaction, so a database failure part-way
+   * through writes none of it either.
    *
    * A setting whose environment variable is set is REFUSED rather than silently
    * stored, because storing it would write a row that can never take effect and
@@ -759,7 +778,7 @@ export class DeploymentSettingsService {
    * completes setup has just applied them, and reports only what remains.
    */
   async save(
-    entries: Record<string, string>,
+    entries: SettingsBatch,
     updatedBy: string | null,
     /** Set by {@link record} alone: the batch is the deployment's own, and may name internal settings. */
     by: 'admin' | 'deployment' = 'admin',
@@ -768,9 +787,6 @@ export class DeploymentSettingsService {
 
     /** The settings this save changed that a running server cannot pick up. */
     const restartKeys: string[] = [];
-    // A blanked blank-means-default setting: its row goes, and its readers
-    // are back on the default from the next read.
-    for (const key of toClear) await this.clear(key);
     for (const { key, value, def } of toWrite) {
       // Compared against the EFFECTIVE value: a setting that was unset was
       // already running on whatever its readers make of "unset" — the layout
@@ -778,17 +794,29 @@ export class DeploymentSettingsService {
       // answer changes nothing a restart would pick up.
       const effective = this.resolve(key) || def.unsetMeans || '';
       if (def.restartToApply && effective !== value) restartKeys.push(key);
-      const encrypted = def.secret === true;
-      const stored = encrypted ? this.crypto!.encrypt(value) : value;
-      await this.db
-        .insert(deploymentSettings)
-        .values({ key, value: stored, encrypted, updatedBy })
-        .onConflictDoUpdate({
-          target: deploymentSettings.key,
-          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
-        });
-      this.stored.set(key, value);
     }
+    // Every row of the batch lands in ONE transaction, and the cache follows
+    // only once it has committed: a batch that fails part-way leaves the
+    // rows and the cache as they were. So a save that removes the single
+    // sign-on issuer cannot fail with its saved secret left behind.
+    await this.db.transaction(async (tx) => {
+      // A cleared row goes (a removed setting, a blanked blank-means-default
+      // one), and its readers are back on unset from the next read.
+      if (toClear.length > 0) await tx.delete(deploymentSettings).where(inArray(deploymentSettings.key, toClear));
+      for (const { key, value, def } of toWrite) {
+        const encrypted = def.secret === true;
+        const stored = encrypted ? this.crypto!.encrypt(value) : value;
+        await tx
+          .insert(deploymentSettings)
+          .values({ key, value: stored, encrypted, updatedBy })
+          .onConflictDoUpdate({
+            target: deploymentSettings.key,
+            set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
+          });
+      }
+    });
+    for (const key of toClear) this.stored.delete(key);
+    for (const { key, value } of toWrite) this.stored.set(key, value);
 
     // A token saved here is in effect at once: the git runner's credentials
     // read `resolve('gitToken')` on every call, so nothing is published to
@@ -803,7 +831,7 @@ export class DeploymentSettingsService {
    * checks the values a save would put in effect (the repository connection)
    * before letting the save happen.
    */
-  resolveAfter(entries: Record<string, string>): (key: string) => string {
+  resolveAfter(entries: SettingsBatch): (key: string) => string {
     const { toWrite, toClear } = this.plan(entries);
     return (key) =>
       toClear.includes(key) ? '' : (toWrite.find((w) => w.key === key)?.value ?? this.resolve(key));
@@ -877,7 +905,7 @@ export class DeploymentSettingsService {
 
   /** Validate a batch and return the writes (and the clears) it amounts to; throws on any problem. */
   private plan(
-    entries: Record<string, string>,
+    entries: SettingsBatch,
     by: 'admin' | 'deployment' = 'admin',
   ): {
     toWrite: { key: string; value: string; def: SettingDef }[];
@@ -901,6 +929,13 @@ export class DeploymentSettingsService {
       }
       if (this.sourceOf(key) === 'env') {
         problems[key] = `Set by the ${def.envVar} environment variable — change it there.`;
+        continue;
+      }
+      // `null` removes the stored value — of a setting that says it may be
+      // removed (`SettingDef.removable`), and of no other.
+      if (raw === null) {
+        if (def.removable) toClear.push(key);
+        else problems[key] = 'This setting cannot be removed.';
         continue;
       }
       const value = raw.trim();
