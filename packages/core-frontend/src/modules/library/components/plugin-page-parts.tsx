@@ -277,7 +277,8 @@ export function CardGrid({
  * delete path would delete a shared skill (or be refused by its own rules).
  *
  * Your own space is the exception to "everyone": nobody else has it, so a
- * skill deleted there is lost to its owner alone, and the copy says so.
+ * skill deleted there is lost to its owner and to whoever the owner shared
+ * that skill with (a card's Share grants its folder), and the copy says so.
  */
 export function RemoveLibraryItemDialog({
   item,
@@ -292,7 +293,7 @@ export function RemoveLibraryItemDialog({
   place: string;
   /** The item is in `place` by LINK — remove the link, not the item. `place` is then the plugin. */
   linked?: boolean;
-  /** `place` is the caller's own space: only they lose what is removed from it. */
+  /** `place` is the caller's own space: they lose what is removed, and so does anyone they shared it with. */
   personal?: boolean;
   onClose(): void;
   /** Fired after the delete lands; the host page reloads and says so. */
@@ -342,7 +343,7 @@ export function RemoveLibraryItemDialog({
           : item.kind === 'skill'
             ? `This deletes the skill and its files from ${place}. ${
                 personal
-                  ? 'Only you lose it, the next time your agent connects.'
+                  ? 'You lose it the next time your agent connects, and so does anyone you shared it with.'
                   : 'Everyone here loses it the next time their agent connects.'
               }`
             : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
