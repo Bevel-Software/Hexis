@@ -115,7 +115,8 @@ describe('ManageAccessDialog: a deny inherited from a folder', () => {
 
   it('an older server without deniedAbove renders as before', async () => {
     const user = userEvent.setup();
-    const { deniedAbove: _omitted, ...older } = VIEW as AccessResponse & { deniedAbove: unknown };
+    const older: Partial<AccessResponse> = { ...VIEW };
+    delete older.deniedAbove;
     api.fetchFileAccess.mockResolvedValue(older);
     render(<ManageAccessDialog entry={FILE} onClose={() => {}} />);
     await expandFolderSection(user);

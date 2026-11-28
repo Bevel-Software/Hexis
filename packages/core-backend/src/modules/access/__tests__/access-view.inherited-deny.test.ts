@@ -54,7 +54,7 @@ describe('a deny written in a folder above reaches the view of what it holds', (
     await write(
       repo,
       PARENT_MD,
-      `---\nwrite:\n  - QAEditors\n  - deny ${DENIED}\nread:\n  - deny GTM Team\n---\n# QAAccess\n`,
+      `---\nwrite:\n  - QAEditors\n  - deny QA Denied <${DENIED}>\nread:\n  - deny GTM Team\n---\n# QAAccess\n`,
     );
     access = new AccessControlService(stubWorkspace(workspaceDir), KB, new NodeFs());
   });
@@ -69,10 +69,10 @@ describe('a deny written in a folder above reaches the view of what it holds', (
   }
 
   it('on a file with its own frontmatter: the person, and the folder the deny is written in', async () => {
-    await write(repo, 'QAAccess/Deal.md', '---\nread:\n  - ed@example.com\n---\n# Deal\n');
+    await write(repo, 'QAAccess/Deal.md', '---\nread:\n  - Ed <ed@example.com>\n---\n# Deal\n');
     const v = await view('QAAccess/Deal.md', 'file');
 
-    expect(v.deniedAbove.users).toEqual([{ name: expect.any(String), email: DENIED }]);
+    expect(v.deniedAbove.users).toEqual([{ name: 'QA Denied', email: DENIED }]);
     expect(v.denials[`u:${DENIED}`]?.write).toEqual([{ kind: 'ancestor', path: PARENT_MD }]);
     // Not a deny of the file's own: nothing to lift here.
     expect(v.deniedHere.users).toEqual([]);
@@ -116,7 +116,7 @@ describe('a deny written in a folder above reaches the view of what it holds', (
   });
 
   it('a deny a closer grant beats is not reported: no row, no sources', async () => {
-    await write(repo, 'QAAccess/Sub/access.md', `---\nwrite:\n  - ${DENIED}\nread:\n  - GTM Team\n---\n`);
+    await write(repo, 'QAAccess/Sub/access.md', `---\nwrite:\n  - QA Denied <${DENIED}>\nread:\n  - GTM Team\n---\n`);
     await write(repo, 'QAAccess/Sub/Note.md', '# Note\n');
     const v = await view('QAAccess/Sub/Note.md', 'file');
 
@@ -126,7 +126,38 @@ describe('a deny written in a folder above reaches the view of what it holds', (
     expect(v.denials['g:gtm team']).toBeUndefined();
   });
 
-  it('a deny that only beats the parent for the verbs it names leaves no stray row', async () => {
+  it('a deny a closer ROLE grant beats leaves the person no row: no deniedAbove, no sources', async () => {
+    // Closeness first: the subfolder's grant to QAEditors beats the parent's
+    // deny of a member by name. The person is in no list of their own here, so
+    // the only thing that put them in the view was the parent's deny.
+    await write(repo, 'QAAccess/Sub/access.md', '---\nwrite:\n  - QAEditors\n---\n');
+    await write(repo, 'QAAccess/Sub/Note.md', '# Note\n');
+    const v = await view('QAAccess/Sub/Note.md', 'file');
+
+    expect(await access.canWrite(WS, DENIED, 'QAAccess/Sub/Note.md')).toBe(true);
+    expect(v.deniedAbove.users).toEqual([]);
+    expect(v.sources[`u:${DENIED}`]).toBeUndefined();
+    expect(v.denials[`u:${DENIED}`]).toBeUndefined();
+  });
+
+  it('a closer ROLE grant of one verb: the row keeps only the verbs the gate still refuses', async () => {
+    await write(
+      repo,
+      PARENT_MD,
+      `---\nwrite:\n  - QAEditors\n  - deny QA Denied <${DENIED}>\nread:\n  - deny QA Denied <${DENIED}>\n---\n`,
+    );
+    await write(repo, 'QAAccess/Sub/access.md', '---\nread:\n  - QAEditors\n---\n');
+    await write(repo, 'QAAccess/Sub/Note.md', '# Note\n');
+    const v = await view('QAAccess/Sub/Note.md', 'file');
+
+    expect(await access.canRead(WS, DENIED, 'QAAccess/Sub/Note.md')).toBe(true);
+    expect(await access.canWrite(WS, DENIED, 'QAAccess/Sub/Note.md')).toBe(false);
+    expect(v.deniedAbove.users.map((u) => u.email)).toEqual([DENIED]);
+    expect(v.denials[`u:${DENIED}`]?.write).toEqual([{ kind: 'ancestor', path: PARENT_MD }]);
+    expect(v.denials[`u:${DENIED}`]?.read).toBeUndefined();
+  });
+
+  it("a group's deny a closer grant beats leaves no stray deniedAbove entry", async () => {
     // The folder denies GTM Team read; a closer grant gives it back. A row with
     // no denial and no grant listed would claim a restriction nobody enforces.
     await write(repo, 'QAAccess/Sub/access.md', '---\nread:\n  - GTM Team\n---\n');
@@ -139,7 +170,7 @@ describe('a deny written in a folder above reaches the view of what it holds', (
   });
 
   it('a deny in the root folder reaches a file at the root', async () => {
-    await write(repo, 'access.md', `---\nwrite:\n  - Admin\n  - QAEditors\n  - deny ${DENIED}\n---\n# Root\n`);
+    await write(repo, 'access.md', `---\nwrite:\n  - Admin\n  - QAEditors\n  - deny QA Denied <${DENIED}>\n---\n# Root\n`);
     await write(repo, 'Top.md', '# Top\n');
     const v = await view('Top.md', 'file');
 
@@ -153,6 +184,6 @@ describe('a deny written in a folder above reaches the view of what it holds', (
 
     expect(emailsInView(v)).toContain(DENIED);
     const labelled = labelAccountHolders(v, new Set([DENIED]));
-    expect(labelled.deniedAbove.users).toEqual([{ name: expect.any(String), email: DENIED, hasAccount: true }]);
+    expect(labelled.deniedAbove.users).toEqual([{ name: 'QA Denied', email: DENIED, hasAccount: true }]);
   });
 });

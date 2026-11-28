@@ -132,13 +132,33 @@ export async function resolveAccessView(
     }),
     ...[...userSet.values()].map(async (u) => {
       const principal = { kind: 'user' as const, email: u.email };
-      const [grants, denied] = await Promise.all([
+      const [grants, reported] = await Promise.all([
         accessControl.grantSources(workspaceId, kind, repoRelTarget, principal),
         accessControl.denialSources?.(workspaceId, kind, repoRelTarget, principal) ??
           Promise.resolve({} as DenialSources),
       ]);
-      sources[`u:${u.email.toLowerCase()}`] = grants;
-      if (Object.keys(denied).length > 0) denials[`u:${u.email.toLowerCase()}`] = denied;
+      const key = `u:${u.email.toLowerCase()}`;
+      const denied: DenialSources = { ...reported };
+      // A person only a parent's deny brings in is put to the gate, verb by
+      // verb: `denialSources` stops at a closer grant naming the PERSON, not
+      // at one naming a role they belong to, and a row saying "restricted"
+      // about a verb the gate allows would be the overstatement this row
+      // exists to correct, the other way round.
+      if (aboveOnly.has(key)) {
+        const gates: Record<Verb, () => Promise<boolean>> = {
+          read: () => accessControl.canRead(workspaceId, u.email, repoRelTarget),
+          write: () => accessControl.canWrite(workspaceId, u.email, repoRelTarget),
+          download: () => accessControl.canDownload(workspaceId, u.email, repoRelTarget),
+          owner: () => accessControl.canOwner(workspaceId, u.email, repoRelTarget),
+        };
+        await Promise.all(
+          KNOWN_VERBS.filter((verb) => denied[verb]).map(async (verb) => {
+            if (await gates[verb]()) delete denied[verb];
+          }),
+        );
+      }
+      sources[key] = grants;
+      if (Object.keys(denied).length > 0) denials[key] = denied;
     }),
   ]);
 
