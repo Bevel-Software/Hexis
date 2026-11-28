@@ -34,7 +34,7 @@ import { FIXED_NAME_SOURCES, toKbRelative, resolveReadableMap, AccessDeniedError
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/index.js';
-import { accessRoster, resolveAccessView, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/index.js';
+import { accessRoster, accessRulesPathOf, bytesAreText, resolveAccessView } from '../access/index.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
 import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
@@ -1406,8 +1406,9 @@ export function registerWorkspaceTools(
    * `why` each verdict holds, from the resolver the gates use, and — only for
    * someone who may write the path's access rules, the same gate the Manage
    * access dialog's grant route applies — the roster that dialog lists. A file
-   * that cannot carry rules of its own is governed by its folder's
-   * `access.md`, so that is the file the gate asks about.
+   * that cannot carry rules of its own, by its name or by its bytes, is
+   * governed by its folder's `access.md`, so that is the file the gate asks
+   * about.
    */
   const explainAccessAt = async (branch: string, ctx: ToolContext, p: string, kind: AccessTargetKind) => {
     const norm = p.replace(/^\/+/, '').replace(/\/+$/, '');
@@ -1422,12 +1423,9 @@ export function registerWorkspaceTools(
     const why = Object.fromEntries(
       Object.entries(explained).map(([verb, { source, via, principal }]) => [verb, { source: sourceToWs(source), via, principal }]),
     );
-    const rulesPath =
-      kind === 'folder'
-        ? accessMdPathForFolder(rel)
-        : fileCarriesAccessRules(rel)
-          ? rel
-          : accessMdPathForFolder(governingFolderOf(rel));
+    const rulesPath = await accessRulesPathOf(kind, rel, (f) =>
+      bytesAreText(() => ctx.workspaceService.readFileBinary(workspaceId, toWs(f))),
+    );
     if (!(await accessControl.canWrite(workspaceId, email, rulesPath))) {
       return {
         why,
@@ -1435,7 +1433,7 @@ export function registerWorkspaceTools(
         rosterReason: `You cannot change who has access here (no write on ${toWs(rulesPath)}), so only your own access is shown.`,
       };
     }
-    const roster = accessRoster(await resolveAccessView(accessControl, workspaceId, rel, email, kind), kind, rel);
+    const roster = accessRoster(await resolveAccessView(accessControl, workspaceId, rel, email, kind, rulesPath), kind, rel);
     const rosterWs = Object.fromEntries(
       Object.entries(roster).map(([verb, entries]) => [
         verb,

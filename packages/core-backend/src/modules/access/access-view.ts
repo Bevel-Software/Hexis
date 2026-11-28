@@ -6,6 +6,7 @@ import type {
   GrantSources,
   HolderList,
   IAccessControl,
+  PathVerbs,
   ResolvedPrincipal,
 } from './access-control.interface.js';
 import {
@@ -22,6 +23,9 @@ import {
  * (`GET /api/workspace/:id/access`): the caller's four verdicts, the eligible
  * principals per verb, and per-principal, per-verb grant sources. Shared by
  * that route and by `file_stat`'s access roster, so both list the same people.
+ * `rulesPath` is the target's rules file as `accessRulesPathOf` decides
+ * it, bytes included: write on it is what lets the caller see other people's
+ * verdicts. Without it, nobody else's are given.
  */
 export async function resolveAccessView(
   accessControl: IAccessControl,
@@ -29,6 +33,7 @@ export async function resolveAccessView(
   repoRelTarget: string,
   userEmail: string,
   kind: AccessTargetKind,
+  rulesPath?: string,
 ) {
   const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, deniedHere] =
     await Promise.all([
@@ -122,6 +127,40 @@ export async function resolveAccessView(
     }),
   ]);
 
+  // What each PERSON restricted here still holds, by the resolver's own
+  // per-person verdicts: the calls the gates make. The lists above name a
+  // person only for a grant written to their own address, so a member denied
+  // write whose read comes through a role is in none of them, and their row
+  // read "No access" while every gate let them read. Collectives need nothing
+  // here: a group's or a role's verbs are the lists' own entries.
+  //
+  // A person's verdicts disclose their role and group memberships, so another
+  // person's are given only to a caller who may change, and so inspect, this
+  // target's access: write on its rules file, the gate the grant route and
+  // file_stat's roster apply. The caller's own entry is the four verdicts
+  // above, which are theirs already.
+  const holds: Record<string, PathVerbs> = {};
+  const me = userEmail.toLowerCase();
+  const others = deniedHere.users.filter((u) => u.email.toLowerCase() !== me);
+  if (others.length < deniedHere.users.length) {
+    holds[`u:${me}`] = { read: canRead, write: canWrite, download: canDownload, owner: canOwner };
+  }
+  const mayInspect =
+    others.length > 0 &&
+    rulesPath !== undefined &&
+    (await accessControl.canWrite(workspaceId, userEmail, rulesPath));
+  await Promise.all(
+    (mayInspect ? others : []).map(async (u) => {
+      const [read, write, download, owner] = await Promise.all([
+        accessControl.canRead(workspaceId, u.email, repoRelTarget),
+        accessControl.canWrite(workspaceId, u.email, repoRelTarget),
+        accessControl.canDownload(workspaceId, u.email, repoRelTarget),
+        accessControl.canOwner(workspaceId, u.email, repoRelTarget),
+      ]);
+      holds[`u:${u.email.toLowerCase()}`] = { read, write, download, owner };
+    }),
+  );
+
   return {
     canRead,
     canWrite,
@@ -134,6 +173,7 @@ export async function resolveAccessView(
     sources,
     denials,
     deniedHere,
+    holds,
   };
 }
 

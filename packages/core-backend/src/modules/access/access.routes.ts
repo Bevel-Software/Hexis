@@ -30,7 +30,7 @@ import {
   AccessMutationError,
   accessMdPathForFolder,
   assertFileCarriesAccessRules,
-  fileCarriesAccessRules,
+  accessRulesPathOf,
   governingFolderOf,
   type TargetKind,
 } from './access-mutation.service.js';
@@ -304,7 +304,14 @@ export function createAccessRoutes(
    * the principal in `deniedHere` while they stay in the eligible lists for the
    * verbs they keep; only a principal denied every verb holds nothing and drops
    * out of those lists. A deny naming a role nobody knows appears in neither
-   * field — the resolver ignores such a line, so it restricts nothing.
+   * field — the resolver ignores such a line, so it restricts nothing. The
+   * lists name a person only for a grant to their own address, so `holds` gives
+   * each person in `deniedHere` the verbs the resolver still lets them use
+   * here: a member denied write who reads through a role holds read. Those
+   * verdicts disclose memberships, so another person's entry is given only to
+   * a caller with write on the target's rules file (its folder's access.md
+   * for a file that cannot hold rules, by its name or its bytes); the caller's
+   * own always.
    *
    * Together those two let the dialog decide its sections by LOCAL ENTRY, grant
    * or denial, rather than by local grant alone: without them a person
@@ -803,7 +810,10 @@ export function createAccessRoutes(
     userEmail: string,
     kind: TargetKind,
   ) {
-    const resolved = await resolveAccessView(accessControl, workspaceId, repoRelTarget, userEmail, kind);
+    // The rules file, judged on the bytes as well as the name: it gates other
+    // people's verdicts in the view, and it is the folder pointer below.
+    const rulesPath = await accessRulesPathOf(kind, repoRelTarget, (f) => mutation.targetHoldsText(workspaceId, f));
+    const resolved = await resolveAccessView(accessControl, workspaceId, repoRelTarget, userEmail, kind, rulesPath);
 
     // Every person the view names says whether they have signed in yet, so the
     // dialog can label a grant made ahead of a first sign-in (`hasAccount:
@@ -838,10 +848,7 @@ export function createAccessRoutes(
     // saved as `.md`) are refused by the mutations too, so the view must say
     // so — otherwise the dialog offers a field whose every write answers 422.
     const governedByFolder =
-      kind === 'file' &&
-      (!fileCarriesAccessRules(repoRelTarget) || !(await mutation.targetHoldsText(workspaceId, repoRelTarget)))
-        ? governingFolderOf(repoRelTarget)
-        : undefined;
+      kind === 'file' && rulesPath !== repoRelTarget ? governingFolderOf(repoRelTarget) : undefined;
 
     return { ...view, ...(governedByFolder !== undefined && { governedByFolder }) };
   }

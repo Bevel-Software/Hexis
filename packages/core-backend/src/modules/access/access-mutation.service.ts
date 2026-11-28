@@ -161,6 +161,38 @@ export function governingFolderOf(repoRelFile: string): string {
   return dir === '.' ? '' : dir;
 }
 
+/**
+ * Whether the bytes `read` answers are text, so a file holding them can carry
+ * rules of its own. ABSENCE answers yes: there is nothing there to object to,
+ * and a target a view is open on is normally about to exist. Any OTHER read
+ * failure (EACCES, EIO) answers no: the mutations read the same bytes and would
+ * fail on them too.
+ */
+export async function bytesAreText(read: () => Promise<Buffer>): Promise<boolean> {
+  try {
+    return isTextBytes(await read());
+  } catch (err) {
+    return isAbsence(err);
+  }
+}
+
+/**
+ * The file whose write decides who may change, and so inspect, a target's
+ * access: a folder's `access.md`; a file that can carry rules by its name AND
+ * by its bytes (`holdsText`, the check the mutations make); else its governing
+ * folder's `access.md`, the file the mutations point to instead.
+ */
+export async function accessRulesPathOf(
+  kind: 'file' | 'folder',
+  repoRelTarget: string,
+  holdsText: (repoRelFile: string) => Promise<boolean>,
+): Promise<string> {
+  if (kind === 'folder') return accessMdPathForFolder(repoRelTarget);
+  return fileCarriesAccessRules(repoRelTarget) && (await holdsText(repoRelTarget))
+    ? repoRelTarget
+    : accessMdPathForFolder(governingFolderOf(repoRelTarget));
+}
+
 export class AccessMutationService {
   constructor(
     private readonly workspaceService: WorkspaceService,
@@ -212,27 +244,16 @@ export class AccessMutationService {
   /**
    * The same content question, asked by the READ view, which must not fail:
    * true when the file's bytes are text, so it really can hold rules of its
-   * own.
-   *
-   * ABSENCE is the one failure that answers yes: there is nothing there to
-   * object to, and a target the view is open on is normally about to exist.
-   * Any OTHER read failure (EACCES, EIO) answers NO — the mutations read the
-   * same bytes and would fail on them too, so the view must not offer a field
-   * whose writes cannot land. The dialog degrades to the folder pointer with
+   * own, by {@link bytesAreText}. A NO keeps the view from offering a field
+   * whose writes cannot land: the dialog degrades to the folder pointer with
    * the read side intact, which is better than a 500 that shows nothing.
    * (The mutations use `assertTargetHoldsText`, which rethrows the failure so
    * the caller sees the real error rather than a refusal.)
    */
-  async targetHoldsText(workspaceId: string, repoRelFile: string): Promise<boolean> {
-    try {
-      const bytes = await this.workspaceService.readFileBinary(
-        workspaceId,
-        this.toWorkspaceRelative(repoRelFile),
-      );
-      return isTextBytes(bytes);
-    } catch (err) {
-      return isAbsence(err);
-    }
+  targetHoldsText(workspaceId: string, repoRelFile: string): Promise<boolean> {
+    return bytesAreText(() =>
+      this.workspaceService.readFileBinary(workspaceId, this.toWorkspaceRelative(repoRelFile)),
+    );
   }
 
   /**

@@ -170,6 +170,18 @@ export interface AccessResponse {
     users: AccessUser[];
   };
   /**
+   * For each person in `deniedHere.users`, keyed `u:<email>` (lowercased), the
+   * verbs the resolver still lets them use here, by the same per-person
+   * verdicts the gates give. A person's row cannot read these off the eligible
+   * lists, which name a person only for a grant to their own address: a member
+   * denied write who reads through a role is in none of them. The caller's own
+   * entry, when they are one of them, is always there; another person's only
+   * when the caller may change this access, since verdicts disclose
+   * memberships. A person left out is withheld: the row then shows no summary.
+   * Optional for version skew.
+   */
+  holds?: Record<string, Record<GrantVerb, boolean>>;
+  /**
    * Present for a file that cannot carry frontmatter (a PDF, a deck, an
    * image — or binary bytes saved under a note's name, which the server
    * judges by reading them): the repo-relative folder (`''` for the root)
