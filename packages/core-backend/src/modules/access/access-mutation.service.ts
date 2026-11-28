@@ -161,6 +161,18 @@ export function governingFolderOf(repoRelFile: string): string {
   return dir === '.' ? '' : dir;
 }
 
+/**
+ * The file whose write decides who may change, and so inspect, a target's
+ * access: a folder's `access.md`, a file carrying its own rules, else its
+ * governing folder's `access.md`.
+ */
+export function accessRulesPathOf(kind: 'file' | 'folder', repoRelTarget: string): string {
+  if (kind === 'folder') return accessMdPathForFolder(repoRelTarget);
+  return fileCarriesAccessRules(repoRelTarget)
+    ? repoRelTarget
+    : accessMdPathForFolder(governingFolderOf(repoRelTarget));
+}
+
 export class AccessMutationService {
   constructor(
     private readonly workspaceService: WorkspaceService,

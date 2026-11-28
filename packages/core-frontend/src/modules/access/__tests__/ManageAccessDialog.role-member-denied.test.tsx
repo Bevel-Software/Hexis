@@ -15,6 +15,7 @@ import type { AccessResponse } from '../api';
  * pins the server side): the row shows what they hold and names the denied verb.
  */
 
+const me = vi.hoisted(() => ({ email: 'me@x.com' }));
 const api = vi.hoisted(() => ({
   fetchFileAccess: vi.fn(),
   grantAccess: vi.fn(),
@@ -33,7 +34,7 @@ vi.mock('../../workspace', async (importOriginal) => ({
 }));
 vi.mock('../../auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../auth')>()),
-  useAuth: () => ({ user: { email: 'me@x.com', name: 'Me' } }),
+  useAuth: () => ({ user: { email: me.email, name: 'Me' } }),
 }));
 
 import { ManageAccessDialog } from '../components/ManageAccessDialog';
@@ -73,6 +74,7 @@ async function rowOf(name: string): Promise<HTMLElement> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  me.email = 'me@x.com';
   api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
 });
 
@@ -143,8 +145,9 @@ describe('ManageAccessDialog: a role member denied write', () => {
   });
 });
 
-describe('ManageAccessDialog: a viewer who cannot manage sees the same row', () => {
-  it('a role member denied write reads "Can read" and "edit denied", never "No access"', async () => {
+describe('ManageAccessDialog: a viewer who cannot manage', () => {
+  it('the denied person sees their own read and "edit denied", never "No access"', async () => {
+    me.email = DENIED.email;
     api.fetchFileAccess.mockResolvedValue({ ...ROLE_MEMBER_DENIED_WRITE, canWrite: false, canOwner: false });
     render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
 
@@ -153,6 +156,23 @@ describe('ManageAccessDialog: a viewer who cannot manage sees the same row', () 
     expect(within(row).getByText('Can read')).toBeInTheDocument();
     expect(within(row).getByText('edit denied')).toBeInTheDocument();
     expect(within(row).queryByText(/no access/i)).toBeNull();
+  });
+
+  it("another person's withheld verdicts: the denied verb is named, nothing is claimed about the rest", async () => {
+    // What the server answers this viewer: `holds` is reported, without the
+    // other person's entry, because their verdicts disclose memberships.
+    api.fetchFileAccess.mockResolvedValue({
+      ...ROLE_MEMBER_DENIED_WRITE,
+      canWrite: false,
+      canOwner: false,
+      holds: {},
+    } as unknown as AccessResponse);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+
+    const row = await rowOf('QA Denied');
+    expect(within(row).getByText('edit denied')).toBeInTheDocument();
+    expect(within(row).queryByText(/no access/i)).toBeNull();
+    expect(within(row).queryByText(/can read/i)).toBeNull();
   });
 
   it('a person denied every verb reads "Denied here", not "No access"', async () => {

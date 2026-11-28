@@ -17,6 +17,7 @@ import {
   GROUP_TOKEN_PREFIX,
   type Verb,
 } from '../access-model/index.js';
+import { accessRulesPathOf } from './access-mutation.service.js';
 
 /**
  * The resolved access view of one target, as the Manage access dialog reads it
@@ -129,9 +130,23 @@ export async function resolveAccessView(
   // write whose read comes through a role is in none of them, and their row
   // read "No access" while every gate let them read. Collectives need nothing
   // here: a group's or a role's verbs are the lists' own entries.
+  //
+  // A person's verdicts disclose their role and group memberships, so another
+  // person's are given only to a caller who may change, and so inspect, this
+  // target's access: write on its rules file, the gate the grant route and
+  // file_stat's roster apply. The caller's own entry is the four verdicts
+  // above, which are theirs already.
   const holds: Record<string, PathVerbs> = {};
+  const me = userEmail.toLowerCase();
+  const others = deniedHere.users.filter((u) => u.email.toLowerCase() !== me);
+  if (others.length < deniedHere.users.length) {
+    holds[`u:${me}`] = { read: canRead, write: canWrite, download: canDownload, owner: canOwner };
+  }
+  const mayInspect =
+    others.length > 0 &&
+    (await accessControl.canWrite(workspaceId, userEmail, accessRulesPathOf(kind, repoRelTarget)));
   await Promise.all(
-    deniedHere.users.map(async (u) => {
+    (mayInspect ? others : []).map(async (u) => {
       const [read, write, download, owner] = await Promise.all([
         accessControl.canRead(workspaceId, u.email, repoRelTarget),
         accessControl.canWrite(workspaceId, u.email, repoRelTarget),

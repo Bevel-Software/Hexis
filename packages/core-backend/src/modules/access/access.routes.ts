@@ -307,7 +307,9 @@ export function createAccessRoutes(
    * field — the resolver ignores such a line, so it restricts nothing. The
    * lists name a person only for a grant to their own address, so `holds` gives
    * each person in `deniedHere` the verbs the resolver still lets them use
-   * here: a member denied write who reads through a role holds read.
+   * here: a member denied write who reads through a role holds read. Those
+   * verdicts disclose memberships, so another person's entry is given only to
+   * a caller with write on the target's rules file; the caller's own always.
    *
    * Together those two let the dialog decide its sections by LOCAL ENTRY, grant
    * or denial, rather than by local grant alone: without them a person

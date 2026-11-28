@@ -239,6 +239,12 @@ interface PrincipalRow {
   grantAncestors: string[];
   /** True when every verb is denied by an entry on this target — "Denied here". */
   deniedHere: boolean;
+  /**
+   * True for a person restricted here whose held verbs the server withheld:
+   * they disclose memberships, so only a caller who may change this access
+   * gets them. The row then claims nothing about what they hold.
+   */
+  holdsWithheld?: boolean;
 }
 
 /** The four grant verbs, for whole-set reasoning. */
@@ -507,10 +513,12 @@ function verbNote(row: PrincipalRow, verb: GrantVerb): string | undefined {
 /**
  * What a row's menu trigger reads. A wholly denied principal is not "No access"
  * — that is what someone never named here would look like. It is a decision
- * somebody made on this target, and the row says so.
+ * somebody made on this target, and the row says so. Nothing for a person whose
+ * held verbs were withheld: "No access" would be a guess.
  */
-function rowSummary(row: PrincipalRow): string {
-  return row.deniedHere ? 'Denied here' : summarizeVerbs(row.verbs);
+function rowSummary(row: PrincipalRow): string | undefined {
+  if (row.deniedHere) return 'Denied here';
+  return row.holdsWithheld ? undefined : summarizeVerbs(row.verbs);
 }
 
 /**
@@ -851,11 +859,13 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
   // A person restricted here may still hold verbs no list names them for — a
   // member denied edit who reads through a role. The server's per-person
   // verdicts (`holds`) are what the row holds, so it never reads "No access"
-  // while the gates let them read.
+  // while the gates let them read. A server that reports `holds` but leaves a
+  // person out withheld them from this caller; a list naming them still counts.
   for (const u of data.deniedHere?.users ?? []) {
     const row = touchUser(u);
     const held = data.holds?.[row.key];
-    if (held) for (const v of ALL_VERBS) if (held[v]) row.verbs[v] = true;
+    if (!held) row.holdsWithheld = !!data.holds && !ALL_VERBS.some((v) => row.verbs[v]);
+    else for (const v of ALL_VERBS) if (held[v]) row.verbs[v] = true;
   }
 
   // Download implies read, the way write does. The server folds it into
@@ -1819,7 +1829,7 @@ export function ManageAccessDialog({
                 onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
                 trailingIcon={<ChevronDown size={14} />}
               >
-                {rowSummary(p)}
+                {rowSummary(p) ?? 'Restricted here'}
               </Button>
               {openRowKey === p.key && (
                 <AnchoredMenu

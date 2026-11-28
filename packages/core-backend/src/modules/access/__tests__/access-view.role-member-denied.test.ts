@@ -112,3 +112,53 @@ describe('the access view of a role member denied write', () => {
     expect(v.holds[`u:${DENIED}`]).toEqual({ read: false, write: false, download: false, owner: false });
   });
 });
+
+describe("the access view withholds other people's verdicts from a caller who cannot change this access", () => {
+  const OTHER = 'qa-denied-2@example.com';
+  const OUTSIDER = 'outsider@example.com';
+  let root: string;
+  let access: AccessControlService;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-role-deny-gate-'));
+    const workspaceDir = path.join(root, WS);
+    const repo = path.join(workspaceDir, KB);
+    await write(
+      repo,
+      'roles.yaml',
+      `roles:\n  Admin:\n    - root@example.com\n  QAEditors:\n    - ${DENIED}\n    - ${OTHER}\n`,
+    );
+    await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n# Root\n');
+    await write(
+      repo,
+      `${FOLDER}/access.md`,
+      `---\nwrite:\n  - QAEditors\n  - deny QA Denied <${DENIED}>\n  - deny QA Denied 2 <${OTHER}>\n---\n# QA\n`,
+    );
+    access = realAccessControl(stubWorkspace(workspaceDir), KB, realDisk());
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('a manager gets every denied person', async () => {
+    const v = await resolveAccessView(access, WS, FOLDER, 'root@example.com', 'folder');
+    expect(Object.keys(v.holds).sort()).toEqual([`u:${OTHER}`, `u:${DENIED}`].sort());
+  });
+
+  it('a denied person who cannot write the rules gets their own verdicts and nobody else', async () => {
+    expect(await access.canWrite(WS, DENIED, `${FOLDER}/access.md`)).toBe(false);
+    const v = await resolveAccessView(access, WS, FOLDER, DENIED, 'folder');
+
+    expect(v.holds).toEqual({
+      [`u:${DENIED}`]: { read: v.canRead, write: v.canWrite, download: v.canDownload, owner: v.canOwner },
+    });
+    expect(v.holds[`u:${DENIED}`].read).toBe(true);
+  });
+
+  it('a caller who cannot even read the folder gets no verdicts at all', async () => {
+    expect(await access.canRead(WS, OUTSIDER, FOLDER)).toBe(false);
+    const v = await resolveAccessView(access, WS, FOLDER, OUTSIDER, 'folder');
+    expect(v.holds).toEqual({});
+  });
+});

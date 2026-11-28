@@ -174,8 +174,9 @@ export interface AccessResponse {
    * verbs the resolver still lets them use here, by the same per-person
    * verdicts the gates give. A person's row cannot read these off the eligible
    * lists, which name a person only for a grant to their own address: a member
-   * denied write who reads through a role is in none of them. Optional for
-   * version skew.
+   * denied write who reads through a role is in none of them. The caller's own
+   * entry is always there; another person's only when the caller may change
+   * this access, since verdicts disclose memberships. Optional for version skew.
    */
   holds?: Record<string, Record<GrantVerb, boolean>>;
   /**

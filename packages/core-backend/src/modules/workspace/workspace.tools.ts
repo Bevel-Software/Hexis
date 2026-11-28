@@ -34,7 +34,7 @@ import { FIXED_NAME_SOURCES, toKbRelative, resolveReadableMap, AccessDeniedError
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/index.js';
-import { accessRoster, resolveAccessView, accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/index.js';
+import { accessRoster, accessRulesPathOf, resolveAccessView } from '../access/index.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
 import { displayPath, type FileKind, type FileReader, type FileReaderRegistry, type ReadOrigin, type ReadResult } from './file-readers/file-reader.js';
@@ -1422,12 +1422,7 @@ export function registerWorkspaceTools(
     const why = Object.fromEntries(
       Object.entries(explained).map(([verb, { source, via, principal }]) => [verb, { source: sourceToWs(source), via, principal }]),
     );
-    const rulesPath =
-      kind === 'folder'
-        ? accessMdPathForFolder(rel)
-        : fileCarriesAccessRules(rel)
-          ? rel
-          : accessMdPathForFolder(governingFolderOf(rel));
+    const rulesPath = accessRulesPathOf(kind, rel);
     if (!(await accessControl.canWrite(workspaceId, email, rulesPath))) {
       return {
         why,
