@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
-import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { AccessControlService } from '../access-control.service.js';
+import type { WorkspaceService } from '../../workspace/index.js';
+import type { AccessControlService } from '../access-control.service.js';
 import { resolveAccessView } from '../access-view.js';
+import { realDisk } from '../../../__tests__/real-disk.js';
+import { realAccessControl } from '../../../__tests__/real-access.js';
 
 /**
  * A ROLE MEMBER DENIED ONE VERB STILL HOLDS THE REST, AND THE VIEW SAYS SO.
@@ -62,7 +63,7 @@ describe('the access view of a role member denied write', () => {
       `---\nwrite:\n  - QAEditors\n  - deny QA Denied <${DENIED}>\n---\n# QA\n`,
     );
     await write(repo, NOTE, '# Note\n');
-    access = new AccessControlService(stubWorkspace(workspaceDir), KB, new NodeFs());
+    access = realAccessControl(stubWorkspace(workspaceDir), KB, realDisk());
   });
 
   afterEach(async () => {
