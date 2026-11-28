@@ -1442,6 +1442,12 @@ export function ManageAccessDialog({
    *     may restore it from the parent;
    *   - a verb the set adds that nothing confers → grant it here.
    *
+   * On a Denied row the whole Deny is lifted first, so the denials left behind
+   * are only the ones the steps above write for this set. If a later step
+   * fails, the dialog writes the whole Deny back. If that write fails too, the
+   * principal may still hold parent grants the set leaves off: the error says
+   * the Deny was not put back, and the reload shows what they hold.
+   *
    * Order is broadest-verb-first for both halves; see {@link VERBS_BROADEST_FIRST}
    * for why neither half is safe in the other order. Each call answers with the
    * server's fresh view, and the next step re-reads the row from it rather than
@@ -1459,6 +1465,7 @@ export function ManageAccessDialog({
       setMutateError(null);
       const base = { path: entry.relativePath, kind: targetKind, principal: row.principal };
       let latest = data;
+      let lifted = false;
       /** The row as the LATEST server response describes it — never a guess. */
       const current = (): PrincipalRow | undefined =>
         buildRows(latest, myEmail).find((r) => r.key === row.key);
@@ -1473,6 +1480,18 @@ export function ManageAccessDialog({
         if (picked === null) {
           await step(() => revokeAccess(workspaceId, { ...base, mode: 'deny-here' }));
           return;
+        }
+
+        // A set picked on a Denied row lifts the whole Deny first: one
+        // verb-less revoke strips all four local denials. The lower half below
+        // then writes back only the denials the set still needs (a verb a
+        // parent grants that the set leaves off), so no leftover `deny`
+        // download or owner line shadows a grant the parent makes later.
+        // Lifting first is forced: under a denial the server reports no parent
+        // grant, so which denials the set still needs is known only after it.
+        if (current()?.deniedHere) {
+          await step(() => revokeAccess(workspaceId, base));
+          lifted = true;
         }
 
         // ---- lower: what the set drops -------------------------------------
@@ -1518,7 +1537,18 @@ export function ManageAccessDialog({
           await step(() => grantAccess(workspaceId, { ...base, verb }));
         }
       } catch (err) {
-        setMutateError(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        setMutateError(message);
+        // A write after the lift failed: put the whole Deny back, and say so
+        // when that fails too, since the person may then hold the parent's grants.
+        if (lifted) {
+          await step(() => revokeAccess(workspaceId, { ...base, mode: 'deny-here' })).catch(
+            (undo: unknown) =>
+              setMutateError(
+                `${message} The Deny could not be put back (${undo instanceof Error ? undo.message : String(undo)}): check what they hold below.`,
+              ),
+          );
+        }
         reload(); // re-sync on whatever the server actually holds now
       } finally {
         setBusy(false);

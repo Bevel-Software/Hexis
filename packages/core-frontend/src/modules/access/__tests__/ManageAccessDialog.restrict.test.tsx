@@ -34,10 +34,14 @@ vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>();
   return { ...actual, ...api };
 });
-vi.mock('../../workspace/state/workspace.context', () => ({
+// The dialog reaches both modules through their entries; the doubles stand in
+// at those same entries, keeping everything else each entry exports.
+vi.mock('../../workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../workspace')>()),
   useWorkspace: () => ({ workspaceId: 'ws-1', kbDirName: 'knowledge-base' }),
 }));
-vi.mock('../../auth/state/auth.context', () => ({
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   useAuth: () => ({ user: { email: 'me@x.com', name: 'Me' } }),
 }));
 
@@ -336,25 +340,163 @@ describe('ManageAccessDialog: Deny, and re-granting after it', () => {
     const menu = await openRowMenu(user, /^denied here$/i);
     await user.click(setItem(menu, /^can read$/i));
 
-    // The read denial is lifted, then read is granted here: with every verb
-    // denied there was no parent grant left to fall back on.
+    // The whole Deny is lifted in one verb-less revoke, then read is granted
+    // here: with nothing left to inherit, the set has to be written.
     await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
-    expect(api.revokeAccess).toHaveBeenCalledWith(
-      'ws-1',
-      expect.objectContaining({ verb: 'read' }),
-    );
+    expect(api.revokeAccess).toHaveBeenCalledTimes(1);
+    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal: { kind: 'user', email: 'alice@x.com', displayName: 'Alice' },
+    });
     expect(api.grantAccess).toHaveBeenCalledWith(
       'ws-1',
       expect.objectContaining({ verb: 'read' }),
     );
-    // Only the denials the new set needs gone are lifted — edit, download and
-    // owner stay denied, because "Can read" is what was asked for.
-    for (const verb of ['write', 'download', 'owner']) {
-      expect(api.revokeAccess).not.toHaveBeenCalledWith(
-        'ws-1',
-        expect.objectContaining({ verb }),
-      );
-    }
+  });
+
+  it('Can read on a denied PERSON whose parent grants edit lifts the Deny, then denies write again', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(DENIED_HERE);
+    // The lift uncovers the parent's edit grant; the re-deny of write lands.
+    api.revokeAccess
+      .mockResolvedValueOnce(EDIT_FROM_PARENT)
+      .mockResolvedValueOnce(WRITE_RESTRICTED_HERE);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('Alice');
+
+    const menu = await openRowMenu(user, /^denied here$/i);
+    await user.click(setItem(menu, /^can read$/i));
+
+    // The set leaves edit off and the parent grants it, so that one denial is
+    // written back. Read comes from the parent: nothing is granted here.
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(2));
+    const principal = { kind: 'user', email: 'alice@x.com', displayName: 'Alice' };
+    expect(api.revokeAccess).toHaveBeenNthCalledWith(1, 'ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal,
+    });
+    expect(api.revokeAccess).toHaveBeenNthCalledWith(2, 'ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal,
+      mode: 'deny-here',
+      verb: 'write',
+    });
+    expect(api.grantAccess).not.toHaveBeenCalled();
+  });
+
+  it('a write that fails after the lift puts the whole Deny back', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(DENIED_HERE);
+    api.revokeAccess
+      .mockResolvedValueOnce(EDIT_FROM_PARENT) // the lift uncovers the parent's edit
+      .mockRejectedValueOnce(new Error('push refused')) // the re-deny of write fails
+      .mockResolvedValueOnce(DENIED_HERE); // the Deny written back
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('Alice');
+
+    const menu = await openRowMenu(user, /^denied here$/i);
+    await user.click(setItem(menu, /^can read$/i));
+
+    // Without the rollback Alice would keep the parent's edit the set left off.
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(3));
+    expect(api.revokeAccess).toHaveBeenNthCalledWith(3, 'ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal: { kind: 'user', email: 'alice@x.com', displayName: 'Alice' },
+      mode: 'deny-here',
+    });
+    expect(await screen.findByText(/push refused/)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be put back/)).not.toBeInTheDocument();
+    expect(api.grantAccess).not.toHaveBeenCalled();
+  });
+
+  it('a Deny that cannot be put back says so, and the sheet reloads what landed', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(DENIED_HERE);
+    api.revokeAccess
+      .mockResolvedValueOnce(EDIT_FROM_PARENT) // the lift uncovers the parent's edit
+      .mockRejectedValueOnce(new Error('push refused')) // the re-deny of write fails
+      .mockRejectedValueOnce(new Error('lock held')); // writing the Deny back fails too
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('Alice');
+    const loadsBefore = api.fetchFileAccess.mock.calls.length;
+
+    const menu = await openRowMenu(user, /^denied here$/i);
+    await user.click(setItem(menu, /^can read$/i));
+
+    // The failed rollback is not swallowed: the error names both failures.
+    expect(
+      await screen.findByText(/push refused.*Deny could not be put back \(lock held\)/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.fetchFileAccess.mock.calls.length).toBeGreaterThan(loadsBefore),
+    );
+  });
+
+  it('Can edit on a denied PERSON whose parent grants edit lifts every denial and writes no new one', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(DENIED_HERE);
+    // Lifting the Deny uncovers the parent's edit grant.
+    api.revokeAccess.mockResolvedValue(EDIT_FROM_PARENT);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('Alice');
+
+    const menu = await openRowMenu(user, /^denied here$/i);
+    await user.click(setItem(menu, /^can edit$/i));
+
+    // Verb-less and not a deny-here: the download and owner denials go with
+    // the rest, and the parent's edit makes any grant here unnecessary.
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
+    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal: { kind: 'user', email: 'alice@x.com', displayName: 'Alice' },
+    });
+    expect(api.grantAccess).not.toHaveBeenCalled();
+  });
+
+  it('Can edit on a denied GROUP lifts every denial with one verb-less revoke', async () => {
+    const user = userEvent.setup();
+    const QA = { name: 'QA Team', kind: 'group' as const };
+    api.fetchFileAccess.mockResolvedValue({
+      ...BLANK,
+      denials: {
+        'g:qa team': {
+          read: [{ kind: 'direct' }],
+          write: [{ kind: 'direct' }],
+          download: [{ kind: 'direct' }],
+          owner: [{ kind: 'direct' }],
+        },
+      },
+      deniedHere: { principals: [QA], users: [] },
+    } as unknown as AccessResponse);
+    api.revokeAccess.mockResolvedValue({
+      ...BLANK,
+      eligible: { principals: [QA], roles: ['QA Team'], users: [] },
+      readers: { restricted: true, principals: [QA], roles: ['QA Team'], users: [] },
+      sources: {
+        'g:qa team': {
+          read: [{ kind: 'ancestor', path: PARENT }],
+          write: [{ kind: 'ancestor', path: PARENT }],
+        },
+      },
+    } as unknown as AccessResponse);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    await screen.findByText('QA Team');
+
+    const menu = await openRowMenu(user, /^denied here$/i);
+    await user.click(setItem(menu, /^can edit$/i));
+
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
+    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', {
+      path: FOLDER.relativePath,
+      kind: 'folder',
+      principal: { kind: 'group', group: 'QA Team' },
+    });
+    expect(api.grantAccess).not.toHaveBeenCalled();
   });
 });
 
