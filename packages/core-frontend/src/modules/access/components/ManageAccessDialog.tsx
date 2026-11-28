@@ -510,7 +510,19 @@ function verbNote(row: PrincipalRow, verb: GrantVerb): string | undefined {
  * somebody made on this target, and the row says so.
  */
 function rowSummary(row: PrincipalRow): string {
-  return row.deniedHere ? 'Denied here' : summarizeVerbs(row.verbs);
+  if (row.deniedHere) return 'Denied here';
+  // A row that holds nothing listed here and is only restricted from above (a
+  // member of a role, denied by name in a parent) is not "No access": the role
+  // may still give them what the parent left. Say what is known — where the
+  // restriction is written.
+  const denied = ALL_VERBS.flatMap((v) => row.denials?.[v] ?? []);
+  const above = denied.flatMap((s) => (s.kind === 'ancestor' ? [s.path] : []));
+  if (!ALL_VERBS.some((v) => row.verbs[v]) && denied.length > 0 && above.length === denied.length) {
+    // The nearest folder, as everywhere else in the sheet: its rule is the one that wins.
+    const nearest = above.reduce((a, b) => (b.split('/').length > a.split('/').length ? b : a));
+    return `Restricted in ${folderLabel(nearest)}`;
+  }
+  return summarizeVerbs(row.verbs);
 }
 
 /** Gap between a trigger and its menu, and the minimum inset from a viewport edge. */
@@ -835,6 +847,14 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
     if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) row.label = 'Everyone';
   }
   for (const u of data.deniedHere?.users ?? []) touchUser(u);
+  // The same for a deny written in a folder above: the person it names holds
+  // nothing any list carries, and without a row the role they belong to reads
+  // as everyone's. Their denials name the folder, so the row files under it.
+  for (const c of data.deniedAbove?.principals ?? []) {
+    const row = touchCollective(c);
+    if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) row.label = 'Everyone';
+  }
+  for (const u of data.deniedAbove?.users ?? []) touchUser(u);
 
   // Download implies read, the way write does. The server folds it into
   // `readers` too, so this is belt-and-braces for an older backend — but it is
@@ -1882,7 +1902,9 @@ export function ManageAccessDialog({
         ) : (
           <span className="ml-auto flex shrink-0 items-center gap-2 text-detail text-ink-muted">
             {inviteAction(p)}
-            {summarizeVerbs(p.verbs)}
+            {/* The same words the managing trigger reads: a denied or
+                restricted row is not "No access" to a reader either. */}
+            {rowSummary(p)}
           </span>
         )}
       </div>

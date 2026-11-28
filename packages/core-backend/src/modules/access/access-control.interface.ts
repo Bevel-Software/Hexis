@@ -570,9 +570,13 @@ export interface IAccessControl {
    * listed. Shaped like an eligible list so the view can union it in without a
    * second code path.
    *
-   * Only the target's OWN scope counts. A denial inherited from a parent is
-   * reported per-verb by {@link denialSources} against a row that already
-   * exists; it does not, by itself, put a new row on this target.
+   * By default only the target's OWN scope counts. `opts.scope: 'inherited'`
+   * reads instead the `access.md` of every folder ABOVE the target — the same
+   * chain the resolver walks, minus the target's own scope — so a principal a
+   * parent denies, who holds nothing the eligible lists could name, still gets
+   * a row on which {@link denialSources} can say where the denial comes from.
+   * A name there is a candidate, not a verdict: a closer grant can beat the
+   * parent's deny, and only `denialSources` says whether it does.
    *
    * Optional so existing test doubles stay valid; the real service implements it.
    */
@@ -580,6 +584,7 @@ export interface IAccessControl {
     workspaceId: string,
     kind: AccessTargetKind,
     relativePath: string,
+    opts?: { scope?: 'own' | 'inherited' },
   ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }>;
 
   /**

@@ -30,7 +30,7 @@ export async function resolveAccessView(
   userEmail: string,
   kind: AccessTargetKind,
 ) {
-  const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, deniedHere] =
+  const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, deniedHere, deniedAboveCandidates] =
     await Promise.all([
       accessControl.canRead(workspaceId, userEmail, repoRelTarget),
       accessControl.canWrite(workspaceId, userEmail, repoRelTarget),
@@ -45,6 +45,13 @@ export async function resolveAccessView(
       // ON this target, and the dialog's row for it is where the restriction is
       // lifted. Unioned into the row set below alongside the holders.
       accessControl.locallyDeniedPrincipals?.(workspaceId, kind, repoRelTarget) ??
+        Promise.resolve({ principals: [], users: [] }),
+      // The principals a folder ABOVE names in a `deny`. One the eligible lists
+      // already carry has its row; one they do not (a member of a role that
+      // can edit, denied by name) would have none, and the role's row would
+      // overstate who can edit. Candidates only: kept below where
+      // `denialSources` confirms the deny still applies here.
+      accessControl.locallyDeniedPrincipals?.(workspaceId, kind, repoRelTarget, { scope: 'inherited' }) ??
         Promise.resolve({ principals: [], users: [] }),
     ]);
 
@@ -75,6 +82,13 @@ export async function resolveAccessView(
     for (const p of kinded) addCollective(p);
   }
   for (const p of deniedHere.principals) addCollective(p);
+  // The keys only an inherited deny brings in — each dropped again below unless
+  // a denial source confirms it.
+  const aboveOnly = new Set<string>();
+  for (const p of deniedAboveCandidates.principals) {
+    if (!collectives.has(rowKey(p))) aboveOnly.add(rowKey(p));
+    addCollective(p);
+  }
   const userSet = new Map<string, { name: string; email: string }>();
   for (const u of [
     ...eligible.users,
@@ -88,6 +102,13 @@ export async function resolveAccessView(
     // the file spelled.
     if (!userSet.has(u.email.toLowerCase())) userSet.set(u.email.toLowerCase(), u);
   }
+  for (const u of deniedAboveCandidates.users) {
+    const key = u.email.toLowerCase();
+    if (userSet.has(key)) continue;
+    userSet.set(key, u);
+    aboveOnly.add(`u:${key}`);
+  }
+  const deniedAboveKeys = new Set(deniedAboveCandidates.users.map((u) => `u:${u.email.toLowerCase()}`));
   const sources: Record<string, GrantSources> = {};
   // Denials ride in their OWN map, keyed the same way. A row reads both: the
   // grants say where each held verb comes from, the denials say why each missing
@@ -112,15 +133,52 @@ export async function resolveAccessView(
     }),
     ...[...userSet.values()].map(async (u) => {
       const principal = { kind: 'user' as const, email: u.email };
-      const [grants, denied] = await Promise.all([
+      const [grants, reported] = await Promise.all([
         accessControl.grantSources(workspaceId, kind, repoRelTarget, principal),
         accessControl.denialSources?.(workspaceId, kind, repoRelTarget, principal) ??
           Promise.resolve({} as DenialSources),
       ]);
-      sources[`u:${u.email.toLowerCase()}`] = grants;
-      if (Object.keys(denied).length > 0) denials[`u:${u.email.toLowerCase()}`] = denied;
+      const key = `u:${u.email.toLowerCase()}`;
+      const denied: DenialSources = { ...reported };
+      // Every person a parent's deny names is put to the gate, verb by verb,
+      // whether or not another list already carries them: `denialSources`
+      // stops at a closer grant naming the PERSON, not at one naming a role
+      // they belong to, and a row saying "restricted" about a verb the gate
+      // allows would be the overstatement this row exists to correct, the
+      // other way round.
+      if (deniedAboveKeys.has(key)) {
+        const gates: Record<Verb, () => Promise<boolean>> = {
+          read: () => accessControl.canRead(workspaceId, u.email, repoRelTarget),
+          write: () => accessControl.canWrite(workspaceId, u.email, repoRelTarget),
+          download: () => accessControl.canDownload(workspaceId, u.email, repoRelTarget),
+          owner: () => accessControl.canOwner(workspaceId, u.email, repoRelTarget),
+        };
+        await Promise.all(
+          KNOWN_VERBS.filter((verb) => denied[verb]).map(async (verb) => {
+            if (await gates[verb]()) delete denied[verb];
+          }),
+        );
+      }
+      sources[key] = grants;
+      if (Object.keys(denied).length > 0) denials[key] = denied;
     }),
   ]);
+
+  // Kept: a candidate an ancestor's deny still restricts here. One a closer
+  // grant beat holds nothing the view can explain; if it was in no other list,
+  // it gets no row, and no sources either.
+  const kept = (key: string) =>
+    Object.values(denials[key] ?? {}).some((list) => (list ?? []).some((s) => s.kind === 'ancestor'));
+  for (const key of aboveOnly) {
+    if (!kept(key)) {
+      delete sources[key];
+      delete denials[key];
+    }
+  }
+  const deniedAbove = {
+    principals: deniedAboveCandidates.principals.filter((p) => kept(rowKey(p))),
+    users: deniedAboveCandidates.users.filter((u) => kept(`u:${u.email.toLowerCase()}`)),
+  };
 
   return {
     canRead,
@@ -134,6 +192,7 @@ export async function resolveAccessView(
     sources,
     denials,
     deniedHere,
+    deniedAbove,
   };
 }
 
@@ -256,7 +315,7 @@ type Labelled<L extends { users: { name: string; email: string }[] }> = Omit<L, 
 /** {@link AccessView} with every person carrying {@link AccessViewUser.hasAccount}. */
 export type LabelledAccessView = Omit<
   AccessView,
-  'eligible' | 'readers' | 'owners' | 'downloaders' | 'deniedHere'
+  'eligible' | 'readers' | 'owners' | 'downloaders' | 'deniedHere' | 'deniedAbove'
 > & {
   eligible: Labelled<AccessView['eligible']>;
   readers: Labelled<AccessView['readers']>;
@@ -268,6 +327,8 @@ export type LabelledAccessView = Omit<
    * otherwise stay invisible.
    */
   deniedHere: Labelled<AccessView['deniedHere']>;
+  /** Restricted by a folder above, labelled the same way. */
+  deniedAbove: Labelled<AccessView['deniedAbove']>;
 };
 
 /**
@@ -284,6 +345,7 @@ export function emailsInView(view: AccessView): string[] {
         ...view.owners.users,
         ...view.downloaders.users,
         ...view.deniedHere.users,
+        ...view.deniedAbove.users,
       ]
         .map((u) => u.email.trim().toLowerCase())
         .filter((e) => e.length > 0),
@@ -314,5 +376,6 @@ export function labelAccountHolders(
     owners: mark(view.owners),
     downloaders: mark(view.downloaders),
     deniedHere: mark(view.deniedHere),
+    deniedAbove: mark(view.deniedAbove),
   };
 }

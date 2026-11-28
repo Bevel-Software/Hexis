@@ -2397,14 +2397,24 @@ export class AccessControlService implements IAccessControl {
     workspaceId: string,
     kind: AccessTargetKind,
     relativePath: string,
+    opts?: { scope?: 'own' | 'inherited' },
   ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }> {
-    // The target's OWN entries, and only those — the one scope whose rules a
-    // restriction made here is written into. A folder's are its `access.md` in
-    // the dir model; a file node's are its own frontmatter, in every copy
-    // `ownCopiesOf` reads, as its gates refuse what any copy denies.
+    // By default the target's OWN entries, and only those — the one scope whose
+    // rules a restriction made here is written into. A folder's are its
+    // `access.md` in the dir model; a file node's are its own frontmatter, in
+    // every copy `ownCopiesOf` reads, as its gates refuse what any copy denies.
+    // `inherited` reads the folders above instead: the `resolveScopes` chain
+    // without its last link, which is the target itself (a folder's own
+    // `access.md`; for a file, its own path, which names no folder).
     const { model, copies } = await this.copiesFor(workspaceId, kind, relativePath);
     const owns: OwnEntries[] = (
-      kind === 'folder' ? [model.accessFilesByDir.get(relativePath)?.entries ?? null] : copies
+      opts?.scope === 'inherited'
+        ? dirChainFor(relativePath)
+            .slice(0, -1)
+            .map((dir) => model.accessFilesByDir.get(dir)?.entries ?? null)
+        : kind === 'folder'
+          ? [model.accessFilesByDir.get(relativePath)?.entries ?? null]
+          : copies
     ).filter((o): o is OwnEntries => o !== null);
     if (owns.length === 0) return { principals: [], users: [] };
 
