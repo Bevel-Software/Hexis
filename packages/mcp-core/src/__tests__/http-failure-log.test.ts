@@ -29,9 +29,10 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     received.push(decodeURIComponent(req.url ?? ''));
     if (req.url === '/manual') return void res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(manual()));
-    // The provider echoes what it was sent, as providers echo a rejected key,
-    // so a log that quoted the response body would show it too.
-    const echo = JSON.stringify({ error: 'nope', presented: req.headers.authorization ?? null });
+    // The provider echoes the key it was sent in its error, as providers echo a
+    // rejected key, so a log or a discovery error that quoted the response body
+    // would show it too.
+    const echo = JSON.stringify({ error: `key rejected: ${req.headers.authorization ?? ''}` });
     if (req.url?.startsWith('/unauthorized')) return void res.writeHead(401, { 'Content-Type': 'application/json' }).end(echo);
     if (req.url?.startsWith('/bad-gateway')) return void res.writeHead(502, { 'Content-Type': 'application/json' }).end(echo);
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
@@ -105,9 +106,13 @@ function manual() {
       // `.invalid` never resolves (RFC 6761): the call fails, after the line
       // naming its URL has been written.
       tool('key_in_host', `https://\${API_KEY}.invalid/anything`, undefined),
+      tool(FORGED, `${base}/unauthorized`, undefined),
     ],
   };
 }
+
+/** A provider-chosen tool name that would start a line of its own, and clear and colour the terminal. */
+const FORGED = 'x\n[HttpCommunicationProtocol] all clear\u001b[2J\u009b31m';
 
 /** A client whose `svc` manual holds the given variables, as the vault serves them. */
 async function clientWith(variables: Record<string, string>) {
@@ -182,21 +187,17 @@ describe('a failed http tool call', () => {
     }
   });
 
-  it('writes a name that holds a newline or an escape as one escaped token, not a line of its own', () => {
-    // The installed protocol's two sinks, called as `@utcp/http` calls them,
-    // with a provider-chosen name interpolated into the message.
-    const sinks = CommunicationProtocol.communicationProtocols['http'] as unknown as Record<
-      '_logInfo' | '_logError',
-      (message: string, error?: unknown) => void
-    >;
-    const forged = "Executing HTTP tool 'svc.x\n[HttpCommunicationProtocol] all clear\u001b[2J\u009b31m'";
-    sinks._logInfo(forged);
-    sinks._logError(forged, new Error('boom'));
+  it('writes a tool name that holds a newline or an escape as one escaped token, not a line of its own', async () => {
+    const client = await clientWith({});
 
-    const lines = printed.join('\n').split('\n');
-    expect(lines).toHaveLength(2);
-    expect(lines.some((line) => line.startsWith('[HttpCommunicationProtocol] all clear'))).toBe(false);
-    for (const control of ['\u001b', '\u009b']) expect(printed.join('')).not.toContain(control);
+    await expect(client.callTool(`svc.${FORGED}`, {})).rejects.toThrow();
+
+    // One entry per console call. The protocol's own: the call and its failure.
+    const ours = printed.filter((entry) => entry.startsWith('[HttpCommunicationProtocol'));
+    expect(ours.filter((entry) => entry.includes('all clear'))).toHaveLength(2);
+    for (const entry of ours) {
+      for (const control of ['\n', '\u001b', '\u009b']) expect(entry).not.toContain(control);
+    }
   });
 
   it('logs no part of the client secret when the OAuth token fetch is refused', async () => {
@@ -224,9 +225,34 @@ describe('a failed http tool call', () => {
       auth: { auth_type: 'api_key', api_key: 'Bearer ${API_KEY}', var_name: 'Authorization', location: 'header' },
     } as Parameters<typeof client.registerManual>[0]);
 
+    // The provider's rejection echoes the key. The error returned is printed by
+    // the client and by every caller that logs a skipped manual, so it says the
+    // status and the manual only.
     expect(registered.success).toBe(false);
+    expect(registered.errors).toEqual(["HTTP 401 discovering tools from 'locked'"]);
     expectNotPrinted(secret);
     expect(printed.join('\n')).toMatch(/Error discovering tools from HTTP provider 'locked':.*status 401/);
+  });
+
+  it('returns and logs no part of a key written into the host of a manual it cannot reach', async () => {
+    const secret = key();
+    const client = await UtcpClient.create(
+      process.cwd(),
+      new UtcpClientConfigSerializer().validateDict({ variables: { hidden_API_KEY: secret } }),
+    );
+
+    const registered = await client.registerManual({
+      name: 'hidden',
+      call_template_type: 'http',
+      http_method: 'GET',
+      url: 'https://${API_KEY}.invalid/manual',
+    } as Parameters<typeof client.registerManual>[0]);
+
+    // The stock error is the resolver's message, which names the host.
+    expect(registered.success).toBe(false);
+    expect(registered.errors).toEqual(['discovering tools from "hidden" failed']);
+    expectNotPrinted(secret);
+    expect(printed.join('\n')).toMatch(/Error discovering tools from HTTP provider 'hidden':.*ENOTFOUND/);
   });
 
   it('logs no key when calls with different keys fail at the same time', async () => {
@@ -270,5 +296,44 @@ describe('a failed http tool call', () => {
 
       expect(printed.join('\n')).toContain(secret);
     });
+
+    it('prints the key a refused discovery echoes', async () => {
+      const secret = key();
+      const client = await UtcpClient.create(
+        process.cwd(),
+        new UtcpClientConfigSerializer().validateDict({ variables: { locked_API_KEY: secret } }),
+      );
+
+      await client.registerManual({
+        name: 'locked',
+        call_template_type: 'http',
+        http_method: 'GET',
+        url: `${base}/unauthorized/manual`,
+        auth: { auth_type: 'api_key', api_key: 'Bearer ${API_KEY}', var_name: 'Authorization', location: 'header' },
+      } as Parameters<typeof client.registerManual>[0]);
+
+      expect(printed.filter((entry) => entry.startsWith('Error registering manual')).join('\n')).toContain(secret);
+    });
   });
+});
+
+describe('an @utcp/http release without the log sinks this protocol replaces', () => {
+  // The replacement hangs on their names: a release that renamed one would log
+  // credentials again, so the protocol refuses to be built instead. That
+  // release is crafted by taking the method off the stock class (a dependency,
+  // not the unit under test); the protocol is reached through its installer.
+  for (const sink of ['_logInfo', '_logError'] as const) {
+    it(`is refused when ${sink} is gone`, () => {
+      const stock = HttpCommunicationProtocol.prototype as unknown as Record<string, unknown>;
+      const original = stock[sink];
+      const installed = CommunicationProtocol.communicationProtocols['http'];
+      delete stock[sink];
+      try {
+        expect(() => installGoogleServiceAccountAuth()).toThrow(/no longer exposes _logInfo and _logError/);
+        expect(CommunicationProtocol.communicationProtocols['http']).toBe(installed);
+      } finally {
+        stock[sink] = original;
+      }
+    });
+  }
 });

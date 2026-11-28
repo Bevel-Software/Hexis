@@ -1,4 +1,4 @@
-import { CommunicationProtocol, type CallTemplate, type IUtcpClient } from '@utcp/sdk';
+import { CommunicationProtocol, type CallTemplate, type IUtcpClient, type RegisterManualResult } from '@utcp/sdk';
 import { HttpCommunicationProtocol, type HttpCallTemplate } from '@utcp/http';
 import { isGoogleServiceAccountAuth } from './google-service-account.auth.js';
 import { GoogleServiceAccountTokenSource } from './google-service-account.token-source.js';
@@ -19,8 +19,10 @@ import { printable } from '../printable.js';
  * discovery prints its full URL, where a key written anywhere in it (the host,
  * the user info, the path, the query) travels. Here a URL is not logged at
  * all, and a failure by its message, error class, code and HTTP status only,
- * so neither reaches stdout or stderr. Each message is one `printable` token,
- * so a tool or provider name cannot forge or colour the line.
+ * so neither reaches stdout or stderr; a refused discovery returns, for its
+ * callers to print, its status and manual name only. Each message this
+ * protocol writes is one `printable` token, so a tool or provider name cannot
+ * forge or colour its lines (the UTCP client's own lines are its own).
  */
 export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
   constructor(private readonly tokens: IServiceAccountTokenSource) {
@@ -40,6 +42,25 @@ export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
     hooks._logError = (message: string, error: unknown): void => {
       console.error(`[HttpCommunicationProtocol Error] ${printable(withoutUrls(message))} ${describeFailure(error)}`);
     };
+  }
+
+  /**
+   * A refused discovery answers its status and the manual's name, nothing
+   * more. Its error text is printed as it is returned: by the UTCP client
+   * (`Error registering manual …`) and by every Hexis caller that logs a
+   * skipped manual, and the stock text carries the provider's rejection body
+   * (which may echo the key) or a transport message (which names a host the
+   * key may sit in). The class and code of the failure are in the log line
+   * `_logError` has already written.
+   */
+  override async registerManual(caller: IUtcpClient, template: CallTemplate): Promise<RegisterManualResult> {
+    const result = await super.registerManual(caller, template);
+    if (result.success) return result;
+    const failed = `discovering tools from ${printable(String(template.name ?? ''))} failed`;
+    // The stock text for a refusal opens `HTTP <status> discovering tools from '<name>'`;
+    // the client names a manual with word characters only, so the match ends at the name.
+    const errors = result.errors.map((error) => /^HTTP \d{3} discovering tools from '\w*'/.exec(error)?.[0] ?? failed);
+    return { ...result, errors };
   }
 
   override async callTool(
