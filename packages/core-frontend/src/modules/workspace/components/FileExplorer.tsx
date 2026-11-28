@@ -1041,7 +1041,10 @@ function RowNotice({
       style={{ paddingLeft }}
     >
       <span className="flex items-start gap-1">
-        <span className="flex-1">{message}</span>
+        {/* A path has no spaces to break at: without min-w-0 and
+            wrap-anywhere a long one widens the row past the sidebar and
+            pushes the dismiss button out of sight. */}
+        <span className="min-w-0 flex-1 wrap-anywhere">{message}</span>
         <IconButton size={18} tone="danger" title="Dismiss" aria-label={dismissLabel} onClick={onDismiss}>
           <X size={12} />
         </IconButton>

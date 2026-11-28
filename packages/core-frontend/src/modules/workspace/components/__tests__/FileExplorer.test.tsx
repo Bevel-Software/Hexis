@@ -4536,4 +4536,23 @@ describe('FileExplorer: a folder dropped into itself', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(moveEntry).not.toHaveBeenCalled();
   });
+
+  // jsdom lays nothing out, so this pins the classes that keep a long path
+  // inside the sidebar: a path has no spaces to break at, and without them
+  // the sentence widens the row and pushes the dismiss button off-screen.
+  it('wraps a long path inside the sidebar and keeps the dismiss button usable', async () => {
+    renderExplorer({ fileTree: TREE });
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Twin'), {
+        dataTransfer: { getData: (t: string) => (t === DRAG_MIME ? `${KB}/Team` : ''), files: [] },
+      });
+    });
+    const message = screen.getByText(/^Nothing can be moved into itself:/);
+    expect(message.className).toContain('wrap-anywhere');
+    expect(message.className).toContain('min-w-0');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss move error' }));
+    });
+    expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+  });
 });
