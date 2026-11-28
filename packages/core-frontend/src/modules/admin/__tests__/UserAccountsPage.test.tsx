@@ -3,12 +3,8 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UserAccountsPage } from '../components/UserAccountsPage';
 import { AdminContext } from '../state/admin.context';
-import { AuthContext, type AuthContextValue } from '../../auth/state/auth.context';
 import {
-  InviteDialogContext,
-  type InviteDialogController,
-} from '../../onboarding/state/invite-dialog.context';
-import {
+  AuthContext,
   createAccount,
   deactivateAccount,
   deleteAccount,
@@ -17,9 +13,15 @@ import {
   reactivateAccount,
   type AccountReferences,
   type AccountSummary,
-} from '../../auth/services/account.api';
+  type AuthContextValue,
+} from '../../auth';
+import { useInviteDialog, type InviteDialogController } from '../../onboarding';
 
-vi.mock('../../auth/services/account.api', () => ({
+// Both modules are reached through their entries, as the page reaches them:
+// the account calls are doubled there, and the Invite dialog is what the
+// public hook answers rather than its internal context.
+vi.mock('../../auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../auth')>()),
   createAccount: vi.fn(),
   deactivateAccount: vi.fn(),
   deleteAccount: vi.fn(),
@@ -27,6 +29,13 @@ vi.mock('../../auth/services/account.api', () => ({
   getAccountReferences: vi.fn(),
   listAccounts: vi.fn(),
 }));
+vi.mock('../../onboarding', () => ({ useInviteDialog: vi.fn() }));
+
+/** The page, with `useInviteDialog` answering `invite` from this render on. */
+function pageWithInvite(invite: InviteDialogController | null) {
+  vi.mocked(useInviteDialog).mockReturnValue(invite);
+  return <UserAccountsPage />;
+}
 
 const REFS = {
   roles: 1,
@@ -109,9 +118,7 @@ function renderPage(opts: { isAdmin?: boolean; invite?: InviteDialogController |
           runRolesRecovery: async () => {},
         }}
       >
-        <InviteDialogContext.Provider value={opts.invite === undefined ? null : opts.invite}>
-          <UserAccountsPage />
-        </InviteDialogContext.Provider>
+        {pageWithInvite(opts.invite === undefined ? null : opts.invite)}
       </AdminContext.Provider>
     </AuthContext.Provider>,
   );
@@ -174,10 +181,18 @@ describe('UserAccountsPage', () => {
   });
 
   it('the delete confirmation describes the password state in the same words', async () => {
-    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB, ROOT]);
+    vi.mocked(listAccounts).mockResolvedValue([
+      ALICE,
+      BOB,
+      ROOT,
+      { ...ALICE, id: 'u-bot', email: 'recovery-bot@bevel.local', name: 'Recovery Bot', isSystem: true },
+      { ...BOB, id: 'u-bot-hashed', email: 'sync-bot@bevel.local', name: 'Sync Bot', isSystem: true },
+    ]);
     renderPage();
     await waitFor(() => screen.getByText('Alice'));
     const cases: Array<[string, RegExp]> = [
+      ['recovery-bot@bevel.local', /System account — the platform runs its own work as it\./],
+      ['sync-bot@bevel.local', /System account — holds a stored password from before: deleting it removes that password\./],
       ['alice@example.com', /No password — signs in with single sign-on: they can sign in again later with single sign-on/],
       ['bob@example.com', /Password: to sign in again they will need an admin/],
       ['root@example.com', /Password \(owner\): they can still sign in with the owner password set on the server, but will start fresh\./],
@@ -260,6 +275,52 @@ describe('UserAccountsPage', () => {
 
   // The whole point of the ticket: first setup and replacing a working
   // credential are different acts, so they are not offered in the same words.
+  // An account the platform runs its own work as: the service refuses it a
+  // password, so the row must neither claim single sign-on nor offer a
+  // password action that can only fail. Nor claim whether it signs in: that
+  // rests on server settings. One whose row still holds a hash says it holds one.
+  it('labels a system account as one and offers it no password action', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      ALICE,
+      BOB,
+      { ...ALICE, id: 'u-bot', email: 'recovery-bot@bevel.local', name: 'Recovery Bot', isSystem: true },
+      { ...BOB, id: 'u-bot-hashed', email: 'sync-bot@bevel.local', name: 'Sync Bot', isSystem: true },
+    ]);
+    renderPage();
+    await waitFor(() => screen.getByText('Recovery Bot'));
+    expect(row('Recovery Bot')).toHaveTextContent(/· System account — the platform runs its own work as it$/);
+    expect(row('Sync Bot')).toHaveTextContent(/· System account — holds a stored password from before$/);
+    for (const name of ['Recovery Bot', 'Sync Bot']) {
+      expect(row(name)).not.toHaveTextContent(/single sign-on/);
+    }
+    for (const email of ['recovery-bot@bevel.local', 'sync-bot@bevel.local']) {
+      expect(screen.queryByRole('button', { name: `Set password for ${email}` })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: `Reset password for ${email}` })).not.toBeInTheDocument();
+    }
+    // The ordinary rows beside them are unchanged.
+    expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
+    expect(row('Bob')).toHaveTextContent(/· Password$/);
+    expect(screen.getByRole('button', { name: 'Set password for alice@example.com' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reset password for bob@example.com' })).toBeInTheDocument();
+  });
+
+  // A system address the server reports as the deployment admin (ADMIN_EMAIL
+  // with ADMIN_PASSWORD set and password login on): it does sign in with the
+  // environment password, and the page says so.
+  it('labels a system account that is also the deployment admin as the deployment admin', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      { ...ROOT, id: 'u-bot-root', email: 'recovery-bot@bevel.local', name: 'Recovery Bot Root', isSystem: true },
+    ]);
+    renderPage();
+    await waitFor(() => screen.getByText('Recovery Bot Root'));
+    expect(row('Recovery Bot Root')).toHaveTextContent(/· Password \(owner\)$/);
+    expect(screen.getByText('Password set in the deployment environment')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account recovery-bot@bevel.local' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(/Password \(owner\): they can still sign in with the owner password set on the server/);
+    expect(dialog).not.toHaveTextContent(/System account/);
+  });
+
   it('offers Set password without one and Reset password with one', async () => {
     vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
     renderPage();
@@ -698,9 +759,7 @@ describe('UserAccountsPage — inviting new users', () => {
             runRolesRecovery: async () => {},
           }}
         >
-          <InviteDialogContext.Provider value={controller(1)}>
-            <UserAccountsPage />
-          </InviteDialogContext.Provider>
+          {pageWithInvite(controller(1))}
         </AdminContext.Provider>
       </AuthContext.Provider>,
     );
@@ -733,9 +792,7 @@ describe('UserAccountsPage — inviting new users', () => {
             runRolesRecovery: async () => {},
           }}
         >
-          <InviteDialogContext.Provider value={controller(revision)}>
-            <UserAccountsPage />
-          </InviteDialogContext.Provider>
+          {pageWithInvite(controller(revision))}
         </AdminContext.Provider>
       </AuthContext.Provider>
     );
@@ -772,9 +829,7 @@ describe('UserAccountsPage — inviting new users', () => {
             runRolesRecovery: async () => {},
           }}
         >
-          <InviteDialogContext.Provider value={controller(revision)}>
-            <UserAccountsPage />
-          </InviteDialogContext.Provider>
+          {pageWithInvite(controller(revision))}
         </AdminContext.Provider>
       </AuthContext.Provider>
     );
