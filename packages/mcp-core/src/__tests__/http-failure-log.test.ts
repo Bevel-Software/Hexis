@@ -229,7 +229,7 @@ describe('a failed http tool call', () => {
     // the client and by every caller that logs a skipped manual, so it says the
     // status and the manual only.
     expect(registered.success).toBe(false);
-    expect(registered.errors).toEqual(["HTTP 401 discovering tools from 'locked'"]);
+    expect(registered.errors).toEqual(['HTTP 401 discovering tools from "locked"']);
     expectNotPrinted(secret);
     expect(printed.join('\n')).toMatch(/Error discovering tools from HTTP provider 'locked':.*status 401/);
   });
@@ -253,6 +253,24 @@ describe('a failed http tool call', () => {
     expect(registered.errors).toEqual(['discovering tools from "hidden" failed']);
     expectNotPrinted(secret);
     expect(printed.join('\n')).toMatch(/Error discovering tools from HTTP provider 'hidden':.*ENOTFOUND/);
+  });
+
+  it('keeps the status of a refused discovery whatever characters the manual name holds', async () => {
+    // The UTCP client folds a manual's name to word characters, but the
+    // installed protocol is reachable without it, from the registry.
+    const protocol = CommunicationProtocol.communicationProtocols['http']!;
+    const caller = await UtcpClient.create(process.cwd(), new UtcpClientConfigSerializer().validateDict({}));
+    const name = 'acme-tools ü.v2';
+
+    const registered = await protocol.registerManual(caller, {
+      name,
+      call_template_type: 'http',
+      http_method: 'GET',
+      url: `${base}/unauthorized/manual`,
+    } as Parameters<typeof protocol.registerManual>[1]);
+
+    expect(registered.success).toBe(false);
+    expect(registered.errors).toEqual([`HTTP 401 discovering tools from ${JSON.stringify(name)}`]);
   });
 
   it('logs no key when calls with different keys fail at the same time', async () => {

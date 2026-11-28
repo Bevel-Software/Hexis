@@ -56,10 +56,13 @@ export class GoogleAuthHttpProtocol extends HttpCommunicationProtocol {
   override async registerManual(caller: IUtcpClient, template: CallTemplate): Promise<RegisterManualResult> {
     const result = await super.registerManual(caller, template);
     if (result.success) return result;
-    const failed = `discovering tools from ${printable(String(template.name ?? ''))} failed`;
-    // The stock text for a refusal opens `HTTP <status> discovering tools from '<name>'`;
-    // the client names a manual with word characters only, so the match ends at the name.
-    const errors = result.errors.map((error) => /^HTTP \d{3} discovering tools from '\w*'/.exec(error)?.[0] ?? failed);
+    // Only the status is read from the stock text (a refusal opens `HTTP <status>`);
+    // the name is the template's own, rendered whatever characters it holds.
+    const manual = printable(String(template.name ?? ''));
+    const errors = result.errors.map((error) => {
+      const status = /^HTTP \d{3}\b/.exec(error)?.[0];
+      return status ? `${status} discovering tools from ${manual}` : `discovering tools from ${manual} failed`;
+    });
     return { ...result, errors };
   }
 
